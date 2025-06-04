@@ -471,7 +471,10 @@ pub fn validate_interfaces(interfaces: FlodbaddInterfaces) -> FlodbaddInterfaces
 pub fn type_of_ipv6(ipv6: Ipv6Addr, prefix: u8) -> FlodbaddInterfaceAddrTypeV6 {
     if is_link_local_ipv6(&ipv6) {
         // Link-local
-        return FlodbaddInterfaceAddrTypeV6::LinkLocal(FlodbaddInterfaceAddrV6 { ip: ipv6, prefix });
+        return FlodbaddInterfaceAddrTypeV6::LinkLocal(FlodbaddInterfaceAddrV6 {
+            ip: ipv6,
+            prefix,
+        });
     }
 
     if is_local_ipv6(&ipv6) {

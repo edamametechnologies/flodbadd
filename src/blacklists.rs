@@ -1,9 +1,8 @@
-use edamame_models::*;
-use undeadlock::*;
 use crate::blacklists_db::BLACKLISTS;
 use crate::sessions::{Session, SessionInfo};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use edamame_models::*;
 use ipnet::IpNet;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -12,6 +11,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
+use undeadlock::*;
 
 // Constants
 const BLACKLISTS_FILE_NAME: &str = "blacklists-db.json";

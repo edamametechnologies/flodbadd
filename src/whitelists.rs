@@ -1,11 +1,10 @@
-use edamame_models::*;
-use undeadlock::*;
 use crate::sessions::{Session, SessionInfo, WhitelistState};
 use crate::whitelists_db::WHITELISTS;
 use anyhow::{anyhow, Context, Result};
 use chrono;
 use chrono::{DateTime, Utc};
 use dashmap::DashSet;
+use edamame_models::*;
 use ipnet::IpNet;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -15,6 +14,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, trace, warn};
+use undeadlock::*;
 
 // Constants
 const WHITELISTS_FILE_NAME: &str = "whitelists-db.json";

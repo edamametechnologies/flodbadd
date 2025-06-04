@@ -1,4 +1,3 @@
-use undeadlock::*;
 use crate::task::TaskHandle;
 use dns_parser::Packet as DnsPacket;
 use std::net::IpAddr;
@@ -7,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tracing::{debug, info, trace, warn};
+use undeadlock::*;
 
 struct PendingQuery {
     domain_name: String,

@@ -1,5 +1,4 @@
 use crate::asn_db::{Db, Record};
-use undeadlock::*;
 use crate::asn_v4_db::*;
 use crate::asn_v6_db::*;
 use lazy_static::lazy_static;
@@ -7,6 +6,7 @@ use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tracing::warn;
+use undeadlock::*;
 
 // TODO load from the cloud regularly and store locally
 // const ASN_V4_DB_URL: &str = "https://iptoasn.com/data/ip2asn-v4.tsv.gz";

@@ -49,9 +49,9 @@
 // This system aims to handle the ephemeral nature of network connections and process lifecycles
 // by combining direct matching with caching, PID reuse protection, and retry mechanisms.
 
-use undeadlock::*;
 use crate::l7_ebpf;
 use crate::sessions::*;
+use crate::task::TaskHandle;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use netstat2::{
@@ -66,7 +66,7 @@ use std::time::Instant;
 use sysinfo::{Pid, Process, ProcessRefreshKind, RefreshKind, System, Uid, Users};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, trace, warn};
-use crate::task::TaskHandle;
+use undeadlock::*;
 
 // Windows-specific imports
 #[cfg(windows)]
@@ -1702,10 +1702,6 @@ mod ebpf_tests {
 
     #[tokio::test]
     async fn test_ebpf_l7_resolution() {
-        if !get_admin_status() {
-            println!("Skipping test_ebpf_l7_resolution: insufficient privileges");
-            return;
-        }
         if !l7_ebpf::is_available() {
             println!("Skipping test_ebpf_l7_resolution: eBPF helper not available");
             return;
@@ -1770,12 +1766,6 @@ mod ebpf_tests {
 
     #[tokio::test]
     async fn test_ebpf_l7_priority_over_standard_resolver() {
-        if !get_admin_status() {
-            println!(
-                "Skipping test_ebpf_l7_priority_over_standard_resolver: insufficient privileges"
-            );
-            return;
-        }
         if !l7_ebpf::is_available() {
             println!(
                 "Skipping test_ebpf_l7_priority_over_standard_resolver: eBPF helper not available"
@@ -1863,10 +1853,7 @@ mod ebpf_tests {
     async fn test_ebpf_l7_integration_with_capture() {
         use crate::capture::FlodbaddCapture;
         use crate::interface::FlodbaddInterfaces;
-        if !get_admin_status() {
-            println!("Skipping test_ebpf_l7_integration_with_capture: insufficient privileges");
-            return;
-        }
+
         if !l7_ebpf::is_available() {
             println!("Skipping test_ebpf_l7_integration_with_capture: eBPF helper not available");
             return;

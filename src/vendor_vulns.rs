@@ -1,12 +1,12 @@
-use edamame_models::*;
-use undeadlock::*;
 use crate::vendor_vulns_db::*;
 use crate::vulnerability_info::*;
 use anyhow::{Context, Result};
+use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
+use undeadlock::*;
 
 const VENDOR_VULNS_NAME: &str = "lanscan-vendor-vulns-db.json";
 

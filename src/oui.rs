@@ -1,11 +1,11 @@
-use undeadlock::CustomDashMap;
-use undeadlock::CustomRwLock;
 use crate::oui_db::*;
 use lazy_static::lazy_static;
 use macaddr::MacAddr6;
 use oui::OuiDatabase;
 use std::sync::Arc;
 use tracing::{error, warn};
+use undeadlock::CustomDashMap;
+use undeadlock::CustomRwLock;
 
 // TODO load from the cloud regularly and store locally
 // const OUI_DB_URL: &str = "https://www.wireshark.org/download/automated/data/manuf";

@@ -1,14 +1,14 @@
 //! Example: Network Session Capture
-//! 
+//!
 //! This example demonstrates how to capture network sessions and analyze network traffic.
 //! It captures packets for a specified duration and displays session information.
 
-use flodbadd::capture::{PacketCapture, CaptureConfig};
-use flodbadd::sessions::{SessionInfo, SessionFilter, format_sessions_zeek, format_sessions_log};
-use flodbadd::ip::get_all_interfaces;
-use std::time::Duration;
-use std::thread::sleep;
 use clap::{arg, Command};
+use flodbadd::capture::{CaptureConfig, PacketCapture};
+use flodbadd::ip::get_all_interfaces;
+use flodbadd::sessions::{format_sessions_log, format_sessions_zeek, SessionFilter, SessionInfo};
+use std::thread::sleep;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("capture_sessions")
@@ -19,7 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(-i --interface <INTERFACE> "Network interface to capture on"))
         .get_matches();
 
-    let duration = matches.get_one::<String>("duration")
+    let duration = matches
+        .get_one::<String>("duration")
         .unwrap()
         .parse::<u64>()
         .unwrap_or(60);
@@ -37,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get network interfaces
     let mut interfaces = get_all_interfaces()?;
-    
+
     // Filter interface if specified
     if let Some(name) = interface_name {
         interfaces.retain(|i| i.name == *name);
@@ -78,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("\rCapturing... {} seconds remaining", remaining.as_secs());
         use std::io::{self, Write};
         io::stdout().flush()?;
-        
+
         sleep(Duration::from_secs(1));
     }
 
@@ -88,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get captured sessions
     let sessions = capture.get_sessions()?;
-    
+
     // Filter sessions based on user preference
     let filtered_sessions = if include_local {
         sessions
@@ -96,8 +97,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flodbadd::sessions::filter_global_sessions(&sessions)
     };
 
-    println!("Captured {} sessions ({} after filtering)\n", 
-             sessions.len(), filtered_sessions.len());
+    println!(
+        "Captured {} sessions ({} after filtering)\n",
+        sessions.len(),
+        filtered_sessions.len()
+    );
 
     // Display results
     if filtered_sessions.is_empty() {
@@ -115,47 +119,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Captured Sessions:\n");
             for (idx, session) in filtered_sessions.iter().enumerate() {
                 println!("Session #{}:", idx + 1);
-                println!("  Protocol: {}", match session.session.protocol {
-                    flodbadd::sessions::Protocol::TCP => "TCP",
-                    flodbadd::sessions::Protocol::UDP => "UDP",
-                });
-                println!("  Source: {}:{}", session.session.src_ip, session.session.src_port);
-                println!("  Destination: {}:{}", session.session.dst_ip, session.session.dst_port);
-                
+                println!(
+                    "  Protocol: {}",
+                    match session.session.protocol {
+                        flodbadd::sessions::Protocol::TCP => "TCP",
+                        flodbadd::sessions::Protocol::UDP => "UDP",
+                    }
+                );
+                println!(
+                    "  Source: {}:{}",
+                    session.session.src_ip, session.session.src_port
+                );
+                println!(
+                    "  Destination: {}:{}",
+                    session.session.dst_ip, session.session.dst_port
+                );
+
                 if let Some(domain) = &session.dst_domain {
                     println!("  Domain: {}", domain);
                 }
-                
+
                 if let Some(service) = &session.dst_service {
                     println!("  Service: {}", service);
                 }
-                
+
                 if let Some(l7) = &session.l7 {
                     println!("  Process: {} (PID: {})", l7.process_name, l7.pid);
                     println!("  User: {}", l7.username);
                 }
-                
-                println!("  Duration: {:?}", 
-                         session.stats.last_activity - session.stats.start_time);
+
+                println!(
+                    "  Duration: {:?}",
+                    session.stats.last_activity - session.stats.start_time
+                );
                 println!("  Bytes In: {}", session.stats.inbound_bytes);
                 println!("  Bytes Out: {}", session.stats.outbound_bytes);
                 println!("  Criticality: {}", session.criticality);
-                
+
                 match session.is_whitelisted {
                     flodbadd::sessions::WhitelistState::Conforming => {
                         println!("  Status: ✓ Whitelisted");
-                    },
+                    }
                     flodbadd::sessions::WhitelistState::NonConforming => {
                         println!("  Status: ⚠ Non-conforming");
                         if let Some(reason) = &session.whitelist_reason {
                             println!("  Reason: {}", reason);
                         }
-                    },
+                    }
                     flodbadd::sessions::WhitelistState::Unknown => {
                         println!("  Status: ? Unknown");
                     }
                 }
-                
+
                 println!();
             }
         }
@@ -169,4 +184,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Interface Dropped: {}", stats.interface_dropped);
 
     Ok(())
-} 
+}

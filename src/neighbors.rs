@@ -342,7 +342,6 @@ mod tests {
     // Converted test to async. Requires you to run with a test runtime (e.g. cargo test -- --test-threads=1 under tokio).
     #[tokio::test]
     async fn test_neighbors_default_interface() {
-
         // Attempt to fetch a default interface (non-loopback, with IP).
         let Some(interface) = get_default_interface() else {
             println!("No suitable default interface found for neighbor test.");

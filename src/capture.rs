@@ -1,15 +1,14 @@
-use undeadlock::*;
-use crate::task::TaskHandle;
 use crate::blacklists;
 use crate::dns::DnsPacketProcessor;
 use crate::interface::*;
 use crate::ip::*;
-use crate::l7::{L7ResolutionSource, FlodbaddL7};
+use crate::l7::{FlodbaddL7, L7ResolutionSource};
 use crate::mdns::*;
 use crate::packets::*;
 use crate::resolver::FlodbaddResolver;
 use crate::sessions::session_macros::*;
 use crate::sessions::*;
+use crate::task::TaskHandle;
 use crate::whitelists::{self, is_valid_whitelist, Whitelists, WhitelistsJSON};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -40,7 +39,8 @@ use std::time::Instant;
 ))]
 use tokio::select;
 use tokio::time::{interval, Duration};
-use tracing::{debug, error, info, trace, warn}; // Add this import // Add Duration import
+use tracing::{debug, error, info, trace, warn};
+use undeadlock::*; // Add this import // Add Duration import
 
 /*
  * DNS Resolution Logic:
@@ -1684,7 +1684,8 @@ impl FlodbaddCapture {
         });
 
         // Store the task handle
-        *self.edamame_model_update_task_handle.write().await = Some(TaskHandle { handle, stop_flag });
+        *self.edamame_model_update_task_handle.write().await =
+            Some(TaskHandle { handle, stop_flag });
     }
 
     async fn stop_edamame_model_update_task(&self) {
@@ -2831,11 +2832,6 @@ mod tests {
             return;
         }
 
-        // Only if admin
-        if !get_admin_status() {
-            return;
-        }
-
         // Get the default network interface (FlodbaddInterfaces)
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
@@ -2862,11 +2858,6 @@ mod tests {
             return;
         }
 
-        // Only if admin
-        if !get_admin_status() {
-            return;
-        }
-
         let default_device = match FlodbaddCapture::get_default_device().await {
             Ok(device) => device,
             Err(e) => {
@@ -2890,12 +2881,6 @@ mod tests {
         // Not working on windows in the CI/CD pipeline yet (no pcap support)
         if cfg!(windows) {
             println!("Skipping test_start_capture_if_admin: pcap feature not fully supported on Windows CI yet");
-            return;
-        }
-
-        // Skip test if not running as admin/root
-        if !get_admin_status() {
-            println!("Skipping test_start_capture_if_admin: not running with admin privileges");
             return;
         }
 

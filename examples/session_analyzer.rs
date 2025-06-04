@@ -1,14 +1,14 @@
 //! Example demonstrating how to use the SessionAnalyzer for anomaly detection
-//! 
+//!
 //! This example shows how to:
 //! - Create a SessionAnalyzer instance
 //! - Analyze network sessions for anomalies
 //! - Handle the warm-up period
 //! - Retrieve anomalous sessions
 
-use flodbadd::{SessionAnalyzer, AnalysisResult, SessionCriticality};
-use flodbadd::sessions::SessionInfo;
 use flodbadd::capture::start_packet_capture;
+use flodbadd::sessions::SessionInfo;
+use flodbadd::{AnalysisResult, SessionAnalyzer, SessionCriticality};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -21,21 +21,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create the session analyzer
     let analyzer = Arc::new(SessionAnalyzer::new());
-    
+
     // Start the analyzer
     analyzer.start().await;
     info!("Session analyzer started");
 
     // Simulate getting sessions (in a real app, these would come from packet capture)
     let mut sessions = generate_sample_sessions();
-    
+
     // Analyze sessions multiple times to demonstrate warm-up period
     for i in 0..5 {
         info!("Analysis round {}", i + 1);
-        
+
         // Analyze the sessions
         let result: AnalysisResult = analyzer.analyze_sessions(&mut sessions).await;
-        
+
         info!(
             "Analyzed {} sessions: {} anomalous, {} blacklisted (new anomalous: {}, new blacklisted: {})",
             result.sessions_analyzed,
@@ -44,44 +44,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.new_anomalous_found,
             result.new_blacklisted_found
         );
-        
+
         // Print some details about anomalous sessions
         for session in &sessions {
-            if session.criticality.contains("anomaly:suspicious") || 
-               session.criticality.contains("anomaly:abnormal") {
+            if session.criticality.contains("anomaly:suspicious")
+                || session.criticality.contains("anomaly:abnormal")
+            {
                 info!(
                     "Anomalous session: {} -> {} (criticality: {})",
                     session.src_ip, session.dst_ip, session.criticality
                 );
             }
         }
-        
+
         // Wait a bit before next analysis
         sleep(Duration::from_secs(30)).await;
-        
+
         // Generate some new sessions for next round
         sessions.extend(generate_sample_sessions());
     }
-    
+
     // Get all tracked anomalous sessions
     let anomalous = analyzer.get_anomalous_sessions().await;
     info!("Total anomalous sessions tracked: {}", anomalous.len());
-    
+
     // Clean up
     analyzer.stop().await;
     info!("Session analyzer stopped");
-    
+
     Ok(())
 }
 
 /// Generate some sample sessions for testing
 fn generate_sample_sessions() -> Vec<SessionInfo> {
+    use chrono::Utc;
     use std::net::IpAddr;
     use std::str::FromStr;
-    use chrono::Utc;
-    
+
     let mut sessions = Vec::new();
-    
+
     // Normal sessions
     for i in 0..10 {
         let mut session = SessionInfo::default();
@@ -97,7 +98,7 @@ fn generate_sample_sessions() -> Vec<SessionInfo> {
         session.stats.last_activity = Utc::now();
         sessions.push(session);
     }
-    
+
     // Some potentially anomalous sessions
     for i in 0..3 {
         let mut session = SessionInfo::default();
@@ -114,7 +115,7 @@ fn generate_sample_sessions() -> Vec<SessionInfo> {
         session.stats.last_activity = Utc::now();
         sessions.push(session);
     }
-    
+
     // A blacklisted session (would normally be detected by blacklist DB)
     let mut blacklisted = SessionInfo::default();
     blacklisted.uid = "blacklisted_1".to_string();
@@ -125,6 +126,6 @@ fn generate_sample_sessions() -> Vec<SessionInfo> {
     blacklisted.stats.start_time = Utc::now();
     blacklisted.stats.last_activity = Utc::now();
     sessions.push(blacklisted);
-    
+
     sessions
-} 
+}

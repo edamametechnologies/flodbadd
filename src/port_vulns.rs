@@ -1,14 +1,14 @@
-use edamame_models::*;
-use undeadlock::*;
 use crate::port_info::*;
 use crate::port_vulns_db::*;
 use crate::vulnerability_info::*;
 use anyhow::{Context, Result};
+use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::default::Default;
 use std::sync::Arc;
 use tracing::{info, warn};
+use undeadlock::*;
 
 const PORT_VULNS_NAME: &str = "lanscan-port-vulns-db.json";
 

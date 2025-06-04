@@ -68,6 +68,30 @@ ios_test: ios
 
 android_test: android
 
+# Anomaly detection tests - run the security anomaly detection tests
+anomaly_test:
+	echo "Running anomaly detection tests"
+	cargo test --test anomaly_test -- --nocapture
+
+# Run anomaly tests with parallel features
+anomaly_test_parallel:
+	echo "Running anomaly detection tests with parallel features"
+	cargo test --features asyncpacketcapture --test anomaly_test -- --nocapture
+
+# Anomaly detection tests for macOS with swiftrs feature
+macos_anomaly_test:
+	echo "Running anomaly detection tests on macOS with swiftrs"
+	cargo test --features swiftrs --test anomaly_test -- --nocapture
+
+# Include anomaly tests in Unix test suite
+unix_test_all: unix_test anomaly_test
+
+# Include anomaly tests in macOS test suite - use the macOS-specific version
+macos_test_all: macos_test macos_anomaly_test
+
+# Include anomaly tests in Linux test suite with eBPF
+linux_test_all: linux_test linux_test_ebpf anomaly_test
+
 # -----------------------------------------------------------------------------
 # macOS → Linux test helper (runs full Linux test-suite inside Docker)
 # -----------------------------------------------------------------------------

@@ -1,16 +1,16 @@
 //! Example: Whitelist Management
-//! 
+//!
 //! This example demonstrates how to create, manage, and check network whitelists.
 //! It shows how to generate whitelists from current sessions and validate traffic against them.
 
-use flodbadd::whitelists::{WhitelistManager, WhitelistEntry, WhitelistType};
-use flodbadd::sessions::{SessionInfo, WhitelistState};
-use flodbadd::capture::{PacketCapture, CaptureConfig};
-use flodbadd::ip::get_all_interfaces;
-use std::time::Duration;
-use std::net::IpAddr;
 use clap::{arg, Command, Subcommand};
+use flodbadd::capture::{CaptureConfig, PacketCapture};
+use flodbadd::ip::get_all_interfaces;
+use flodbadd::sessions::{SessionInfo, WhitelistState};
+use flodbadd::whitelists::{WhitelistEntry, WhitelistManager, WhitelistType};
 use serde_json;
+use std::net::IpAddr;
+use std::time::Duration;
 
 #[derive(Subcommand)]
 enum Commands {
@@ -44,17 +44,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Command::new("whitelist_management")
         .about("Manage network whitelists")
         .subcommand_required(true)
-        .subcommand(Command::new("create")
-            .about("Create whitelist from current sessions")
-            .arg(arg!(-d --duration <SECONDS> "Capture duration").default_value("60"))
-            .arg(arg!(-o --output <FILE> "Output file").default_value("whitelist.json")))
-        .subcommand(Command::new("check")
-            .about("Check sessions against whitelist")
-            .arg(arg!(-w --whitelist <FILE> "Whitelist file").default_value("whitelist.json"))
-            .arg(arg!(-d --duration <SECONDS> "Monitor duration").default_value("30")))
-        .subcommand(Command::new("show")
-            .about("Display whitelist contents")
-            .arg(arg!(-w --whitelist <FILE> "Whitelist file").default_value("whitelist.json")));
+        .subcommand(
+            Command::new("create")
+                .about("Create whitelist from current sessions")
+                .arg(arg!(-d --duration <SECONDS> "Capture duration").default_value("60"))
+                .arg(arg!(-o --output <FILE> "Output file").default_value("whitelist.json")),
+        )
+        .subcommand(
+            Command::new("check")
+                .about("Check sessions against whitelist")
+                .arg(arg!(-w --whitelist <FILE> "Whitelist file").default_value("whitelist.json"))
+                .arg(arg!(-d --duration <SECONDS> "Monitor duration").default_value("30")),
+        )
+        .subcommand(
+            Command::new("show")
+                .about("Display whitelist contents")
+                .arg(arg!(-w --whitelist <FILE> "Whitelist file").default_value("whitelist.json")),
+        );
 
     let matches = cli.get_matches();
 
@@ -68,7 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match matches.subcommand() {
         Some(("create", sub_matches)) => {
-            let duration = sub_matches.get_one::<String>("duration")
+            let duration = sub_matches
+                .get_one::<String>("duration")
                 .unwrap()
                 .parse::<u64>()?;
             let output = sub_matches.get_one::<String>("output").unwrap();
@@ -76,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(("check", sub_matches)) => {
             let whitelist_file = sub_matches.get_one::<String>("whitelist").unwrap();
-            let duration = sub_matches.get_one::<String>("duration")
+            let duration = sub_matches
+                .get_one::<String>("duration")
                 .unwrap()
                 .parse::<u64>()?;
             check_whitelist(whitelist_file, duration)?;
@@ -96,7 +104,7 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
 
     // Get network interfaces
     let interfaces = get_all_interfaces()?;
-    
+
     // Create capture configuration
     let config = CaptureConfig {
         interfaces: interfaces.clone(),
@@ -109,7 +117,7 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
     // Capture sessions
     let mut capture = PacketCapture::new(config)?;
     println!("Capturing network sessions for {} seconds...", duration);
-    
+
     capture.start()?;
     std::thread::sleep(Duration::from_secs(duration));
     capture.stop()?;
@@ -124,14 +132,17 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
     let mut entries_count = 0;
     for session in &sessions {
         // Skip local-only traffic
-        if flodbadd::ip::is_lan_ip(&session.session.src_ip) 
-            && flodbadd::ip::is_lan_ip(&session.session.dst_ip) {
+        if flodbadd::ip::is_lan_ip(&session.session.src_ip)
+            && flodbadd::ip::is_lan_ip(&session.session.dst_ip)
+        {
             continue;
         }
 
         // Create entry based on destination
         let entry = WhitelistEntry {
-            name: session.dst_domain.clone()
+            name: session
+                .dst_domain
+                .clone()
                 .unwrap_or_else(|| format!("Service on port {}", session.session.dst_port)),
             description: format!(
                 "Auto-generated from {} traffic to {}",
@@ -139,17 +150,24 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
                     flodbadd::sessions::Protocol::TCP => "TCP",
                     flodbadd::sessions::Protocol::UDP => "UDP",
                 },
-                session.dst_service.as_ref().unwrap_or(&"unknown service".to_string())
+                session
+                    .dst_service
+                    .as_ref()
+                    .unwrap_or(&"unknown service".to_string())
             ),
             whitelist_type: WhitelistType::Domain,
-            value: session.dst_domain.clone()
+            value: session
+                .dst_domain
+                .clone()
                 .unwrap_or_else(|| session.session.dst_ip.to_string()),
             ports: vec![session.session.dst_port],
             protocols: vec![match session.session.protocol {
                 flodbadd::sessions::Protocol::TCP => "TCP".to_string(),
                 flodbadd::sessions::Protocol::UDP => "UDP".to_string(),
             }],
-            process_names: session.l7.as_ref()
+            process_names: session
+                .l7
+                .as_ref()
                 .map(|l7| vec![l7.process_name.clone()])
                 .unwrap_or_default(),
             enabled: true,
@@ -161,7 +179,7 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
 
     // Save whitelist
     whitelist_manager.save_to_file(output_file)?;
-    
+
     println!("Created whitelist with {} entries", entries_count);
     println!("Saved to: {}", output_file);
 
@@ -179,18 +197,21 @@ fn create_whitelist(duration: u64, output_file: &str) -> Result<(), Box<dyn std:
 }
 
 fn check_whitelist(whitelist_file: &str, duration: u64) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Checking network sessions against whitelist: {}\n", whitelist_file);
+    println!(
+        "Checking network sessions against whitelist: {}\n",
+        whitelist_file
+    );
 
     // Load whitelist
     let mut whitelist_manager = WhitelistManager::new();
     whitelist_manager.load_from_file(whitelist_file)?;
-    
+
     let entry_count = whitelist_manager.get_entries().len();
     println!("Loaded whitelist with {} entries\n", entry_count);
 
     // Get network interfaces
     let interfaces = get_all_interfaces()?;
-    
+
     // Create capture configuration
     let config = CaptureConfig {
         interfaces,
@@ -203,31 +224,32 @@ fn check_whitelist(whitelist_file: &str, duration: u64) -> Result<(), Box<dyn st
     // Monitor sessions
     let mut capture = PacketCapture::new(config)?;
     println!("Monitoring network sessions for {} seconds...\n", duration);
-    
+
     capture.start()?;
-    
+
     let start_time = std::time::Instant::now();
     let monitor_duration = Duration::from_secs(duration);
-    
+
     let mut conforming_count = 0;
     let mut non_conforming_count = 0;
     let mut exceptions = Vec::new();
 
     while start_time.elapsed() < monitor_duration {
         std::thread::sleep(Duration::from_secs(5));
-        
+
         let sessions = capture.get_sessions()?;
-        
+
         for session in &sessions {
             // Skip local traffic
-            if flodbadd::ip::is_lan_ip(&session.session.src_ip) 
-                && flodbadd::ip::is_lan_ip(&session.session.dst_ip) {
+            if flodbadd::ip::is_lan_ip(&session.session.src_ip)
+                && flodbadd::ip::is_lan_ip(&session.session.dst_ip)
+            {
                 continue;
             }
 
             // Check against whitelist
             let is_whitelisted = whitelist_manager.check_session(session)?;
-            
+
             match is_whitelisted {
                 WhitelistState::Conforming => {
                     conforming_count += 1;
@@ -239,13 +261,15 @@ fn check_whitelist(whitelist_file: &str, duration: u64) -> Result<(), Box<dyn st
                 WhitelistState::Unknown => {}
             }
         }
-        
-        print!("\rChecking... Conforming: {} | Non-conforming: {}", 
-               conforming_count, non_conforming_count);
+
+        print!(
+            "\rChecking... Conforming: {} | Non-conforming: {}",
+            conforming_count, non_conforming_count
+        );
         use std::io::{self, Write};
         io::stdout().flush()?;
     }
-    
+
     capture.stop()?;
     println!("\n\nMonitoring complete!\n");
 
@@ -253,12 +277,15 @@ fn check_whitelist(whitelist_file: &str, duration: u64) -> Result<(), Box<dyn st
     println!("Results:");
     println!("  Conforming sessions: {}", conforming_count);
     println!("  Non-conforming sessions: {}", non_conforming_count);
-    
+
     if !exceptions.is_empty() {
         println!("\nNon-conforming sessions detected:");
         for (idx, session) in exceptions.iter().take(10).enumerate() {
             println!("\n  Exception #{}:", idx + 1);
-            println!("    Destination: {}:{}", session.session.dst_ip, session.session.dst_port);
+            println!(
+                "    Destination: {}:{}",
+                session.session.dst_ip, session.session.dst_port
+            );
             if let Some(domain) = &session.dst_domain {
                 println!("    Domain: {}", domain);
             }
@@ -269,7 +296,7 @@ fn check_whitelist(whitelist_file: &str, duration: u64) -> Result<(), Box<dyn st
                 println!("    Reason: {}", reason);
             }
         }
-        
+
         if exceptions.len() > 10 {
             println!("\n  ... and {} more exceptions", exceptions.len() - 10);
         }
@@ -284,7 +311,7 @@ fn show_whitelist(whitelist_file: &str) -> Result<(), Box<dyn std::error::Error>
     // Load whitelist
     let mut whitelist_manager = WhitelistManager::new();
     whitelist_manager.load_from_file(whitelist_file)?;
-    
+
     let entries = whitelist_manager.get_entries();
     println!("Whitelist contains {} entries:\n", entries.len());
 
@@ -308,4 +335,4 @@ fn show_whitelist(whitelist_file: &str) -> Result<(), Box<dyn std::error::Error>
     }
 
     Ok(())
-} 
+}

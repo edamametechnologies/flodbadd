@@ -1,13 +1,13 @@
-use edamame_models::*;
-use undeadlock::*;
 use crate::port_info::*;
 use crate::profiles_db::*;
 use anyhow::{Context, Result};
+use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{info, trace, warn};
+use undeadlock::*;
 
 // Constants for repository and file names
 const PROFILES_NAME: &str = "lanscan-profiles-db.json";

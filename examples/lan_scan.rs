@@ -1,13 +1,13 @@
 //! Example: LAN Scanner
-//! 
+//!
 //! This example demonstrates how to perform a LAN scan to discover devices on the local network.
 //! It will scan all available network interfaces and display discovered devices.
 
+use flodbadd::device_info::DeviceInfo;
 use flodbadd::ip::get_all_interfaces;
 use flodbadd::scanner::{NetworkScanner, ScannerConfig};
-use flodbadd::device_info::DeviceInfo;
-use std::time::Duration;
 use std::thread::sleep;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Flodbadd LAN Scanner Example ===\n");
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while start_time.elapsed() < scan_duration {
         // Get current scan results
         devices = scanner.get_discovered_devices()?;
-        
+
         // Display progress
         print!("\rScanning... Found {} devices", devices.len());
         use std::io::{self, Write};
@@ -73,41 +73,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No devices found on the network.");
     } else {
         println!("Discovered {} devices:\n", devices.len());
-        
+
         for (idx, device) in devices.iter().enumerate() {
             println!("Device #{}:", idx + 1);
             println!("  IP Address: {}", device.get_ip_address());
-            
+
             if let Some(mac) = device.get_mac_address() {
                 println!("  MAC Address: {}", mac);
             }
-            
+
             if !device.hostname.is_empty() {
                 println!("  Hostname: {}", device.hostname);
             }
-            
+
             if !device.device_vendor.is_empty() {
                 println!("  Vendor: {}", device.device_vendor);
             }
-            
+
             if !device.os_name.is_empty() {
                 println!("  OS: {} {}", device.os_name, device.os_version);
             }
-            
+
             if !device.open_ports.is_empty() {
                 println!("  Open Ports:");
                 for port in &device.open_ports {
                     println!("    - {} ({})", port.port, port.service);
                 }
             }
-            
+
             if !device.mdns_services.is_empty() {
                 println!("  mDNS Services:");
                 for service in &device.mdns_services {
                     println!("    - {}", service);
                 }
             }
-            
+
             println!("  Device Type: {}", device.device_type);
             println!("  Criticality: {}", device.criticality);
             println!();
@@ -115,4 +115,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-} 
+}

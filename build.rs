@@ -16,7 +16,6 @@ use std::process::Command;
 use zip;
 
 fn main() {
-
     // For Windows, download and extract the Npcap SDK
     #[cfg(all(target_os = "windows", feature = "packetcapture"))]
     {

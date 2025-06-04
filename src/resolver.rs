@@ -1,4 +1,4 @@
-use undeadlock::*;
+use crate::task::TaskHandle;
 use hickory_resolver::{
     config::ResolverConfig, name_server::TokioConnectionProvider, TokioResolver,
 };
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, trace, warn};
-use crate::task::TaskHandle;
+use undeadlock::*;
 
 // Add constant for resolution retry parameters
 const MAX_RESOLUTION_ATTEMPTS: usize = 3;

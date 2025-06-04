@@ -1,7 +1,6 @@
+use crate::sessions::SessionInfo;
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
-use undeadlock::CustomRwLock;
-use crate::sessions::SessionInfo;
 use extended_isolation_forest::{Forest, ForestOptions};
 use std::collections::HashSet;
 use std::fmt;
@@ -9,6 +8,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
+use undeadlock::CustomRwLock;
 
 /// # LanscanAnalyzer Module
 ///
@@ -1268,8 +1268,21 @@ impl SessionAnalyzer {
                 // The current batch of sessions has been added to `recent_data` and training ensured.
                 // They will be analyzed once warm-up completes.
                 if !initial_batch_analyzed_post_warmup {
-                    // Check flag
-                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early).", sessions_len);
+                    // Before returning early, count existing anomalous/blacklisted sessions
+                    let mut anom_count = 0;
+                    let mut bl_count = 0;
+                    for session in sessions.iter() {
+                        if Self::is_anomalous(&session.criticality) {
+                            anom_count += 1;
+                        }
+                        if Self::is_blacklisted(&session.criticality) {
+                            bl_count += 1;
+                        }
+                    }
+                    result.anomalous_count = anom_count;
+                    result.blacklisted_count = bl_count;
+
+                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, anom_count, bl_count);
                     return result;
                 }
             }
@@ -1434,12 +1447,28 @@ impl SessionAnalyzer {
                     result.blacklisted_count = bl_count;
                 } else {
                     warn!("Analyzer (Regular Op/Post-Warmup): No forest model available for analysis. Sessions will not be scored for anomalies.");
+
+                    // Count existing anomalous/blacklisted sessions even without forest model
+                    let mut anom_count = 0;
+                    let mut bl_count = 0;
+
                     for session in sessions.iter_mut() {
                         if !session.criticality.contains("blacklist:") {
                             session.criticality = "anomaly:normal/no_model".to_string();
                             session.last_modified = now;
                         }
+
+                        // Count sessions after any updates
+                        if Self::is_anomalous(&session.criticality) {
+                            anom_count += 1;
+                        }
+                        if Self::is_blacklisted(&session.criticality) {
+                            bl_count += 1;
+                        }
                     }
+
+                    result.anomalous_count = anom_count;
+                    result.blacklisted_count = bl_count;
                 }
             }
         }
@@ -1454,7 +1483,7 @@ impl SessionAnalyzer {
             "Analyzer: analyze_sessions call finished for {} sessions.",
             sessions_len
         );
-        
+
         result
     }
 
@@ -1561,5 +1590,37 @@ impl SessionAnalyzer {
         let mut model_guard = self.model.write().await;
         *model_guard = None;
         info!("Analyzer resources released");
+    }
+
+    /// Debug method to get anomaly score and thresholds for a session (testing purposes only)
+    pub async fn debug_score_and_thresholds(
+        &self,
+        session: &SessionInfo,
+    ) -> Option<(f64, f64, f64)> {
+        let model_guard = self.model.read().await;
+        if let Some(model) = &*model_guard {
+            let model_read = model.read().await;
+            if let Some((score, _features)) = model_read.score_session(session) {
+                Some((
+                    score,
+                    model_read.suspicious_threshold,
+                    model_read.abnormal_threshold,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Set custom thresholds for testing purposes
+    pub async fn set_test_thresholds(&self, suspicious: f64, abnormal: f64) {
+        let model_guard = self.model.read().await;
+        if let Some(model) = &*model_guard {
+            let mut model_write = model.write().await;
+            model_write.suspicious_threshold = suspicious;
+            model_write.abnormal_threshold = abnormal;
+        }
     }
 }

@@ -1,10 +1,10 @@
-use undeadlock::*;
 use crate::interface::*;
 use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{trace, warn};
+use undeadlock::*;
 
 lazy_static! {
     /// A concurrent cache of IP addresses that are known to be local.

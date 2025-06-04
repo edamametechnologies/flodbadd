@@ -1,4 +1,3 @@
-use undeadlock::*;
 use crate::asn::*;
 use crate::ip::is_lan_ip;
 use crate::l7::FlodbaddL7;
@@ -21,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio;
 use tracing::{info, trace, warn};
+use undeadlock::*;
 use uuid::Uuid;
 
 const TCP_PSH: u8 = 0x08; // PSH (push) flag in TCP
@@ -803,12 +803,12 @@ pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use undeadlock::CustomRwLock;
     use chrono::Utc;
     use pnet_packet::tcp::TcpFlags;
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
     use std::{collections::HashSet, sync::Arc};
+    use undeadlock::CustomRwLock;
 
     #[tokio::test]
     #[serial]
