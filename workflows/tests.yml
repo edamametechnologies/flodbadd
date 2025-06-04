@@ -1,0 +1,516 @@
+name: Cross-platform Tests
+
+on:
+  pull_request:
+    branches: ["*"]
+  workflow_dispatch:
+  push:
+    branches:
+      - 'dev'
+      - 'main'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  EDAMAME_TARGET: ${{ secrets.EDAMAME_TARGET }}
+  EDAMAME_SERVER: ${{ secrets.EDAMAME_SERVER }}
+  EDAMAME_SERVER_PEM: ${{ secrets.EDAMAME_SERVER_PEM }}
+  EDAMAME_SERVER_KEY: ${{ secrets.EDAMAME_SERVER_KEY }}
+  EDAMAME_CA_PEM: ${{ secrets.EDAMAME_CA_PEM }}
+  EDAMAME_CLIENT_PEM: ${{ secrets.EDAMAME_CLIENT_PEM }}
+  EDAMAME_CLIENT_KEY: ${{ secrets.EDAMAME_CLIENT_KEY }}
+  EDAMAME_CLIENT_CA_PEM: ${{ secrets.EDAMAME_CLIENT_CA_PEM }}
+  LAMBDA_SIGNATURE: ${{ secrets.LAMBDA_SIGNATURE }}
+  # Debug mode
+  EDAMAME_LOG_LEVEL: debug
+
+jobs:
+  test-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            protobuf_install: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+          - os: macos-latest
+            platform: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+            protobuf_install: brew install protobuf
+          - os: windows-latest
+            platform: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            protobuf_install: choco install protoc
+          - os: macos-latest
+            platform: ios
+            arch: aarch64
+            target: aarch64-apple-ios
+            protobuf_install: brew install protobuf
+          - os: ubuntu-latest
+            platform: android
+            arch: x86_64
+            target: x86_64-linux-android
+            protobuf_install: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+          # Linux aarch64 test using QEMU
+          - os: ubuntu-latest
+            platform: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            protobuf_install: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    
+    steps:
+      - name: Setup EDAMAME Posture
+        uses: edamametechnologies/edamame_posture_action@v0
+        with:
+          edamame_user: ${{ vars.EDAMAME_POSTURE_USER }}
+          edamame_domain: ${{ vars.EDAMAME_POSTURE_DOMAIN }}
+          edamame_pin: ${{ secrets.EDAMAME_POSTURE_PIN }}
+          edamame_id: ${{ github.run_id }}
+          checkout: true
+
+      - name: Set ignored paths
+        id: set-ignored-paths
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "${{ matrix.platform }}" != "android" ]; then
+            echo "IGNORED_PATHS<<EOF" >> $GITHUB_OUTPUT
+            echo "windows/**" >> $GITHUB_OUTPUT
+            echo "macos/**" >> $GITHUB_OUTPUT
+            echo "ios/**" >> $GITHUB_OUTPUT
+            echo "android/**" >> $GITHUB_OUTPUT
+            echo "src/*windows*.rs" >> $GITHUB_OUTPUT
+            echo "src/*macos*.rs" >> $GITHUB_OUTPUT
+            echo "src/*ios*.rs" >> $GITHUB_OUTPUT
+            echo "src/*android*.rs" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*windows*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*macos*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*ios*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*android*.yml" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.os }}" = "macos-latest" ] && [ "${{ matrix.platform }}" != "ios" ]; then
+            echo "IGNORED_PATHS<<EOF" >> $GITHUB_OUTPUT
+            echo "windows/**" >> $GITHUB_OUTPUT
+            echo "linux/**" >> $GITHUB_OUTPUT
+            echo "snap/**" >> $GITHUB_OUTPUT
+            echo "android/**" >> $GITHUB_OUTPUT
+            echo "ios/**" >> $GITHUB_OUTPUT
+            echo "src/*windows*.rs" >> $GITHUB_OUTPUT
+            echo "src/*linux*.rs" >> $GITHUB_OUTPUT
+            echo "src/*android*.rs" >> $GITHUB_OUTPUT
+            echo "src/*ios*.rs" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*windows*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*linux*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*android*.yml" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            echo "IGNORED_PATHS<<EOF" >> $GITHUB_OUTPUT
+            echo "linux/**" >> $GITHUB_OUTPUT
+            echo "snap/**" >> $GITHUB_OUTPUT
+            echo "macos/**" >> $GITHUB_OUTPUT
+            echo "ios/**" >> $GITHUB_OUTPUT
+            echo "android/**" >> $GITHUB_OUTPUT
+            echo "src/*linux*.rs" >> $GITHUB_OUTPUT
+            echo "src/*macos*.rs" >> $GITHUB_OUTPUT
+            echo "src/*ios*.rs" >> $GITHUB_OUTPUT
+            echo "src/*android*.rs" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*linux*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*macos*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*ios*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*android*.yml" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.platform }}" = "ios" ]; then
+            echo "IGNORED_PATHS<<EOF" >> $GITHUB_OUTPUT
+            echo "windows/**" >> $GITHUB_OUTPUT
+            echo "linux/**" >> $GITHUB_OUTPUT
+            echo "snap/**" >> $GITHUB_OUTPUT
+            echo "android/**" >> $GITHUB_OUTPUT
+            echo "src/*windows*.rs" >> $GITHUB_OUTPUT
+            echo "src/*linux*.rs" >> $GITHUB_OUTPUT
+            echo "src/*android*.rs" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*windows*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*linux*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*android*.yml" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.platform }}" = "android" ]; then
+            echo "IGNORED_PATHS<<EOF" >> $GITHUB_OUTPUT
+            echo "windows/**" >> $GITHUB_OUTPUT
+            echo "macos/**" >> $GITHUB_OUTPUT
+            echo "ios/**" >> $GITHUB_OUTPUT
+            echo "src/*windows*.rs" >> $GITHUB_OUTPUT
+            echo "src/*macos*.rs" >> $GITHUB_OUTPUT
+            echo "src/*ios*.rs" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*windows*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*macos*.yml" >> $GITHUB_OUTPUT
+            echo ".github/workflows/*ios*.yml" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64' && matrix.platform == 'linux'
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: arm64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set Rust toolchain
+        shell: bash
+        run: |
+          # For ebpf
+          rustup toolchain install nightly --component rust-src
+          rustup component add --toolchain nightly llvm-tools-preview
+          # Use nightly by default so that build.rs picks it up automatically
+          echo "RUSTUP_TOOLCHAIN=nightly" >> $HOME/.cargo/env
+
+      - name: iOS add-ons
+        if: matrix.platform == 'ios'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-ios
+
+      - name: Android add-ons
+        if: matrix.platform == 'android'
+        shell: bash
+        run: |
+          rustup target add x86_64-linux-android
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install protobuf
+        shell: bash
+        run: ${{ matrix.protobuf_install }}
+
+      - name: Run tests
+        id: tests
+        shell: bash
+        run: |
+          make ${{ matrix.platform }}_test
+        continue-on-error: true
+
+      - name: Dump logs
+        if: always()
+        shell: bash
+        run: |
+          echo "--- Dumping Native Logs (${{ matrix.os }}-${{ matrix.platform }}) --- "
+          find "$HOME/" -name "edamame_*.*" -exec echo "--- {} ---" \; -exec cat {} \; || echo "No logs found in HOME"
+          echo "--- Native Log Dump Complete ---"
+
+      - name: Slack alerts
+        if: steps.tests.outcome != 'success'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: 'C072J0U9TH7'
+          slack-message: "Tests ran in ${{ github.workflow }} for ${{ github.repository }} for ${{ runner.os }} on branch ${{ github.ref }} failed: see https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Fail job if tests failed
+        if: steps.tests.outcome != 'success'
+        shell: bash
+        run: |
+          echo "## Test Results Summary (Native - ${{ matrix.os }}-${{ matrix.platform }})"
+          echo "- Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}"
+          echo ""
+          echo "Forcing job to fail because tests did not succeed."
+          exit 1
+
+  test-container:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Container-based tests for older Ubuntu versions
+          - os: ubuntu-latest
+            container_image: ubuntu:20.04
+            container_name: ubuntu-20.04
+            platform: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            container_image: ubuntu:18.04
+            container_name: ubuntu-18.04
+            platform: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    container:
+      image: ${{ matrix.container_image }}
+      # Needed for integration tests (pcap)
+      options: --cap-add=NET_ADMIN --cap-add=NET_RAW
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      EDAMAME_TARGET: ${{ secrets.EDAMAME_TARGET }}
+      EDAMAME_SERVER: ${{ secrets.EDAMAME_SERVER }}
+      EDAMAME_SERVER_PEM: ${{ secrets.EDAMAME_SERVER_PEM }}
+      EDAMAME_SERVER_KEY: ${{ secrets.EDAMAME_SERVER_KEY }}
+      EDAMAME_CA_PEM: ${{ secrets.EDAMAME_CA_PEM }}
+      EDAMAME_CLIENT_PEM: ${{ secrets.EDAMAME_CLIENT_PEM }}
+      EDAMAME_CLIENT_KEY: ${{ secrets.EDAMAME_CLIENT_KEY }}
+      EDAMAME_CLIENT_CA_PEM: ${{ secrets.EDAMAME_CLIENT_CA_PEM }}
+      LAMBDA_SIGNATURE: ${{ secrets.LAMBDA_SIGNATURE }}
+      # Debug mode
+      EDAMAME_LOG_LEVEL: debug
+
+    steps:
+      # Needed when we are running in a container
+      - name: Setup permissions for git and install missing packages
+        shell: bash
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y git curl
+          git config --global --add safe.directory '*'
+
+      - name: Setup EDAMAME Posture
+        uses: edamametechnologies/edamame_posture_action@v0
+        with:
+          edamame_user: ${{ vars.EDAMAME_POSTURE_USER }}
+          edamame_domain: ${{ vars.EDAMAME_POSTURE_DOMAIN }}
+          edamame_pin: ${{ secrets.EDAMAME_POSTURE_PIN }}
+          edamame_id: ${{ github.run_id }}-container-${{ matrix.container_name }}
+          # Don't checkout the repo, as we will do that in the next step
+          checkout: false
+          wait_for_api: true
+          wait_for_https: true
+        # Will fail on 18.04 because of glibc version
+        continue-on-error: true
+
+      # Manual checkout for containers (actions/checkout@v4 requires node20 which is not supported on older Ubuntu containers)
+      - name: Manual checkout for containers
+        shell: bash
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.ref_name }}
+
+      - name: Install additional packages
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y protobuf-compiler libpcap-dev
+
+      # Install Rust in container
+      - name: Install Rust in container
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # Add rust to path for subsequent steps
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          # This fails during build so rather use the standard toolchain and don't build Ebpf
+          # Install nightly toolchain first
+          #. "$HOME/.cargo/env"
+          #rustup toolchain install nightly
+          # Then add the target to the nightly toolchain
+          #rustup target add --toolchain nightly ${{ matrix.target }}
+          # For ebpf - add rust-src specifically for the target toolchain
+          #rustup component add rust-src --toolchain nightly-${{ matrix.target }}
+          #rustup component add --toolchain nightly llvm-tools-preview
+          # Use nightly by default so that build.rs picks it up automatically
+          #echo "RUSTUP_TOOLCHAIN=nightly" >> $HOME/.cargo/env
+          
+      - name: Run tests
+        id: tests
+        shell: bash
+        run: |
+          # Ensure cargo is in path
+          export PATH="$HOME/.cargo/bin:$PATH"
+          make ${{ matrix.platform }}_test_no_ebpf
+        continue-on-error: true
+
+      - name: Dump logs
+        if: always()
+        shell: bash
+        run: |
+          echo "--- Dumping Container Logs (${{ matrix.container_name }}) --- "
+          find "$HOME/" -name "edamame_*.*" -exec echo "--- {} ---" \; -exec cat {} \; || echo "No logs found in HOME"
+          echo "--- Container Log Dump Complete ---"
+
+      - name: Slack alerts
+        # Won't work on 18.04 because of glibc version
+        if: steps.tests.outcome != 'success' && !contains(matrix.container_name, '18.04')
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: 'C072J0U9TH7'
+          slack-message: |
+            *Container Test Results for ${{ github.repository }} (${{ matrix.container_name }})*:
+            - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
+            Branch: ${{ github.ref }}
+            More details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Fail job if tests failed
+        if: steps.tests.outcome != 'success'
+        shell: bash
+        run: |
+          echo "## Test Results Summary (Container - ${{ matrix.container_name }})"
+          echo "- Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}"
+          echo ""
+          echo "Forcing container job to fail because tests did not succeed."
+          exit 1
+
+  test-alpine:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+            platform: linux
+          - os: ubuntu-latest
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+    # We need to wait a long time for musl aarch64 due to the use of qemu
+    timeout-minutes: 240
+    env:
+      CARGO_TERM_COLOR: always
+      EDAMAME_TARGET: ${{ secrets.EDAMAME_TARGET }}
+      EDAMAME_SERVER: ${{ secrets.EDAMAME_SERVER }}
+      EDAMAME_SERVER_PEM: ${{ secrets.EDAMAME_SERVER_PEM }}
+      EDAMAME_SERVER_KEY: ${{ secrets.EDAMAME_SERVER_KEY }}
+      EDAMAME_CA_PEM: ${{ secrets.EDAMAME_CA_PEM }}
+      EDAMAME_CLIENT_PEM: ${{ secrets.EDAMAME_CLIENT_PEM }}
+      EDAMAME_CLIENT_KEY: ${{ secrets.EDAMAME_CLIENT_KEY }}
+      EDAMAME_CLIENT_CA_PEM: ${{ secrets.EDAMAME_CLIENT_CA_PEM }}
+      LAMBDA_SIGNATURE: ${{ secrets.LAMBDA_SIGNATURE }}
+      # Debug mode
+      EDAMAME_LOG_LEVEL: debug
+
+    steps:
+      # Set up QEMU for aarch64 emulation
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: arm64
+
+      # Setup Alpine Linux
+      - name: Setup Alpine Linux
+        uses: jirutka/setup-alpine@v1
+        with:
+          arch: ${{ matrix.arch }}
+          branch: v3.15
+
+      # Install dependencies with apk
+      - name: Install dependencies with apk
+        run: |
+          apk add --no-cache \
+            build-base \
+            protobuf-dev \
+            libpcap-dev \
+            git \
+            curl \
+            pkgconf \
+            eudev-dev \
+            perl
+        shell: alpine.sh --root {0}
+
+      # We need to setup edamame_posture outside of the Alpine VM as otherwise IP address detection will fail and access will not be granted
+      #- name: Setup EDAMAME Posture
+      #  run: |
+      #    # Install bash and sudo first
+      #    apk add --no-cache bash sudo
+      #    # Download edamame_posture for MUSL
+      #    wget https://raw.githubusercontent.com/edamametechnologies/edamame_posture_cli/refs/heads/main/linux/edamame_setup.sh -O ./edamame_setup.sh
+      #    chmod +x ./edamame_setup.sh
+      #    # Use bash to run the script
+      #   bash ./edamame_setup.sh ${{ vars.EDAMAME_POSTURE_USER }} ${{ vars.EDAMAME_POSTURE_DOMAIN }} ${{ secrets.EDAMAME_POSTURE_PIN }} ${{ github.run_id }}-alpine-${{ matrix.arch }}
+      #  shell: alpine.sh --root {0}
+
+      # Setup EDAMAME Posture in host environment
+      - name: Setup EDAMAME Posture
+        uses: edamametechnologies/edamame_posture_action@v0
+        with:
+          edamame_user: ${{ vars.EDAMAME_POSTURE_USER }}
+          edamame_domain: ${{ vars.EDAMAME_POSTURE_DOMAIN }}
+          edamame_pin: ${{ secrets.EDAMAME_POSTURE_PIN }}
+          edamame_id: ${{ github.run_id }}-alpine-${{ matrix.arch }}
+          checkout: false
+
+      # Manual checkout in Alpine VM
+      - name: Manual checkout
+        run: |
+          mkdir temp
+          cd temp
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.ref_name }}
+        shell: alpine.sh {0}
+
+      # Install Rust in Alpine VM
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # Add rust to path for subsequent steps
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          # This fails during build so rather use the standard toolchain and don't build Ebpf
+          # Install nightly toolchain first
+          #. "$HOME/.cargo/env"
+          #rustup toolchain install nightly
+          # Then add the target to the nightly toolchain
+          #rustup target add --toolchain nightly ${{ matrix.target }}
+          # For ebpf - add rust-src specifically for the target toolchain
+          #rustup component add rust-src --toolchain nightly-${{ matrix.target }}
+          #rustup component add --toolchain nightly llvm-tools-preview
+          # Use nightly by default so that build.rs picks it up automatically
+          #echo "RUSTUP_TOOLCHAIN=nightly" >> $HOME/.cargo/env
+        shell: alpine.sh {0}
+
+      # Must be in the Alpine VM
+      - name: Run tests
+        id: tests
+        run: |
+          cd temp
+          source $HOME/.cargo/env
+          make ${{ matrix.platform }}_test_no_ebpf
+        shell: alpine.sh --root {0}
+        continue-on-error: true
+        env:
+          VERGEN_GIT_BRANCH: ${{ github.ref_name }}
+
+      # Must be in the Alpine VM
+      - name: Dump logs
+        if: always()
+        run: |
+          echo "--- Dumping Alpine Logs (${{ matrix.arch }}) --- "
+          find "$HOME/" -name "edamame_*.*" -exec echo "--- {} ---" \; -exec cat {} \; || echo "No logs found in HOME"
+          echo "--- Alpine Log Dump Complete ---"
+        shell: alpine.sh --root {0}
+
+      # Must be in the host environment
+      - name: Slack alerts
+        if: steps.tests.outcome != 'success'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: 'C072J0U9TH7'
+          slack-message: |
+            *Alpine Test Results for ${{ github.repository }} (${{ matrix.arch }})*:
+            - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
+            Branch: ${{ github.ref }}
+            More details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      # Must be in the host environment
+      - name: Fail job if tests failed
+        if: steps.tests.outcome != 'success'
+        run: |
+          echo "## Test Results Summary (Alpine - ${{ matrix.arch }})"
+          echo "- Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}"
+          echo ""
+          echo "Forcing alpine job to fail because tests did not succeed."
+          exit 1
