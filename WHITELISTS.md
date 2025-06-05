@@ -11,29 +11,29 @@ The EDAMAME whitelist system provides a flexible and powerful way to control net
 ```rust
 // Main whitelist container
 struct Whitelists {
-    date: String,                    // Creation/update date
-    signature: Option<String>,       // Optional cryptographic signature
-    whitelists: Map<String, WhitelistInfo> // Named whitelist collection
+    date: String,                                   // Creation/update date
+    signature: Option<String>,                      // Optional cryptographic signature
+    whitelists: CustomDashMap<String, WhitelistInfo>, // Named whitelist collection (DashMap for concurrency)
 }
 
 // Individual whitelist definition
 struct WhitelistInfo {
-    name: String,                // Unique identifier
-    extends: Option<Vec<String>>, // Parent whitelists to inherit from
-    endpoints: Vec<WhitelistEndpoint> // List of allowed endpoints
+    name: String,                       // Unique identifier
+    extends: Option<Vec<String>>,       // Parent whitelists to inherit from
+    endpoints: Vec<WhitelistEndpoint>,  // List of allowed endpoints
 }
 
 // Network endpoint specification
 struct WhitelistEndpoint {
-    domain: Option<String>,     // Domain name (supports wildcards)
-    ip: Option<String>,         // IP address or CIDR range
-    port: Option<u16>,          // Port number
-    protocol: Option<String>,   // Protocol (TCP, UDP, etc.)
-    as_number: Option<u32>,     // Autonomous System number
-    as_country: Option<String>, // Country code for the AS
-    as_owner: Option<String>,   // AS owner/organization name
-    process: Option<String>,    // Process name
-    description: Option<String> // Human-readable description
+    domain: Option<String>,      // Domain name (supports wildcards)
+    ip: Option<String>,          // IP address or CIDR range
+    port: Option<u16>,           // Port number
+    protocol: Option<String>,    // Protocol (TCP, UDP, etc.)
+    as_number: Option<u32>,      // Autonomous System number
+    as_country: Option<String>,  // Country code for the AS
+    as_owner: Option<String>,    // AS owner/organization name
+    process: Option<String>,     // Process name
+    description: Option<String>, // Human-readable description
 }
 ```
 

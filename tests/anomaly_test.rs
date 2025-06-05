@@ -59,6 +59,7 @@ fn create_basic_session(
         dst_asn: None,
         is_whitelisted: WhitelistState::Unknown,
         criticality: String::new(),
+        dismissed: false,
         whitelist_reason: None,
         uid: Uuid::new_v4().to_string(),
         last_modified: now,
@@ -407,7 +408,10 @@ async fn test_c2_beacon_detection() {
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
 
-    // Re-analyze after warm-up (using production thresholds)
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
+    // Re-analyze after warm-up (using test thresholds)
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
 
     println!("\n=== C&C Beacon Detection Test Results ===");
@@ -467,14 +471,14 @@ async fn test_c2_beacon_detection() {
         println!("3. The anomaly thresholds need tuning");
     }
 
-    // With production thresholds, any beacon detection is a success
+    // With the test thresholds above, any beacon detection counts as a success
     if anomalous_count > 0 {
         println!(
             "SUCCESS: {} beacons detected as anomalous!",
             anomalous_count
         );
     } else {
-        println!("INFO: No beacons detected with production thresholds");
+        println!("INFO: No beacons detected with test thresholds");
         println!("C&C beacon detection is challenging and may require more distinctive patterns");
     }
 
@@ -503,6 +507,9 @@ async fn test_data_exfiltration_detection() {
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
 
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
 
@@ -521,15 +528,15 @@ async fn test_data_exfiltration_detection() {
         exfil_session.criticality
     );
 
-    // With production thresholds, check if exfiltration was detected
+    // Using the test thresholds, check if exfiltration was detected
     let exfil_detected = exfil_session.criticality.contains("suspicious")
         || exfil_session.criticality.contains("abnormal");
 
     if exfil_detected {
         println!("SUCCESS: Data exfiltration detected as anomalous!");
     } else {
-        println!("INFO: Data exfiltration not detected with production thresholds - this may be expected");
-        println!("Production thresholds are tuned to reduce false positives on real traffic");
+        println!("INFO: Data exfiltration not detected with test thresholds (may be expected under strict settings)");
+        println!("Note: production thresholds are tuned to reduce false positives; the test thresholds here are more sensitive");
     }
 
     // Test passes if analyzer functions correctly, regardless of detection rate
@@ -556,6 +563,9 @@ async fn test_port_scan_detection() {
 
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
+
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
@@ -585,15 +595,15 @@ async fn test_port_scan_detection() {
         scan_sessions.len()
     );
 
-    // With production thresholds, any detection is a success
+    // With the test thresholds, any detection is a success
     if detected_scans > 0 {
         println!(
             "SUCCESS: {} port scans detected as anomalous!",
             detected_scans
         );
     } else {
-        println!("INFO: No port scans detected with production thresholds");
-        println!("Production thresholds prioritize low false positive rates");
+        println!("INFO: No port scans detected with test thresholds");
+        println!("Note: production thresholds prioritise low false-positive rates – tests use more sensitive ones");
     }
 
     // Test passes if analyzer functions correctly
@@ -621,6 +631,9 @@ async fn test_dns_tunnel_detection() {
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
 
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
 
@@ -645,14 +658,14 @@ async fn test_dns_tunnel_detection() {
         dns_tunnel_sessions.len()
     );
 
-    // With production thresholds, any detection is a success
+    // With the test thresholds, any detection is a success
     if detected_tunnels > 0 {
         println!(
             "SUCCESS: {} DNS tunnels detected as anomalous!",
             detected_tunnels
         );
     } else {
-        println!("INFO: No DNS tunnels detected with production thresholds");
+        println!("INFO: No DNS tunnels detected with test thresholds");
         println!("DNS tunnel detection may require more sophisticated patterns");
     }
 
@@ -680,6 +693,9 @@ async fn test_cryptomining_detection() {
 
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
+
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
@@ -711,15 +727,15 @@ async fn test_cryptomining_detection() {
         .filter(|s| s.criticality.contains("suspicious") || s.criticality.contains("abnormal"))
         .count();
 
-    // With production thresholds, any detection is a success
+    // With the test thresholds, any detection is a success
     if detected_miners > 0 {
         println!(
             "SUCCESS: {} mining sessions detected as anomalous!",
             detected_miners
         );
     } else {
-        println!("INFO: No mining sessions detected with production thresholds");
-        println!("Production thresholds may require more distinctive patterns");
+        println!("INFO: No mining sessions detected with test thresholds");
+        println!("Note: production thresholds may require more distinctive patterns; tests are more sensitive");
     }
 
     // Test passes if analyzer functions correctly
@@ -756,7 +772,10 @@ async fn test_mixed_anomaly_detection() {
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 180).await;
 
-    // Final analysis (using production thresholds)
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
+    // Final analysis (using test thresholds)
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
 
     println!("\n=== Mixed Anomaly Detection Test Results ===");
@@ -782,15 +801,15 @@ async fn test_mixed_anomaly_detection() {
         println!("  {}: {} sessions", process, count);
     }
 
-    // With production thresholds, any detection is a success, no detection is also acceptable
+    // With the test thresholds, any detection is a success (no detection is also acceptable)
     if result.anomalous_count > 0 {
         println!(
-            "SUCCESS: {} anomalous sessions detected with production thresholds!",
+            "SUCCESS: {} anomalous sessions detected with test thresholds!",
             result.anomalous_count
         );
     } else {
-        println!("INFO: No anomalous sessions detected with production thresholds");
-        println!("This is acceptable - production thresholds prioritize low false positive rates");
+        println!("INFO: No anomalous sessions detected with test thresholds");
+        println!("This is acceptable – production thresholds prioritise low false-positive rates; test thresholds are more sensitive");
     }
 
     // Test passes if analyzer functions correctly
@@ -847,6 +866,9 @@ async fn test_blacklist_preservation() {
 
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 60).await;
+
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut sessions).await;
@@ -930,6 +952,9 @@ async fn test_basic_anomaly_detection_debug() {
     // Wait for warm-up
     wait_for_analyzer_ready(&analyzer, 120).await;
 
+    // Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
     // Add extremely anomalous sessions
     println!("\nAdding anomalous sessions...");
 
@@ -996,14 +1021,14 @@ async fn test_basic_anomaly_detection_debug() {
         || exfil_session.criticality.contains("abnormal");
 
     if !beacon_anomalous && !exfil_anomalous {
-        println!("\nINFO: No extreme anomalies detected with production thresholds");
-        println!("This is expected behavior with conservative production settings");
+        println!("\nINFO: No extreme anomalies detected with test thresholds");
+        println!("This can happen because, despite the more sensitive test thresholds, patterns might still resemble normal traffic");
     } else {
         println!("\nSUCCESS: At least one extreme anomaly was detected!");
     }
 
-    // With production thresholds, focus on testing functionality rather than detection rates
-    println!("Test completed successfully - analyzer functional with production thresholds");
+    // With the test thresholds, focus on testing functionality rather than detection rates
+    println!("Test completed successfully – analyzer functional with test thresholds");
 
     analyzer.stop().await;
 }
@@ -1075,10 +1100,13 @@ async fn test_minimal_anomaly() {
     // 4. Wait for analyzer to be ready
     wait_for_analyzer_ready(&analyzer, 180).await;
 
-    // 5. Final analysis (using production thresholds)
+    // 5. Use more sensitive thresholds in this test context only (does NOT affect production).
+    analyzer.set_test_thresholds(0.60, 0.72).await;
+
+    // 6. Final analysis (using test thresholds)
     let _ = analyzer.analyze_sessions(&mut normal).await;
 
-    // 6. Print and assert
+    // 7. Print and assert
     let out = normal.iter().find(|s| s.uid == anomaly.uid).unwrap();
     println!("Anomaly criticality: '{}'", out.criticality);
 
@@ -1090,9 +1118,8 @@ async fn test_minimal_anomaly() {
         println!("Could not compute anomaly score/thresholds");
     }
 
-    // With production thresholds, even extreme synthetic outliers may not be detected
-    // This test verifies the analyzer runs without crashing and provides debug info
-    println!("Test completed successfully - analyzer functional with production thresholds");
+    // Even with our more sensitive test thresholds, extreme synthetic outliers may occasionally evade detection
+    println!("Test completed successfully – analyzer functional with test thresholds");
 
     // Optional assertion - only fail if the analyzer completely breaks
     assert!(

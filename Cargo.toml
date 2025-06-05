@@ -1,6 +1,6 @@
 [package]
 name = "flodbadd"
-version = "0.1.0"
+version = "0.9.40"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
 description = "Network scanning and session monitoring library"
@@ -23,11 +23,11 @@ examples = ["clap", "tracing-subscriber", "rayon"]
 # Core dependencies
 edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backend.git", branch = "main" }
 # Local copy in order to allow rapid development/debug
-undeadlock = { path = "../undeadlock" }
-#undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
+#undeadlock = { path = "../undeadlock" }
+undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 # Local copy in order to allow rapid development/debug
-edamame_models = { path = "../edamame_models" }
-#edamame_models = { git = "https://github.com/edamametechnologies/edamame_models", branch = "main" }
+#edamame_models = { path = "../edamame_models" }
+edamame_models = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
 
 # Global statics w/ mutex
 lazy_static = "1.4"
@@ -103,8 +103,7 @@ pcap = { version = "2.2.0", optional = true, features = ["capture-stream"] }
 hickory-resolver = { version = "0.25.1", optional = true }
 dns-parser = { git = "https://github.com/edamametechnologies/dns-parser", branch = "pr47", optional = true }
 pnet_packet = { version = "0.35.0", optional = true }
-sysinfo = { version = "0.34.2", optional = true }
-libc = "0.2.168"
+sysinfo = { version = "0.35.2", optional = true }
 netstat2 = { version = "0.11.0", optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
@@ -139,9 +138,9 @@ clap = { version = "4.0", features = ["derive"], optional = true }
 rayon = { version = "1.7", optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.6"
 tempfile = "3.8"
-mockall = "0.11"
+mockall = "0.13.1"
 
 [[example]]
 name = "lan_scan"

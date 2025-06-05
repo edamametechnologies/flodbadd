@@ -1,175 +1,170 @@
 # Flodbadd
 
-A high-performance network scanning and session monitoring library for Rust, extracted from the EDAMAME security platform.
+Flodbadd is the network-visibility and traffic-analysis library that powers the EDAMAME security platform.
 
-## Overview
+It turns raw packets into enriched, security-aware *sessions*, tracks those sessions over time and applies
+rule-based (whitelists / blacklists) as well as statistical (Isolation-Forest) analysis – all with a focus on
+high throughput and cross-platform support.
 
-Flodbadd provides comprehensive network monitoring capabilities including:
-- **LAN Scanning**: Discover devices on local networks with port scanning and service detection
-- **Session Capture**: Monitor network connections with L7 process information
-- **Whitelist Management**: Create and enforce network access policies
-- **Blacklist Detection**: Identify and alert on malicious connections
-- **Cross-platform Support**: Works on Linux, macOS, and Windows
+> **Heads-up:** The high-level LAN / port-scanning helpers are currently hosted in the `edamame_core` crate.  They
+> will be re-exported from Flodbadd in an upcoming release.  In the meantime Flodbadd concentrates on capture,
+> session processing and analytics.
 
-## Features
+---
 
-- Fast, concurrent network scanning with customizable parallelism
-- Deep packet inspection with protocol detection
-- Process-level network visibility (who's making connections)
-- mDNS/Bonjour service discovery
-- MAC address vendor lookup
-- Whitelist/blacklist rule engine
-- Export to Zeek/Bro format for SIEM integration
+## Feature Highlights
+
+* Zero-copy packet capture on Linux, macOS and Windows (via `pcap`)  
+  Optional eBPF datapath on Linux for even higher throughput (feature: `ebpf`).
+* Stateful TCP/UDP session reconstruction with byte / packet counters, RTT estimation, history flags (Zeek-style).
+* Real-time DNS correlation, mDNS discovery and L7 process attribution.
+* Built-in whitelist / blacklist engine that can ingest Zeek JSON as well as EDAMAME-formatted rules.
+* On-device anomaly detection powered by an **extended Isolation Forest** model with automatic warm-up & threshold tuning.
+* Huge, compressed lookup tables packaged as const-data for:
+  * MAC OUI → vendor (≈2 MB)
+  * ASN IPv4 / IPv6 ranges (≈40 MB)  
+  * Common port & vendor vulnerability references
+* Fully asynchronous (`tokio`) throughout – optimized for running inside an existing async runtime.
+
+---
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Add Flodbadd to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-flodbadd = { git = "https://github.com/edamame/flodbadd.git" }
+flodbadd = { git = "https://github.com/edamametechnologies/flodbadd", default-features = false, features = ["packetcapture"] }
 ```
 
-For packet capture features:
-```toml
-[dependencies]
-flodbadd = { git = "https://github.com/edamame/flodbadd.git", features = ["packetcapture"] }
-```
+Key optional features:
+
+* `packetcapture` – enable live packet capture via **pcap** (required for `FlodbaddCapture`).
+* `asyncpacketcapture` – same as above but uses an async `pcap` stream (experimental).
+* `ebpf` – Linux-only, accelerates capture & process lookup using eBPF + `aya`.
+* `examples` – pulls in `clap`, `tracing-subscriber`, `rayon` and registers the example binaries.
+
+---
 
 ## Quick Start
 
-### LAN Scanning
+### Enumerate local interfaces
 
 ```rust
 use flodbadd::ip::get_all_interfaces;
-use flodbadd::scanner::{NetworkScanner, ScannerConfig};
-use std::time::Duration;
 
-// Get network interfaces
-let interfaces = get_all_interfaces()?;
-
-// Configure scanner
-let config = ScannerConfig {
-    timeout: Duration::from_secs(5),
-    concurrent_scans: 100,
-    scan_ports: vec![80, 443, 22, 21, 23, 3389],
-    enable_mdns: true,
-    enable_arp: true,
-};
-
-// Start scanning
-let mut scanner = NetworkScanner::new(config)?;
-scanner.start_scan(&interfaces)?;
-
-// Get results
-let devices = scanner.get_discovered_devices()?;
-for device in devices {
-    println!("Found: {} ({})", device.ip_address, device.hostname);
+fn main() -> anyhow::Result<()> {
+    let interfaces = get_all_interfaces()?;
+    for iface in &interfaces {
+        println!("{} → {}", iface.name, iface.ip);
+    }
+    Ok(())
 }
 ```
 
-### Session Monitoring
+### Capture & list sessions
 
 ```rust
-use flodbadd::capture::{PacketCapture, CaptureConfig};
-use flodbadd::sessions::format_sessions_zeek;
+use flodbadd::capture::FlodbaddCapture;
+use flodbadd::ip::get_all_interfaces;
+use tokio::time::{sleep, Duration};
 
-// Configure capture
-let config = CaptureConfig {
-    interfaces: get_all_interfaces()?,
-    promiscuous: true,
-    snaplen: 65535,
-    timeout: Duration::from_millis(100),
-    buffer_size: 10 * 1024 * 1024,
-};
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 1. Pick the interfaces you want to listen on
+    let interfaces = get_all_interfaces()?;
 
-// Start capture
-let mut capture = PacketCapture::new(config)?;
-capture.start()?;
+    // 2. Start capture
+    let mut capture = FlodbaddCapture::new();
+    capture.start(&interfaces).await;
 
-// Monitor for 60 seconds
-thread::sleep(Duration::from_secs(60));
-capture.stop()?;
+    // 3. Let it run for a while…
+    sleep(Duration::from_secs(30)).await;
 
-// Get sessions
-let sessions = capture.get_sessions()?;
-println!("Captured {} sessions", sessions.len());
+    // 4. Fetch sessions (set `incremental = false` to get the full table)
+    let sessions = capture.get_sessions(false).await;
+    println!("captured {} sessions", sessions.len());
+
+    // 5. Done
+    capture.stop().await;
+    Ok(())
+}
 ```
 
-## Examples
-
-Run the examples with:
-
-```bash
-# LAN scanning
-cargo run --example lan_scan --features examples
-
-# Network capture
-cargo run --example capture_sessions --features examples -- --duration 30
-
-# Whitelist management
-cargo run --example whitelist_management --features examples create
-cargo run --example whitelist_management --features examples check
-
-# Blacklist detection  
-cargo run --example blacklist_detection --features examples -- --create
-```
-
-See the [examples](examples/) directory for more detailed usage.
-
-## Architecture
-
-Flodbadd is designed as a modular system:
-
-- **Device Info**: Device discovery and fingerprinting
-- **Port Info**: Port scanning and service detection  
-- **Sessions**: Connection tracking and L7 visibility
-- **Vulnerability Info**: Security assessment integration
-- **IP Utils**: Network interface and routing utilities
-- **Analyzer**: Anomaly detection using Isolation Forest algorithm
-
-The library uses async I/O for high performance and can handle thousands of concurrent operations.
-
-### Session Analyzer
-
-The analyzer module provides real-time anomaly detection for network sessions using machine learning:
+### Detect anomalies
 
 ```rust
 use flodbadd::{SessionAnalyzer, AnalysisResult};
+use flodbadd::sessions::SessionInfo;
+use std::sync::Arc;
 
-// Create analyzer
-let analyzer = Arc::new(SessionAnalyzer::new());
-analyzer.start().await;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Create & start the analyzer
+    let analyzer = Arc::new(SessionAnalyzer::new());
+    analyzer.start().await;
 
-// Analyze sessions
-let result: AnalysisResult = analyzer.analyze_sessions(&mut sessions).await;
+    // feed it some sessions (from capture or elsewhere)
+    let mut sessions: Vec<SessionInfo> = /* … */ Vec::new();
+    let AnalysisResult { anomalous_count, .. } = analyzer.analyze_sessions(&mut sessions).await;
+    println!("found {anomalous_count} anomalous sessions");
 
-println!("Analyzed {} sessions", result.sessions_analyzed);
-println!("Found {} anomalous, {} blacklisted", 
-         result.anomalous_count, result.blacklisted_count);
-
-// Get anomalous sessions
-let anomalous = analyzer.get_anomalous_sessions().await;
-for session in anomalous {
-    println!("Anomaly: {} -> {} ({})", 
-             session.src_ip, session.dst_ip, session.criticality);
+    analyzer.stop().await;
+    Ok(())
 }
 ```
 
-Features:
-- Automatic warm-up period for model training
-- Dynamic threshold calculation based on network behavior
-- Preserves existing classifications (e.g., blacklisted sessions)
-- Detailed diagnostics for anomalous sessions
+---
 
-Run the analyzer example:
+## Running the bundled examples
+
+Compile & run with all the helper CLIs enabled:
+
 ```bash
-cargo run --example session_analyzer --features examples
+# Clone the repo
+$ git clone https://github.com/edamametechnologies/flodbadd.git
+$ cd flodbadd
+
+# LAN scanning (device discovery)
+$ cargo run --example lan_scan --features "examples packetcapture"
+
+# Live session capture
+$ cargo run --example capture_sessions --features "examples packetcapture" -- --duration 30
+
+# Create / check whitelists
+$ cargo run --example whitelist_management --features "examples packetcapture" create
+
+# Real-time anomaly detection
+$ cargo run --example session_analyzer --features examples
 ```
 
-## Security Considerations
+---
 
-- Requires appropriate permissions for packet capture (root/admin)
-- Use responsibly and only on networks you own or have permission to scan
-- Consider rate limiting in production environments
-- Whitelist/blacklist rules should be regularly updated
+## Module Overview
+
+* `capture`        – packet capture & session table maintenance (`FlodbaddCapture`)
+* `sessions`       – data-structures for `Session`, `SessionInfo` and helpers (formatting, filters …)
+* `analyzer`       – statistical anomaly detection (`SessionAnalyzer`)
+* `whitelists`     – rule engine + helpers for whitelist conformance
+* `blacklists`     – curated threat feeds and rule-helpers
+* `l7` / `l7_ebpf` – OS process → socket correlation (fallback & eBPF back-ends)
+* `dns`, `resolver` – passive DNS decoding + active asynchronous resolver
+* `ip`, `interface` – cross-platform interface & address enumeration utilities
+* `mdns`, `arp`, `broadcast` – helper tasks for local-network discovery
+* `asn`, `oui`, `port_vulns`, `vendor_vulns` – static lookup databases
+
+---
+
+## Security & Privileges
+
+* Packet capture requires elevated privileges on most platforms:  
+  *Linux* – run as `root` or grant `CAP_NET_RAW`/`CAP_NET_ADMIN`.  
+  *macOS* – run as `root` or use the *Packet PEEK* entitlement.  
+  *Windows* – install Npcap in "WinPcap compatible" mode.
+* Always ensure you have authorization to capture traffic on the network you are analysing.
+
+---
+
+## License
+
+Flodbadd is released under the Apache 2.0 license.

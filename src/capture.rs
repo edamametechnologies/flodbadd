@@ -411,6 +411,100 @@ impl FlodbaddCapture {
         }
     }
 
+    pub async fn augment_custom_whitelists(&mut self) -> Result<String> {
+        // Ensure sessions are up to date so that exceptions have latest data
+        self.update_sessions().await;
+
+        use crate::whitelists::{WhitelistEndpoint, WhitelistInfo, Whitelists, WhitelistsJSON};
+        use chrono::Local;
+        use serde_json;
+
+        // 1. Collect existing endpoints *and* inheritance from the current custom whitelist
+        let mut combined_endpoints: Vec<WhitelistEndpoint> = Vec::new();
+        let current_json = crate::whitelists::current_json().await;
+        let mut current_extends: Option<Vec<String>> = None;
+
+        if let Some(custom_info) = current_json
+            .whitelists
+            .iter()
+            .find(|info| info.name == "custom_whitelist")
+        {
+            combined_endpoints.extend(custom_info.endpoints.clone());
+            current_extends = custom_info.extends.clone();
+        }
+
+        // 2. Build endpoints from current whitelist exceptions (non-conforming sessions)
+        //    Re-use the helper that converts sessions → endpoints via Whitelists::new_from_sessions
+        let exception_keys = {
+            let guard = self.whitelist_exceptions.read().await;
+            guard.clone()
+        };
+
+        let mut exception_infos: Vec<crate::sessions::SessionInfo> = Vec::new();
+        for key in exception_keys {
+            if let Some(entry) = self.sessions.get(&key) {
+                exception_infos.push(entry.clone());
+            }
+        }
+
+        if !exception_infos.is_empty() {
+            let whitelist_from_exceptions = Whitelists::new_from_sessions(&exception_infos);
+            if let Some(info) = whitelist_from_exceptions.whitelists.get("custom_whitelist") {
+                combined_endpoints.extend(info.endpoints.clone());
+            };
+        }
+
+        // 3. De-duplicate endpoints (same logic as in Whitelists::new_from_sessions)
+        let mut unique = std::collections::HashSet::new();
+        combined_endpoints.retain(|ep| {
+            let fingerprint = (
+                ep.domain.clone(),
+                ep.ip.clone(),
+                ep.port,
+                ep.protocol.clone(),
+                ep.as_number,
+                ep.as_country.clone(),
+                ep.as_owner.clone(),
+                ep.process.clone(),
+            );
+            unique.insert(fingerprint)
+        });
+
+        // 4. Assemble the final Whitelists structure
+        let whitelist_info = WhitelistInfo {
+            name: "custom_whitelist".to_string(),
+            extends: current_extends, // preserve any existing inheritance chain
+            endpoints: combined_endpoints,
+        };
+
+        let whitelists = Whitelists {
+            date: Local::now().format("%B %dth %Y").to_string(),
+            signature: None,
+            whitelists: {
+                let map = CustomDashMap::new("Whitelists");
+                map.insert("custom_whitelist".to_string(), whitelist_info);
+                std::sync::Arc::new(map)
+            },
+        };
+
+        let whitelist_json: WhitelistsJSON = whitelists.into();
+        let json_str = serde_json::to_string(&whitelist_json)?;
+        Ok(json_str)
+    }
+
+    pub async fn merge_custom_whitelists(
+        whitelist1_json_str: &str,
+        whitelist2_json_str: &str,
+    ) -> Result<String> {
+        // Validate both JSON strings first
+        serde_json::from_str::<WhitelistsJSON>(whitelist1_json_str)?;
+        serde_json::from_str::<WhitelistsJSON>(whitelist2_json_str)?;
+
+        let merged_json_str =
+            Whitelists::merge_custom_whitelists(whitelist1_json_str, whitelist2_json_str)?;
+        Ok(merged_json_str)
+    }
+
     pub async fn get_filter(&self) -> SessionFilter {
         self.filter.read().await.clone()
     }
@@ -2036,6 +2130,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
@@ -2140,6 +2235,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
@@ -2221,6 +2317,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
@@ -2241,6 +2338,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
@@ -2371,6 +2469,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
@@ -2391,6 +2490,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown,
             criticality: "".to_string(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
@@ -3296,6 +3396,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown, // Start with Unknown state
             criticality: String::new(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
@@ -3360,6 +3461,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown, // Start with Unknown state
             criticality: String::new(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
@@ -4381,6 +4483,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown, // Start with Unknown state
             criticality: String::new(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
@@ -4443,6 +4546,7 @@ mod tests {
             dst_asn: None,
             is_whitelisted: WhitelistState::Unknown, // Start with Unknown state
             criticality: String::new(),
+            dismissed: false,
             whitelist_reason: None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),

@@ -1,22 +1,31 @@
-# Rust Isolation Forest Module for Session Criticality
+# Rust Isolation Forest Module for Session Criticality (SessionAnalyzer)
 
 ## Overview and Requirements
 
-We need to create a Rust module (let's call it `flodbadd_analyzer`) that labels network sessions with a **criticality** level (`"normal"`, `"suspicious"`, or `"abnormal"`). This will be done by using an **Isolation Forest** anomaly detection model in pure Rust (no Python or FFI). The module will take a list of current `SessionInfo` objects and enrich each with a `criticality` field based on how anomalous their features are. Key requirements include:
+Flodbadd already ships with an async-friendly **`SessionAnalyzer`** (see `src/analyzer.rs`).
+It labels every `SessionInfo` with a **criticality** level (`"normal"`, `"suspicious"`, or
+`"abnormal"`) using an **Extended Isolation Forest** model implemented in pure Rust.  Below we
+summarise the design goals and the feature-engineering approach used by the `SessionAnalyzer`.
 
-- **Feature Selection:** Use meaningful session features (excluding raw IPs/domains) for anomaly detection. For example:
-  - **Process name:** Convert to a numeric form (e.g., a hash or encoded value) to include as a feature without using the raw string.
-  - **Destination port:** Use the numeric port number directly.
-  - **Session statistics:** Include numeric stats like duration, total bytes, packet counts, missed bytes, etc.
-- **Pure Rust Isolation Forest:** Use a Rust crate for Isolation Forest (e.g. `isoforest` or `smartcore`) – no Python or external dependencies. These crates implement Isolation Forest purely in Rust.
-- **LanscanAnalyzer Design:** Create a struct `LanscanAnalyzer` that:
-  - Accepts/stores recent session data for modeling.
-  - Extracts the selected features and trains an Isolation Forest on this data.
-  - Scores new sessions and assigns a `criticality` level based on anomaly scores.
-  - Can periodically retrain the model with fresh data to adapt to new "normal" patterns.
-- **Performance:** The design should be mindful of real-time use. The analyzer should be usable in a multi-threaded or asynchronous environment (e.g., process sessions in a pipeline) without blocking other tasks. 
+- **Feature Selection:** Use meaningful behavioural features (excluding raw IPs/domains) for anomaly
+  detection. For example:
+  - **Process name:** Converted to a numeric hash so the model sees a stable categorical value.
+  - **Destination port:** Numeric and directly usable.
+  - **Session statistics:** Duration, byte/packet counts, missed bytes, etc.
+- **Pure Rust Isolation Forest:** Implemented via the `extended_isolation_forest` crate – no Python
+  or FFI required.
+- **SessionAnalyzer Design:**
+  - Maintains a sliding window of recent sessions (default: 300 samples).
+  - Trains an Isolation Forest in a background blocking task when enough new data is available.
+  - Scores new sessions on-the-fly; thresholds map the anomaly score to one of the three
+    criticality levels.
+  - Preserves any existing `blacklist:*` tags when updating the criticality string.
+- **Performance:** Model training is off-loaded to a blocking thread; scoring is lock-free and fast
+  enough for per-packet updates.
 
-Below, we discuss the feature encoding, model usage, and how to integrate this into the `SessionInfo` structure, followed by a code example.
+*(The remainder of this document retains the original, in-depth rationale and code example but has
+all references renamed from `LanscanAnalyzer` → `SessionAnalyzer` for consistency with the
+codebase.)*
 
 ## Feature Selection and Encoding
 
@@ -45,9 +54,9 @@ To implement the anomaly detection, we leverage a Rust crate for Isolation Fores
 
 Any of these would satisfy the "pure Rust" requirement. For our example, we will use `extended_isolation_forest` for simplicity, as it allows straightforward training from slices of data and provides a normalized anomaly score. The concepts will be similar if using `isoforest` or `smartcore` (the main difference is in API usage).
 
-## `LanscanAnalyzer` Design
+## `SessionAnalyzer` Design
 
-The `LanscanAnalyzer` struct will manage the sessions data and the Isolation Forest model. Key design points:
+The `SessionAnalyzer` struct will manage the sessions data and the Isolation Forest model. Key design points:
 
 - **Storing Recent Sessions:** The analyzer can keep a buffer (Vec) of recent `SessionInfo` or just their feature vectors. This data will be used to train or update the model. We might limit the buffer size (for example, keep only the last N sessions or last T minutes of sessions) to adapt to concept drift and to limit memory use.
 - **Training the Model:** We provide a method (e.g., `train_model`) that takes the collected feature vectors and fits a new Isolation Forest model. Training involves building many isolation trees on random subsets of the data:
@@ -65,12 +74,12 @@ The `LanscanAnalyzer` struct will manage the sessions data and the Isolation For
   - **Sliding window:** We can also use a sliding window of recent sessions (e.g., keep only last 1000 sessions). This way the model "forgets" old data and focuses on current behavior.
   - **Why retraining:** Without retraining, the model might become stale – it might treat new legitimate behavior as anomalous if it wasn't present in the training data. Regular retraining with fresh data ensures the model adapts.
 - **Concurrency Considerations:** 
-  - Ensure that the `LanscanAnalyzer` and its model are thread-safe. This might involve using thread-safe data structures or locking if the model is updated from multiple threads. For example, training the model (which is a heavy operation) could be done in a background thread or under a mutex lock, while scoring could be done concurrently on a read-only model reference.
+  - Ensure that the `SessionAnalyzer` and its model are thread-safe. This might involve using thread-safe data structures or locking if the model is updated from multiple threads. For example, training the model (which is a heavy operation) could be done in a background thread or under a mutex lock, while scoring could be done concurrently on a read-only model reference.
   - The `extended_isolation_forest` or `isoforest` model objects are plain Rust structs (containing trees and numeric data) and should implement `Send` (and possibly `Sync` if they don't use interior mutability). We can wrap the model in an `Arc<RwLock<...>>` if we need to update it asynchronously while another thread might be reading from it.
   - If integrating in an async environment (like a Tokio runtime), one could call training in a blocking task (to avoid blocking the async reactor), then update the shared model. The scoring function itself is just CPU-bound computations, which can be done quickly for each session.
   - In summary, design the analyzer such that model updates and usage won't cause race conditions: e.g., use interior mutability or require exclusive access in `update_sessions`.
 
-With these considerations, let's outline the `flodbadd_analyzer` module with the `LanscanAnalyzer` struct and its key methods. We assume `SessionInfo` and `SessionStats` are given (with fields as described). We'll add a new field `criticality` to `SessionInfo` and use an enum for its value. The code will use the `extended_isolation_forest` crate to train and score the model. (If using a different crate, the API calls would differ, but the structure of the code remains similar.)
+With these considerations, let's outline the `flodbadd_analyzer` module with the `SessionAnalyzer` struct and its key methods. We assume `SessionInfo` and `SessionStats` are given (with fields as described). We'll add a new field `criticality` to `SessionInfo` and use an enum for its value. The code will use the `extended_isolation_forest` crate to train and score the model. (If using a different crate, the API calls would differ, but the structure of the code remains similar.)
 
 ## Example Implementation
 
@@ -114,8 +123,8 @@ impl std::fmt::Display for Criticality {
     }
 }
 
-// The LanscanAnalyzer struct holds the Isolation Forest model and recent data
-pub struct LanscanAnalyzer {
+// The SessionAnalyzer struct holds the Isolation Forest model and recent data
+pub struct SessionAnalyzer {
     // The Isolation Forest model (from the extended_isolation_forest crate in this example)
     forest: extended_isolation_forest::Forest<f64, 10>, // Using 10 features in the actual implementation
     // We choose 6 features: [process_hash, dest_port, duration, bytes, packets, missed_bytes]
@@ -126,13 +135,13 @@ pub struct LanscanAnalyzer {
     abnormal_threshold: f64,
 }
 
-impl LanscanAnalyzer {
+impl SessionAnalyzer {
     /// Create a new analyzer with default thresholds and an empty model.
     pub fn new() -> Self {
         // Initialize with an empty forest (we'll train it before use).
         // We need to initialize the Forest with some parameters. We can start with 0 trees and then create later.
         let empty_forest = extended_isolation_forest::Forest::new(0, 0); 
-        LanscanAnalyzer {
+        SessionAnalyzer {
             forest: empty_forest,
             recent_data: Vec::new(),
             max_samples: 1000,              // for example, keep up to 1000 recent sessions
@@ -235,7 +244,7 @@ impl LanscanAnalyzer {
 
 // Example usage (not part of the module, just for illustration):
 fn main() {
-    let mut analyzer = LanscanAnalyzer::new();
+    let mut analyzer = SessionAnalyzer::new();
     let mut sessions: Vec<SessionInfo> = get_current_sessions(); // assume this fetches current sessions
     analyzer.update_sessions(&mut sessions);
     // Now each SessionInfo in sessions has its criticality set.
@@ -248,7 +257,7 @@ fn main() {
 **Explanation of the code:** 
 
 - We define `Criticality` as an enum to represent the three levels. This is more type-safe than a string and makes it easy to set or check the level in code.
-- In `LanscanAnalyzer`, we define a fixed feature vector length of 10 (as an example) corresponding to the features chosen. The `Forest<f64, 10>` is a generic type from `extended_isolation_forest` indicating it works on 10-dimensional data of type f64.
+- In `SessionAnalyzer`, we define a fixed feature vector length of 10 (as an example) corresponding to the features chosen. The `Forest<f64, 10>` is a generic type from `extended_isolation_forest` indicating it works on 10-dimensional data of type f64.
 - The `compute_features` method transforms a `SessionInfo` into the numeric feature array:
   - We hash the `process_name` to a numeric value. We used Rust's `BuildHasher` to get a u64 hash and then reduced it modulo 1,000,000. This keeps the hash in a moderate range (0 to 1e6) instead of a full 64-bit number, which is arbitrary but helps limit the range of that feature. Another approach could be to take only the lower 20 bits of the hash, etc. The idea is to represent different process names by different numeric values. Sessions with the same process will have the same `process_hash` feature, allowing the model to learn if a particular process's traffic is typical or not.
   - We directly cast the `dest_port` and various stats to f64.
@@ -272,7 +281,7 @@ fn main() {
 
 The above implementation is single-threaded in design, but it can be adapted for concurrent environments:
 
-- **Thread Safety:** The `LanscanAnalyzer` does not use any global mutable state except its own fields. If you ensure that each instance is used by one thread at a time or protect calls with a mutex, it will be fine. The `Forest` from `extended_isolation_forest` is just data (trees with random splits), and scoring is read-only on that data. So you could share the trained `forest` across threads (after training) for scoring new sessions concurrently. If using `Arc<...>` for the analyzer or model, ensure to lock or only mutate it in one thread.
+- **Thread Safety:** The `SessionAnalyzer` does not use any global mutable state except its own fields. If you ensure that each instance is used by one thread at a time or protect calls with a mutex, it will be fine. The `Forest` from `extended_isolation_forest` is just data (trees with random splits), and scoring is read-only on that data. So you could share the trained `forest` across threads (after training) for scoring new sessions concurrently. If using `Arc<...>` for the analyzer or model, ensure to lock or only mutate it in one thread.
 - **Async usage:** In an async runtime, you might offload `train_model` to a blocking thread since it may perform a lot of computation (especially if the dataset is large). For example, using `tokio::task::spawn_blocking` to retrain, then update the analyzer's `forest`. The scoring of a single session is very fast (just traversing ~100 trees), which can typically be done inline even in async context without issue.
 - **Non-blocking scoring:** Alternatively, you could maintain the model inside an `Arc<RwLock<...>>` so that the main thread can score sessions quickly by reading the model (holding a read lock) while occasionally a background task acquires a write lock to update the model with new training data. This design would let incoming sessions be labeled in real-time without waiting for retraining to finish.
 

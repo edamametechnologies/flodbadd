@@ -518,6 +518,7 @@ pub async fn process_parsed_packet(
                 dst_asn: dst_asn_opt,
                 is_whitelisted: WhitelistState::Unknown, // Whitelist check happens later
                 criticality: "".to_string(),             // Blacklist check happens later
+                dismissed: false,
                 whitelist_reason: None,
                 uid: uid,
                 last_modified: Utc::now(),

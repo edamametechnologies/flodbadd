@@ -209,6 +209,94 @@ impl Whitelists {
         }
         Ok(all_endpoints)
     }
+
+    //--------------------------------------------------------------------
+    /// Merge two JSON whitelist blobs (same `WhitelistsJSON` format) and
+    /// return a single JSON string with endpoints deduplicated.
+    ///
+    /// If the same whitelist `name` exists in both inputs the endpoints are
+    /// merged and deduplicated; the `extends` field is kept from the *first*
+    /// argument unless it is `None`, in which case the second's value is
+    /// used.  Metadata fields (`date`, `signature`) from the first JSON are
+    /// preserved.
+    //--------------------------------------------------------------------
+    pub fn merge_custom_whitelists(json_a: &str, json_b: &str) -> Result<String> {
+        use serde_json;
+
+        let a: WhitelistsJSON =
+            serde_json::from_str(json_a).context("Failed to parse first whitelist JSON")?;
+        let b: WhitelistsJSON =
+            serde_json::from_str(json_b).context("Failed to parse second whitelist JSON")?;
+
+        // Helper to fingerprint an endpoint for deduplication
+        fn fingerprint(
+            ep: &WhitelistEndpoint,
+        ) -> (
+            Option<String>,
+            Option<String>,
+            Option<u16>,
+            Option<String>,
+            Option<u32>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) {
+            (
+                ep.domain.clone(),
+                ep.ip.clone(),
+                ep.port,
+                ep.protocol.clone(),
+                ep.as_number,
+                ep.as_country.clone(),
+                ep.as_owner.clone(),
+                ep.process.clone(),
+            )
+        }
+
+        // Build a map name -> WhitelistInfo (merged)
+        let mut merged: std::collections::HashMap<String, WhitelistInfo> =
+            std::collections::HashMap::new();
+
+        // Closure to insert/merge info into map
+        let mut add_info = |info: &WhitelistInfo| {
+            let entry = merged
+                .entry(info.name.clone())
+                .or_insert_with(|| WhitelistInfo {
+                    name: info.name.clone(),
+                    extends: info.extends.clone(),
+                    endpoints: Vec::new(),
+                });
+
+            // Prefer extends from the first source that specified it
+            if entry.extends.is_none() {
+                entry.extends = info.extends.clone();
+            }
+
+            entry.endpoints.extend(info.endpoints.clone());
+        };
+
+        for info in &a.whitelists {
+            add_info(info);
+        }
+        for info in &b.whitelists {
+            add_info(info);
+        }
+
+        // Deduplicate endpoints per whitelist
+        for info in merged.values_mut() {
+            let mut seen = std::collections::HashSet::new();
+            info.endpoints.retain(|ep| seen.insert(fingerprint(ep)));
+        }
+
+        // Assemble output JSON using metadata from first blob
+        let output = WhitelistsJSON {
+            date: a.date,
+            signature: a.signature, // Could compute new; keep original for now
+            whitelists: merged.into_values().collect(),
+        };
+
+        Ok(serde_json::to_string(&output)?)
+    }
 }
 
 lazy_static! {
@@ -1856,5 +1944,42 @@ mod tests {
             reason.is_some() && reason.unwrap().contains("contains no endpoints"),
             "Should return appropriate error message for empty whitelist"
         );
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_custom_whitelists_basic() {
+        // JSON A – one endpoint
+        let json_a = r#"{
+            "date":"May 1st 2025",
+            "signature":null,
+            "whitelists":[
+              {"name":"custom_whitelist","extends":null,
+               "endpoints":[{"domain":"a.com","port":80}]}
+            ]
+        }"#;
+
+        // JSON B – another endpoint (plus duplicate of a.com:80 and new extends)
+        let json_b = r#"{
+            "date":"May 2nd 2025",
+            "signature":null,
+            "whitelists":[
+              {"name":"custom_whitelist","extends":["builder"],
+               "endpoints":[{"domain":"a.com","port":80},{"domain":"b.com","port":443}]}
+            ]
+        }"#;
+
+        let merged = Whitelists::merge_custom_whitelists(json_a, json_b).expect("merge ok");
+        let merged_json: WhitelistsJSON = serde_json::from_str(&merged).unwrap();
+        assert_eq!(merged_json.whitelists.len(), 1);
+        let info = &merged_json.whitelists[0];
+        // extends should be from first (null) or second if first none – here first none so second preserved
+        assert_eq!(info.extends.as_ref().unwrap(), &vec!["builder".to_string()]);
+        // endpoints deduped – should be 2 unique entries
+        assert_eq!(info.endpoints.len(), 2);
     }
 }
