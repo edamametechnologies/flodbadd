@@ -112,6 +112,7 @@ arp-toolkit = "0.3.2"
 
 # Windows
 [target.'cfg(target_os = "windows")'.dependencies]
+powershell_script = "1.1.0"
 windows = { version = "0.61.0", features = [ 
     "Data_Xml_Dom", 
     "Win32_Foundation", 
