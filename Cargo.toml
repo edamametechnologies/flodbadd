@@ -144,8 +144,10 @@ tempfile = "3.8"
 mockall = "0.13.1"
 
 [build-dependencies]
-reqwest = { version = "0.12.5", default-features = false, features = ["blocking", "gzip", "rustls-tls"] }
-zip = "4.0.0" 
+# Npcap
+# Prevent reqwest from using native-tls
+reqwest = { version = "0.12.5", default-features = false, features = ["blocking", "rustls-tls"] }
+zip = "4.0.0"
 
 [[example]]
 name = "lan_scan"
