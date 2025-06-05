@@ -147,7 +147,8 @@ mockall = "0.13.1"
 # Npcap
 # Prevent reqwest from using native-tls
 reqwest = { version = "0.12.5", default-features = false, features = ["blocking", "rustls-tls"] }
-zip = "4.0.0"
+# 4.0.0 creates conflicts
+zip = "2.2.0"
 
 [[example]]
 name = "lan_scan"
