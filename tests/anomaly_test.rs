@@ -162,8 +162,8 @@ fn generate_beacon_traffic(beacon_interval_seconds: i64, beacon_count: usize) ->
         session.stats.resp_pkts = 2;
         session.stats.orig_ip_bytes = session.stats.outbound_bytes + 40; // Minimal overhead
         session.stats.resp_ip_bytes = session.stats.inbound_bytes + 40;
-        session.stats.history = "S".to_string(); // Just SYN - incomplete
-        session.stats.conn_state = Some("S0".to_string()); // Connection attempt seen, no reply
+        session.stats.history = "ShAD".to_string(); // Typical short TCP handshake + small data
+        session.stats.conn_state = Some("SF".to_string()); // Completed connection
         session.stats.missed_bytes = 0;
 
         // Key beacon characteristics - use short interarrival for actual transmission
@@ -201,17 +201,17 @@ fn generate_exfiltration_traffic() -> Vec<SessionInfo> {
     );
 
     session.stats.start_time = base_time;
-    session.stats.end_time = Some(base_time + Duration::minutes(10));
-    session.stats.outbound_bytes = 50_000_000_000; // 50GB outbound
-    session.stats.inbound_bytes = 1000; // Very small inbound
-    session.stats.orig_pkts = 50_000_000;
-    session.stats.resp_pkts = 100;
+    session.stats.end_time = Some(base_time + Duration::minutes(45));
+    session.stats.outbound_bytes = 8_000_000_000; // 8GB outbound
+    session.stats.inbound_bytes = 250_000; // Small inbound
+    session.stats.orig_pkts = 8_000_000;
+    session.stats.resp_pkts = 50_000;
     session.stats.orig_ip_bytes = session.stats.outbound_bytes + (20 * session.stats.orig_pkts);
     session.stats.resp_ip_bytes = session.stats.inbound_bytes + (20 * session.stats.resp_pkts);
-    session.stats.history = "ShADadFf".to_string();
+    session.stats.history = "ShAD".to_string();
     session.stats.conn_state = Some("SF".to_string());
     session.stats.missed_bytes = 0;
-    session.stats.segment_count = 1000; // Many segments for large transfer
+    session.stats.segment_count = 5_000; // Many segments for large transfer
     session.dst_service = Some("ssh".to_string());
     session.l7 = Some(SessionL7 {
         pid: 31337,
@@ -520,7 +520,7 @@ async fn test_data_exfiltration_detection() {
     // Check exfiltration session
     let exfil_session = all_sessions
         .iter()
-        .find(|s| s.stats.outbound_bytes > 10_000_000_000)
+        .find(|s| s.stats.outbound_bytes > 5_000_000_000)
         .expect("Exfiltration session should exist");
 
     println!(

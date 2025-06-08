@@ -11,6 +11,25 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, warn};
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum DeviceCriticality {
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+impl std::fmt::Display for DeviceCriticality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceCriticality::Unknown => write!(f, "Unknown"),
+            DeviceCriticality::Low => write!(f, "Low"),
+            DeviceCriticality::Medium => write!(f, "Medium"),
+            DeviceCriticality::High => write!(f, "High"),
+        }
+    }
+}
+
 // We should really use HashSets instead of Vec, but we don't in order to make it more usable with FFI
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceInfo {
@@ -36,7 +55,8 @@ pub struct DeviceInfo {
     pub deactivated: bool,
     pub no_icmp: bool,
     pub non_std_ports: bool,
-    pub criticality: String,
+    pub criticality: DeviceCriticality,
+    // We use a string as we rely on a dynamic database of device types
     pub device_type: String,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
@@ -85,7 +105,7 @@ impl DeviceInfo {
             deactivated: false,
             no_icmp: false,
             non_std_ports: false,
-            criticality: "Unknown".to_string(),
+            criticality: DeviceCriticality::Unknown,
             device_type: "Unknown".to_string(),
             // Initialize the times to UNIX_EPOCH
             first_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
@@ -493,8 +513,10 @@ impl DeviceInfo {
         }
 
         // Use the most recent if valid (not unknown)
-        if new_device.criticality != "Unknown" {
-            if new_device.last_seen > device.last_seen || device.criticality == "Unknown" {
+        if new_device.criticality != DeviceCriticality::Unknown {
+            if new_device.last_seen > device.last_seen
+                || device.criticality == DeviceCriticality::Unknown
+            {
                 device.criticality.clone_from(&new_device.criticality);
             }
         }
