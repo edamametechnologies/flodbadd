@@ -64,8 +64,6 @@ pub struct DeviceInfo {
     pub origin_ip: String, // IP of the device that first discovered this device
     pub origin_network: String, // Network identifier of where the device was first discovered
     // Below are user properties
-    // Sorted Vec would be better but had trouble with the bridge once...
-    pub dismissed_ports: Vec<u16>,
     pub custom_name: String,
     pub deleted: bool,
     pub last_modified: DateTime<Utc>,
@@ -114,7 +112,6 @@ impl DeviceInfo {
             origin_ip: "".to_string(), // IP of the device that first discovered this device
             origin_network: "".to_string(), // Network identifier of where the device was first discovered
             // Below are user properties
-            dismissed_ports: Vec::new(),
             custom_name: "".to_string(),
             // Not deleted by default
             deleted: false,
@@ -560,7 +557,6 @@ impl DeviceInfo {
         // Merge user properties based on the last modified date
         if new_device.last_modified > device.last_modified {
             device.custom_name.clone_from(&new_device.custom_name);
-            device.dismissed_ports = new_device.dismissed_ports.clone();
             device.deleted = new_device.deleted;
             device.last_modified = new_device.last_modified;
         }
@@ -1029,6 +1025,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "http".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // Create a device representing a community detection with additional ports
@@ -1046,6 +1043,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "https".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // Merge the community device into the local device
@@ -1083,9 +1081,6 @@ mod tests {
         local_device.origin_network = "home-network".to_string();
         local_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
 
-        // Add a dismissed port
-        local_device.dismissed_ports.push(8080);
-
         // Create a vector of local devices
         let mut local_devices = vec![local_device];
 
@@ -1104,6 +1099,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "http-alt".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // Create a vector of community devices
@@ -1114,7 +1110,6 @@ mod tests {
 
         // Verify that user customizations are preserved
         assert_eq!(local_devices[0].custom_name, "My Custom Device");
-        assert_eq!(local_devices[0].dismissed_ports, vec![8080]);
 
         // Verify hostname from community device was merged
         assert_eq!(local_devices[0].hostname, "community-name-for-device");
@@ -1204,6 +1199,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "http".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // Step 2: Simulate mDNS discovery (happens after initial scan)
@@ -1248,6 +1244,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "https".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // Merge the rescan device
@@ -1319,6 +1316,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "http".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // 2. Create a device as if detected by another community member
@@ -1335,6 +1333,7 @@ mod tests {
             protocol: "tcp".to_string(),
             service: "https".to_string(),
             banner: "".to_string(),
+            dismissed: false,
         });
 
         // 3. Simulate the process in community_lan.rs's LanDeviceShared event

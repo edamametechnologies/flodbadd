@@ -7,6 +7,7 @@ pub struct PortInfo {
     pub protocol: String,
     pub service: String,
     pub banner: String,
+    pub dismissed: bool,
 }
 
 impl Into<PortInfoBackend> for PortInfo {

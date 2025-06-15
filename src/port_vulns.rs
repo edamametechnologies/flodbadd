@@ -461,12 +461,14 @@ mod tests {
                 protocol: "tcp".to_string(),
                 banner: "".to_string(),
                 service: "http".to_string(),
+                dismissed: false,
             },
             PortInfo {
                 port: 22,
                 protocol: "tcp".to_string(),
                 banner: "".to_string(),
                 service: "ssh".to_string(),
+                dismissed: false,
             },
         ];
         let criticality = get_device_criticality(&port_info_list).await;
