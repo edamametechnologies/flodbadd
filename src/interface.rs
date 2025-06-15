@@ -336,6 +336,12 @@ impl IntoIterator for FlodbaddInterfaces {
     }
 }
 
+impl Default for FlodbaddInterfaces {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlodbaddInterfaces {
     pub fn new() -> Self {
         Self {
