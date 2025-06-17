@@ -251,9 +251,43 @@ impl FlodbaddCapture {
             return;
         }
 
+        let _start_time = std::time::Instant::now();
+
         // Then start the capture task to populate the sessions map
         self.start_capture_task().await;
-        debug!("FlodbaddCapture started successfully.");
+
+        let elapsed_ms = _start_time.elapsed().as_millis();
+        if elapsed_ms > 1_000 {
+            warn!(
+                "start_capture_task initialisation took {} ms (interfaces processed: {}).",
+                elapsed_ms,
+                self.capture_task_handles.len()
+            );
+        } else {
+            trace!("start_capture_task completed in {} ms", elapsed_ms);
+        }
+
+        // Wait briefly until at least one capture task is registered so callers can rely on is_capturing()
+        use tokio::time::{sleep, Duration};
+        const CAPTURE_START_TIMEOUT_MS: u64 = 10_000; // 10 s upper bound
+        let start_wait = std::time::Instant::now();
+        while !self.is_capturing().await
+            && start_wait.elapsed().as_millis() < CAPTURE_START_TIMEOUT_MS as u128
+        {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        if self.is_capturing().await {
+            debug!(
+                "FlodbaddCapture started successfully (tasks={}).",
+                self.capture_task_handles.len()
+            );
+        } else {
+            error!(
+                "FlodbaddCapture did not start any capture tasks within {} ms.",
+                CAPTURE_START_TIMEOUT_MS
+            );
+        }
     }
 
     pub async fn stop(&mut self) {
@@ -2977,7 +3011,7 @@ mod tests {
     // Test uses get_admin_status and sleep
     #[tokio::test]
     #[serial]
-    async fn test_start_capture_if_admin() {
+    async fn test_start_capture() {
         // Not working on windows in the CI/CD pipeline yet (no pcap support)
         if cfg!(windows) {
             println!("Skipping test_start_capture_if_admin: pcap feature not fully supported on Windows CI yet");
@@ -4640,5 +4674,52 @@ mod tests {
             0,
             "get_blacklisted_sessions should return empty list after removing the session"
         );
+    }
+
+    // New test: ensure that `is_capturing()` is only true when a capture task is actually running
+    #[tokio::test]
+    #[serial]
+    async fn test_capture_flag_consistency() {
+        // Skip on Windows CI due to pcap limitations
+        if cfg!(windows) {
+            return;
+        }
+
+        // Acquire a default valid interface; skip test if none detected (e.g., in sandbox)
+        let default_interface = match get_default_interface() {
+            Some(iface) => iface,
+            None => {
+                println!("test_capture_flag_consistency: No default interface available – skipping");
+                return;
+            }
+        };
+
+        let interfaces = FlodbaddInterfaces {
+            interfaces: vec![default_interface],
+        };
+
+        let mut capture = FlodbaddCapture::new();
+
+        // Start capture (stand-alone mode within test)
+        capture.start(&interfaces).await;
+
+        // Allow a small grace period for tasks to spawn
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let flag = capture.is_capturing().await;
+        let task_count = capture.capture_task_handles.len();
+
+        println!(
+            "is_capturing flag = {}, task_count = {} (should match)",
+            flag, task_count
+        );
+
+        // If flag reports capturing, we must have at least one task
+        if flag {
+            assert!(task_count > 0, "capture flag true but no tasks alive");
+        }
+
+        // Clean up
+        capture.stop().await;
     }
 }
