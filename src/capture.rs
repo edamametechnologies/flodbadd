@@ -170,6 +170,14 @@ impl FlodbaddCapture {
 
         // Reset the internal whitelist state tracking
         self.reset_whitelist().await;
+
+        // Force immediate whitelist recomputation after changing whitelist
+        // This ensures that existing sessions are immediately re-evaluated against the new whitelist
+        info!(
+            "Whitelist changed to '{}', forcing immediate session update",
+            whitelist_name
+        );
+        self.update_sessions().await;
     }
 
     pub async fn get_whitelist_name(&self) -> String {
@@ -403,6 +411,10 @@ impl FlodbaddCapture {
                 }
             }
             self.reset_whitelist().await; // Reset session states
+
+            // Force immediate whitelist recomputation after clearing
+            info!("Custom whitelists cleared, forcing immediate session update");
+            self.update_sessions().await;
             return;
         }
 
@@ -411,6 +423,11 @@ impl FlodbaddCapture {
             Ok(_) => {
                 // Set the name after successful update
                 *self.whitelist_name.write().await = "custom_whitelist".to_string();
+
+                // Force immediate whitelist recomputation after setting custom whitelists
+                // This ensures that existing sessions are immediately re-evaluated against the new whitelist
+                info!("Custom whitelists set successfully, forcing immediate session update");
+                self.update_sessions().await;
             }
             Err(e) => {
                 error!("Error setting custom whitelists: {}", e);
@@ -1601,7 +1618,16 @@ impl FlodbaddCapture {
         &mut self,
         blacklist_json: &str,
     ) -> Result<(), anyhow::Error> {
-        blacklists::set_custom_blacklists(blacklist_json).await
+        let result = blacklists::set_custom_blacklists(blacklist_json).await;
+
+        // Force immediate blacklist recomputation after setting custom blacklists
+        // This ensures that existing sessions are immediately re-evaluated against the new blacklist
+        if result.is_ok() {
+            info!("Custom blacklists set successfully, forcing immediate session update");
+            self.update_sessions().await;
+        }
+
+        result
     }
 
     // ----- Internal Update Logic -----
