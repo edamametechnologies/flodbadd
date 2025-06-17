@@ -4689,7 +4689,9 @@ mod tests {
         let default_interface = match get_default_interface() {
             Some(iface) => iface,
             None => {
-                println!("test_capture_flag_consistency: No default interface available – skipping");
+                println!(
+                    "test_capture_flag_consistency: No default interface available – skipping"
+                );
                 return;
             }
         };
