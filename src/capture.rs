@@ -2649,22 +2649,8 @@ mod tests {
         let mut capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
-        // Setup a custom blacklist
+        // Create test sessions FIRST with recent timestamps
         let blacklist_ip = "192.168.10.10";
-        let list_json = format!(
-            r#"{{
-                "date": "{}",
-                "signature": "test-sig-black-inc",
-                "blacklists": [{{ "name": "inc_test", "ip_ranges": ["{}/32"] }}]
-            }}"#,
-            Utc::now().to_rfc3339(),
-            blacklist_ip
-        );
-        let _ = capture
-            .set_custom_blacklists(&list_json)
-            .await
-            .expect("Failed to set custom blacklist");
-
         let blacklisted_session = Session {
             protocol: Protocol::TCP,
             src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
