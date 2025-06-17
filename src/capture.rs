@@ -277,23 +277,24 @@ impl FlodbaddCapture {
 
         // Wait briefly until at least one capture task is registered so callers can rely on is_capturing()
         use tokio::time::{sleep, Duration};
-        const CAPTURE_START_TIMEOUT_MS: u64 = 10_000; // 10 s upper bound
+        const CAPTURE_START_TIMEOUT_MS: u64 = 10000; // 10 s upper bound
         let start_wait = std::time::Instant::now();
         while !self.is_capturing().await
             && start_wait.elapsed().as_millis() < CAPTURE_START_TIMEOUT_MS as u128
         {
-            sleep(Duration::from_millis(100)).await;
+            info!("Waiting for capture task(s) to start...");
+            sleep(Duration::from_millis(1000)).await;
         }
 
         if self.is_capturing().await {
             debug!(
-                "FlodbaddCapture started successfully (tasks={}).",
+                "Capture task(s) started successfully (tasks={}).",
                 self.capture_task_handles.len()
             );
         } else {
             error!(
-                "FlodbaddCapture did not start any capture tasks within {} ms.",
-                CAPTURE_START_TIMEOUT_MS
+                "Capture task(s) failed to start (tasks={}).",
+                self.capture_task_handles.len()
             );
         }
     }
