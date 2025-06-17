@@ -2702,6 +2702,22 @@ mod tests {
             current_sessions_guard.push(normal_session.clone());
         }
 
+        // NOW setup the custom blacklist (after sessions exist)
+        let list_json = format!(
+            r#"{{
+                "date": "{}",
+                "signature": "test-sig-black-inc",
+                "blacklists": [{{ "name": "inc_test", "ip_ranges": ["{}/32"] }}]
+            }}"#,
+            Utc::now().to_rfc3339(),
+            blacklist_ip
+        );
+
+        let _ = capture
+            .set_custom_blacklists(&list_json)
+            .await
+            .expect("Failed to set custom blacklist");
+
         // 1. Perform initial full fetch of blacklisted sessions
         let initial_blacklisted = capture.get_blacklisted_sessions(false).await;
         assert_eq!(
