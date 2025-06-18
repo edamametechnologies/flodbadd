@@ -66,9 +66,9 @@ use undeadlock::*; // Add this import // Add Duration import
  */
 
 // A session is considered active if it has had activity in the last 60 seconds
-static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
+pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
 // A session is considered current if it has been active in the last 180 seconds
-static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
+pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
 // Keep 4 hours of history
 static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60 * 60 * 4);
 pub struct FlodbaddCapture {
