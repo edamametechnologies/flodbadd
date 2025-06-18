@@ -1249,7 +1249,7 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
-                let anom_count = 0;
+                let mut anom_count = 0;
                 let mut bl_count = 0;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
@@ -1273,7 +1273,15 @@ impl SessionAnalyzer {
                     self.all_sessions
                         .insert(session.uid.clone(), session.clone());
 
-                    // No analysis yet, so we can't determine if they are anomalous
+                    // Even during warmup, check if sessions are already marked as anomalous or blacklisted
+                    // and add them to the appropriate collections. This is used for testing purposes.
+
+                    // Populate the anomalous sessions (sessions already marked as anomalous)
+                    if Self::is_anomalous(&session.criticality) {
+                        self.anomalous_sessions
+                            .insert(session.uid.clone(), session.clone());
+                        anom_count += 1;
+                    }
 
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
