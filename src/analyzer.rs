@@ -1553,7 +1553,7 @@ impl SessionAnalyzer {
     }
 
     /// Start the analyzer (set running flag, prepare for background tasks if needed)
-    /// TARGET ARCHITECTURE: Start with preserved security findings if available
+    /// Start with preserved security findings if available
     pub async fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already running");
@@ -1579,7 +1579,7 @@ impl SessionAnalyzer {
     }
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
-    /// TARGET ARCHITECTURE: Preserve critical security findings across restarts
+    /// Preserve critical security findings across restarts
     pub async fn stop(&self) {
         if !self.running.swap(false, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already stopped");

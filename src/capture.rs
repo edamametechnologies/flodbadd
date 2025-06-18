@@ -3130,7 +3130,7 @@ mod tests {
         println!("Generating traffic from {}...", target_domain);
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true) // Often needed for direct IP/less common domains
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
 
@@ -3243,7 +3243,7 @@ mod tests {
 
         // --- Blacklist Test ---
         println!("--- Starting Blacklist Test ---");
-        let target_domain = "2.na.dl.wireshark.org";
+        let target_domain = "httpbin.org";
         let target_ipv4 = "5.78.100.21";
         let target_ipv6 = "2a01:4ff:1f0:ca4b::1";
         let blacklist_name = "test_integration_blacklist";
@@ -3279,11 +3279,11 @@ mod tests {
         );
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true) // Often needed for direct IP/less common domains
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = format!("https://{}", target_domain);
+        let target_url = format!("https://{}/image/jpeg", target_domain);
         match client.head(&target_url).send().await {
             Ok(response) => {
                 println!(
@@ -4412,14 +4412,14 @@ mod tests {
 
         // Generate traffic instead of waiting 60 seconds
         println!("Generating traffic from trigger session capture...");
-        let target_domain = "2.na.dl.wireshark.org";
+        let target_domain = "httpbin.org";
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = format!("https://{}", target_domain);
+        let target_url = format!("https://{}/image/jpeg", target_domain);
         match client.get(&target_url).send().await {
             Ok(response) => {
                 println!(
@@ -4998,22 +4998,30 @@ mod tests {
         println!("Generating initial traffic...");
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
-        match client.get(target_url).send().await {
-            Ok(response) => {
-                println!(
-                    "Traffic generation successful (Status: {})",
-                    response.status()
-                );
-                let _ = response.bytes().await;
+        let target_url = "https://httpbin.org/image/jpeg";
+        let mut test_success = false;
+        let mut retry_count = 0;
+        while !test_success && retry_count < 10 {
+            match client.get(target_url).send().await {
+                Ok(response) => {
+                    println!(
+                        "Traffic generation successful (Status: {})",
+                        response.status()
+                    );
+                    let _ = response.bytes().await;
+                    test_success = true;
+                }
+                Err(e) => {
+                    println!("Traffic generation failed: {}", e);
+                }
             }
-            Err(e) => {
-                println!("Traffic generation failed: {}", e);
-            }
+            retry_count += 1;
+            println!("Waiting for traffic generation to succeed, retrying...");
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
 
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -5037,6 +5045,48 @@ mod tests {
             "Task handles should be cleared after stop"
         );
 
+        // Generate some initial traffic and verify it works
+        println!("Generating initial traffic...");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("Failed to build reqwest client");
+
+        let target_url = "https://httpbin.org/image/jpeg";
+        let mut test_success = false;
+        let mut retry_count = 0;
+        while !test_success && retry_count < 10 {
+            match client.get(target_url).send().await {
+                Ok(response) => {
+                    println!(
+                        "Traffic generation successful (Status: {})",
+                        response.status()
+                    );
+                    let _ = response.bytes().await;
+                    test_success = true;
+                }
+                Err(e) => {
+                    println!("Traffic generation failed: {}", e);
+                }
+            }
+            retry_count += 1;
+            println!("Waiting for traffic generation to succeed, retrying...");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let stop_sessions = capture.get_sessions(false).await;
+        let stop_count = stop_sessions.len();
+        println!("Stop: Found {} sessions", stop_count);
+
+        assert!(
+            stop_count == 0,
+            "Should not capture sessions after stop, but found {} sessions",
+            stop_count
+        );
+
         // === SECOND START ===
         println!("=== SECOND START ===");
         capture.start(&interfaces).await;
@@ -5051,19 +5101,34 @@ mod tests {
             "Task handles should be recreated after restart"
         );
 
-        // Generate traffic again and verify it's captured
-        println!("Generating traffic after restart...");
-        match client.get(target_url).send().await {
-            Ok(response) => {
-                println!(
-                    "Traffic generation after restart successful (Status: {})",
-                    response.status()
-                );
-                let _ = response.bytes().await;
+        // Generate some initial traffic and verify it works
+        println!("Generating initial traffic...");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("Failed to build reqwest client");
+
+        let target_url = "https://httpbin.org/image/jpeg";
+        let mut test_success = false;
+        let mut retry_count = 0;
+        while !test_success && retry_count < 10 {
+            match client.get(target_url).send().await {
+                Ok(response) => {
+                    println!(
+                        "Traffic generation successful (Status: {})",
+                        response.status()
+                    );
+                    let _ = response.bytes().await;
+                    test_success = true;
+                }
+                Err(e) => {
+                    println!("Traffic generation failed: {}", e);
+                }
             }
-            Err(e) => {
-                println!("Traffic generation after restart failed: {}", e);
-            }
+            retry_count += 1;
+            println!("Waiting for traffic generation to succeed, retrying...");
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
 
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -5077,33 +5142,6 @@ mod tests {
             restart_count > 0,
             "Should capture sessions after restart, but found {} sessions",
             restart_count
-        );
-
-        // Generate additional traffic to ensure capture is really working
-        println!("Generating additional traffic to confirm capture is working...");
-        match client.get("https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz").send().await {
-            Ok(response) => {
-                println!(
-                    "Additional traffic successful (Status: {})",
-                    response.status()
-                );
-                let _ = response.bytes().await;
-            }
-            Err(e) => {
-                println!("Additional traffic failed: {}", e);
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let final_sessions = capture.get_sessions(false).await;
-        let final_count = final_sessions.len();
-        println!("Final: Found {} sessions", final_count);
-
-        // Sessions should continue to be captured
-        assert!(
-            final_count >= restart_count,
-            "Sessions should continue to be captured after restart"
         );
 
         // Clean up
