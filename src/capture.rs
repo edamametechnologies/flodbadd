@@ -3243,7 +3243,7 @@ mod tests {
 
         // --- Blacklist Test ---
         println!("--- Starting Blacklist Test ---");
-        let target_domain = "httpbin.org";
+        let target_domain = "2.na.dl.wireshark.org";
         let target_ipv4 = "5.78.100.21";
         let target_ipv6 = "2a01:4ff:1f0:ca4b::1";
         let blacklist_name = "test_integration_blacklist";
@@ -3283,7 +3283,7 @@ mod tests {
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = format!("https://{}/image/jpeg", target_domain);
+        let target_url = format!("https://{}/src/wireshark-latest.tar.xz", target_domain);
         match client.head(&target_url).send().await {
             Ok(response) => {
                 println!(
@@ -4412,14 +4412,14 @@ mod tests {
 
         // Generate traffic instead of waiting 60 seconds
         println!("Generating traffic from trigger session capture...");
-        let target_domain = "httpbin.org";
+        let target_domain = "2.na.dl.wireshark.org";
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = format!("https://{}/image/jpeg", target_domain);
+        let target_url = format!("https://{}/src/wireshark-latest.tar.xz", target_domain);
         match client.get(&target_url).send().await {
             Ok(response) => {
                 println!(
@@ -5002,7 +5002,7 @@ mod tests {
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = "https://httpbin.org/image/jpeg";
+        let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
         let mut test_success = false;
         let mut retry_count = 0;
         while !test_success && retry_count < 10 {
@@ -5053,7 +5053,7 @@ mod tests {
             .build()
             .expect("Failed to build reqwest client");
 
-        let target_url = "https://httpbin.org/image/jpeg";
+        let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
         let mut test_success = false;
         let mut retry_count = 0;
         while !test_success && retry_count < 10 {
@@ -5110,7 +5110,7 @@ mod tests {
             .expect("Failed to build reqwest client");
 
 
-        let target_url = "https://httpbin.org/image/jpeg";
+        let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
         let mut test_success = false;
         let mut retry_count = 0;
         while !test_success && retry_count < 10 {
