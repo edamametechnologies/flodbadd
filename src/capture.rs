@@ -5109,7 +5109,6 @@ mod tests {
             .build()
             .expect("Failed to build reqwest client");
 
-
         let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
         let mut test_success = false;
         let mut retry_count = 0;

@@ -1,6 +1,5 @@
 use crate::sessions::SessionInfo;
 use chrono::{DateTime, Duration, Utc};
-use dashmap::DashMap;
 use extended_isolation_forest::{Forest, ForestOptions};
 use std::collections::HashSet;
 use std::fmt;
@@ -8,7 +7,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
-use undeadlock::CustomRwLock;
+use undeadlock::*;
 
 /// # LanscanAnalyzer Module
 ///
@@ -64,6 +63,9 @@ static ANOMALOUS_SESSION_TIMEOUT: i64 = 86400; // 24 hours
 // Define a timeout for blacklisted session tracking (in seconds)
 static BLACKLISTED_SESSION_TIMEOUT: i64 = 86400; // 24 hours
 
+// Define a timeout for all session tracking (in seconds)
+static ALL_SESSION_TIMEOUT: i64 = 86400; // 24 hours
+
 // Define default values for warm-up settings
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
@@ -105,7 +107,7 @@ struct IsolationForestModel {
     max_samples: usize,
     suspicious_threshold: f64,
     abnormal_threshold: f64,
-    session_cache: DashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
+    session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: AtomicBool,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
@@ -132,7 +134,7 @@ impl IsolationForestModel {
             // Will be overridden by the first training and its percentile based thresholds computed from the training data.
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
-            session_cache: DashMap::new(),
+            session_cache: CustomDashMap::new("session_cache"),
             training_in_progress: AtomicBool::new(false),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
@@ -986,8 +988,9 @@ pub struct AnalysisResult {
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
 pub struct SessionAnalyzer {
     model: CustomRwLock<Option<CustomRwLock<IsolationForestModel>>>,
-    anomalous_sessions: DashMap<String, SessionInfo>,
-    blacklisted_sessions: DashMap<String, SessionInfo>,
+    anomalous_sessions: CustomDashMap<String, SessionInfo>,
+    blacklisted_sessions: CustomDashMap<String, SessionInfo>,
+    all_sessions: CustomDashMap<String, SessionInfo>, // Store all processed sessions
     // Warm-up related fields
     warm_up_active: AtomicBool,
     warm_up_start_time: AtomicU64, // Timestamp when warm-up started (seconds since UNIX epoch)
@@ -1009,8 +1012,9 @@ impl SessionAnalyzer {
         );
         Self {
             model: CustomRwLock::new(None),
-            anomalous_sessions: DashMap::new(),
-            blacklisted_sessions: DashMap::new(),
+            anomalous_sessions: CustomDashMap::new("anomalous_sessions"),
+            blacklisted_sessions: CustomDashMap::new("blacklisted_sessions"),
+            all_sessions: CustomDashMap::new("all_sessions"),
             // Warm-up defaults - increase to ensure enough time for training
             warm_up_active: AtomicBool::new(true),
             // Initialize with 0 (will be set on first analyze_sessions call)
@@ -1245,6 +1249,8 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
+                let anom_count = 0;
+                let mut bl_count = 0;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
                 {
@@ -1263,22 +1269,23 @@ impl SessionAnalyzer {
                         session.criticality = "anomaly:normal/warming_up".to_string(); // More specific tag
                         session.last_modified = now;
                     }
+                    // Store all sessions even during warmup
+                    self.all_sessions
+                        .insert(session.uid.clone(), session.clone());
+
+                    // No analysis yet, so we can't determine if they are anomalous
+
+                    // Populate the blacklisted sessions
+                    if Self::is_blacklisted(&session.criticality) {
+                        self.blacklisted_sessions
+                            .insert(session.uid.clone(), session.clone());
+                        bl_count += 1;
+                    }
                 }
                 // If still in warm-up and not finalizing this call, return early.
                 // The current batch of sessions has been added to `recent_data` and training ensured.
                 // They will be analyzed once warm-up completes.
                 if !initial_batch_analyzed_post_warmup {
-                    // Before returning early, count existing anomalous/blacklisted sessions
-                    let mut anom_count = 0;
-                    let mut bl_count = 0;
-                    for session in sessions.iter() {
-                        if Self::is_anomalous(&session.criticality) {
-                            anom_count += 1;
-                        }
-                        if Self::is_blacklisted(&session.criticality) {
-                            bl_count += 1;
-                        }
-                    }
                     result.anomalous_count = anom_count;
                     result.blacklisted_count = bl_count;
 
@@ -1412,6 +1419,10 @@ impl SessionAnalyzer {
                             model_write_guard.analyze_session(session, &feature_stats);
                         }
 
+                        // Store all sessions regardless of classification
+                        self.all_sessions
+                            .insert(session.uid.clone(), session.clone());
+
                         if Self::is_anomalous(&session.criticality) {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
                                 found_new_anomalous = true;
@@ -1458,6 +1469,10 @@ impl SessionAnalyzer {
                             session.last_modified = now;
                         }
 
+                        // Store all sessions even when no model is available
+                        self.all_sessions
+                            .insert(session.uid.clone(), session.clone());
+
                         // Count sessions after any updates
                         if Self::is_anomalous(&session.criticality) {
                             anom_count += 1;
@@ -1489,23 +1504,28 @@ impl SessionAnalyzer {
 
     /// Get a session by its UID
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
-        // First check anomalous sessions
+        // Check all sessions first (most comprehensive)
+        if let Some(entry) = self.all_sessions.get(uid) {
+            return Some(entry.value().clone());
+        }
+        // Fallback to anomalous sessions for backward compatibility
         if let Some(entry) = self.anomalous_sessions.get(uid) {
             return Some(entry.value().clone());
         }
-        // If not found, check blacklisted sessions
+        // Finally check blacklisted sessions
         if let Some(entry) = self.blacklisted_sessions.get(uid) {
             return Some(entry.value().clone());
         }
-        // If not found in either, return None
+        // If not found in any, return None
         None
     }
 
-    /// Cleans up old entries from the anomalous and blacklisted session maps.
+    /// Cleans up old entries from the anomalous, blacklisted, and all session maps.
     fn cleanup_tracked_sessions(&self) {
         let now = Utc::now();
         let anomalous_timeout = Duration::seconds(ANOMALOUS_SESSION_TIMEOUT);
         let blacklisted_timeout = Duration::seconds(BLACKLISTED_SESSION_TIMEOUT);
+        let all_session_timeout = Duration::seconds(ALL_SESSION_TIMEOUT);
 
         self.anomalous_sessions.retain(|_, session| {
             now.signed_duration_since(session.last_modified) < anomalous_timeout
@@ -1513,6 +1533,10 @@ impl SessionAnalyzer {
 
         self.blacklisted_sessions.retain(|_, session| {
             now.signed_duration_since(session.last_modified) < blacklisted_timeout
+        });
+
+        self.all_sessions.retain(|_, session| {
+            now.signed_duration_since(session.last_modified) < all_session_timeout
         });
     }
 
@@ -1543,6 +1567,34 @@ impl SessionAnalyzer {
             .collect()
     }
 
+    /// Retrieves all sessions that have been processed by the analyzer.
+    /// This includes sessions from all states: normal, suspicious, abnormal, and blacklisted.
+    /// Sessions are available even during warmup period.
+    /// Also cleans up old entries.
+    pub async fn get_sessions(&self) -> Vec<SessionInfo> {
+        self.cleanup_tracked_sessions();
+        self.all_sessions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Retrieves all current sessions that have been processed by the analyzer.
+    /// Sessions are available even during warmup period.
+    /// Also cleans up old entries.
+    pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
+        self.cleanup_tracked_sessions();
+        let current_session_timeout = crate::capture::CONNECTION_CURRENT_TIMEOUT;
+        let now = Utc::now();
+        self.all_sessions
+            .iter()
+            .filter(|entry| {
+                now.signed_duration_since(entry.value().last_modified) < current_session_timeout
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Public async method to trigger session_cache cleanup.
     /// Call this periodically from a background task or timer.
     pub async fn cleanup_session_cache(&self) {
@@ -1560,14 +1612,15 @@ impl SessionAnalyzer {
             return;
         }
 
-        // Count preserved security findings
+        // Count preserved sessions
         let anomalous_count = self.anomalous_sessions.len();
         let blacklisted_count = self.blacklisted_sessions.len();
+        let all_sessions_count = self.all_sessions.len();
 
-        if anomalous_count > 0 || blacklisted_count > 0 {
+        if anomalous_count > 0 || blacklisted_count > 0 || all_sessions_count > 0 {
             info!(
-                "LanscanAnalyzer started with preserved security findings: {} anomalous, {} blacklisted",
-                anomalous_count, blacklisted_count
+                "LanscanAnalyzer started with preserved sessions: {} anomalous, {} blacklisted, {} total",
+                anomalous_count, blacklisted_count, all_sessions_count
             );
         } else {
             info!("LanscanAnalyzer started");
@@ -1638,10 +1691,11 @@ impl SessionAnalyzer {
 
         let anomalous_count = self.anomalous_sessions.len();
         let blacklisted_count = self.blacklisted_sessions.len();
+        let all_sessions_count = self.all_sessions.len();
 
         info!(
-            "Analyzer stopped - security findings preserved: {} anomalous, {} blacklisted",
-            anomalous_count, blacklisted_count
+            "Analyzer stopped - sessions preserved: {} anomalous, {} blacklisted, {} total",
+            anomalous_count, blacklisted_count, all_sessions_count
         );
     }
 
@@ -1867,5 +1921,150 @@ mod tests {
         analyzer.stop().await;
 
         println!("✅ Security findings preservation across stop/start verified");
+    }
+
+    /// Test that all sessions are tracked and retrievable even during warmup
+    #[tokio::test]
+    async fn test_get_sessions_during_warmup() {
+        let analyzer = SessionAnalyzer::new();
+
+        // Start the analyzer (it will be in warmup mode)
+        analyzer.start().await;
+        assert!(
+            analyzer.warm_up_active.load(Ordering::Relaxed),
+            "Analyzer should be in warmup mode"
+        );
+
+        // Create test sessions
+        let mut test_sessions = vec![
+            SessionInfo {
+                session: Session {
+                    protocol: Protocol::TCP,
+                    src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                    src_port: 12345,
+                    dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    dst_port: 443,
+                },
+                stats: SessionStats::default(),
+                status: SessionStatus::default(),
+                is_local_src: false,
+                is_local_dst: false,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: None,
+                dst_service: None,
+                l7: None,
+                src_asn: None,
+                dst_asn: None,
+                is_whitelisted: WhitelistState::Unknown,
+                criticality: "".to_string(), // Empty initially
+                dismissed: false,
+                whitelist_reason: None,
+                uid: Uuid::new_v4().to_string(),
+                last_modified: Utc::now(),
+            },
+            SessionInfo {
+                session: Session {
+                    protocol: Protocol::UDP,
+                    src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101)),
+                    src_port: 54321,
+                    dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    dst_port: 53,
+                },
+                stats: SessionStats::default(),
+                status: SessionStatus::default(),
+                is_local_src: false,
+                is_local_dst: false,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: None,
+                dst_service: None,
+                l7: None,
+                src_asn: None,
+                dst_asn: None,
+                is_whitelisted: WhitelistState::Unknown,
+                criticality: "blacklist:test_dns".to_string(), // Pre-classified as blacklisted
+                dismissed: false,
+                whitelist_reason: None,
+                uid: Uuid::new_v4().to_string(),
+                last_modified: Utc::now(),
+            },
+        ];
+
+        let session_uids: Vec<String> = test_sessions.iter().map(|s| s.uid.clone()).collect();
+
+        // Analyze sessions during warmup
+        let result = analyzer.analyze_sessions(&mut test_sessions).await;
+        assert_eq!(
+            result.sessions_analyzed, 2,
+            "Should have analyzed 2 sessions"
+        );
+
+        // Verify that sessions are available via get_sessions even during warmup
+        let all_sessions = analyzer.get_sessions().await;
+        assert_eq!(
+            all_sessions.len(),
+            2,
+            "get_sessions should return 2 sessions during warmup"
+        );
+
+        // Verify that get_current_sessions also works
+        let current_sessions = analyzer.get_current_sessions().await;
+        assert_eq!(
+            current_sessions.len(),
+            2,
+            "get_current_sessions should return 2 sessions during warmup"
+        );
+
+        // Verify that the sessions have the expected UIDs
+        let retrieved_uids: Vec<String> = all_sessions.iter().map(|s| s.uid.clone()).collect();
+        for uid in &session_uids {
+            assert!(
+                retrieved_uids.contains(uid),
+                "Retrieved sessions should contain UID {}",
+                uid
+            );
+        }
+
+        // Verify that sessions have warmup criticality where expected
+        let warmup_session = all_sessions
+            .iter()
+            .find(|s| s.uid == session_uids[0])
+            .expect("Should find first session");
+        assert!(
+            warmup_session.criticality.contains("warming_up"),
+            "Session should have warming_up tag, got: {}",
+            warmup_session.criticality
+        );
+
+        // Verify that pre-classified sessions keep their classification
+        let blacklisted_session = all_sessions
+            .iter()
+            .find(|s| s.uid == session_uids[1])
+            .expect("Should find second session");
+        assert!(
+            blacklisted_session
+                .criticality
+                .contains("blacklist:test_dns"),
+            "Session should keep blacklist classification, got: {}",
+            blacklisted_session.criticality
+        );
+
+        // Verify that get_session_by_uid works for all sessions
+        for uid in &session_uids {
+            let session = analyzer.get_session_by_uid(uid).await;
+            assert!(
+                session.is_some(),
+                "get_session_by_uid should find session with UID {}",
+                uid
+            );
+        }
+
+        // Cleanup
+        analyzer.stop().await;
+
+        println!("✅ Session tracking during warmup verified");
     }
 }
