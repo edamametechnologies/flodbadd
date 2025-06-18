@@ -262,7 +262,7 @@ impl FlodbaddCapture {
         let _start_time = std::time::Instant::now();
 
         // Then start the capture task to populate the sessions map
-        self.start_capture_task().await;
+        self.start_capture_tasks().await;
 
         let elapsed_ms = _start_time.elapsed().as_millis();
         if elapsed_ms > 1_000 {
@@ -366,14 +366,14 @@ impl FlodbaddCapture {
     pub async fn restart(&mut self, interfaces: &FlodbaddInterfaces) {
         // Only restart if capturing and if the interface string has changed
         if !self.is_capturing().await || self.interfaces.read().await.eq(interfaces) {
-            info!("Not restarting capture as it's not capturing or interface has not changed");
+            warn!("Not restarting capture as it's not capturing or interface has not changed");
             return;
         };
 
-        info!("Restarting FlodbaddCapture");
+        info!("Restarting capture with interfaces: {:?}", interfaces);
         // Only restart the capture task
         self.stop_capture_tasks().await;
-        self.start_capture_task().await;
+        self.start_capture_tasks().await;
     }
 
     pub async fn is_capturing(&self) -> bool {
@@ -454,7 +454,7 @@ impl FlodbaddCapture {
 
         let whitelist = Whitelists::new_from_sessions(&sessions_vec);
         let whitelist_json = WhitelistsJSON::from(whitelist);
-        match serde_json::to_string(&whitelist_json) {
+        match serde_json::to_string_pretty(&whitelist_json) {
             Ok(json) => Ok(json),
             Err(e) => {
                 error!("Error creating custom whitelists: {}", e);
@@ -710,7 +710,7 @@ impl FlodbaddCapture {
         Ok(device)
     }
 
-    async fn start_capture_task(&mut self) {
+    async fn start_capture_tasks(&mut self) {
         // Retrieve the configured interfaces from our stored FlodbaddInterfaces
         let interfaces = self.interfaces.read().await;
         let passed_interface_success = if !interfaces.interfaces.is_empty() {
