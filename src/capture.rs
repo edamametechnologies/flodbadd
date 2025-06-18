@@ -373,7 +373,7 @@ impl FlodbaddCapture {
             info!("DNS Packet Processor was already stopped or not initialized.");
         }
 
-        // Clear ALL session data for consistency (TARGET ARCHITECTURE)
+        // Clear ALL session data for consistency
         self.clear_all_sessions().await;
 
         // Reset fetch timestamps to prevent stale data issues on restart
@@ -382,7 +382,7 @@ impl FlodbaddCapture {
         info!("FlodbaddCapture stopped - clean slate for restart");
     }
 
-    /// Clear all session data structures for a clean restart (TARGET ARCHITECTURE)
+    /// Clear all session data structures for a clean restart
     async fn clear_all_sessions(&mut self) {
         info!("Clearing all session data for clean restart");
 
@@ -401,7 +401,7 @@ impl FlodbaddCapture {
         debug!("All session data cleared");
     }
 
-    /// Reset fetch timestamps to epoch to ensure fresh fetching after restart (TARGET ARCHITECTURE)
+    /// Reset fetch timestamps to epoch to ensure fresh fetching after restart
     async fn reset_fetch_timestamps(&mut self) {
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
 
@@ -4907,7 +4907,7 @@ mod tests {
             "Blacklisted sessions should contain test data"
         );
 
-        // Stop capture - this should clear all session data per TARGET ARCHITECTURE
+        // Stop capture - this should clear all session data
         capture.stop().await;
         assert!(!capture.is_capturing().await, "Capture should be stopped");
 
@@ -5108,6 +5108,7 @@ mod tests {
             .timeout(Duration::from_secs(20))
             .build()
             .expect("Failed to build reqwest client");
+
 
         let target_url = "https://httpbin.org/image/jpeg";
         let mut test_success = false;

@@ -1687,7 +1687,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use uuid::Uuid;
 
-    /// Test that security findings are preserved across stop/start cycles (TARGET ARCHITECTURE)
+    /// Test that security findings are preserved across stop/start cycles
     #[tokio::test]
     async fn test_security_findings_preservation() {
         let analyzer = SessionAnalyzer::new();
@@ -1789,7 +1789,7 @@ mod tests {
             "get_blacklisted_sessions should return 1 session"
         );
 
-        // Stop the analyzer - this should preserve security findings per TARGET ARCHITECTURE
+        // Stop the analyzer - this should preserve security findings
         analyzer.stop().await;
         assert!(
             !analyzer.running.load(Ordering::Relaxed),
