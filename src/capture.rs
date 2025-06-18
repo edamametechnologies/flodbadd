@@ -11,7 +11,7 @@ use crate::sessions::*;
 use crate::task::TaskHandle;
 use crate::whitelists::{self, is_valid_whitelist, Whitelists, WhitelistsJSON};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use futures::future::join_all;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
@@ -65,12 +65,8 @@ use undeadlock::*; // Add this import // Add Duration import
  *    - The integrate_dns_with_resolver method synchronizes data between both systems
  */
 
-// A session is considered active if it has had activity in the last 60 seconds
-pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
-// A session is considered current if it has been active in the last 180 seconds
-pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
 // Keep 4 hours of history
-static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60 * 60 * 4);
+
 pub struct FlodbaddCapture {
     interfaces: Arc<CustomRwLock<FlodbaddInterfaces>>,
     capture_task_handles: Arc<CustomDashMap<String, TaskHandle>>,

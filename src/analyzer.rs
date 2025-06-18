@@ -1,4 +1,4 @@
-use crate::sessions::SessionInfo;
+use crate::sessions::*;
 use chrono::{DateTime, Duration, Utc};
 use extended_isolation_forest::{Forest, ForestOptions};
 use std::collections::HashSet;
@@ -55,13 +55,13 @@ use undeadlock::*;
 ///     sessions have the same value) but this session has a different value
 
 // Define a timeout for cache entries (in seconds)
-static ANALYZER_CACHE_TIMEOUT: i64 = 3600; // 1 hour by default
+static ANALYZER_CACHE_TIMEOUT: i64 = 3600;
 
 // Define a timeout for anomalous session tracking (in seconds)
-static ANOMALOUS_SESSION_TIMEOUT: i64 = 86400; // 24 hours
+static ANOMALOUS_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define a timeout for blacklisted session tracking (in seconds)
-static BLACKLISTED_SESSION_TIMEOUT: i64 = 86400; // 24 hours
+static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = 86400; // 24 hours
@@ -1584,7 +1584,7 @@ impl SessionAnalyzer {
     /// Also cleans up old entries.
     pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
-        let current_session_timeout = crate::capture::CONNECTION_CURRENT_TIMEOUT;
+        let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
         let now = Utc::now();
         self.all_sessions
             .iter()

@@ -1,11 +1,18 @@
 use crate::asn_db::Record;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use edamame_backend::session_info_backend::SessionInfoBackend;
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 use strum_macros::Display;
 use uuid::Uuid;
+
+// A session is considered active if it has had activity in the last 60 seconds
+pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
+// A session is considered current if it has been active in the last 180 seconds
+pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
+// Keep 24 hours of history
+pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(86400);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd)]
 pub enum Protocol {
