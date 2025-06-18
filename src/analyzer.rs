@@ -1533,6 +1533,16 @@ impl SessionAnalyzer {
         self.anomalous_sessions.len()
     }
 
+    /// Retrieves a snapshot of currently tracked blacklisted sessions.
+    /// Also cleans up old entries.
+    pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
+        self.cleanup_tracked_sessions();
+        self.blacklisted_sessions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Public async method to trigger session_cache cleanup.
     /// Call this periodically from a background task or timer.
     pub async fn cleanup_session_cache(&self) {
@@ -1543,24 +1553,39 @@ impl SessionAnalyzer {
     }
 
     /// Start the analyzer (set running flag, prepare for background tasks if needed)
+    /// TARGET ARCHITECTURE: Start with preserved security findings if available
     pub async fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already running");
             return;
         }
-        info!("LanscanAnalyzer started");
+
+        // Count preserved security findings
+        let anomalous_count = self.anomalous_sessions.len();
+        let blacklisted_count = self.blacklisted_sessions.len();
+
+        if anomalous_count > 0 || blacklisted_count > 0 {
+            info!(
+                "LanscanAnalyzer started with preserved security findings: {} anomalous, {} blacklisted",
+                anomalous_count, blacklisted_count
+            );
+        } else {
+            info!("LanscanAnalyzer started");
+        }
+
         // Instantiate the IsolationForestModel
         let mut model_guard = self.model.write().await;
         *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
     }
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
+    /// TARGET ARCHITECTURE: Preserve critical security findings across restarts
     pub async fn stop(&self) {
         if !self.running.swap(false, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already stopped");
             return;
         }
-        info!("LanscanAnalyzer stopped");
+        info!("LanscanAnalyzer stopped - preserving security findings");
 
         // First abort any training task
         let abort_result = {
@@ -1586,10 +1611,38 @@ impl SessionAnalyzer {
             info!("Successfully aborted training task");
         }
 
-        // Now drop the IsolationForestModel
+        // Clear temporary analysis data but preserve security findings
         let mut model_guard = self.model.write().await;
+        if let Some(model) = &*model_guard {
+            let mut model_write = model.write().await;
+
+            // Clear temporary data
+            model_write.recent_data.clear();
+            model_write.session_cache.clear();
+
+            // Reset training state
+            model_write.forest = None;
+            model_write.training_handle = None;
+            model_write
+                .training_in_progress
+                .store(false, Ordering::Release);
+
+            debug!("Cleared temporary analysis data while preserving security findings");
+        }
+
+        // Drop the model but keep security findings
         *model_guard = None;
-        info!("Analyzer resources released");
+
+        // Clean up old security findings but keep recent ones
+        self.cleanup_tracked_sessions();
+
+        let anomalous_count = self.anomalous_sessions.len();
+        let blacklisted_count = self.blacklisted_sessions.len();
+
+        info!(
+            "Analyzer stopped - security findings preserved: {} anomalous, {} blacklisted",
+            anomalous_count, blacklisted_count
+        );
     }
 
     /// Debug method to get anomaly score and thresholds for a session (testing purposes only)
@@ -1622,5 +1675,197 @@ impl SessionAnalyzer {
             model_write.suspicious_threshold = suspicious;
             model_write.abnormal_threshold = abnormal;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::{
+        Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+    };
+    use std::net::{IpAddr, Ipv4Addr};
+    use uuid::Uuid;
+
+    /// Test that security findings are preserved across stop/start cycles (TARGET ARCHITECTURE)
+    #[tokio::test]
+    async fn test_security_findings_preservation() {
+        let analyzer = SessionAnalyzer::new();
+
+        // Start the analyzer
+        analyzer.start().await;
+        assert!(
+            analyzer.running.load(Ordering::Relaxed),
+            "Analyzer should be running"
+        );
+
+        // Create test sessions with security findings
+        let anomalous_session = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 12345,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                dst_port: 443,
+            },
+            stats: SessionStats::default(),
+            status: SessionStatus::default(),
+            is_local_src: false,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: None,
+            dst_service: None,
+            l7: None,
+            src_asn: None,
+            dst_asn: None,
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: "anomaly:suspicious".to_string(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: Utc::now(),
+        };
+
+        let blacklisted_session = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101)),
+                src_port: 54321,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                dst_port: 80,
+            },
+            stats: SessionStats::default(),
+            status: SessionStatus::default(),
+            is_local_src: false,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: None,
+            dst_service: None,
+            l7: None,
+            src_asn: None,
+            dst_asn: None,
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: "blacklist:test_blacklist".to_string(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: Utc::now(),
+        };
+
+        // Manually add security findings (simulating what analyze_sessions would do)
+        analyzer
+            .anomalous_sessions
+            .insert(anomalous_session.uid.clone(), anomalous_session.clone());
+        analyzer
+            .blacklisted_sessions
+            .insert(blacklisted_session.uid.clone(), blacklisted_session.clone());
+
+        // Verify security findings exist before stop
+        assert_eq!(
+            analyzer.anomalous_sessions.len(),
+            1,
+            "Should have 1 anomalous session before stop"
+        );
+        assert_eq!(
+            analyzer.blacklisted_sessions.len(),
+            1,
+            "Should have 1 blacklisted session before stop"
+        );
+
+        let initial_anomalous = analyzer.get_anomalous_sessions().await;
+        let initial_blacklisted = analyzer.get_blacklisted_sessions().await;
+        assert_eq!(
+            initial_anomalous.len(),
+            1,
+            "get_anomalous_sessions should return 1 session"
+        );
+        assert_eq!(
+            initial_blacklisted.len(),
+            1,
+            "get_blacklisted_sessions should return 1 session"
+        );
+
+        // Stop the analyzer - this should preserve security findings per TARGET ARCHITECTURE
+        analyzer.stop().await;
+        assert!(
+            !analyzer.running.load(Ordering::Relaxed),
+            "Analyzer should be stopped"
+        );
+
+        // Verify security findings are preserved after stop
+        assert_eq!(
+            analyzer.anomalous_sessions.len(),
+            1,
+            "Anomalous sessions should be preserved after stop"
+        );
+        assert_eq!(
+            analyzer.blacklisted_sessions.len(),
+            1,
+            "Blacklisted sessions should be preserved after stop"
+        );
+
+        let preserved_anomalous = analyzer.get_anomalous_sessions().await;
+        let preserved_blacklisted = analyzer.get_blacklisted_sessions().await;
+        assert_eq!(
+            preserved_anomalous.len(),
+            1,
+            "get_anomalous_sessions should return preserved session"
+        );
+        assert_eq!(
+            preserved_blacklisted.len(),
+            1,
+            "get_blacklisted_sessions should return preserved session"
+        );
+
+        // Verify the UIDs match the original sessions
+        assert_eq!(
+            preserved_anomalous[0].uid, anomalous_session.uid,
+            "Preserved anomalous session should have same UID"
+        );
+        assert_eq!(
+            preserved_blacklisted[0].uid, blacklisted_session.uid,
+            "Preserved blacklisted session should have same UID"
+        );
+
+        // Restart the analyzer - security findings should still be available
+        analyzer.start().await;
+        assert!(
+            analyzer.running.load(Ordering::Relaxed),
+            "Analyzer should be running after restart"
+        );
+
+        // Verify security findings are still available after restart
+        assert_eq!(
+            analyzer.anomalous_sessions.len(),
+            1,
+            "Anomalous sessions should persist after restart"
+        );
+        assert_eq!(
+            analyzer.blacklisted_sessions.len(),
+            1,
+            "Blacklisted sessions should persist after restart"
+        );
+
+        let restarted_anomalous = analyzer.get_anomalous_sessions().await;
+        let restarted_blacklisted = analyzer.get_blacklisted_sessions().await;
+        assert_eq!(
+            restarted_anomalous.len(),
+            1,
+            "get_anomalous_sessions should return session after restart"
+        );
+        assert_eq!(
+            restarted_blacklisted.len(),
+            1,
+            "get_blacklisted_sessions should return session after restart"
+        );
+
+        // Final cleanup
+        analyzer.stop().await;
+
+        println!("✅ Security findings preservation across stop/start verified");
     }
 }

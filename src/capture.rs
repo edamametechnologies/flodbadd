@@ -191,6 +191,19 @@ impl FlodbaddCapture {
     pub async fn start(&mut self, interfaces: &FlodbaddInterfaces) {
         info!("Starting FlodbaddCapture");
 
+        // Reset fetch timestamps to ensure incremental fetching works correctly after restart
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+        *self.last_get_sessions_fetch_timestamp.write().await = epoch;
+        *self.last_get_current_sessions_fetch_timestamp.write().await = epoch;
+        *self
+            .last_get_blacklisted_sessions_fetch_timestamp
+            .write()
+            .await = epoch;
+        *self
+            .last_get_whitelist_exceptions_fetch_timestamp
+            .write()
+            .await = epoch;
+
         // Start mDNS task (if it's not already running)
         mdns_start().await;
 
@@ -360,7 +373,50 @@ impl FlodbaddCapture {
             info!("DNS Packet Processor was already stopped or not initialized.");
         }
 
-        info!("FlodbaddCapture stopped.");
+        // Clear ALL session data for consistency (TARGET ARCHITECTURE)
+        self.clear_all_sessions().await;
+
+        // Reset fetch timestamps to prevent stale data issues on restart
+        self.reset_fetch_timestamps().await;
+
+        info!("FlodbaddCapture stopped - clean slate for restart");
+    }
+
+    /// Clear all session data structures for a clean restart (TARGET ARCHITECTURE)
+    async fn clear_all_sessions(&mut self) {
+        info!("Clearing all session data for clean restart");
+
+        // Clear the main sessions map
+        self.sessions.clear();
+
+        // Clear current sessions
+        self.current_sessions.write().await.clear();
+
+        // Clear whitelist exceptions
+        self.whitelist_exceptions.write().await.clear();
+
+        // Clear blacklisted sessions
+        self.blacklisted_sessions.write().await.clear();
+
+        debug!("All session data cleared");
+    }
+
+    /// Reset fetch timestamps to epoch to ensure fresh fetching after restart (TARGET ARCHITECTURE)
+    async fn reset_fetch_timestamps(&mut self) {
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+
+        *self.last_get_sessions_fetch_timestamp.write().await = epoch;
+        *self.last_get_current_sessions_fetch_timestamp.write().await = epoch;
+        *self
+            .last_get_blacklisted_sessions_fetch_timestamp
+            .write()
+            .await = epoch;
+        *self
+            .last_get_whitelist_exceptions_fetch_timestamp
+            .write()
+            .await = epoch;
+
+        debug!("All fetch timestamps reset to epoch");
     }
 
     pub async fn restart(&mut self, interfaces: &FlodbaddInterfaces) {
@@ -4752,5 +4808,312 @@ mod tests {
 
         // Clean up
         capture.stop().await;
+    }
+
+    // Test start/stop/start sequence specifically
+    #[tokio::test]
+    #[serial]
+    async fn test_capture_session_clearing_on_stop() {
+        // Skip on Windows CI due to pcap limitations
+        if cfg!(windows) {
+            return;
+        }
+
+        // Acquire a default valid interface; skip test if none detected (e.g., in sandbox)
+        let default_interface = match get_default_interface() {
+            Some(iface) => iface,
+            None => {
+                println!("test_capture_session_clearing_on_stop: No default interface available – skipping");
+                return;
+            }
+        };
+
+        let interfaces = FlodbaddInterfaces {
+            interfaces: vec![default_interface.clone()],
+        };
+
+        let mut capture = FlodbaddCapture::new();
+
+        // Start capture
+        capture.start(&interfaces).await;
+        assert!(capture.is_capturing().await, "Capture should be active");
+
+        // Add some mock sessions to verify they get cleared
+        let test_session = Session {
+            src_ip: "192.168.1.1".parse().unwrap(),
+            dst_ip: "8.8.8.8".parse().unwrap(),
+            src_port: 12345,
+            dst_port: 443,
+            protocol: Protocol::TCP,
+        };
+
+        let test_session_info = SessionInfo {
+            session: test_session.clone(),
+            stats: SessionStats::default(),
+            status: SessionStatus::default(),
+            is_local_src: false,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: None,
+            dst_service: None,
+            l7: None,
+            src_asn: None,
+            dst_asn: None,
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: "test".to_string(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: "test-uid".to_string(),
+            last_modified: Utc::now(),
+        };
+
+        // Insert test data
+        capture
+            .sessions
+            .insert(test_session.clone(), test_session_info);
+        capture
+            .current_sessions
+            .write()
+            .await
+            .push(test_session.clone());
+        capture
+            .whitelist_exceptions
+            .write()
+            .await
+            .push(test_session.clone());
+        capture
+            .blacklisted_sessions
+            .write()
+            .await
+            .push(test_session.clone());
+
+        // Verify data exists
+        assert!(
+            !capture.sessions.is_empty(),
+            "Sessions should contain test data"
+        );
+        assert!(
+            !capture.current_sessions.read().await.is_empty(),
+            "Current sessions should contain test data"
+        );
+        assert!(
+            !capture.whitelist_exceptions.read().await.is_empty(),
+            "Whitelist exceptions should contain test data"
+        );
+        assert!(
+            !capture.blacklisted_sessions.read().await.is_empty(),
+            "Blacklisted sessions should contain test data"
+        );
+
+        // Stop capture - this should clear all session data per TARGET ARCHITECTURE
+        capture.stop().await;
+        assert!(!capture.is_capturing().await, "Capture should be stopped");
+
+        // Verify all session data is cleared
+        assert!(
+            capture.sessions.is_empty(),
+            "Sessions should be cleared after stop"
+        );
+        assert!(
+            capture.current_sessions.read().await.is_empty(),
+            "Current sessions should be cleared after stop"
+        );
+        assert!(
+            capture.whitelist_exceptions.read().await.is_empty(),
+            "Whitelist exceptions should be cleared after stop"
+        );
+        assert!(
+            capture.blacklisted_sessions.read().await.is_empty(),
+            "Blacklisted sessions should be cleared after stop"
+        );
+
+        // Verify fetch timestamps are reset
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+        assert_eq!(
+            *capture.last_get_sessions_fetch_timestamp.read().await,
+            epoch,
+            "Sessions fetch timestamp should be reset"
+        );
+        assert_eq!(
+            *capture
+                .last_get_current_sessions_fetch_timestamp
+                .read()
+                .await,
+            epoch,
+            "Current sessions fetch timestamp should be reset"
+        );
+        assert_eq!(
+            *capture
+                .last_get_blacklisted_sessions_fetch_timestamp
+                .read()
+                .await,
+            epoch,
+            "Blacklisted sessions fetch timestamp should be reset"
+        );
+        assert_eq!(
+            *capture
+                .last_get_whitelist_exceptions_fetch_timestamp
+                .read()
+                .await,
+            epoch,
+            "Whitelist exceptions fetch timestamp should be reset"
+        );
+
+        println!("✅ Session clearing on stop verified - clean slate achieved");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_capture_start_stop_start_sequence() {
+        // Skip on Windows CI due to pcap limitations
+        if cfg!(windows) {
+            println!("Skipping start/stop/start test: Not fully supported on Windows yet");
+            return;
+        }
+
+        let default_interface = match get_default_interface() {
+            Some(interface) => interface,
+            None => {
+                println!("No default interface detected, skipping test");
+                return;
+            }
+        };
+        let interfaces = FlodbaddInterfaces {
+            interfaces: vec![default_interface],
+        };
+
+        let mut capture = FlodbaddCapture::new();
+
+        // === FIRST START ===
+        println!("=== FIRST START ===");
+        capture.start(&interfaces).await;
+        assert!(
+            capture.is_capturing().await,
+            "First start: Capture should be running"
+        );
+
+        // Generate some initial traffic and verify it works
+        println!("Generating initial traffic...");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build reqwest client");
+
+        let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
+        match client.get(target_url).send().await {
+            Ok(response) => {
+                println!(
+                    "Traffic generation successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+            }
+            Err(e) => {
+                println!("Traffic generation failed: {}", e);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let initial_sessions = capture.get_sessions(false).await;
+        let initial_count = initial_sessions.len();
+        println!("First start: Found {} sessions", initial_count);
+
+        // === STOP ===
+        println!("=== STOP ===");
+        capture.stop().await;
+        assert!(
+            !capture.is_capturing().await,
+            "After stop: Capture should have stopped"
+        );
+
+        // Verify that task handles are cleared
+        assert_eq!(
+            capture.capture_task_handles.len(),
+            0,
+            "Task handles should be cleared after stop"
+        );
+
+        // === SECOND START ===
+        println!("=== SECOND START ===");
+        capture.start(&interfaces).await;
+        assert!(
+            capture.is_capturing().await,
+            "Second start: Capture should be running again"
+        );
+
+        // Verify that task handles are recreated
+        assert!(
+            capture.capture_task_handles.len() > 0,
+            "Task handles should be recreated after restart"
+        );
+
+        // Generate traffic again and verify it's captured
+        println!("Generating traffic after restart...");
+        match client.get(target_url).send().await {
+            Ok(response) => {
+                println!(
+                    "Traffic generation after restart successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+            }
+            Err(e) => {
+                println!("Traffic generation after restart failed: {}", e);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let restart_sessions = capture.get_sessions(false).await;
+        let restart_count = restart_sessions.len();
+        println!("Second start: Found {} sessions", restart_count);
+
+        // The key test: we should be able to capture sessions after restart
+        assert!(
+            restart_count > 0,
+            "Should capture sessions after restart, but found {} sessions",
+            restart_count
+        );
+
+        // Generate additional traffic to ensure capture is really working
+        println!("Generating additional traffic to confirm capture is working...");
+        match client.get("https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz").send().await {
+            Ok(response) => {
+                println!(
+                    "Additional traffic successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+            }
+            Err(e) => {
+                println!("Additional traffic failed: {}", e);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let final_sessions = capture.get_sessions(false).await;
+        let final_count = final_sessions.len();
+        println!("Final: Found {} sessions", final_count);
+
+        // Sessions should continue to be captured
+        assert!(
+            final_count >= restart_count,
+            "Sessions should continue to be captured after restart"
+        );
+
+        // Clean up
+        println!("=== FINAL CLEANUP ===");
+        capture.stop().await;
+        assert!(
+            !capture.is_capturing().await,
+            "Final cleanup: Capture should be stopped"
+        );
+
+        println!("Start/stop/start sequence test completed successfully");
     }
 }

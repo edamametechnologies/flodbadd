@@ -1447,7 +1447,7 @@ mod tests {
 
     /// Test that the bug from the original toto file is fixed
     #[test]
-    fn test_toto_file_bug_fix() {
+    fn test_whitelist_file_bug_fix() {
         // This tests that we can parse a JSON that was previously missing name/extends fields
         // and that our generation now includes them
 
