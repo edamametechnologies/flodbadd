@@ -17,7 +17,7 @@ default = []
 asyncpacketcapture = []
 packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "sysinfo", "netstat2" ]
 ebpf = [ "aya", "bytemuck", "nix" ]
-examples = ["clap", "tracing-subscriber", "rayon"]
+examples = ["clap", "tracing-subscriber"]
 
 [dependencies]
 # Core dependencies
@@ -85,6 +85,7 @@ serial_test = "3.1.1"
 # Strum
 strum = "0.27.0"
 strum_macros = "0.27.0"
+rayon = "1.7"
 
 # Not WASI/WASIX/WASM
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -136,7 +137,9 @@ nix = { version = "0.30.1", optional = true, features = [ "user" ] }
 
 # Add example dependencies
 clap = { version = "4.0", features = ["derive"], optional = true }
-rayon = { version = "1.7", optional = true }
+
+# Performance optimization dependencies
+rayon = "1.7"
 
 [dev-dependencies]
 criterion = "0.6"
