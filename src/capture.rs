@@ -185,7 +185,13 @@ impl FlodbaddCapture {
     }
 
     pub async fn start(&mut self, interfaces: &FlodbaddInterfaces) {
-        info!("Starting FlodbaddCapture");
+        // Check if the capture task is already running
+        if self.is_capturing().await {
+            warn!("Capture task already running, skipping start");
+            return;
+        }
+
+        info!("Starting capture");
 
         // Reset fetch timestamps to ensure incremental fetching works correctly after restart
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
@@ -309,7 +315,12 @@ impl FlodbaddCapture {
     }
 
     pub async fn stop(&mut self) {
-        info!("Stopping FlodbaddCapture");
+        if !self.is_capturing().await {
+            warn!("Capture task not running, skipping stop");
+            return;
+        }
+
+        info!("Stopping capture");
 
         // Stop the main capture tasks first
         if !self.capture_task_handles.is_empty() {
@@ -418,7 +429,11 @@ impl FlodbaddCapture {
     pub async fn restart(&mut self, interfaces: &FlodbaddInterfaces) {
         // Only restart if capturing and if the interface string has changed
         if !self.is_capturing().await || self.interfaces.read().await.eq(interfaces) {
-            warn!("Not restarting capture as it's not capturing or interface has not changed");
+            warn!(
+                "Not restarting capture as it's not capturing or interface has not changed {} = {}",
+                self.is_capturing().await,
+                self.interfaces.read().await.eq(interfaces)
+            );
             return;
         };
 
