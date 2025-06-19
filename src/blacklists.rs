@@ -544,11 +544,11 @@ pub async fn recompute_blacklist_for_sessions(
         .filter_map(|session_key| session_snapshots.get(session_key))
         .flat_map(|snapshot| {
             let mut ips = Vec::new();
-            if !snapshot.is_local_src { 
-                ips.push(snapshot.session.src_ip); 
+            if !snapshot.is_local_src {
+                ips.push(snapshot.session.src_ip);
             }
-            if !snapshot.is_local_dst { 
-                ips.push(snapshot.session.dst_ip); 
+            if !snapshot.is_local_dst {
+                ips.push(snapshot.session.dst_ip);
             }
             ips
         })
@@ -557,19 +557,20 @@ pub async fn recompute_blacklist_for_sessions(
     info!(
         "IP deduplication: checking {} unique IPs instead of {} session IPs",
         unique_ips.len(),
-        sessions_to_evaluate.len() * 2  // Approximate, some sessions might have local IPs
+        sessions_to_evaluate.len() * 2 // Approximate, some sessions might have local IPs
     );
 
     // OPTIMIZATION 2: Parallel Processing with Rayon
     // Batch check all unique IPs against all blacklists once using parallel processing
     let ip_blacklist_results: HashMap<IpAddr, Vec<String>> = unique_ips
-        .par_iter()  // Parallel iterator
+        .par_iter() // Parallel iterator
         .map(|ip| {
             let ip_str = ip.to_string();
             let matching_lists: Vec<String> = blacklist_names
                 .iter()
                 .filter(|list_name| {
-                    list_data.is_ip_in_blacklist(&ip_str, list_name)
+                    list_data
+                        .is_ip_in_blacklist(&ip_str, list_name)
                         .unwrap_or(false)
                 })
                 .cloned()
@@ -585,19 +586,19 @@ pub async fn recompute_blacklist_for_sessions(
 
     // Now process all sessions in parallel using cached IP results
     let session_results: Vec<(Session, String, bool)> = sessions_to_evaluate
-        .par_iter()  // Parallel processing of sessions
+        .par_iter() // Parallel processing of sessions
         .filter_map(|session_key| {
             // Skip if we don't have a snapshot (session might have been removed)
             session_snapshots.get(session_key).and_then(|snapshot| {
                 // Use cached blacklist results instead of expensive CIDR checks
                 let mut matching_names = Vec::<String>::new();
-                
+
                 if !snapshot.is_local_src {
                     if let Some(src_matches) = ip_blacklist_results.get(&snapshot.session.src_ip) {
                         matching_names.extend(src_matches.iter().cloned());
                     }
                 }
-                
+
                 if !snapshot.is_local_dst {
                     if let Some(dst_matches) = ip_blacklist_results.get(&snapshot.session.dst_ip) {
                         matching_names.extend(dst_matches.iter().cloned());
@@ -630,7 +631,11 @@ pub async fn recompute_blacklist_for_sessions(
                 let new_criticality = final_tags.join(",");
 
                 // Return session info regardless of whether criticality changed
-                Some((session_key.clone(), new_criticality, !matching_names.is_empty()))
+                Some((
+                    session_key.clone(),
+                    new_criticality,
+                    !matching_names.is_empty(),
+                ))
             })
         })
         .collect();
