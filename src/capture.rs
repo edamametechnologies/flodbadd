@@ -87,6 +87,8 @@ pub struct FlodbaddCapture {
     last_get_current_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_blacklisted_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_whitelist_exceptions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
+    /// Serialises access to update_sessions so callers await instead of spinning.
+    update_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FlodbaddCapture {
@@ -125,6 +127,7 @@ impl FlodbaddCapture {
             >::from(
                 std::time::UNIX_EPOCH,
             ))),
+            update_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -492,9 +495,11 @@ impl FlodbaddCapture {
                 // Set the name after successful update
                 *self.whitelist_name.write().await = "custom_whitelist".to_string();
 
-                // Force immediate whitelist recomputation after setting custom whitelists
-                // This ensures that existing sessions are immediately re-evaluated against the new whitelist
-                info!("Custom whitelists set successfully, forcing immediate session update");
+                // Reset per-session whitelist state *before* doing a single recomputation
+                self.reset_whitelist().await;
+
+                // One recompute is enough (avoid previous double run)
+                info!("Custom whitelists set successfully – performing single session update");
                 self.update_sessions().await;
             }
             Err(e) => {
@@ -504,8 +509,7 @@ impl FlodbaddCapture {
             }
         }
 
-        // Reset the internal session whitelist states
-        self.reset_whitelist().await;
+        // No extra reset/update needed here – already done above
     }
 
     pub async fn create_custom_whitelists(&mut self) -> Result<String> {
@@ -1483,6 +1487,7 @@ impl FlodbaddCapture {
             self.whitelist_exceptions.clone(),
             self.blacklisted_sessions.clone(),
             self.update_in_progress.clone(),
+            self.update_mutex.clone(),
         )
         .await;
     }
@@ -1712,14 +1717,12 @@ impl FlodbaddCapture {
         whitelist_exceptions: Arc<CustomRwLock<Vec<Session>>>,
         blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
         update_in_progress: Arc<AtomicBool>,
+        update_mutex: Arc<tokio::sync::Mutex<()>>,
     ) {
-        // This can be called by multiple threads, so we need to wait until the previous update is finished
-        // and return when it is done
-        while update_in_progress.load(Ordering::Relaxed) {
-            debug!("update_sessions skipped - another update is already in progress");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            return;
-        }
+        // Acquire the mutex to ensure only one update executes at a time.
+        // Other callers will await here instead of polling.
+        let _guard = update_mutex.lock().await;
+        // A second safety flag (kept for diagnostics) – but we do not spin any more.
 
         // Set the flag to indicate update is starting
         update_in_progress.store(true, Ordering::Relaxed);

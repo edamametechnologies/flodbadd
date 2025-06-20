@@ -1511,17 +1511,18 @@ impl SessionAnalyzer {
     }
 
     /// Get a session by its UID
+    /// Prioritizes anomalous and blacklisted versions to preserve historical criticality
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
-        // Check all sessions first (most comprehensive)
-        if let Some(entry) = self.all_sessions.get(uid) {
+        // Check blacklisted sessions first (highest priority for criticality preservation)
+        if let Some(entry) = self.blacklisted_sessions.get(uid) {
             return Some(entry.value().clone());
         }
-        // Fallback to anomalous sessions for backward compatibility
+        // Then check anomalous sessions
         if let Some(entry) = self.anomalous_sessions.get(uid) {
             return Some(entry.value().clone());
         }
-        // Finally check blacklisted sessions
-        if let Some(entry) = self.blacklisted_sessions.get(uid) {
+        // Finally fallback to all sessions (may have different criticality state)
+        if let Some(entry) = self.all_sessions.get(uid) {
             return Some(entry.value().clone());
         }
         // If not found in any, return None
