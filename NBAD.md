@@ -302,14 +302,6 @@ By using this `flodbadd_analyzer` module, each new network session can be evalua
 - **Extension Level:** Following the recommendations of the EIF paper [Hariri et al., 2018] for improved score robustness and to avoid artifacts seen with standard Isolation Forest (level 0), the maximum extension level (`N-1`, which is 9 for our 10D features) is used. Empirically, using `extension_level > 0` also resolved significant performance instability observed with `extension_level = 0` in this specific crate implementation.
 - **Performance Tuning:** Initial parameters based on common defaults (`n_trees=100`, `sample_size=256`) led to performance bottlenecks (hangs) during training with 10D data. The parameters were tuned down to `n_trees=50` and `sample_size=128` to achieve stable and acceptable training times while using the preferred `extension_level=9`.
 
-**Sources:**
-
-- Rust `isoforest` crate – an Isolation Forest implementation in pure Rust.
-- *SmartCore* machine learning crate – includes algorithms like Isolation Forest and one-class SVM for anomaly detection.
-- Extended Isolation Forest (EIF) usage example – anomaly score above 0.5 indicates an outlier.
-- Encoding categorical features for Isolation Forest – hashing as a method to handle categories without one-hot exploding feature count.
-- Isolation Forest model retraining strategy – typically retrain with new data rather than incremental update (online learning not common for IF).
-
 ## Test Coverage
 
 A comprehensive synthetic test-suite exercises the `SessionAnalyzer` under a variety of benign and malicious traffic patterns.  The generators, expectations and run-instructions live in [`ANOMALYTEST.md`](./ANOMALYTEST.md).  All tests are compiled only when the `packetcapture` feature is enabled and can be run with:

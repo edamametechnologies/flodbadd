@@ -15,15 +15,15 @@ high throughput and cross-platform support.
 ## Feature Highlights
 
 * Zero-copy packet capture on Linux, macOS and Windows (via `pcap`)  
-  Optional eBPF datapath on Linux for even higher throughput (feature: `ebpf`).
+  Optional eBPF datapath on Linux for even higher throughput (feature: `ebpf`) (work in progress).
 * Stateful TCP/UDP session reconstruction with byte / packet counters, RTT estimation, history flags (Zeek-style).
 * Real-time DNS correlation, mDNS discovery and L7 process attribution.
 * Built-in whitelist / blacklist engine that can ingest Zeek JSON as well as EDAMAME-formatted rules.
 * On-device anomaly detection powered by an **extended Isolation Forest** model with automatic warm-up & threshold tuning.
-* Huge, compressed lookup tables packaged as const-data for:
-  * MAC OUI → vendor (≈2 MB)
-  * ASN IPv4 / IPv6 ranges (≈40 MB)  
-  * Common port & vendor vulnerability references
+* Lookup tables for:
+  * MAC OUI → vendor
+  * ASN IPv4 / IPv6 ranges
+  * Common port & vendor vulnerability references (dynamically updated)
 * Fully asynchronous (`tokio`) throughout – optimized for running inside an existing async runtime.
 
 ---

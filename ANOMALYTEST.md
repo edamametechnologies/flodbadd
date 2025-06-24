@@ -62,6 +62,3 @@ cargo test --features packetcapture anomaly -- --nocapture
 • **No anomalies detected** – The synthetic patterns might still be within learned norms. Tighten the test thresholds or exaggerate the generator parameters.
 
 • **Too many false positives** – The mixed test asserts that < 10 normal Chrome sessions are flagged. If this fails, revisit generator realism or threshold selection.
-
----
-Maintainer: *Security & ML Team* – feel free to update this document when adding new anomaly tests or adjusting traffic generators. 
