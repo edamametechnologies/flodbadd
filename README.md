@@ -57,8 +57,6 @@ Operational details:
 * **Sliding window** – keeps the last 300 samples by default; retrains periodically or when
   sufficient fresh data is available.
 
-Refer to **`NBAD.md`** for the full rationale and to `tests/anomaly_test.rs` for examples.
-
 ---
 
 ## Installation
@@ -235,7 +233,7 @@ cargo test --all-features -- --nocapture
 
 ## Blacklist System (quick overview)
 
-Flodbadd contains a flexible IP-based blacklist engine (see `BLACKLISTS.md` for the full spec).
+Flodbadd contains a flexible IP-based blacklist engine.
 Highlights:
 
 * **Custom & global lists** – load trusted feeds plus your own organisation-specific ranges.
