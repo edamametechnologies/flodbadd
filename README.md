@@ -18,7 +18,7 @@ high throughput and cross-platform support.
   Optional eBPF datapath on Linux for even higher throughput (feature: `ebpf`) (work in progress).
 * Stateful TCP/UDP session reconstruction with byte / packet counters, RTT estimation, history flags (Zeek-style).
 * Real-time DNS correlation, mDNS discovery and L7 process attribution.
-* Built-in whitelist / blacklist engine that can ingest Zeek JSON as well as EDAMAME-formatted rules.
+* Built-in whitelist / blacklist engine that can ingest EDAMAME-formatted rules.
 * On-device anomaly detection powered by an **extended Isolation Forest** model with automatic warm-up & threshold tuning.
 * Lookup tables for:
   * MAC OUI → vendor
