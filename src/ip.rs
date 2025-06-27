@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::{trace, warn};
 use undeadlock::*;
 
