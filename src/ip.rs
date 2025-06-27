@@ -17,7 +17,7 @@ lazy_static! {
     static ref LAN_IPV6_LOCAL_NETS: CustomDashMap<u8, HashSet<u128>> = CustomDashMap::new("LAN IPv6 Local Nets");
 
     /// Flag indicating if the local cache was initialized.
-    static ref CACHE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+    static ref CACHE_INITIALIZED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 }
 
 const MAX_CACHE_SIZE: usize = 10000;

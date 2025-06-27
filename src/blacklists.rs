@@ -287,7 +287,7 @@ lazy_static! {
         Arc::new(CustomRwLock::new(DateTime::<Utc>::from(std::time::UNIX_EPOCH)));
 
     // Flag indicating a full blacklist recompute is required.
-    static ref NEED_FULL_RECOMPUTE_BLACKLIST: AtomicBool = AtomicBool::new(false);
+    static ref NEED_FULL_RECOMPUTE_BLACKLIST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 }
 
 // Private helper function to clear the cache

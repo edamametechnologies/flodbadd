@@ -109,7 +109,7 @@ struct IsolationForestModel {
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
-    training_in_progress: AtomicBool,
+    training_in_progress: Arc<AtomicBool>,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
     /// allowed at a time.  The flag above remains `true` for as long as this handle is alive and
     /// not finished.
@@ -135,7 +135,7 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
             session_cache: CustomDashMap::new("session_cache"),
-            training_in_progress: AtomicBool::new(false),
+            training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
             min_training_interval: Duration::hours(24),
@@ -992,14 +992,14 @@ pub struct SessionAnalyzer {
     blacklisted_sessions: CustomDashMap<String, SessionInfo>,
     all_sessions: CustomDashMap<String, SessionInfo>, // Store all processed sessions
     // Warm-up related fields
-    warm_up_active: AtomicBool,
+    warm_up_active: Arc<AtomicBool>,
     warm_up_start_time: AtomicU64, // Timestamp when warm-up started (seconds since UNIX epoch)
     warm_up_duration: Duration,
     suspicious_threshold_percentile: f64,
     abnormal_threshold_percentile: f64,
     last_threshold_recalc_time: Arc<CustomRwLock<DateTime<Utc>>>,
     threshold_recalc_interval: Duration,
-    running: AtomicBool,
+    running: Arc<AtomicBool>,
     last_analysis_time: Arc<CustomRwLock<Option<DateTime<Utc>>>>,
 }
 
@@ -1016,7 +1016,7 @@ impl SessionAnalyzer {
             blacklisted_sessions: CustomDashMap::new("blacklisted_sessions"),
             all_sessions: CustomDashMap::new("all_sessions"),
             // Warm-up defaults - increase to ensure enough time for training
-            warm_up_active: AtomicBool::new(true),
+            warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
             warm_up_start_time: AtomicU64::new(0),
             warm_up_duration: Duration::seconds(120), // Increased from 60 to 120 seconds
@@ -1024,7 +1024,7 @@ impl SessionAnalyzer {
             abnormal_threshold_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             last_threshold_recalc_time: Arc::new(CustomRwLock::new(Utc::now())),
             threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_HOURS),
-            running: AtomicBool::new(false),
+            running: Arc::new(AtomicBool::new(false)),
             last_analysis_time: Arc::new(CustomRwLock::new(None)),
         }
     }
