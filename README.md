@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let interfaces = get_all_interfaces()?;
 
     // 2. Start capture
-    let mut capture = FlodbaddCapture::new();
+    let capture = FlodbaddCapture::new();
     capture.start(&interfaces).await;
 
     // 3. Let it run for a while…

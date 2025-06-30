@@ -1886,7 +1886,7 @@ mod ebpf_tests {
         };
         std::thread::sleep(std::time::Duration::from_millis(500));
         println!("Starting capture");
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         let interfaces = FlodbaddInterfaces::new();
         println!("Starting capture on interfaces: {}", interfaces);
         capture.start(&interfaces).await;

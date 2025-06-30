@@ -72,15 +72,15 @@ pub struct FlodbaddCapture {
     capture_task_handles: Arc<CustomDashMap<String, TaskHandle>>,
     sessions: Arc<CustomDashMap<Session, SessionInfo>>,
     current_sessions: Arc<CustomRwLock<Vec<Session>>>,
-    resolver: Option<Arc<FlodbaddResolver>>,
-    l7: Option<Arc<FlodbaddL7>>,
+    resolver: Arc<CustomRwLock<Option<Arc<FlodbaddResolver>>>>,
+    l7: Arc<CustomRwLock<Option<Arc<FlodbaddL7>>>>,
     whitelist_name: Arc<CustomRwLock<String>>,
     whitelist_conformance: Arc<AtomicBool>,
     last_whitelist_exception_time: Arc<CustomRwLock<DateTime<Utc>>>,
     whitelist_exceptions: Arc<CustomRwLock<Vec<Session>>>,
     blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
     filter: Arc<CustomRwLock<SessionFilter>>,
-    dns_packet_processor: Option<Arc<DnsPacketProcessor>>,
+    dns_packet_processor: Arc<CustomRwLock<Option<Arc<DnsPacketProcessor>>>>,
     edamame_model_update_task_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
     update_in_progress: Arc<AtomicBool>, // New field to track when update is in progress
     last_get_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
@@ -98,8 +98,8 @@ impl FlodbaddCapture {
             capture_task_handles: Arc::new(CustomDashMap::new("Capture Task Handles")),
             sessions: Arc::new(CustomDashMap::new("Sessions")),
             current_sessions: Arc::new(CustomRwLock::new(Vec::new())),
-            resolver: None,
-            l7: None,
+            resolver: Arc::new(CustomRwLock::new(None)),
+            l7: Arc::new(CustomRwLock::new(None)),
             whitelist_name: Arc::new(CustomRwLock::new("".to_string())),
             whitelist_conformance: Arc::new(AtomicBool::new(true)),
             last_whitelist_exception_time: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
@@ -108,7 +108,7 @@ impl FlodbaddCapture {
             whitelist_exceptions: Arc::new(CustomRwLock::new(Vec::new())),
             blacklisted_sessions: Arc::new(CustomRwLock::new(Vec::new())),
             filter: Arc::new(CustomRwLock::new(SessionFilter::GlobalOnly)),
-            dns_packet_processor: None,
+            dns_packet_processor: Arc::new(CustomRwLock::new(None)),
             edamame_model_update_task_handle: Arc::new(CustomRwLock::new(None)),
             update_in_progress: Arc::new(AtomicBool::new(false)), // Initialize to false
             last_get_sessions_fetch_timestamp: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
@@ -131,7 +131,7 @@ impl FlodbaddCapture {
         }
     }
 
-    pub async fn reset_whitelist(&mut self) {
+    pub async fn reset_whitelist(&self) {
         // Reset the conformance flag
         self.whitelist_conformance.store(true, Ordering::Relaxed);
 
@@ -151,7 +151,7 @@ impl FlodbaddCapture {
         info!("Whitelist exceptions cleared and session states reset to Unknown.");
     }
 
-    pub async fn set_whitelist(&mut self, whitelist_name: &str) {
+    pub async fn set_whitelist(&self, whitelist_name: &str) {
         // Check if the whitelist is valid (either a standard whitelist or our custom one)
         let is_custom = whitelist_name == "custom_whitelist";
         if !whitelist_name.is_empty() && !is_custom && !is_valid_whitelist(whitelist_name).await {
@@ -183,11 +183,11 @@ impl FlodbaddCapture {
         self.whitelist_name.read().await.clone()
     }
 
-    pub async fn set_filter(&mut self, filter: SessionFilter) {
+    pub async fn set_filter(&self, filter: SessionFilter) {
         *self.filter.write().await = filter;
     }
 
-    pub async fn start(&mut self, interfaces: &FlodbaddInterfaces) {
+    pub async fn start(&self, interfaces: &FlodbaddInterfaces) {
         // Check if the capture task is already running
         if self.is_capturing().await {
             warn!("Capture task already running, skipping start");
@@ -213,54 +213,35 @@ impl FlodbaddCapture {
         mdns_start().await;
 
         // Initialize and start L7
-        if let Some(l7) = &mut self.l7 {
-            if let Some(l7) = Arc::get_mut(l7) {
-                l7.start().await;
-            } else {
-                error!("Unable to get mutable reference to L7");
-            }
-        } else {
-            self.l7 = Some(Arc::new(FlodbaddL7::new()));
-            if let Some(l7) = &mut self.l7 {
-                if let Some(l7) = Arc::get_mut(l7) {
-                    l7.start().await;
-                } else {
-                    error!("Unable to get mutable reference to L7");
-                }
+        {
+            let mut l7_guard = self.l7.write().await;
+            if l7_guard.is_none() {
+                // Initialize L7
+                let mut new_l7 = FlodbaddL7::new();
+                new_l7.start().await;
+                *l7_guard = Some(Arc::new(new_l7));
             }
         }
 
         // Initialize and start resolver
-        if let Some(resolver) = &mut self.resolver {
-            if let Some(resolver) = Arc::get_mut(resolver) {
-                resolver.start().await;
-            }
-        } else {
-            self.resolver = Some(Arc::new(FlodbaddResolver::new()));
-            if let Some(resolver) = &mut self.resolver {
-                if let Some(resolver) = Arc::get_mut(resolver) {
-                    resolver.start().await;
-                } else {
-                    error!("Unable to get mutable reference to resolver");
-                }
+        {
+            let mut resolver_guard = self.resolver.write().await;
+            if resolver_guard.is_none() {
+                // Initialize resolver
+                let new_resolver = FlodbaddResolver::new();
+                new_resolver.start().await;
+                *resolver_guard = Some(Arc::new(new_resolver));
             }
         }
 
         // Initialize and start DNS packet processor
-        if let Some(dns_processor) = &mut self.dns_packet_processor {
-            if let Some(dns_processor) = Arc::get_mut(dns_processor) {
-                dns_processor.start().await;
-            } else {
-                error!("Failed to get mutable reference to DNS packet processor");
-            }
-        } else {
-            self.dns_packet_processor = Some(Arc::new(DnsPacketProcessor::new()));
-            if let Some(dns_processor) = &mut self.dns_packet_processor {
-                if let Some(dns_processor) = Arc::get_mut(dns_processor) {
-                    dns_processor.start().await;
-                } else {
-                    error!("Failed to get mutable reference to DNS packet processor");
-                }
+        {
+            let mut dns_guard = self.dns_packet_processor.write().await;
+            if dns_guard.is_none() {
+                // Initialize DNS processor
+                let mut new_dns_processor = DnsPacketProcessor::new();
+                new_dns_processor.start().await;
+                *dns_guard = Some(Arc::new(new_dns_processor));
             }
         }
 
@@ -317,7 +298,7 @@ impl FlodbaddCapture {
         }
     }
 
-    pub async fn stop(&mut self) {
+    pub async fn stop(&self) {
         if !self.is_capturing().await {
             warn!("Capture task not running, skipping stop");
             return;
@@ -337,50 +318,59 @@ impl FlodbaddCapture {
         self.stop_edamame_model_update_task().await;
 
         // Stop other components (resolver, L7, DNS processor)
-        // Use take() and try_unwrap pattern for safer stopping with Arcs
-        if let Some(resolver) = self.resolver.take() {
-            match Arc::try_unwrap(resolver) {
-                Ok(res) => {
-                    res.stop().await;
-                    info!("Resolver stopped");
+        // Use write lock to take the resolver and stop it
+        {
+            let mut resolver_guard = self.resolver.write().await;
+            if let Some(resolver) = resolver_guard.take() {
+                match Arc::try_unwrap(resolver) {
+                    Ok(res) => {
+                        res.stop().await;
+                        info!("Resolver stopped");
+                    }
+                    Err(arc) => {
+                        error!("Resolver Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
+                        *resolver_guard = Some(arc); // Put the Arc back if needed elsewhere potentially
+                    }
                 }
-                Err(arc) => {
-                    error!("Resolver Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
-                    self.resolver = Some(arc); // Put the Arc back if needed elsewhere potentially
-                }
+            } else {
+                info!("Resolver was already stopped or not initialized.");
             }
-        } else {
-            info!("Resolver was already stopped or not initialized.");
         }
 
-        if let Some(l7) = self.l7.take() {
-            match Arc::try_unwrap(l7) {
-                Ok(mut l7_instance) => {
-                    l7_instance.stop().await;
-                    info!("L7 stopped");
+        {
+            let mut l7_guard = self.l7.write().await;
+            if let Some(l7) = l7_guard.take() {
+                match Arc::try_unwrap(l7) {
+                    Ok(mut l7_instance) => {
+                        l7_instance.stop().await;
+                        info!("L7 stopped");
+                    }
+                    Err(arc) => {
+                        error!("L7 Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
+                        *l7_guard = Some(arc);
+                    }
                 }
-                Err(arc) => {
-                    error!("L7 Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
-                    self.l7 = Some(arc);
-                }
+            } else {
+                info!("L7 was already stopped or not initialized.");
             }
-        } else {
-            info!("L7 was already stopped or not initialized.");
         }
 
-        if let Some(dns_processor) = self.dns_packet_processor.take() {
-            match Arc::try_unwrap(dns_processor) {
-                Ok(mut dns_proc_instance) => {
-                    dns_proc_instance.stop_dns_query_cleanup_task().await;
-                    info!("DNS packet processor stopped");
+        {
+            let mut dns_guard = self.dns_packet_processor.write().await;
+            if let Some(dns_processor) = dns_guard.take() {
+                match Arc::try_unwrap(dns_processor) {
+                    Ok(mut dns_proc_instance) => {
+                        dns_proc_instance.stop_dns_query_cleanup_task().await;
+                        info!("DNS packet processor stopped");
+                    }
+                    Err(arc) => {
+                        error!("DNS Processor Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
+                        *dns_guard = Some(arc);
+                    }
                 }
-                Err(arc) => {
-                    error!("DNS Processor Arc still has multiple owners, cannot stop directly. Assuming it will stop when dropped or via internal signal.");
-                    self.dns_packet_processor = Some(arc);
-                }
+            } else {
+                info!("DNS Packet Processor was already stopped or not initialized.");
             }
-        } else {
-            info!("DNS Packet Processor was already stopped or not initialized.");
         }
 
         // Clear ALL session data for consistency
@@ -393,7 +383,7 @@ impl FlodbaddCapture {
     }
 
     /// Clear all session data structures for a clean restart
-    async fn clear_all_sessions(&mut self) {
+    async fn clear_all_sessions(&self) {
         info!("Clearing all session data for clean restart");
 
         // Clear the main sessions map
@@ -412,7 +402,7 @@ impl FlodbaddCapture {
     }
 
     /// Reset fetch timestamps to epoch to ensure fresh fetching after restart
-    async fn reset_fetch_timestamps(&mut self) {
+    async fn reset_fetch_timestamps(&self) {
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
 
         *self.last_get_sessions_fetch_timestamp.write().await = epoch;
@@ -429,7 +419,7 @@ impl FlodbaddCapture {
         debug!("All fetch timestamps reset to epoch");
     }
 
-    pub async fn restart(&mut self, interfaces: &FlodbaddInterfaces) {
+    pub async fn restart(&self, interfaces: &FlodbaddInterfaces) {
         // Only restart if capturing and if the interface string has changed
         if !self.is_capturing().await || self.interfaces.read().await.eq(interfaces) {
             warn!(
@@ -464,7 +454,7 @@ impl FlodbaddCapture {
         blacklists::get_blacklists().await
     }
 
-    pub async fn set_custom_whitelists(&mut self, whitelist_json: &str) {
+    pub async fn set_custom_whitelists(&self, whitelist_json: &str) {
         // Clear the custom whitelists if the JSON is empty
         if whitelist_json.is_empty() {
             // Use the whitelists module function to reset
@@ -512,7 +502,7 @@ impl FlodbaddCapture {
         // No extra reset/update needed here – already done above
     }
 
-    pub async fn create_custom_whitelists(&mut self) -> Result<String> {
+    pub async fn create_custom_whitelists(&self) -> Result<String> {
         // First update all sessions
         self.update_sessions().await;
 
@@ -534,7 +524,7 @@ impl FlodbaddCapture {
         }
     }
 
-    pub async fn augment_custom_whitelists(&mut self) -> Result<String> {
+    pub async fn augment_custom_whitelists(&self) -> Result<String> {
         // Ensure sessions are up to date so that exceptions have latest data
         self.update_sessions().await;
 
@@ -781,7 +771,7 @@ impl FlodbaddCapture {
         Ok(device)
     }
 
-    async fn start_capture_tasks(&mut self) {
+    async fn start_capture_tasks(&self) {
         // Retrieve the configured interfaces from our stored FlodbaddInterfaces
         let interfaces = self.interfaces.read().await;
         let passed_interface_success = if !interfaces.interfaces.is_empty() {
@@ -966,18 +956,23 @@ impl FlodbaddCapture {
                                         match parsed_packet {
                                             ParsedPacket::SessionPacket(cp) => {
                                                 // Call the original async processing function
-                                                process_parsed_packet(
-                                                    cp,
-                                                    &sessions_clone,
-                                                    &current_sessions_clone,
-                                                    &own_ips_clone,
-                                                    &filter_clone,
-                                                    l7_clone.as_ref(),
-                                                )
-                                                .await;
+                                                                                        let l7_opt = {
+                                            let l7_guard = l7_clone.read().await;
+                                            l7_guard.clone()
+                                        };
+                                        process_parsed_packet(
+                                            cp,
+                                            &sessions_clone,
+                                            &current_sessions_clone,
+                                            &own_ips_clone,
+                                            &filter_clone,
+                                            l7_opt.as_ref(),
+                                        )
+                                        .await;
                                             }
                                             ParsedPacket::DnsPacket(dp) => {
-                                                if let Some(dns_packet_processor) = dns_packet_processor.as_ref() {
+                                                let dns_guard = dns_packet_processor.read().await;
+                                                if let Some(dns_packet_processor) = dns_guard.as_ref() {
                                                     dns_packet_processor.process_dns_packet(dp.dns_payload).await;
                                                 }
                                             }
@@ -1145,18 +1140,23 @@ impl FlodbaddCapture {
                                     total_packets += 1;
                                     match parse_packet_pcap(&packet_owned.data) {
                                         Some(ParsedPacket::SessionPacket(cp)) => {
+                                            let l7_opt = {
+                                                let l7_guard = l7.read().await;
+                                                l7_guard.clone()
+                                            };
                                             process_parsed_packet(
                                                 cp,
                                                 &sessions,
                                                 &current_sessions,
                                                 &own_ips,
                                                 &filter,
-                                                l7.as_ref(),
+                                                l7_opt.as_ref(),
                                             )
                                             .await;
                                         }
                                         Some(ParsedPacket::DnsPacket(dp)) => {
-                                            if let Some(dns_packet_processor) = dns_packet_processor.as_ref() {
+                                            let dns_guard = dns_packet_processor.read().await;
+                                            if let Some(dns_packet_processor) = dns_guard.as_ref() {
                                                 dns_packet_processor.process_dns_packet(dp.dns_payload).await;
                                             }
                                         }
@@ -1185,7 +1185,7 @@ impl FlodbaddCapture {
         );
     }
 
-    async fn stop_capture_tasks(&mut self) {
+    async fn stop_capture_tasks(&self) {
         info!("Stopping capture tasks...");
         let keys: Vec<String> = self
             .capture_task_handles
@@ -1687,10 +1687,7 @@ impl FlodbaddCapture {
         !self.blacklisted_sessions.read().await.is_empty()
     }
 
-    pub async fn set_custom_blacklists(
-        &mut self,
-        blacklist_json: &str,
-    ) -> Result<(), anyhow::Error> {
+    pub async fn set_custom_blacklists(&self, blacklist_json: &str) -> Result<(), anyhow::Error> {
         let result = blacklists::set_custom_blacklists(blacklist_json).await;
 
         // Force immediate blacklist recomputation after setting custom blacklists
@@ -1708,9 +1705,9 @@ impl FlodbaddCapture {
     async fn update_sessions_internal(
         sessions: Arc<CustomDashMap<Session, SessionInfo>>,
         current_sessions: Arc<CustomRwLock<Vec<Session>>>,
-        resolver: &Option<Arc<FlodbaddResolver>>, // Corrected type
-        l7: &Option<Arc<FlodbaddL7>>,
-        dns_packet_processor: &Option<Arc<DnsPacketProcessor>>,
+        resolver: &Arc<CustomRwLock<Option<Arc<FlodbaddResolver>>>>,
+        l7: &Arc<CustomRwLock<Option<Arc<FlodbaddL7>>>>,
+        dns_packet_processor: &Arc<CustomRwLock<Option<Arc<DnsPacketProcessor>>>>,
         whitelist_name: Arc<CustomRwLock<String>>,
         whitelist_conformance: Arc<AtomicBool>,
         last_whitelist_exception_time: Arc<CustomRwLock<DateTime<Utc>>>,
@@ -1733,26 +1730,37 @@ impl FlodbaddCapture {
         debug!("update_sessions_status done");
 
         // Update L7 information for all sessions
-        if let Some(l7_arc) = l7 {
-            Self::populate_l7(&sessions, &Some(l7_arc.clone()), &current_sessions).await;
+        {
+            let l7_guard = l7.read().await;
+            if let Some(l7_arc) = l7_guard.as_ref() {
+                Self::populate_l7(&sessions, &Some(l7_arc.clone()), &current_sessions).await;
+            }
         }
         debug!("populate_l7 done");
 
         // Enrich DNS resolutions with DNS packet processor information
-        if let (Some(res), Some(dns_proc)) = (resolver, dns_packet_processor) {
-            Self::integrate_dns_with_resolver(res, dns_proc).await;
+        {
+            let resolver_guard = resolver.read().await;
+            let dns_guard = dns_packet_processor.read().await;
+            if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
+                Self::integrate_dns_with_resolver(res, dns_proc).await;
+            }
         }
         debug!("integrate_dns_with_resolver done");
 
         // Then update resolver information for all sessions
-        if let (Some(res), Some(dns_proc)) = (resolver, dns_packet_processor) {
-            Self::populate_domain_names(
-                &sessions,
-                &Some(res.clone()),
-                &dns_proc.get_dns_resolutions(),
-                &current_sessions,
-            )
-            .await;
+        {
+            let resolver_guard = resolver.read().await;
+            let dns_guard = dns_packet_processor.read().await;
+            if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
+                Self::populate_domain_names(
+                    &sessions,
+                    &Some(res.clone()),
+                    &dns_proc.get_dns_resolutions(),
+                    &current_sessions,
+                )
+                .await;
+            }
         }
         debug!("populate_domain_names done");
 
@@ -1984,7 +1992,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_session_management() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Simulate a clear client-server connection with well-known service port
@@ -2036,13 +2044,17 @@ mod tests {
         let own_ips: HashSet<IpAddr> = own_ips_vec.into_iter().collect();
 
         // Process all three packets in a valid TCP handshake sequence
+        let l7_opt = {
+            let l7_guard = capture.l7.read().await;
+            l7_guard.clone()
+        };
         process_parsed_packet(
             client_syn,
             &capture.sessions,
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -2052,7 +2064,7 @@ mod tests {
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -2062,7 +2074,7 @@ mod tests {
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -2131,7 +2143,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_session_management_revert() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_whitelist("github").await;
         capture.set_filter(SessionFilter::All).await; // Include all sessions in the filter
 
@@ -2155,13 +2167,17 @@ mod tests {
         let own_ips: HashSet<IpAddr> = own_ips_vec.into_iter().collect();
 
         // Process the synthetic packet
+        let l7_opt = {
+            let l7_guard = capture.l7.read().await;
+            l7_guard.clone()
+        };
         process_parsed_packet(
             session_packet,
             &capture.sessions,
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -2197,13 +2213,13 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_populate_domain_names() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_whitelist("github").await;
 
         // Initialize the resolver component
         let resolver = Arc::new(FlodbaddResolver::new());
         resolver.start().await;
-        capture.resolver = Some(resolver.clone());
+        *capture.resolver.write().await = Some(resolver);
 
         // Create a synthetic session and add it to sessions
         let session = Session {
@@ -2280,9 +2296,10 @@ mod tests {
         );
 
         // Call populate_domain_names
+        let resolver_guard = capture.resolver.read().await;
         FlodbaddCapture::populate_domain_names(
             &capture.sessions,
-            &capture.resolver,
+            &resolver_guard,
             &dns_processor.get_dns_resolutions(),
             &capture.current_sessions,
         )
@@ -2296,8 +2313,8 @@ mod tests {
         };
 
         // Clean up
-        if let Some(resolver) = &capture.resolver {
-            let resolver = Arc::clone(resolver);
+        let resolver_guard = capture.resolver.read().await;
+        if let Some(resolver) = resolver_guard.as_ref() {
             resolver.stop().await;
         }
     }
@@ -2305,7 +2322,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_update_sessions_status_added() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Create a synthetic session and add it to sessions
@@ -2413,7 +2430,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_sessions_incremental() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         let session1 = Session {
@@ -2565,7 +2582,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_current_sessions_incremental() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         let session1 = Session {
@@ -2717,7 +2734,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_blacklisted_sessions_incremental() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Create test sessions FIRST with recent timestamps
@@ -2864,7 +2881,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_whitelist_exceptions_incremental() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // PART 1: Setup custom whitelist including GitHub, excluding Google DNS
@@ -3119,7 +3136,7 @@ mod tests {
 
         // --- Test Setup ---
         println!("Setting up capture test...");
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         // Reset global state before starting
         whitelists::reset_to_default().await;
         blacklists::reset_to_default().await;
@@ -3374,7 +3391,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_blacklist_integration() {
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Create a custom blacklist that includes our test IP
@@ -3419,13 +3436,17 @@ mod tests {
         let own_ips: HashSet<IpAddr> = own_ips_vec.into_iter().collect();
 
         // Process the packet
+        let l7_opt = {
+            let l7_guard = capture.l7.read().await;
+            l7_guard.clone()
+        };
         process_parsed_packet(
             session_packet,
             &capture.sessions,
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -3443,7 +3464,7 @@ mod tests {
     #[serial]
     async fn test_blacklist_functionality() {
         // Initialize a capture instance
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
 
         // Create a custom blacklist
         let blacklist_ip = "192.168.25.5";
@@ -3815,7 +3836,7 @@ mod tests {
     async fn test_custom_whitelist_recomputation() {
         println!("\n=== Starting test_custom_whitelist_recomputation ===");
         // Create the base capture class
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Make sure whitelist module is in default state
@@ -3880,13 +3901,17 @@ mod tests {
 
         // Process packets with custom whitelist
         println!("Processing packets with custom whitelist");
+        let l7_opt = {
+            let l7_guard = capture.l7.read().await;
+            l7_guard.clone()
+        };
         process_parsed_packet(
             github_packet.clone(),
             &capture.sessions,
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -3896,7 +3921,7 @@ mod tests {
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -3952,13 +3977,17 @@ mod tests {
         // Don't update here yet
 
         // Process packets with github whitelist
+        let l7_opt = {
+            let l7_guard = capture.l7.read().await;
+            l7_guard.clone()
+        };
         process_parsed_packet(
             github_packet.clone(),
             &capture.sessions,
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -3968,7 +3997,7 @@ mod tests {
             &capture.current_sessions,
             &own_ips,
             &capture.filter,
-            capture.l7.as_ref(),
+            l7_opt.as_ref(),
         )
         .await;
 
@@ -4028,7 +4057,7 @@ mod tests {
     #[serial]
     async fn test_custom_blacklist_recomputation() {
         println!("Starting test_custom_blacklist_recomputation");
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_filter(SessionFilter::All).await;
 
         // Use an IpAddr for own_ips helper compatibility
@@ -4407,7 +4436,7 @@ mod tests {
     #[serial]
     async fn test_capture_start_stop() {
         println!("--- Starting test_capture_start_stop ---");
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -4535,7 +4564,7 @@ mod tests {
     #[serial]
     async fn test_blacklisted_sessions_list_maintenance() {
         // Create a new capture instance
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
         capture.set_whitelist("github").await;
         capture.set_filter(SessionFilter::All).await;
 
@@ -4799,7 +4828,7 @@ mod tests {
             interfaces: vec![default_interface],
         };
 
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
 
         // Start capture (stand-alone mode within test)
         capture.start(&interfaces).await;
@@ -4846,7 +4875,7 @@ mod tests {
             interfaces: vec![default_interface.clone()],
         };
 
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
 
         // Start capture
         capture.start(&interfaces).await;
@@ -4998,7 +5027,7 @@ mod tests {
             interfaces: vec![default_interface],
         };
 
-        let mut capture = FlodbaddCapture::new();
+        let capture = FlodbaddCapture::new();
 
         // === FIRST START ===
         println!("=== FIRST START ===");
