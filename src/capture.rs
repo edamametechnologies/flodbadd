@@ -1551,7 +1551,6 @@ impl FlodbaddCapture {
         let mut current_sessions_vec = Vec::new();
         let current_session_keys = self.current_sessions.read().await.clone();
 
-        // 1) regular current sessions (same logic as before)
         for key in current_session_keys.iter() {
             if let Some(entry) = self.sessions.get(key) {
                 let session_info = entry.value();
@@ -1576,39 +1575,6 @@ impl FlodbaddCapture {
 
                 if should_include {
                     current_sessions_vec.push(session_info_clone);
-                }
-            }
-        }
-
-        // 2) additional sessions that changed **after** the last fetch but are no longer in current_sessions
-        if incremental {
-            for entry in self.sessions.iter() {
-                let session_info = entry.value();
-
-                if session_info.last_modified <= last_fetch_ts {
-                    continue; // unchanged
-                }
-
-                // Skip if it's already included via the current_session_keys path
-                if current_session_keys.contains(entry.key()) {
-                    continue;
-                }
-
-                // Clone and clean up domain name
-                let mut session_clone = session_info.clone();
-                if session_clone.dst_domain == Some("Unknown".to_string()) {
-                    session_clone.dst_domain = None;
-                }
-
-                // Apply session filter
-                let should_include = match filter {
-                    SessionFilter::All => true,
-                    SessionFilter::LocalOnly => is_local_session!(session_clone),
-                    SessionFilter::GlobalOnly => is_global_session!(session_clone),
-                };
-
-                if should_include {
-                    current_sessions_vec.push(session_clone);
                 }
             }
         }
