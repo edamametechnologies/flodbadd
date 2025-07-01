@@ -276,23 +276,28 @@ impl FlodbaddCapture {
 
         // Wait briefly until at least one capture task is registered so callers can rely on is_capturing()
         use tokio::time::{sleep, Duration};
-        const CAPTURE_START_TIMEOUT_MS: u64 = 10000; // 10 s upper bound
+        // Increase timeout for CI environments where interface detection and pcap startup may be slower
+        const CAPTURE_START_TIMEOUT_MS: u64 = 30000; // 30 s upper bound (increased from 10s)
         let start_wait = std::time::Instant::now();
         while !self.is_capturing().await
             && start_wait.elapsed().as_millis() < CAPTURE_START_TIMEOUT_MS as u128
         {
-            info!("Waiting for capture task(s) to start...");
+            info!("Waiting for capture task(s) to start... (elapsed: {}ms, tasks: {})", 
+                start_wait.elapsed().as_millis(), 
+                self.capture_task_handles.len());
             sleep(Duration::from_millis(1000)).await;
         }
 
         if self.is_capturing().await {
-            debug!(
-                "Capture task(s) started successfully (tasks={}).",
+            info!(
+                "Capture task(s) started successfully after {}ms (tasks={}).",
+                start_wait.elapsed().as_millis(),
                 self.capture_task_handles.len()
             );
         } else {
             error!(
-                "Capture task(s) failed to start (tasks={}).",
+                "Capture task(s) failed to start after {}ms timeout (tasks={}).",
+                start_wait.elapsed().as_millis(),
                 self.capture_task_handles.len()
             );
         }

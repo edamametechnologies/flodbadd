@@ -1019,7 +1019,8 @@ impl SessionAnalyzer {
             warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
             warm_up_start_time: AtomicU64::new(0),
-            warm_up_duration: Duration::seconds(120), // Increased from 60 to 120 seconds
+            // Use a shorter warm-up during tests
+            warm_up_duration: Duration::seconds(if cfg!(test) { 15 } else { 120 }),
             suspicious_threshold_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             abnormal_threshold_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             last_threshold_recalc_time: Arc::new(CustomRwLock::new(Utc::now())),
