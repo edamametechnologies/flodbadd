@@ -8,9 +8,10 @@ use std::sync::Arc;
 use tracing::warn;
 use undeadlock::*;
 
-// TODO load from the cloud regularly and store locally
-// const ASN_V4_DB_URL: &str = "https://iptoasn.com/data/ip2asn-v4.tsv.gz";
-// const ASN_V6_DB_URL: &str = "https://iptoasn.com/data/ip2asn-v6.tsv.gz";
+// ASN databases are embedded for offline operation
+// Future versions may support cloud updates from:
+// - IPv4: https://iptoasn.com/data/ip2asn-v4.tsv.gz
+// - IPv6: https://iptoasn.com/data/ip2asn-v6.tsv.gz
 
 lazy_static! {
     static ref ASN_V4: Arc<Db> = {

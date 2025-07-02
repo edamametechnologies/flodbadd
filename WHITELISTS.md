@@ -1,39 +1,52 @@
-# EDAMAME Whitelist System
+# Flodbadd Whitelist System
 
 ## Overview
 
-The EDAMAME whitelist system provides a flexible and powerful way to control network access through a hierarchical structure with clear matching priorities. This document explains how whitelists work, how to create them, and provides examples for common use cases.
+The Flodbadd whitelist system provides a flexible and powerful way to control network access through a hierarchical structure with clear matching priorities. This document explains how whitelists work, how to create them, and provides examples for common use cases.
 
 ## Whitelist Structure
 
 ### Basic Components
 
 ```rust
-// Main whitelist container
-struct Whitelists {
-    date: String,                                   // Creation/update date
-    signature: Option<String>,                      // Optional cryptographic signature
-    whitelists: CustomDashMap<String, WhitelistInfo>, // Named whitelist collection (DashMap for concurrency)
+// Main whitelist container (from whitelists.rs)
+pub struct Whitelists {
+    pub date: String,                                    // Creation/update date
+    pub signature: Option<String>,                       // Cryptographic signature for integrity
+    pub whitelists: Arc<CustomDashMap<String, WhitelistInfo>>, // Named whitelist collection
 }
 
 // Individual whitelist definition
-struct WhitelistInfo {
-    name: String,                       // Unique identifier
-    extends: Option<Vec<String>>,       // Parent whitelists to inherit from
-    endpoints: Vec<WhitelistEndpoint>,  // List of allowed endpoints
+pub struct WhitelistInfo {
+    pub name: String,                        // Unique identifier
+    pub extends: Option<Vec<String>>,        // Parent whitelists to inherit from
+    pub endpoints: Vec<WhitelistEndpoint>,   // List of allowed endpoints
 }
 
-// Network endpoint specification
-struct WhitelistEndpoint {
-    domain: Option<String>,      // Domain name (supports wildcards)
-    ip: Option<String>,          // IP address or CIDR range
-    port: Option<u16>,           // Port number
-    protocol: Option<String>,    // Protocol (TCP, UDP, etc.)
-    as_number: Option<u32>,      // Autonomous System number
-    as_country: Option<String>,  // Country code for the AS
-    as_owner: Option<String>,    // AS owner/organization name
-    process: Option<String>,     // Process name
-    description: Option<String>, // Human-readable description
+// Network endpoint specification with comprehensive matching criteria
+pub struct WhitelistEndpoint {
+    pub domain: Option<String>,      // Domain name (supports wildcards: *.example.com)
+    pub ip: Option<String>,          // IP address or CIDR range
+    pub port: Option<u16>,           // Port number (None = any port)
+    pub protocol: Option<String>,    // Protocol (TCP, UDP, ICMP, etc.)
+    pub as_number: Option<u32>,      // Autonomous System number
+    pub as_country: Option<String>,  // Country code for the AS (case-insensitive)
+    pub as_owner: Option<String>,    // AS owner/organization name (case-insensitive)
+    pub process: Option<String>,     // Process name (case-insensitive)
+    pub description: Option<String>, // Human-readable description for documentation
+}
+```
+
+### JSON Serialization Format
+
+The system uses a flattened JSON structure for persistence and interchange:
+
+```rust
+// JSON representation for serialization
+pub struct WhitelistsJSON {
+    pub date: String,
+    pub signature: Option<String>,
+    pub whitelists: Vec<WhitelistInfo>,  // Flattened array format
 }
 ```
 
@@ -41,11 +54,12 @@ struct WhitelistEndpoint {
 
 ### Basic Whitelist Setup
 
-Whitelists are defined in JSON format and loaded at startup. Each whitelist consists of a unique name and a list of endpoint specifications:
+Whitelists are defined in JSON format and can be loaded at runtime or embedded as defaults:
 
 ```json
 {
-  "date": "October 24th 2023",
+  "date": "2024-01-01",
+  "signature": "cryptographic-signature-here",
   "whitelists": [
     {
       "name": "basic_services",
@@ -54,7 +68,13 @@ Whitelists are defined in JSON format and loaded at startup. Each whitelist cons
           "domain": "api.example.com", 
           "port": 443, 
           "protocol": "TCP",
-          "description": "Example API server"
+          "description": "Example API server HTTPS"
+        },
+        {
+          "ip": "192.168.1.0/24",
+          "port": 22,
+          "protocol": "TCP",
+          "description": "Internal SSH access"
         }
       ]
     }
@@ -62,323 +82,580 @@ Whitelists are defined in JSON format and loaded at startup. Each whitelist cons
 }
 ```
 
-### Inheritance System
+### Advanced Inheritance System
 
-Whitelists can inherit from other whitelists using the `extends` field, creating a hierarchical structure:
+The inheritance system supports complex hierarchical structures with circular dependency detection:
 
 ```json
 {
+  "date": "2024-01-01",
   "whitelists": [
     {
-      "name": "base_services",
+      "name": "base_infrastructure",
       "endpoints": [
-        { "domain": "api.example.com", "port": 443, "protocol": "TCP" }
+        { "domain": "dns.google.com", "port": 53, "protocol": "UDP", "description": "Google DNS" },
+        { "domain": "time.nist.gov", "port": 123, "protocol": "UDP", "description": "NTP servers" }
       ]
     },
     {
-      "name": "extended_services",
-      "extends": ["base_services"],
+      "name": "corporate_services", 
+      "extends": ["base_infrastructure"],
       "endpoints": [
-        { "domain": "cdn.example.com", "port": 443, "protocol": "TCP" }
+        { "domain": "*.corp.example.com", "port": 443, "protocol": "TCP", "description": "Corporate services" }
+      ]
+    },
+    {
+      "name": "development_environment",
+      "extends": ["corporate_services"],
+      "endpoints": [
+        { "ip": "10.0.0.0/8", "description": "Development network access" },
+        { "domain": "*.dev.example.com", "protocol": "TCP", "description": "Development services" }
       ]
     }
   ]
 }
 ```
 
-When a whitelist extends another:
+### Inheritance Resolution Algorithm
 
-1. **Endpoint Aggregation**: All endpoints from the parent whitelist(s) are included in the child.
-2. **Multiple Inheritance**: A whitelist can extend multiple parent whitelists.
-3. **Circular Detection**: The system detects and prevents infinite recursion in circular inheritance patterns.
-4. **Inheritance Depth**: There is no limit to the inheritance chain depth.
+The system implements depth-first inheritance resolution with cycle detection:
 
-When retrieving endpoints from a whitelist:
-```
-function get_all_endpoints(whitelist_name):
-    visited = HashSet()
-    visited.add(whitelist_name)
+```rust
+fn get_all_endpoints(&self, whitelist_name: &str, visited: &mut HashSet<String>) -> Result<Vec<WhitelistEndpoint>> {
+    if visited.contains(whitelist_name) {
+        return Err(anyhow!("Circular dependency detected in whitelist inheritance"));
+    }
     
-    info = whitelists.get(whitelist_name)
-    endpoints = info.endpoints.clone()
+    visited.insert(whitelist_name.to_string());
     
-    if info.extends exists:
-        for parent in info.extends:
-            if parent not in visited:
-                visited.add(parent)
-                endpoints.extend(get_all_endpoints(parent, visited))
+    let info = self.whitelists.get(whitelist_name)
+        .ok_or_else(|| anyhow!("Whitelist not found: {}", whitelist_name))?;
     
-    return endpoints
-```
-
-## Matching Algorithm
-
-The whitelist system follows a precise matching order when determining if a network connection should be allowed:
-
-### 1. Fundamental Match Criteria
-
-These are always checked first and are required for any further matching:
-
-```
-if (!port_matches || !protocol_matches || !process_matches):
-    return NO_MATCH
-```
-
-- **Protocol**: Must match case-insensitively if specified (e.g., "TCP" matches "tcp").
-- **Port**: Must match exactly if specified.
-- **Process**: Must match case-insensitively if specified.
-
-### 2. Hierarchical Match Order
-
-If fundamental criteria pass, the system evaluates in this strict order:
-
-1. **Domain Matching**: If domain is specified and matches, immediately accept.
-2. **IP Matching**: If domain didn't match or wasn't specified, check IP.
-3. **AS Information**: Only checked if neither domain nor IP matched, or AS info is specifically required.
-
-```
-// Domain priority
-if (domain_specified && domain_matches):
-    return MATCH
-
-// IP priority
-if (ip_specified && ip_matches):
-    return MATCH
-
-// Entity match validation
-if ((domain_specified || ip_specified) && !(domain_matches || ip_matches)):
-    return NO_MATCH
-
-// AS info matching (when needed)
-if (should_check_as_info && !as_info_matches):
-    return NO_MATCH
-
-// If we've made it this far, all checks have passed
-return MATCH
-```
-
-## Pattern Matching Details
-
-### Domain Wildcard Matching
-
-The system supports three types of domain wildcards with specific behaviors:
-
-#### 1. Prefix Wildcards (`*.example.com`)
-
-```
-function prefix_wildcard_match(domain, pattern):
-    // Remove "*."; remaining pattern is the suffix
-    suffix = pattern.substring(2)
+    let mut endpoints = info.endpoints.clone();
     
-    // Domain must not exactly match suffix (requires subdomain)
-    if (domain == suffix):
-        return false
+    // Recursively collect from parent whitelists
+    if let Some(extends) = &info.extends {
+        for parent_name in extends {
+            let parent_endpoints = self.get_all_endpoints(parent_name, visited)?;
+            endpoints.extend(parent_endpoints);
+        }
+    }
+    
+    visited.remove(whitelist_name);
+    Ok(endpoints)
+}
+```
+
+## Advanced Matching Algorithm
+
+### Multi-Criteria Matching Priority
+
+The whitelist system follows a precise matching order for optimal performance and security:
+
+```rust
+pub fn endpoint_matches_with_reason(
+    session_domain: Option<&str>,
+    session_ip: Option<&str>, 
+    port: u16,
+    protocol: &str,
+    as_number: Option<u32>,
+    as_country: Option<&str>,
+    as_owner: Option<&str>,
+    process: Option<&str>,
+    endpoint: &WhitelistEndpoint,
+) -> (bool, Option<String>) {
+    // 1. Fundamental criteria must match first
+    if !port_matches(port, endpoint.port) {
+        return (false, Some(format!("Port mismatch: {} vs {:?}", port, endpoint.port)));
+    }
+    
+    if !protocol_matches(protocol, &endpoint.protocol) {
+        return (false, Some(format!("Protocol mismatch: {} vs {:?}", protocol, endpoint.protocol)));
+    }
+    
+    if !process_matches(process, &endpoint.process) {
+        return (false, Some(format!("Process mismatch: {:?} vs {:?}", process, endpoint.process)));
+    }
+    
+    // 2. Entity identification (domain has priority over IP)
+    let domain_specified = endpoint.domain.is_some();
+    let ip_specified = endpoint.ip.is_some();
+    
+    if domain_specified {
+        if domain_matches(session_domain, &endpoint.domain) {
+            return check_as_criteria(as_number, as_country, as_owner, endpoint);
+        } else if !ip_specified {
+            return (false, Some("Domain mismatch and no IP fallback".to_string()));
+        }
+    }
+    
+    if ip_specified {
+        if ip_matches(session_ip, &endpoint.ip) {
+            return check_as_criteria(as_number, as_country, as_owner, endpoint);
+        } else if domain_specified {
+            return (false, Some("Both domain and IP mismatch".to_string()));
+        }
+    }
+    
+    // 3. If neither domain nor IP specified, only AS/process matching
+    if !domain_specified && !ip_specified {
+        return check_as_criteria(as_number, as_country, as_owner, endpoint);
+    }
+    
+    (false, Some("No matching criteria found".to_string()))
+}
+```
+
+## Session-based Whitelist Generation
+
+### Automatic Whitelist Creation from Traffic
+
+The system can generate whitelists automatically from observed network sessions:
+
+```rust
+impl Whitelists {
+    pub fn new_from_sessions(sessions: &Vec<SessionInfo>) -> Self {
+        let mut endpoints = Vec::new();
         
-    // Domain must end with suffix
-    if (!domain.endsWith(suffix)):
-        return false
+        for session in sessions {
+            // Extract endpoint information from session
+            let endpoint = WhitelistEndpoint {
+                domain: session.dst_domain.clone(),
+                ip: Some(session.session.dst_ip.to_string()),
+                port: Some(session.session.dst_port),
+                protocol: Some(session.session.protocol.to_string()),
+                as_number: session.dst_asn.as_ref().map(|asn| asn.as_number),
+                as_country: session.dst_asn.as_ref().map(|asn| asn.country.clone()),
+                as_owner: session.dst_asn.as_ref().map(|asn| asn.owner.clone()),
+                process: session.l7.as_ref().map(|l7| l7.process_name.clone()),
+                description: Some(format!("Auto-generated from session to {}", session.session.dst_ip)),
+            };
+            endpoints.push(endpoint);
+        }
         
-    // Ensure there's a dot before the suffix (valid subdomain boundary)
-    prefixLen = domain.length - suffix.length - 1
-    return prefixLen > 0 && domain[prefixLen] == '.'
-```
-
-**Examples:**
-- `*.example.com` ✓ Matches: `sub.example.com`, `a.b.example.com`
-- `*.example.com` ✗ Does NOT match: `example.com`, `otherexample.com`
-
-#### 2. Suffix Wildcards (`example.*`)
-
-```
-function suffix_wildcard_match(domain, pattern):
-    // Remove ".*"; remaining pattern is the prefix
-    prefix = pattern.substring(0, pattern.length - 2)
-    
-    // Domain must start with prefix
-    if (!domain.startsWith(prefix)):
-        return false
+        // Deduplicate endpoints based on fingerprint
+        let mut unique_fingerprints = HashSet::new();
+        endpoints.retain(|ep| {
+            let fingerprint = (
+                ep.domain.clone(), ep.ip.clone(), ep.port,
+                ep.protocol.clone(), ep.as_number, ep.as_country.clone(),
+                ep.as_owner.clone(), ep.process.clone()
+            );
+            unique_fingerprints.insert(fingerprint)
+        });
         
-    // Exact prefix match is valid
-    if (domain.length == prefix.length):
-        return true
+        // Create whitelist structure
+        Self::create_custom_whitelist(endpoints)
+    }
+}
+```
+
+### Whitelist Merging and Composition
+
+Support for merging multiple whitelist sources:
+
+```rust
+pub fn merge_custom_whitelists(json_a: &str, json_b: &str) -> Result<String> {
+    let whitelist_a: WhitelistsJSON = serde_json::from_str(json_a)?;
+    let whitelist_b: WhitelistsJSON = serde_json::from_str(json_b)?;
+    
+    // Combine whitelists with conflict resolution
+    let mut combined_whitelists = whitelist_a.whitelists;
+    
+    for whitelist_b_info in whitelist_b.whitelists {
+        if let Some(existing) = combined_whitelists.iter_mut()
+            .find(|w| w.name == whitelist_b_info.name) {
+            // Merge endpoints, avoiding duplicates
+            merge_whitelist_endpoints(existing, &whitelist_b_info);
+        } else {
+            combined_whitelists.push(whitelist_b_info);
+        }
+    }
+    
+    let merged = WhitelistsJSON {
+        date: chrono::Utc::now().format("%B %dth %Y").to_string(),
+        signature: None, // Re-signing required after merge
+        whitelists: combined_whitelists,
+    };
+    
+    serde_json::to_string(&merged).map_err(Into::into)
+}
+```
+
+## Pattern Matching Implementation
+
+### Enhanced Domain Matching
+
+The domain matching system supports sophisticated wildcard patterns:
+
+```rust
+fn domain_matches(session_domain: Option<&str>, endpoint_domain: &Option<String>) -> bool {
+    let (Some(session_domain), Some(endpoint_domain)) = (session_domain, endpoint_domain.as_ref()) else {
+        return false;
+    };
+    
+    // Exact match
+    if session_domain == endpoint_domain {
+        return true;
+    }
+    
+    // Wildcard patterns
+    if endpoint_domain.contains('*') {
+        return wildcard_match(session_domain, endpoint_domain);
+    }
+    
+    false
+}
+
+fn wildcard_match(domain: &str, pattern: &str) -> bool {
+    if pattern.starts_with("*.") {
+        // Prefix wildcard: *.example.com
+        let suffix = &pattern[2..];
+        return domain != suffix && 
+               domain.ends_with(suffix) && 
+               domain.len() > suffix.len() + 1 &&
+               domain.chars().nth(domain.len() - suffix.len() - 1) == Some('.');
+    }
+    
+    if pattern.ends_with(".*") {
+        // Suffix wildcard: example.*
+        let prefix = &pattern[..pattern.len() - 2];
+        return domain.starts_with(prefix) && 
+               (domain.len() == prefix.len() || 
+                domain.chars().nth(prefix.len()) == Some('.'));
+    }
+    
+    if let Some(star_pos) = pattern.find('*') {
+        // Middle wildcard: api.*.example.com
+        let (prefix, suffix) = pattern.split_at(star_pos);
+        let suffix = &suffix[1..]; // Remove the '*'
+        return domain.starts_with(prefix) && 
+               domain.endsWith(suffix) &&
+               domain.len() > prefix.len() + suffix.len();
+    }
+    
+    false
+}
+```
+
+### CIDR and IP Range Matching
+
+Comprehensive IP address and CIDR range matching:
+
+```rust
+fn ip_matches(session_ip: Option<&str>, endpoint_ip: &Option<String>) -> bool {
+    let (Some(session_ip), Some(endpoint_ip)) = (session_ip, endpoint_ip.as_ref()) else {
+        return false;
+    };
+    
+    // Parse session IP
+    let session_addr: IpAddr = match session_ip.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    
+    if endpoint_ip.contains('/') {
+        // CIDR notation
+        match endpoint_ip.parse::<IpNet>() {
+            Ok(network) => network.contains(&session_addr),
+            Err(_) => false,
+        }
+    } else {
+        // Exact IP match
+        match endpoint_ip.parse::<IpAddr>() {
+            Ok(endpoint_addr) => session_addr == endpoint_addr,
+            Err(_) => false,
+        }
+    }
+}
+```
+
+## Integration with Session Analysis
+
+### Real-time Whitelist Evaluation
+
+The system integrates tightly with the session analysis pipeline:
+
+```rust
+pub async fn recompute_whitelist_for_sessions(
+    whitelist_name_arc: &Arc<CustomRwLock<String>>,
+    sessions: &Arc<CustomDashMap<Session, SessionInfo>>,
+    whitelist_exceptions: &Arc<CustomRwLock<Vec<Session>>>,
+    whitelist_conformance: &Arc<AtomicBool>,
+    last_exception_time: &Arc<CustomRwLock<DateTime<Utc>>>,
+) {
+    let whitelist_name = whitelist_name_arc.read().await.clone();
+    
+    if whitelist_name.is_empty() {
+        return; // No whitelist configured
+    }
+    
+    let mut new_exceptions = Vec::new();
+    let mut conformance = true;
+    
+    // Evaluate all sessions against the current whitelist
+    for session_entry in sessions.iter() {
+        let session_info = session_entry.value();
         
-    // If longer than prefix, next char must be a dot (TLD boundary)
-    return domain.length > prefix.length && 
-           domain[prefix.length] == '.'
-```
-
-**Examples:**
-- `example.*` ✓ Matches: `example.com`, `example.org`, `example.co.uk`
-- `example.*` ✗ Does NOT match: `www.example.com`, `myexample.com`
-
-#### 3. Middle Wildcards (`api.*.example.com`)
-
-```
-function middle_wildcard_match(domain, pattern):
-    parts = pattern.split('*')
-    prefix = parts[0]
-    suffix = parts[1]
+        // Skip if already marked as blacklisted (higher priority)
+        if session_info.criticality.contains("blacklist:") {
+            continue;
+        }
+        
+        let (is_conforming, reason) = is_session_in_whitelist(
+            session_info.dst_domain.as_deref(),
+            Some(&session_info.session.dst_ip.to_string()),
+            session_info.session.dst_port,
+            &session_info.session.protocol.to_string(),
+            &whitelist_name,
+            session_info.dst_asn.as_ref().map(|asn| asn.as_number),
+            session_info.dst_asn.as_ref().map(|asn| asn.country.as_str()),
+            session_info.dst_asn.as_ref().map(|asn| asn.owner.as_str()),
+            session_info.l7.as_ref().map(|l7| l7.process_name.as_str()),
+        ).await;
+        
+        // Update session whitelist state
+        let new_state = if is_conforming {
+            WhitelistState::Conforming
+        } else {
+            WhitelistState::NonConforming
+        };
+        
+        if let Some(mut entry) = sessions.get_mut(session_entry.key()) {
+            let info = entry.value_mut();
+            if info.is_whitelisted != new_state {
+                info.is_whitelisted = new_state;
+                info.whitelist_reason = reason;
+                info.last_modified = Utc::now();
+                
+                if !is_conforming {
+                    new_exceptions.push(session_entry.key().clone());
+                    conformance = false;
+                }
+            }
+        }
+    }
     
-    return domain.startsWith(prefix) && 
-           domain.endsWith(suffix) && 
-           domain.length > (prefix.length + suffix.length)
+    // Update global state atomically
+    *whitelist_exceptions.write().await = new_exceptions;
+    whitelist_conformance.store(conformance, Ordering::Relaxed);
+    
+    if !conformance {
+        *last_exception_time.write().await = Utc::now();
+    }
+}
 ```
 
-**Examples:**
-- `api.*.example.com` ✓ Matches: `api.v1.example.com`, `api.staging.example.com`
-- `api.*.example.com` ✗ Does NOT match: `api.example.com`, `v1.api.example.com`
+## Cloud Model Integration
 
-### IP Address Matching
+### Dynamic Updates and Versioning
 
-IP matching supports both exact matching and CIDR notation:
+The whitelist system supports dynamic updates with cryptographic verification:
 
+```rust
+impl CloudSignature for Whitelists {
+    fn get_signature(&self) -> String {
+        self.signature.clone().unwrap_or_default()
+    }
+    
+    fn set_signature(&mut self, signature: String) {
+        self.signature = Some(signature);
+    }
+}
+
+pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
+    LISTS.update(branch, force, |data| {
+        let whitelist_info_json: WhitelistsJSON = serde_json::from_str(data)
+            .with_context(|| "Failed to parse JSON data")?;
+        Ok(Whitelists::new_from_json(whitelist_info_json))
+    }).await
+}
+
+pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::Error> {
+    if whitelist_json.is_empty() {
+        LISTS.reset_to_default().await;
+        return Ok(());
+    }
+    
+    let whitelist_result = serde_json::from_str::<WhitelistsJSON>(whitelist_json);
+    
+    match whitelist_result {
+        Ok(whitelist_data) => {
+            let whitelist = Whitelists::new_from_json(whitelist_data);
+            LISTS.set_custom_data(whitelist).await;
+            Ok(())
+        }
+        Err(e) => {
+            LISTS.reset_to_default().await;
+            Err(anyhow!("Error parsing custom whitelist JSON: {}", e))
+        }
+    }
+}
 ```
-function ip_matches(session_ip, whitelist_ip):
-    if (whitelist_ip contains '/'):  // CIDR notation
-        return session_ip is within CIDR range
-    else:
-        return session_ip == whitelist_ip exactly
+
+## Usage Examples
+
+### Capture Integration
+
+```rust
+use flodbadd::capture::FlodbaddCapture;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let capture = FlodbaddCapture::new();
+    
+    // Set a predefined whitelist
+    capture.set_whitelist("corporate_standard").await;
+    
+    // Or create a custom whitelist from current traffic
+    let custom_whitelist = capture.create_custom_whitelists().await?;
+    capture.set_custom_whitelists(&custom_whitelist).await;
+    
+    // Check conformance
+    let is_conformant = capture.get_whitelist_conformance().await;
+    if !is_conformant {
+        let exceptions = capture.get_whitelist_exceptions(false).await;
+        println!("Non-conforming sessions: {}", exceptions.len());
+    }
+    
+    Ok(())
+}
 ```
 
-**Examples:**
-- Exact: `192.168.1.1` only matches that specific IP
-- CIDR: `192.168.1.0/24` matches any IP from `192.168.1.0` to `192.168.1.255`
-- IPv6 support: `2001:db8::/32` matches any IPv6 address in that prefix
+### Testing and Validation
 
-### AS Information Matching
-
-AS matching includes number, country, and owner verification:
-
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[tokio::test]
+    async fn test_whitelist_inheritance() {
+        let json = r#"{
+            "date": "2024-01-01",
+            "whitelists": [
+                {
+                    "name": "base",
+                    "endpoints": [{"domain": "api.example.com", "port": 443, "protocol": "TCP"}]
+                },
+                {
+                    "name": "extended",
+                    "extends": ["base"],
+                    "endpoints": [{"domain": "cdn.example.com", "port": 443, "protocol": "TCP"}]
+                }
+            ]
+        }"#;
+        
+        let whitelists = Whitelists::new_from_json(serde_json::from_str(json).unwrap());
+        let endpoints = whitelists.get_all_endpoints("extended", &mut HashSet::new()).unwrap();
+        
+        assert_eq!(endpoints.len(), 2);
+        assert!(endpoints.iter().any(|e| e.domain == Some("api.example.com".to_string())));
+        assert!(endpoints.iter().any(|e| e.domain == Some("cdn.example.com".to_string())));
+    }
+}
 ```
-// Autonomous System Number
-if (whitelist_asn_specified && session_asn != whitelist_asn):
-    return NO_MATCH
-    
-// Country (case-insensitive)
-if (whitelist_country_specified && !session_country.equalsIgnoreCase(whitelist_country)):
-    return NO_MATCH
-    
-// Owner (case-insensitive)
-if (whitelist_owner_specified && !session_owner.equalsIgnoreCase(whitelist_owner)):
-    return NO_MATCH
-```
 
-## Matching Process In Detail
+## Performance Considerations
 
-The complete matching process for determining if a session matches a whitelist:
+### Caching and Optimization
 
-1. **Retrieve Endpoints**: Collect all endpoints from the whitelist, including inherited ones.
-2. **Empty Check**: If the whitelist contains no endpoints, immediate no-match.
-3. **Iterate Endpoints**: For each endpoint in the whitelist:
-   a. Check fundamental criteria (protocol, port, process)
-   b. Check domain match if specified (highest priority)
-   c. Check IP match if specified
-   d. Check AS information if required
-   e. If all required checks pass, return match
-4. **Default**: If no endpoints match, return no-match with reason
+- **Endpoint Resolution Caching**: Inheritance chains are cached to avoid repeated computation
+- **Pattern Matching Optimization**: Common patterns are pre-compiled for faster matching
+- **Concurrent Access**: CustomDashMap provides lock-free concurrent access for high-throughput scenarios
 
-```pseudocode
-function is_session_in_whitelist(session, whitelist_name):
-    visited = HashSet()
-    visited.add(whitelist_name)
-    
-    endpoints = get_all_endpoints(whitelist_name, visited)
-    
-    if endpoints.isEmpty():
-        return (false, "Whitelist contains no endpoints")
-    
-    for endpoint in endpoints:
-        if endpoint_matches(session, endpoint):
-            return (true, null)
-    
-    return (false, "No matching endpoint found")
-```
+### Memory Management
+
+- **Lazy Loading**: Only active whitelists are loaded into memory
+- **Automatic Cleanup**: Unused whitelist caches are periodically cleaned
+- **Incremental Updates**: Only modified sessions are re-evaluated during whitelist changes
+
+## Security Considerations
+
+### Cryptographic Verification
+
+- **Signature Validation**: All distributed whitelists must be cryptographically signed
+- **Integrity Checking**: JSON structure is validated against schema before loading
+- **Version Control**: Whitelist updates include version tracking and rollback capability
+
+### Privilege Separation
+
+- **Read-only Operation**: Whitelist matching operates in read-only mode during evaluation
+- **Atomic Updates**: Whitelist changes are applied atomically to prevent inconsistent states
+- **Audit Logging**: All whitelist changes and violations are logged for security auditing
 
 ## Best Practices
 
-1. **Start Specific**
-   - Begin with the most specific rules possible
-   - Use domain names over IP addresses when available
-   - Specify ports and protocols explicitly
+### Design Guidelines
 
-2. **Use Inheritance**
-   - Create base whitelists for common services
-   - Extend for environment-specific needs
-   - Keep whitelists modular and reusable
+1. **Principle of Least Privilege**: Start with restrictive rules and add exceptions as needed
+2. **Clear Documentation**: Always include meaningful descriptions for endpoints
+3. **Hierarchical Structure**: Use inheritance to avoid duplication and maintain consistency
+4. **Regular Auditing**: Periodically review and update whitelist rules
+5. **Testing**: Validate whitelist changes in development environments before production
 
-3. **Document Endpoints**
-   - Use clear descriptions for each endpoint
-   - Explain the purpose of each whitelist
-   - Document inheritance relationships
+### Common Patterns
 
-4. **Regular Maintenance**
-   - Review and update whitelists regularly
-   - Remove unused endpoints
-   - Audit inheritance chains
-
-5. **Security Considerations**
-   - Prefer domain matches over IP matches
-   - Use process restrictions for sensitive connections
-   - Implement the principle of least privilege
-
-## Testing and Validation
-
-To validate whitelist configurations:
-
-1. **Create Test Whitelist**
-```bash
-edamame_posture create-custom-whitelists > test.json
+```json
+{
+  "name": "secure_corporate_whitelist",
+  "extends": ["base_infrastructure"],
+  "endpoints": [
+    {
+      "domain": "*.internal.corp.com",
+      "protocol": "TCP",
+      "description": "Internal corporate services"
+    },
+    {
+      "as_number": 15169,
+      "as_country": "US", 
+      "protocol": "TCP",
+      "port": 443,
+      "description": "Google services (ASN-based)"
+    },
+    {
+      "ip": "10.0.0.0/8",
+      "description": "Internal network access"
+    }
+  ]
+}
 ```
-
-2. **Apply and Test**
-```bash
-edamame_posture set-custom-whitelists "$(cat test.json)"
-edamame_posture get-sessions
-```
-
-3. **Monitor Results**
-   - Check logs for blocked connections
-   - Verify expected connections work
-   - Validate inheritance chains
 
 ## Troubleshooting
 
-Common issues and solutions:
+### Common Issues
 
-1. **Connection Blocked**
-   - Check protocol and port match
-   - Verify domain/IP pattern syntax
-   - Confirm process name if specified
+1. **Inheritance Loops**: Check for circular dependencies in extends chains
+2. **Pattern Syntax**: Verify wildcard patterns follow supported formats
+3. **Case Sensitivity**: Remember that protocols, countries, and owners are case-insensitive
+4. **CIDR Notation**: Ensure IP ranges use valid CIDR format
 
-2. **Inheritance Issues**
-   - Verify parent whitelist exists
-   - Check for circular dependencies
-   - Confirm whitelist names match
+### Debug Tools
 
-3. **Pattern Matching**
-   - Test wildcard patterns individually
-   - Verify CIDR notation
-   - Check case sensitivity
+```rust
+// Enable detailed logging
+RUST_LOG=flodbadd::whitelists=debug cargo run
 
-## Reference
+// Test specific patterns
+let result = domain_matches(Some("api.example.com"), &Some("*.example.com".to_string()));
+println!("Match result: {}", result);
+```
 
-### Supported Protocols
-- TCP
-- UDP
-- ICMP
-- (others as configured)
+## API Reference
 
-### Special Values
-- `"*"` - Wildcard in domain patterns
-- `"0.0.0.0/0"` - All IPv4 addresses
-- `::/0` - All IPv6 addresses
+### Core Functions
 
-### Environment Variables
-- `EDAMAME_WHITELIST_PATH` - Custom whitelist location
-- `EDAMAME_WHITELIST_LOG_LEVEL` - Logging verbosity
+- `is_session_in_whitelist()` - Main matching function
+- `new_from_sessions()` - Generate whitelist from traffic
+- `merge_custom_whitelists()` - Combine multiple whitelists
+- `get_all_endpoints()` - Resolve inheritance chain
 
-## Further Reading
+### Configuration
 
-- [Threat Models](https://github.com/edamametechnologies/threatmodels)
-- [EDAMAME Posture](https://github.com/edamametechnologies/edamame_posture_action)
-- [CI/CD Integration](https://github.com/edamametechnologies/edamame_posture_action)
+- `set_custom_whitelists()` - Load custom whitelist
+- `reset_to_default()` - Revert to embedded defaults
+- `update()` - Fetch updates from cloud source
+
+---
+
+*For more information, see the [Flodbadd README](README.md) and [API documentation](https://docs.rs/flodbadd).*

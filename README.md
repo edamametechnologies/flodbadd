@@ -1,322 +1,329 @@
 # Flodbadd
 
-Flodbadd is the network-visibility and traffic-analysis library that powers the EDAMAME security platform.
+Flodbadd is a comprehensive network visibility and traffic analysis library that powers the EDAMAME security platform. It provides real-time packet capture, session tracking, anomaly detection, and security analysis with cross-platform support.
 
-It turns raw packets into enriched, security-aware *sessions*, tracks those sessions over time and applies
-rule-based (whitelists / blacklists) as well as statistical (Isolation-Forest) analysis – all with a focus on
-high throughput and cross-platform support.
+## Core Architecture
 
-> **Heads-up:** The high-level LAN / port-scanning helpers are currently hosted in the `edamame_core` crate.  They
-> will be re-exported from Flodbadd in an upcoming release.  In the meantime Flodbadd concentrates on capture,
-> session processing and analytics.
+Flodbadd transforms raw network packets into enriched, security-aware sessions and applies multiple layers of analysis:
 
----
-
-## Feature Highlights
-
-* Zero-copy packet capture on Linux, macOS and Windows (via `pcap`)  
-  Optional eBPF datapath on Linux for even higher throughput (feature: `ebpf`) (work in progress).
-* Stateful TCP/UDP session reconstruction with byte / packet counters, RTT estimation, history flags (Zeek-style).
-* Real-time DNS correlation, mDNS discovery and L7 process attribution.
-* Built-in whitelist / blacklist engine that can ingest EDAMAME-formatted rules.
-* On-device anomaly detection powered by an **extended Isolation Forest** model with automatic warm-up & threshold tuning.
-* Lookup tables for:
-  * MAC OUI → vendor
-  * ASN IPv4 / IPv6 ranges
-  * Common port & vendor vulnerability references (dynamically updated)
-* Fully asynchronous (`tokio`) throughout – optimized for running inside an existing async runtime.
-
-## Anomaly Detection internals (Isolation Forest)
-
-Flodbadd does **per-session behavioural anomaly detection** entirely on-device via a
-pure-Rust [extended
-Isolation Forest](https://crates.io/crates/extended_isolation_forest) implementation.  Each
-`SessionInfo` is converted into a **fixed 10-dimensional feature vector** (no raw IPs/domains are
-used – keeping the model privacy-friendly and generalisable):
-
-| # | Feature | Type | Notes |
-|---|----------|------|-------|
-| 1 | Process name hash | categorical → numeric | Stable 64-bit hash of `process_name` |
-| 2 | Session duration | numeric | Seconds between first packet and last activity |
-| 3 | Total bytes | numeric | Inbound + outbound |
-| 4 | Total packets | numeric | Inbound + outbound |
-| 5 | Segment inter-arrival | numeric | Average gap (ms) between TCP segments |
-| 6 | Inbound / outbound ratio | numeric | Traffic directionality |
-| 7 | Average packet size | numeric | Bytes ÷ packets |
-| 8 | Destination service hash | categorical → numeric | Hash of `dst_service` (e.g. "https", "dns") |
-| 9 | Self-destination flag | numeric (0/1) | `1.0` when talking to ourselves |
-| 10 | Missed bytes | numeric | Retransmissions / packet-loss indicator |
-
-Operational details:
-
-* **Warm-up** – first minute(s) used to collect a baseline and train the forest.
-* **Dynamic thresholds** – suspicious ≥ 93rd percentile; abnormal ≥ 95th percentile (defaults can
-  be overridden or dynamically re-calculated).
-* **Non-destructive tagging** – existing `blacklist:*` tags are preserved when the analyzer writes
-  its `anomaly:{normal|suspicious|abnormal}` tag.
-* **Sliding window** – keeps the last 300 samples by default; retrains periodically or when
-  sufficient fresh data is available.
+1. **Packet Capture & Processing** - Platform-specific packet capture with async processing
+2. **Session Reconstruction** - Stateful TCP/UDP session tracking with comprehensive statistics
+3. **Security Analysis** - Multi-layered threat detection including whitelists, blacklists, and ML-based anomaly detection
+4. **Intelligence Enrichment** - ASN, DNS, mDNS, and process attribution
 
 ---
 
-## Installation
+## Key Features
 
-Add Flodbadd to your `Cargo.toml`:
+### Network Capture & Processing
+- **Cross-platform packet capture** - Linux, macOS, Windows via pcap
+- **Async/sync capture modes** - Configurable based on platform capabilities
+- **Session reconstruction** - Stateful TCP/UDP session tracking with Zeek-style history
+- **Real-time DNS correlation** - Passive DNS monitoring and active resolution
+- **mDNS discovery** - Local network device discovery via multicast DNS
+- **Layer 7 attribution** - Process-to-socket correlation (with optional eBPF on Linux)
 
-```toml
-[dependencies]
-flodbadd = { git = "https://github.com/edamametechnologies/flodbadd", default-features = false, features = ["packetcapture"] }
-```
+### Security Analysis
+- **Whitelist engine** - Rule-based traffic validation with inheritance and complex matching
+- **Blacklist engine** - IP-based threat feeds with CIDR support and cryptographic signatures
+- **Anomaly detection** - On-device ML using Extended Isolation Forest with 10-dimensional feature vectors
+- **ASN intelligence** - IPv4/IPv6 autonomous system number lookups
+- **Vulnerability correlation** - Port and vendor vulnerability databases
 
-Key optional features:
-
-* `packetcapture` – enable live packet capture via **pcap** (required for `FlodbaddCapture`).
-* `asyncpacketcapture` – same as above but uses an async `pcap` stream (experimental).
-* `ebpf` – Linux-only, accelerates capture & process lookup using eBPF + `aya`.
-* `examples` – pulls in `clap`, `tracing-subscriber`, `rayon` and registers the example binaries.
-
----
-
-## Quick Start
-
-### Enumerate local interfaces
-
-```rust
-use flodbadd::ip::get_all_interfaces;
-
-fn main() -> anyhow::Result<()> {
-    let interfaces = get_all_interfaces()?;
-    for iface in &interfaces {
-        println!("{} → {}", iface.name, iface.ip);
-    }
-    Ok(())
-}
-```
-
-### Capture & list sessions
-
-```rust
-use flodbadd::capture::FlodbaddCapture;
-use flodbadd::ip::get_all_interfaces;
-use tokio::time::{sleep, Duration};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Pick the interfaces you want to listen on
-    let interfaces = get_all_interfaces()?;
-
-    // 2. Start capture
-    let capture = FlodbaddCapture::new();
-    capture.start(&interfaces).await;
-
-    // 3. Let it run for a while…
-    sleep(Duration::from_secs(30)).await;
-
-    // 4. Fetch sessions (set `incremental = false` to get the full table)
-    let sessions = capture.get_sessions(false).await;
-    println!("captured {} sessions", sessions.len());
-
-    // 5. Done
-    capture.stop().await;
-    Ok(())
-}
-```
-
-### Detect anomalies
-
-```rust
-use flodbadd::{SessionAnalyzer, AnalysisResult};
-use flodbadd::sessions::SessionInfo;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create & start the analyzer
-    let analyzer = Arc::new(SessionAnalyzer::new());
-    analyzer.start().await;
-
-    // feed it some sessions (from capture or elsewhere)
-    let mut sessions: Vec<SessionInfo> = /* … */ Vec::new();
-    let AnalysisResult { anomalous_count, .. } = analyzer.analyze_sessions(&mut sessions).await;
-    println!("found {anomalous_count} anomalous sessions");
-
-    analyzer.stop().await;
-    Ok(())
-}
-```
-
----
-
-## Running the bundled examples
-
-Compile & run with all the helper CLIs enabled:
-
-```bash
-# Clone the repo
-$ git clone https://github.com/edamametechnologies/flodbadd.git
-$ cd flodbadd
-
-# LAN scanning (device discovery)
-$ cargo run --example lan_scan --features "examples packetcapture"
-
-# Live session capture
-$ cargo run --example capture_sessions --features "examples packetcapture" -- --duration 30
-
-# Create / check whitelists
-$ cargo run --example whitelist_management --features "examples packetcapture" create
-
-# Real-time anomaly detection
-$ cargo run --example session_analyzer --features examples
-```
+### Performance & Scalability
+- **Fully asynchronous** - Built on Tokio for high-performance async I/O
+- **Concurrent processing** - Parallel analysis pipelines with work distribution
+- **Incremental updates** - Efficient session state tracking and delta processing
+- **Caching layers** - Multi-level caching for DNS, ASN, and analysis results
 
 ---
 
 ## Module Overview
 
-* `capture`        – packet capture & session table maintenance (`FlodbaddCapture`)
-* `sessions`       – data-structures for `Session`, `SessionInfo` and helpers (formatting, filters …)
-* `analyzer`       – statistical anomaly detection (`SessionAnalyzer`)
-* `whitelists`     – rule engine + helpers for whitelist conformance
-* `blacklists`     – curated threat feeds and rule-helpers
-* `l7` / `l7_ebpf` – OS process → socket correlation (fallback & eBPF back-ends)
-* `dns`, `resolver` – passive DNS decoding + active asynchronous resolver
-* `ip`, `interface` – cross-platform interface & address enumeration utilities
-* `mdns`, `arp`, `broadcast` – helper tasks for local-network discovery
-* `asn`, `oui`, `port_vulns`, `vendor_vulns` – static lookup databases
+### Core Capture & Processing
+- **`capture.rs`** - Main capture orchestration with `FlodbaddCapture` struct
+- **`packets.rs`** - Packet parsing and session packet processing
+- **`sessions.rs`** - Session data structures and management utilities
+
+### Security Analysis
+- **`analyzer.rs`** - ML-based anomaly detection using Isolation Forest
+- **`whitelists.rs`** - Rule-based whitelist engine with complex matching
+- **`blacklists.rs`** - IP-based blacklist engine with CIDR support
+
+### Network Intelligence
+- **`dns.rs`** - Passive DNS packet processing
+- **`resolver.rs`** - Active DNS resolution with caching
+- **`mdns.rs`** - Multicast DNS discovery for local devices
+- **`asn.rs`** / **`asn_db.rs`** - Autonomous System Number lookups
+- **`l7.rs`** / **`l7_ebpf.rs`** - Layer 7 process attribution
+
+### Network Discovery
+- **`arp.rs`** - ARP-based MAC address resolution (cross-platform)
+- **`broadcast.rs`** - ICMP broadcast ping for host discovery
+- **`neighbors.rs`** - Neighbor table scanning for device discovery
+
+### Utilities & Data
+- **`interface.rs`** - Network interface enumeration and management
+- **`ip.rs`** - IP address utilities and local network detection
+- **`oui.rs`** - MAC OUI to vendor mapping
+- **`port_vulns.rs`** - Port-based vulnerability databases
+- **`vendor_vulns.rs`** - Vendor-specific vulnerability tracking
+- **`device_info.rs`** - Device information aggregation and management
 
 ---
 
-## Test & Verification
+## Anomaly Detection System
 
-Flodbadd ships with an extensive, **self-contained test-suite** that exercises both the high-level
-anomaly detection logic and the low-level statistics pipeline.
+Flodbadd implements sophisticated on-device anomaly detection using an Extended Isolation Forest model:
 
-### 1. Synthetic anomaly-detection suite  (`tests/anomaly_test.rs`)
+### Feature Engineering
+Each network session is converted to a 10-dimensional feature vector:
 
-The suite fabricates realistic traffic patterns (normal web browsing, DNS tunnelling, C2 beacons,
-port-scans, data-exfiltration, cryptomining …) and feeds them into the `SessionAnalyzer`.
-It then checks that the **extended Isolation Forest** model correctly flags the malicious sessions
-while keeping false-positives in check.
+| Feature | Type | Description |
+|---------|------|-------------|
+| Process Hash | Categorical | Hash of process name for privacy |
+| Duration | Numeric | Session duration in seconds |
+| Total Bytes | Numeric | Combined inbound/outbound traffic |
+| Total Packets | Numeric | Combined packet count |
+| Segment Interarrival | Numeric | Average time between segments |
+| Inbound/Outbound Ratio | Numeric | Traffic directionality measure |
+| Average Packet Size | Numeric | Mean packet size |
+| Destination Service | Categorical | Hash of destination service type |
+| Self Destination | Binary | Internal traffic indicator |
+| Missed Bytes | Numeric | Packet loss/retransmission indicator |
 
-Key properties:
-* Automatic warm-up with dynamic thresholds – the tests wait until the model is ready.
-* Per-scenario assertions ("at least one beacon must be flagged", "< 10 normal Chrome sessions
-  may be false-positive", …).
-* Runs with more sensitive thresholds (`analyzer.set_test_thresholds(0.60, 0.72)`) so that the real
-  production thresholds can remain conservative.
+### Operational Model
+- **Warm-up period** - Initial training on baseline traffic (configurable, default 2 minutes)
+- **Dynamic thresholds** - Percentile-based thresholds (93rd for suspicious, 95th for abnormal)
+- **Continuous learning** - Model retraining with sliding window (300 samples default)
+- **Non-destructive analysis** - Preserves existing security tags while adding anomaly classifications
 
-### 2. Statistics pipeline sanity test  (`tests/metrics_test.rs`)
-
-This multi-threaded test injects hand-crafted TCP packets straight into the packet-processing
-pipeline and ensures that:
-* Byte / packet counters add up
-* Ratio, average-packet-size and segment-inter-arrival calculations are correct
-* Session duration and FIN handling behave as expected
-
-> The metrics test is only compiled when the `packetcapture` feature is enabled **and** the target
-> platform is supported (macOS, Linux or Windows).
-
-### 3. Running the tests
-
-```bash
-# Run synthetic anomaly tests (shows verbose debug output)
-cargo test --features packetcapture anomaly -- --nocapture
-
-# Run the metrics pipeline test (serial, multi-thread)
-cargo test --features packetcapture metrics -- --nocapture
-
-# Run **everything**
-cargo test --all-features -- --nocapture
-```
+### Criticality Tagging
+Sessions receive comma-separated criticality tags:
+- `anomaly:normal` - Normal behavior
+- `anomaly:suspicious` - 93rd+ percentile anomaly score
+- `anomaly:abnormal` - 95th+ percentile anomaly score
+- `blacklist:<list_name>` - Matches IP blacklist
+- Multiple tags can coexist (e.g., `anomaly:suspicious,blacklist:malware_c2`)
 
 ---
 
-## Blacklist System (quick overview)
+## Whitelist System
 
-Flodbadd contains a flexible IP-based blacklist engine.
-Highlights:
+### Flexible Matching Rules
+Whitelist endpoints support multiple matching criteria:
+- **Domain matching** - Exact domain or wildcard patterns
+- **IP matching** - Individual IPs or CIDR ranges
+- **Port/Protocol** - Specific or wildcard port/protocol combinations
+- **ASN matching** - Autonomous System criteria
+- **Process matching** - Application-level filtering
 
-* **Custom & global lists** – load trusted feeds plus your own organisation-specific ranges.
-* **CIDR aware** – IPv4 & IPv6, individual IPs or whole prefixes.
-* **Cryptographically signed JSON** format with `date` / `signature` metadata.
-* Runtime helper `is_ip_blacklisted(ip, custom_lists)` returns both a boolean and the matching list
-  names, making it trivial to surface *why* traffic was blocked.
+### Inheritance & Composition
+- **Extends mechanism** - Whitelists can inherit from other whitelists
+- **Conflict resolution** - Clear precedence rules for overlapping criteria
+- **Custom overrides** - Organization-specific rules can extend standard lists
 
-Blacklists integrate tightly with the `SessionAnalyzer`: pre-existing `blacklist:*` tags are
-preserved during re-analysis and surfaced via `analyzer.get_blacklisted_sessions()`.
-
-### Data structures
-
-```rust
-// Main blacklist container
-struct Blacklists {
-    date: String,
-    signature: String,
-    blacklists: CustomDashMap<String, BlacklistInfo>,
-    parsed_ranges: CustomDashMap<String, Vec<IpNet>>,
-}
-
-struct BlacklistInfo {
-    name: String,
-    description: Option<String>,
-    last_updated: Option<String>,
-    source_url: Option<String>,
-    ip_ranges: Vec<String>,
-}
-```
-
-### Example JSON
-
-```jsonc
+### JSON Format Example
+```json
 {
-  "date": "2025-03-29",
-  "signature": "<ed25519-sig>",
-  "blacklists": [
-    {
-      "name": "basic_blocklist",
-      "description": "Basic malicious IPs blocklist",
-      "last_updated": "2025-03-29",
-      "source_url": "https://example.com/blacklist-source",
-      "ip_ranges": [
-        "192.168.0.0/16",
-        "10.0.0.0/8"
-      ]
-    }
-  ]
+  "date": "2024-01-01",
+  "signature": "cryptographic-signature",
+  "whitelists": [{
+    "name": "corporate_whitelist",
+    "extends": ["base_whitelist"],
+    "endpoints": [{
+      "domain": "*.company.com",
+      "port": 443,
+      "protocol": "TCP",
+      "description": "Corporate HTTPS traffic"
+    }]
+  }]
 }
 ```
 
-### IP-matching algorithm (simplified)
+---
 
-```text
-function is_ip_in_blacklist(ip_str, blacklist_name):
-    ip     ← parse_ip_address(ip_str)
-    ranges ← get_all_ip_ranges(blacklist_name)
-    for range in ranges:
-        if range.contains(ip):
-            return true
-    return false
+## Installation & Usage
+
+### Dependencies
+```toml
+[dependencies]
+flodbadd = { path = ".", features = ["packetcapture"] }
 ```
 
-The asynchronous helper `is_ip_blacklisted(ip, custom_lists)` combines **custom** and **global**
-lists and returns both a boolean and the names of every list that matched.
+### Key Features
+- `packetcapture` - Enable live packet capture (requires elevated privileges)
+- `asyncpacketcapture` - Async packet capture mode (Linux/macOS/Windows)
+- `ebpf` - Linux eBPF acceleration for L7 attribution
 
-Blacklists integrate tightly with the `SessionAnalyzer`: pre-existing `blacklist:*` tags are
-preserved during re-analysis and surfaced via `analyzer.get_blacklisted_sessions()` (handy for UIs
-and alerting systems).
+### Basic Usage
+
+#### Interface Discovery
+```rust
+use flodbadd::interface::get_valid_network_interfaces;
+
+let interfaces = get_valid_network_interfaces();
+for interface in &interfaces.interfaces {
+    println!("Interface: {} - IPv4: {:?}", interface.name, interface.ipv4);
+}
+```
+
+#### Session Capture
+```rust
+use flodbadd::capture::FlodbaddCapture;
+use flodbadd::interface::get_valid_network_interfaces;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let interfaces = get_valid_network_interfaces();
+    let capture = FlodbaddCapture::new();
+    
+    capture.start(&interfaces).await;
+    
+    // Let it capture for 30 seconds
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    
+    let sessions = capture.get_sessions(false).await;
+    println!("Captured {} sessions", sessions.len());
+    
+    capture.stop().await;
+    Ok(())
+}
+```
+
+#### Anomaly Detection
+```rust
+use flodbadd::analyzer::SessionAnalyzer;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let analyzer = SessionAnalyzer::new();
+    analyzer.start().await;
+    
+    // Analyze sessions (from capture or other source)
+    let mut sessions = vec![/* session data */];
+    let result = analyzer.analyze_sessions(&mut sessions).await;
+    
+    println!("Found {} anomalous sessions", result.anomalous_count);
+    
+    let anomalous = analyzer.get_anomalous_sessions().await;
+    for session in anomalous {
+        println!("Anomalous: {} -> {} ({})", 
+                 session.session.src_ip, 
+                 session.session.dst_ip, 
+                 session.criticality);
+    }
+    
+    analyzer.stop().await;
+    Ok(())
+}
+```
+
+#### Security Analysis
+```rust
+// Check blacklist status
+let blacklisted = capture.get_blacklisted_sessions(false).await;
+println!("Blacklisted sessions: {}", blacklisted.len());
+
+// Check whitelist conformance
+let conformant = capture.get_whitelist_conformance().await;
+if !conformant {
+    let exceptions = capture.get_whitelist_exceptions(false).await;
+    println!("Non-conforming sessions: {}", exceptions.len());
+}
+
+// Set custom blacklists
+let custom_blacklist = r#"{
+    "date": "2024-01-01",
+    "signature": "test-signature",
+    "blacklists": [{
+        "name": "custom_threats",
+        "ip_ranges": ["192.168.1.100/32", "10.0.0.0/8"]
+    }]
+}"#;
+capture.set_custom_blacklists(custom_blacklist).await?;
+```
 
 ---
 
-## Security & Privileges
+## Platform Support & Requirements
 
-* Packet capture requires elevated privileges on most platforms:  
-  *Linux* – run as `root` or grant `CAP_NET_RAW`/`CAP_NET_ADMIN`.  
-  *macOS* – run as `root` or use the *Packet PEEK* entitlement.  
-  *Windows* – install Npcap in "WinPcap compatible" mode.
-* Always ensure you have authorization to capture traffic on the network you are analysing.
+### Supported Platforms
+- **Linux** - Full feature support including eBPF acceleration
+- **macOS** - Full feature support with native packet capture
+- **Windows** - Full feature support via WinPcap/Npcap
+- **iOS/Android** - Limited support (no raw packet capture)
+
+### Privileges Required
+- **Linux** - `CAP_NET_RAW` capability or root for packet capture
+- **macOS** - Root privileges or packet capture entitlements
+- **Windows** - Administrator privileges and Npcap installation
+
+### Performance Characteristics
+- **Memory usage** - Configurable session limits with automatic cleanup
+- **CPU usage** - Multi-threaded processing with configurable worker pools
+- **Network overhead** - Minimal - passive monitoring with optional active probing
+- **Storage** - In-memory operation with optional persistence layers
+
+---
+
+## Testing & Validation
+
+### Comprehensive Test Suite
+- **Unit tests** - Individual module functionality
+- **Integration tests** - End-to-end capture and analysis workflows
+- **Anomaly detection tests** - ML model validation with synthetic scenarios
+- **Cross-platform tests** - Platform-specific functionality verification
+
+### Running Tests
+```bash
+# All tests with packet capture features
+cargo test --features packetcapture
+
+# Specific test categories
+cargo test --features packetcapture anomaly_test
+cargo test --features packetcapture metrics_test
+
+# Performance tests
+cargo test --release --features packetcapture -- --ignored
+```
+
+---
+
+## Security Considerations
+
+### Privacy Protection
+- **No raw data storage** - Only statistical features retained for ML
+- **Hash-based categorization** - Process names and services hashed for privacy
+- **Local processing** - All analysis performed on-device
+- **Configurable retention** - Automatic session cleanup with configurable timeouts
+
+### Network Security
+- **Privilege separation** - Minimal required privileges for operation
+- **Input validation** - Comprehensive packet and configuration validation
+- **Resource limits** - Built-in protections against resource exhaustion
+- **Cryptographic verification** - Signed threat intelligence feeds
+
+---
+
+## Contributing & Development
+
+### Code Structure
+- Well-documented modules with clear separation of concerns
+- Comprehensive error handling with context preservation  
+- Async-first design with efficient resource management
+- Platform abstractions for cross-platform compatibility
+
+### Development Setup
+```bash
+git clone <repository>
+cd flodbadd
+cargo build --all-features
+cargo test --all-features
+```
 
 ---
 
 ## License
 
-Flodbadd is released under the Apache 2.0 license.
+Licensed under the Apache License, Version 2.0.

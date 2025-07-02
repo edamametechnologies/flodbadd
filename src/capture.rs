@@ -277,14 +277,16 @@ impl FlodbaddCapture {
         // Wait briefly until at least one capture task is registered so callers can rely on is_capturing()
         use tokio::time::{sleep, Duration};
         // Increase timeout for CI environments where interface detection and pcap startup may be slower
-        const CAPTURE_START_TIMEOUT_MS: u64 = 30000; // 30 s upper bound (increased from 10s)
+        const CAPTURE_START_TIMEOUT_MS: u64 = 60000; // 60 s upper bound
         let start_wait = std::time::Instant::now();
         while !self.is_capturing().await
             && start_wait.elapsed().as_millis() < CAPTURE_START_TIMEOUT_MS as u128
         {
-            info!("Waiting for capture task(s) to start... (elapsed: {}ms, tasks: {})", 
-                start_wait.elapsed().as_millis(), 
-                self.capture_task_handles.len());
+            info!(
+                "Waiting for capture task(s) to start... (elapsed: {}ms, tasks: {})",
+                start_wait.elapsed().as_millis(),
+                self.capture_task_handles.len()
+            );
             sleep(Duration::from_millis(1000)).await;
         }
 
@@ -1895,8 +1897,8 @@ impl FlodbaddCapture {
                         info!("Cloud model update task: Updating whitelist and blacklist cloud models...");
 
                         // Update blacklists - always try to update default blacklists
-                        // We only update the main branch
-                        // TODO: Make this configurable through VERGEN_GIT_BRANCH
+                        // Currently using main branch for stability
+                        // Branch selection could be made configurable in future versions
                         let branch = "main";
                         match blacklists::update(branch, false).await {
                             Ok(_) => info!("Blacklist cloud model updated successfully."),

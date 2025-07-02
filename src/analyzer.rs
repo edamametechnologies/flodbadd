@@ -24,7 +24,7 @@ use undeadlock::*;
 ///
 /// 1. `anomaly`: Detection result from the Isolation Forest algorithm
 ///    - Values: `normal`, `suspicious`, `abnormal`
-///    - Optional details may provide diagnostic information (e.g., `anomaly:abnormal/score_high` or `anomaly:suspicious/port:1234(z=4.5)`)
+///    - Optional details may provide diagnostic information (e.g., `anomaly:abnormal/OverallScoreHigh` or `anomaly:suspicious/Duration:UnusuallyHigh`)
 ///
 /// 2. `blacklist`: Indicates the session matches known malicious patterns
 ///    - Values: Custom strings identifying the blacklist reason (e.g., `blacklist:malware_C2`)
@@ -39,20 +39,22 @@ use undeadlock::*;
 ///
 /// The diagnostic information indicates which statistical features of the session were unusual:
 ///
-/// - Feature format: `feature_name:value(z=score)` where:
-///   - `feature_name` is one of: `proc_hash` (process name hash), `port` (destination port),
-///     `duration` (session duration in seconds), `bytes` (total bytes transferred),
-///     `packets` (total packets), or `missed` (missed bytes)
-///   - `value` is the actual value in scientific notation (e.g., `1.2e3` for 1200)
-///   - `z=score` is the z-score showing how many standard deviations this value is from the mean
+/// - Feature format: `feature_name:descriptor` where:
+///   - `feature_name` is one of: `Process` (process name hash), `Duration` (session duration),
+///     `Bytes` (total bytes transferred), `Packets` (total packets), `SegmentInterarrival` (timing),
+///     `InOutRatio` (inbound/outbound ratio), `DestService` (destination service),
+///     `AvgPacketSize` (average packet size), `SelfDestination` (self destination flag),
+///     or `MissedData` (missed bytes)
+///   - `descriptor` indicates the type of anomaly: `UnusuallyHigh`, `UnusuallyLow`, `DeviatesFromNorm`, or `Unusual`
 ///
 /// - Multiple unusual features are separated by forward slashes:
-///   `anomaly:abnormal/port:1234(z=4.5)/bytes:1.2e6(z=3.2)/duration:0.1e0(z=-2.7)`
+///   `anomaly:abnormal/Duration:UnusuallyHigh/Bytes:UnusuallyHigh/AvgPacketSize:UnusuallyLow`
 ///
 /// - Special cases:
-///   - `score_high`: No specific features identified as unusual, but overall anomaly score is high
-///   - `feature_name:value(const)`: This feature has zero variance in the dataset (all other
+///   - `OverallScoreHigh`: No specific features identified as unusual, but overall anomaly score is high
+///   - `feature_name:DeviatesFromNorm`: This feature has zero variance in the dataset (all other
 ///     sessions have the same value) but this session has a different value
+///   - `feature_name:Unusual`: For categorical features that differ from the training set norm
 
 // Define a timeout for cache entries (in seconds)
 static ANALYZER_CACHE_TIMEOUT: i64 = 3600;
