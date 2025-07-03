@@ -658,4 +658,4 @@ println!("Match result: {}", result);
 
 ---
 
-*For more information, see the [Flodbadd README](README.md) and [API documentation](https://docs.rs/flodbadd).*
+*For more information, see the [Flodbadd README](README.md).*

@@ -1950,6 +1950,67 @@ impl FlodbaddCapture {
         }
         debug!("Finished stopping cloud model update task.");
     }
+
+    /// Force immediate domain name resolution for sessions
+    pub async fn sync_domain_resolution(&self) {
+        info!("Starting immediate domain resolution sync");
+
+        // Get current DNS resolutions
+        let resolver_guard = self.resolver.read().await;
+        let dns_guard = self.dns_packet_processor.read().await;
+
+        if let (Some(resolver), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
+            // First integrate any pending DNS responses
+            Self::integrate_dns_with_resolver(resolver, dns_proc).await;
+
+            // Then populate domain names immediately for all sessions
+            Self::populate_domain_names(
+                &self.sessions,
+                &Some(resolver.clone()),
+                &dns_proc.get_dns_resolutions(),
+                &self.current_sessions,
+            )
+            .await;
+
+            info!("Immediate domain resolution sync completed");
+        } else {
+            warn!("DNS resolver or processor not available for immediate sync");
+        }
+    }
+
+    /// Force immediate L7 process resolution for sessions
+    pub async fn sync_l7_resolution(&self) {
+        info!("Starting immediate L7 resolution sync");
+
+        let l7_guard = self.l7.read().await;
+        if let Some(l7) = l7_guard.as_ref() {
+            // Force the L7 resolver to process its queue immediately
+            l7.force_immediate_resolution().await;
+
+            // Then populate L7 data for all current sessions
+            Self::populate_l7(&self.sessions, &Some(l7.clone()), &self.current_sessions).await;
+
+            info!("Immediate L7 resolution sync completed");
+        } else {
+            warn!("L7 resolver not available for immediate sync");
+        }
+    }
+
+    /// Force immediate synchronization of all async session data (domains, L7, blacklists)
+    pub async fn sync_all_session_data(&self) {
+        info!("Starting comprehensive immediate session data sync");
+
+        // Sync domain resolution
+        self.sync_domain_resolution().await;
+
+        // Sync L7 process resolution
+        self.sync_l7_resolution().await;
+
+        // Force blacklist re-evaluation (existing sessions)
+        self.update_sessions().await;
+
+        info!("Comprehensive immediate session data sync completed");
+    }
 }
 
 #[cfg(test)]
