@@ -2060,7 +2060,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_session_management() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Simulate a clear client-server connection with well-known service port
@@ -2211,7 +2211,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_session_management_revert() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_whitelist("github").await;
         capture.set_filter(SessionFilter::All).await; // Include all sessions in the filter
 
@@ -2281,7 +2281,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_populate_domain_names() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_whitelist("github").await;
 
         // Initialize the resolver component
@@ -2390,7 +2390,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_update_sessions_status_added() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Create a synthetic session and add it to sessions
@@ -2498,7 +2498,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_sessions_incremental() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         let session1 = Session {
@@ -2650,7 +2650,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_current_sessions_incremental() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         let session1 = Session {
@@ -2802,7 +2802,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_blacklisted_sessions_incremental() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Create test sessions FIRST with recent timestamps
@@ -2949,7 +2949,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_get_whitelist_exceptions_incremental() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // PART 1: Setup custom whitelist including GitHub, excluding Google DNS
@@ -3204,7 +3204,7 @@ mod tests {
 
         // --- Test Setup ---
         println!("Setting up capture test...");
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         // Reset global state before starting
         whitelists::reset_to_default().await;
         blacklists::reset_to_default().await;
@@ -3459,7 +3459,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_blacklist_integration() {
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Create a custom blacklist that includes our test IP
@@ -3532,7 +3532,7 @@ mod tests {
     #[serial]
     async fn test_blacklist_functionality() {
         // Initialize a capture instance
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
 
         // Create a custom blacklist
         let blacklist_ip = "192.168.25.5";
@@ -3788,7 +3788,7 @@ mod tests {
     #[serial]
     async fn test_custom_blacklists() {
         // Create a new instance of FlodbaddCapture
-        let flodbadd_capture = FlodbaddCapture::new();
+        let flodbadd_capture = Arc::new(FlodbaddCapture::new());
 
         // Now, test the set_custom_blacklists method
         let test_blacklist_json = r#"{
@@ -3836,7 +3836,7 @@ mod tests {
     #[serial]
     async fn test_multiple_blacklists() {
         // Create a new instance of FlodbaddCapture
-        let flodbadd_capture = FlodbaddCapture::new();
+        let flodbadd_capture = Arc::new(FlodbaddCapture::new());
 
         // Test the set_custom_blacklists method with multiple blacklists
         let test_blacklist_json = r#"{
@@ -3904,7 +3904,7 @@ mod tests {
     async fn test_custom_whitelist_recomputation() {
         println!("\n=== Starting test_custom_whitelist_recomputation ===");
         // Create the base capture class
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Make sure whitelist module is in default state
@@ -4125,7 +4125,7 @@ mod tests {
     #[serial]
     async fn test_custom_blacklist_recomputation() {
         println!("Starting test_custom_blacklist_recomputation");
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_filter(SessionFilter::All).await;
 
         // Use an IpAddr for own_ips helper compatibility
@@ -4504,7 +4504,7 @@ mod tests {
     #[serial]
     async fn test_capture_start_stop() {
         println!("--- Starting test_capture_start_stop ---");
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -4582,7 +4582,7 @@ mod tests {
     #[serial]
     async fn test_get_whitelists_blacklists() {
         // Create a new capture instance with a fresh state
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
 
         // Explicitly reset to defaults before testing
         whitelists::reset_to_default().await;
@@ -4632,7 +4632,7 @@ mod tests {
     #[serial]
     async fn test_blacklisted_sessions_list_maintenance() {
         // Create a new capture instance
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
         capture.set_whitelist("github").await;
         capture.set_filter(SessionFilter::All).await;
 
@@ -4896,7 +4896,7 @@ mod tests {
             interfaces: vec![default_interface],
         };
 
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
 
         // Start capture (stand-alone mode within test)
         capture.start(&interfaces).await;
@@ -4943,7 +4943,7 @@ mod tests {
             interfaces: vec![default_interface.clone()],
         };
 
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
 
         // Start capture
         capture.start(&interfaces).await;
@@ -5095,7 +5095,7 @@ mod tests {
             interfaces: vec![default_interface],
         };
 
-        let capture = FlodbaddCapture::new();
+        let capture = Arc::new(FlodbaddCapture::new());
 
         // === FIRST START ===
         println!("=== FIRST START ===");
@@ -5264,5 +5264,102 @@ mod tests {
         );
 
         println!("Start/stop/start sequence test completed successfully");
+    }
+
+    // === Race-condition regression tests ===
+
+    /// Spawn several concurrent `get_sessions()` calls while a custom blacklist is
+    /// being applied.  Ensures that `update_sessions()` (invoked inside getters)
+    /// remains thread-safe and that the blacklist tag is visible immediately.
+    #[tokio::test]
+    #[serial]
+    async fn test_concurrent_get_sessions_during_blacklist_update() {
+        use tokio::time::{sleep, Duration};
+
+        let capture = Arc::new(FlodbaddCapture::new());
+        capture.set_filter(SessionFilter::All).await;
+
+        // ----- prepare a session that will become blacklisted -----
+        let test_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let session = Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2)),
+            src_port: 60000,
+            dst_ip: test_ip,
+            dst_port: 443,
+        };
+        let mut info = SessionInfo::default();
+        info.session = session.clone();
+        info.last_modified = Utc::now();
+        capture.sessions.insert(session.clone(), info);
+        capture.current_sessions.write().await.push(session.clone());
+
+        // Spawn a task that hammers `get_sessions()` in a loop.
+        let capture_clone = capture.clone();
+        let reader = tokio::spawn(async move {
+            for _ in 0..20 {
+                let _ = capture_clone.get_sessions(false).await;
+                sleep(Duration::from_millis(25)).await;
+            }
+        });
+
+        // After a short delay, apply a custom blacklist that matches the dst IP.
+        sleep(Duration::from_millis(100)).await;
+        let blacklist_json = format!(
+            r#"{{
+                "date": "2025-01-01T00:00:00Z",
+                "signature": "test-sig",
+                "blacklists": [{{
+                    "name": "race_test",
+                    "ip_ranges": ["{}/32"]
+                }}]
+            }}"#,
+            test_ip
+        );
+        capture
+            .set_custom_blacklists(&blacklist_json)
+            .await
+            .unwrap();
+
+        reader.await.unwrap();
+
+        // Final check – the session must carry the blacklist tag.
+        let sessions = capture.get_sessions(false).await;
+        let tagged = sessions
+            .iter()
+            .any(|s| s.session == session && s.criticality.contains("blacklist:race_test"));
+        assert!(
+            tagged,
+            "Blacklist tag should be visible immediately under concurrency"
+        );
+    }
+
+    /// Call `update_sessions()` from many tasks in parallel to ensure the internal
+    /// mutex prevents simultaneous execution and no deadlocks occur.
+    #[tokio::test]
+    #[serial]
+    async fn test_parallel_update_sessions_mutex() {
+        use tokio::time::timeout;
+        use tokio::time::Duration;
+
+        let capture = Arc::new(FlodbaddCapture::new());
+        capture.set_filter(SessionFilter::All).await;
+
+        // Spawn 10 tasks that call update_sessions() concurrently.
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let c = capture.clone();
+            handles.push(tokio::spawn(async move {
+                c.update_sessions().await;
+            }));
+        }
+
+        // All tasks should finish well within 5 seconds.
+        for h in handles {
+            timeout(Duration::from_secs(5), h)
+                .await
+                .expect("update_sessions() hung")
+                .unwrap();
+        }
     }
 }
