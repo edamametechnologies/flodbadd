@@ -1071,11 +1071,9 @@ impl SessionAnalyzer {
 
         let now = Utc::now();
 
-        // Update last_analysis_time at the start
-        {
-            let mut last_analysis_time_guard = self.last_analysis_time.write().await;
-            *last_analysis_time_guard = Some(now);
-        }
+        // NOTE: do *not* touch `last_analysis_time` **before** the analysis loop –
+        // we need the previous value to decide whether a session needs re-analysis.
+        // We will update it **after** the whole batch finishes (see bottom of fn).
 
         // Acquire the read guard for the Option<CustomRwLock<IsolationForestModel>>
         // This guard (`model_option_guard`) must live as long as `model_rwlock` is used.
@@ -1526,6 +1524,13 @@ impl SessionAnalyzer {
             sessions_len
         );
 
+        // Record when this analysis completed so the next batch can correctly
+        // detect modifications.  This must be done *after* all work above.
+        {
+            let mut guard = self.last_analysis_time.write().await;
+            *guard = Some(now);
+        }
+
         result
     }
 
@@ -1806,7 +1811,6 @@ mod tests {
     use crate::sessions::{
         Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
     };
-    use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
     use uuid::Uuid;
 
@@ -2878,7 +2882,7 @@ mod tests {
     /// Test start/stop/start sequence with actual network capture and traffic generation
     /// Verifies that packets are actually captured after both first start and second start
     #[tokio::test]
-    #[serial]
+    #[serial_test::serial]
     #[cfg(feature = "packetcapture")]
     async fn test_capture_start_stop_start_with_traffic_verification() {
         use crate::capture::FlodbaddCapture;
