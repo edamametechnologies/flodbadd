@@ -816,13 +816,34 @@ impl FlodbaddCapture {
 
         // If no passed interfaces were found, use a default interface.
         if !passed_interface_success {
-            let mut default_interface = match get_default_interface() {
-                Some(interface) => {
-                    info!("Using default interface: {}", interface.name);
-                    interface
+            let default_interface_opt = get_default_interface();
+
+            // Fallback – let libpcap decide via Device::lookup()
+            if default_interface_opt.is_none() {
+                warn!("Falling back to pcap::Device::lookup() for a usable device");
+                match Self::get_default_device().await {
+                    Ok(device) => {
+                        // Try to map the device back to a FlodbaddInterface for consistency
+                        let iface = Self::get_interface_from_device(&device).unwrap_or_else(|_| {
+                            FlodbaddInterface {
+                                name: device.name.clone(),
+                                ipv4: None,
+                                ipv6: Vec::new(),
+                            }
+                        });
+                        info!("Fallback pcap device selected: {}", iface.name);
+                        default_interface_opt = Some(iface);
+                    }
+                    Err(e) => {
+                        error!("Final fallback failed to get default device: {}", e);
+                    }
                 }
+            }
+
+            let mut default_interface = match default_interface_opt {
+                Some(iface) => iface,
                 None => {
-                    error!("No default interface detected, aborting capture");
+                    error!("No suitable network interface found, aborting capture");
                     return;
                 }
             };

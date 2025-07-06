@@ -1281,16 +1281,26 @@ impl SessionAnalyzer {
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
                     if Self::is_anomalous(&session.criticality) {
+                        if !self.anomalous_sessions.contains_key(&session.uid) {
+                            anom_count += 1;
+                        }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
-                        anom_count += 1;
+                    } else {
+                        // Remove from collection if session is no longer anomalous
+                        self.anomalous_sessions.remove(&session.uid);
                     }
 
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
+                        if !self.blacklisted_sessions.contains_key(&session.uid) {
+                            bl_count += 1;
+                        }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
-                        bl_count += 1;
+                    } else {
+                        // Remove from collection if session is no longer blacklisted
+                        self.blacklisted_sessions.remove(&session.uid);
                     }
                 }
                 // If still in warm-up and not finalizing this call, return early.
@@ -1441,6 +1451,9 @@ impl SessionAnalyzer {
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
                             anom_count += 1;
+                        } else {
+                            // Remove from collection if session is no longer anomalous
+                            self.anomalous_sessions.remove(&session.uid);
                         }
                         if Self::is_blacklisted(&session.criticality) {
                             if !self.blacklisted_sessions.contains_key(&session.uid) {
@@ -1449,6 +1462,9 @@ impl SessionAnalyzer {
                             self.blacklisted_sessions
                                 .insert(session.uid.clone(), session.clone());
                             bl_count += 1;
+                        } else {
+                            // Remove from collection if session is no longer blacklisted
+                            self.blacklisted_sessions.remove(&session.uid);
                         }
                         if (idx + 1) % 100 == 0 {
                             debug!(
@@ -1790,7 +1806,6 @@ mod tests {
     use crate::sessions::{
         Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
     };
-    use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
     use uuid::Uuid;
 

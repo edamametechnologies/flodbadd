@@ -11,6 +11,10 @@ use std::iter::FromIterator;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::net::UdpSocket;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use std::thread::sleep;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use std::time::Duration;
 use tracing::debug;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use tracing::error;
@@ -597,36 +601,43 @@ pub fn get_own_ips() -> Vec<IpAddr> {
 pub fn get_default_interface() -> Option<FlodbaddInterface> {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
-        // 1) Use a UDP socket to determine the local IP the OS deems "default route"
-        let local_ip = {
-            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-            socket.connect("8.8.8.8:80").ok()?;
-            socket.local_addr().ok()?.ip()
-        };
+        const MAX_RETRIES: u8 = 5;
 
-        // 2) Get all valid interfaces
-        let all_valid = get_valid_network_interfaces();
-
-        // 3) Find the interface that has this local_ip
-        all_valid.into_iter().find(|iface| {
-            // Check IPv4
-            if let Some(addr_v4) = &iface.ipv4 {
-                if IpAddr::V4(addr_v4.ip) == local_ip {
-                    return true;
+        for _ in 0..MAX_RETRIES {
+            // 1) Try to discover the IP used for the default route via UDP socket trick
+            if let Some(local_ip) = {
+                let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+                if socket.connect("8.8.8.8:80").is_err() {
+                    None
+                } else {
+                    socket.local_addr().ok().map(|addr| addr.ip())
+                }
+            } {
+                // 2) Map that IP back to one of our validated interfaces
+                if let Some(iface) = get_valid_network_interfaces().into_iter().find(|iface| {
+                    iface
+                        .ipv4
+                        .as_ref()
+                        .map_or(false, |v4| IpAddr::V4(v4.ip) == local_ip)
+                        || iface.ipv6.iter().any(|v6| {
+                            let ip = match v6 {
+                                FlodbaddInterfaceAddrTypeV6::Temporary(a)
+                                | FlodbaddInterfaceAddrTypeV6::Secured(a)
+                                | FlodbaddInterfaceAddrTypeV6::LinkLocal(a)
+                                | FlodbaddInterfaceAddrTypeV6::Local(a)
+                                | FlodbaddInterfaceAddrTypeV6::Unspecified(a) => a.ip,
+                            };
+                            IpAddr::V6(ip) == local_ip
+                        })
+                }) {
+                    return Some(iface);
                 }
             }
-            // Check IPv6
-            iface.ipv6.iter().any(|addr_v6_type| {
-                let v6_ip = match addr_v6_type {
-                    FlodbaddInterfaceAddrTypeV6::Temporary(a)
-                    | FlodbaddInterfaceAddrTypeV6::Secured(a)
-                    | FlodbaddInterfaceAddrTypeV6::LinkLocal(a)
-                    | FlodbaddInterfaceAddrTypeV6::Local(a)
-                    | FlodbaddInterfaceAddrTypeV6::Unspecified(a) => a.ip,
-                };
-                IpAddr::V6(v6_ip) == local_ip
-            })
-        })
+
+            // Back-off a little before retrying
+            sleep(Duration::from_millis(200));
+        }
+        None
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
