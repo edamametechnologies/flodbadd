@@ -816,7 +816,7 @@ impl FlodbaddCapture {
 
         // If no passed interfaces were found, use a default interface.
         if !passed_interface_success {
-            let default_interface_opt = get_default_interface();
+            let mut default_interface_opt = get_default_interface();
 
             // Fallback – let libpcap decide via Device::lookup()
             if default_interface_opt.is_none() {
