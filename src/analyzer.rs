@@ -1806,6 +1806,7 @@ mod tests {
     use crate::sessions::{
         Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
     };
+    use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
     use uuid::Uuid;
 
