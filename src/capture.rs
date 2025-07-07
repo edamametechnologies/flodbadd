@@ -758,24 +758,80 @@ impl FlodbaddCapture {
         )))
     }
 
+    /// Tries to obtain a sensible default pcap device that can be used for capturing.
+    ///
+    /// Behaviour by platform:
+    ///  • On macOS `pcap::Device::lookup()` sometimes returns the AWDL* (Apple Wireless
+    ///    Direct Link) interface with names like "ap0" or "ap1" which cannot be opened
+    ///    for regular capture.  If that happens we fall back to the first non-"ap"
+    ///    interface returned by `pcap::Device::list()` – preferring wired/wifi
+    ///    interfaces whose name starts with "en".
+    ///  • On other platforms we simply return the result from `Device::lookup()`.
+    ///    If that fails we fall back to the first entry from `Device::list()`.
     async fn get_default_device() -> Result<pcap::Device> {
-        let device = match pcap::Device::lookup() {
+        // First attempt – let libpcap decide.
+        match pcap::Device::lookup() {
             Ok(Some(device)) => {
-                // Only for macOS
+                // Special handling for macOS: skip the AWDL ("ap*") interfaces which
+                // libpcap commonly selects but cannot be opened in non-promiscuous
+                // mode and produce zero packets for us.
                 if cfg!(target_os = "macos") && device.name.starts_with("ap") {
-                    return Err(anyhow!("Interface from lookup is incorrect"));
+                    warn!(
+                        "pcap::Device::lookup() returned {} which is likely the AWDL interface – searching for a better default…",
+                        device.name
+                    );
+
+                    // Enumerate all devices and pick the first sensible one.
+                    let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
+                    // Prefer devices that start with "en" (e.g. en0 wifi/ethernet).
+                    if let Some(en_dev) = devices.iter().find(|d| d.name.starts_with("en")) {
+                        info!("Selected {} as default capture interface", en_dev.name);
+                        return Ok(en_dev.clone());
+                    }
+
+                    // Otherwise take the first non-"ap" device.
+                    if let Some(first_non_ap) =
+                        devices.into_iter().find(|d| !d.name.starts_with("ap"))
+                    {
+                        info!(
+                            "Selected {} (first non-ap device) as default capture interface",
+                            first_non_ap.name
+                        );
+                        return Ok(first_non_ap);
+                    }
+
+                    // Give up – return the original device even if it is "ap*".
+                    warn!(
+                        "Falling back to {}, could not find a better alternative",
+                        device.name
+                    );
+                    Ok(device)
                 } else {
-                    device
+                    Ok(device)
                 }
             }
             Ok(None) => {
-                return Err(anyhow!("No device found from lookup"));
+                warn!("pcap::Device::lookup() returned None – falling back to Device::list()");
+                let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
+                if let Some(first) = devices.first() {
+                    Ok(first.clone())
+                } else {
+                    Err(anyhow!("No pcap devices available"))
+                }
             }
             Err(e) => {
-                return Err(anyhow!(e));
+                warn!(
+                    "pcap::Device::lookup() failed ({}). Falling back to Device::list()",
+                    e
+                );
+                let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
+                if let Some(first) = devices.first() {
+                    Ok(first.clone())
+                } else {
+                    Err(anyhow!("No pcap devices available"))
+                }
             }
-        };
-        Ok(device)
+        }
     }
 
     async fn start_capture_tasks(&self) {
