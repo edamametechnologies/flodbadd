@@ -1606,10 +1606,15 @@ impl SessionAnalyzer {
     /// Also cleans up old entries.
     pub async fn get_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
-        self.all_sessions
+        let mut sessions: Vec<SessionInfo> = self
+            .all_sessions
             .iter()
             .map(|entry| entry.value().clone())
-            .collect()
+            .collect();
+
+        // Newest first ensures callers see the most up-to-date copy when duplicates exist.
+        sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        sessions
     }
 
     /// Retrieves all current sessions that have been processed by the analyzer.
@@ -1619,13 +1624,17 @@ impl SessionAnalyzer {
         self.cleanup_tracked_sessions();
         let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
         let now = Utc::now();
-        self.all_sessions
+        let mut current_sessions: Vec<SessionInfo> = self
+            .all_sessions
             .iter()
             .filter(|entry| {
                 now.signed_duration_since(entry.value().last_modified) < current_session_timeout
             })
             .map(|entry| entry.value().clone())
-            .collect()
+            .collect();
+
+        current_sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        current_sessions
     }
 
     /// Public async method to trigger session_cache cleanup.
