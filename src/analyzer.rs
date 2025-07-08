@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*;
 
-/// # LanscanAnalyzer Module
+/// # Analyzer Module
 ///
 /// This module provides network session anomaly detection using the Isolation Forest algorithm.
 /// It analyzes network traffic sessions to identify outliers and suspicious connections based
@@ -68,9 +68,6 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = 86400; // 24 hours
 
-// Define a stability period for anomaly decisions to prevent flakiness
-static ANOMALY_STABILITY_PERIOD: i64 = 600; // 10 minutes - once marked anomalous, stay anomalous for this period
-
 // Define default values for warm-up settings
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
@@ -113,8 +110,8 @@ struct IsolationForestModel {
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
-    /// Cache to track when sessions were first marked as anomalous to provide stability
-    anomaly_stability_cache: CustomDashMap<String, (DateTime<Utc>, SessionCriticality)>,
+    /// Cache to track sessions that were ever marked as anomalous (never allow them to go back to normal)
+    ever_anomalous_cache: CustomDashMap<String, SessionCriticality>,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: Arc<AtomicBool>,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
@@ -142,7 +139,7 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
             session_cache: CustomDashMap::new("session_cache"),
-            anomaly_stability_cache: CustomDashMap::new("anomaly_stability_cache"),
+            ever_anomalous_cache: CustomDashMap::new("ever_anomalous_cache"),
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
@@ -185,9 +182,9 @@ impl IsolationForestModel {
             self.training_in_progress.load(Ordering::Relaxed)
         );
 
-        // CRITICAL FIX: DO NOT process completed training here to avoid deadlocks
+        // Don't process completed training here to avoid deadlocks
         // Training completion is handled in the dedicated section at the beginning of analyze_sessions
-        
+
         // Check if a training task is already in progress
         if self.training_in_progress.load(Ordering::Relaxed) {
             debug!("train_model: Training already in progress – skip");
@@ -284,8 +281,8 @@ impl IsolationForestModel {
             "train_model: Spawned new background training task ({} samples)",
             self.recent_data.len()
         );
-        
-        // CRITICAL: Return immediately without waiting for completion
+
+        // Return immediately without waiting for completion
         // Training completion will be processed in analyze_sessions
     }
 
@@ -373,7 +370,6 @@ impl IsolationForestModel {
                 );
 
                 if is_categorical {
-                    // Revised handling for categorical/binary features -------------------------------------
                     // Numerical distance between hashed categorical values is not meaningful, so using a
                     // z-score on the hash often yields false positives (e.g. `DestService:Unusual`).
                     //
@@ -554,50 +550,51 @@ impl IsolationForestModel {
 
         // Determine criticality level and generate diagnostic if applicable
         let diagnostic_time = std::time::Instant::now();
-        let (anomaly_level, anomaly_diagnostic) =
-            if let Some((score, features)) = score_and_features {
-                if detailed_logging {
-                    debug!("Scored session {} with score={}", session.uid, score);
-                }
+        let (anomaly_level, anomaly_diagnostic) = if let Some((score, features)) =
+            score_and_features
+        {
+            if detailed_logging {
+                debug!("Scored session {} with score={}", session.uid, score);
+            }
 
-                let calculated_level = if score >= self.abnormal_threshold {
-                    SessionCriticality::Abnormal
-                } else if score >= self.suspicious_threshold {
-                    SessionCriticality::Suspicious
-                } else {
-                    SessionCriticality::Normal
-                };
-
-                // Apply stability period to prevent flakiness
-                let final_level = self.apply_anomaly_stability(&session.uid, calculated_level);
-
-                // Generate diagnostic string only for non-normal levels
-                let diag_time = std::time::Instant::now();
-                let diag_str = if final_level != SessionCriticality::Normal {
-                    let diagnostic = self.generate_anomaly_diagnostic(&features, feature_stats); // reuse stats
-                    if detailed_logging && diag_time.elapsed().as_millis() > 20 {
-                        debug!(
-                            "Diagnostic generation for session {} took {:?}",
-                            session.uid,
-                            diag_time.elapsed()
-                        );
-                    }
-                    diagnostic
-                } else {
-                    "".to_string()
-                };
-
-                (final_level, diag_str)
+            let calculated_level = if score >= self.abnormal_threshold {
+                SessionCriticality::Abnormal
+            } else if score >= self.suspicious_threshold {
+                SessionCriticality::Suspicious
             } else {
-                // If we couldn't compute a score (no forest), default to Normal
-                if detailed_logging {
+                SessionCriticality::Normal
+            };
+
+            // Check if session was ever anomalous - if so, never allow it to go back to normal
+            let final_level = self.apply_permanent_anomaly_marking(&session.uid, calculated_level);
+
+            // Generate diagnostic string only for non-normal levels
+            let diag_time = std::time::Instant::now();
+            let diag_str = if final_level != SessionCriticality::Normal {
+                let diagnostic = self.generate_anomaly_diagnostic(&features, feature_stats); // reuse stats
+                if detailed_logging && diag_time.elapsed().as_millis() > 20 {
                     debug!(
-                        "No score available for session {}, using default Normal",
-                        session.uid
+                        "Diagnostic generation for session {} took {:?}",
+                        session.uid,
+                        diag_time.elapsed()
                     );
                 }
-                (SessionCriticality::Normal, "".to_string())
+                diagnostic
+            } else {
+                "".to_string()
             };
+
+            (final_level, diag_str)
+        } else {
+            // If we couldn't compute a score (no forest), default to Normal
+            if detailed_logging {
+                debug!(
+                    "No score available for session {}, using default Normal",
+                    session.uid
+                );
+            }
+            (SessionCriticality::Normal, "".to_string())
+        };
 
         if detailed_logging && diagnostic_time.elapsed().as_millis() > 30 {
             debug!(
@@ -615,7 +612,6 @@ impl IsolationForestModel {
             format!("anomaly:{}/{}", anomaly_level, anomaly_diagnostic)
         };
 
-        // --- Revised Merging Logic ---
         // Get all existing tags, separating anomaly from others
         let mut final_tags: Vec<String> = session
             .criticality
@@ -632,7 +628,6 @@ impl IsolationForestModel {
         final_tags.dedup();
 
         let final_criticality = final_tags.join(",");
-        // --- End Revised Merging Logic ---
 
         // Only update if the value actually changed
         if session.criticality != final_criticality {
@@ -691,60 +686,62 @@ impl IsolationForestModel {
             now <= *last_modified + Duration::seconds(ANALYZER_CACHE_TIMEOUT)
         });
 
-        // Also cleanup expired anomaly stability cache entries
-        self.anomaly_stability_cache.retain(|_, v| {
-            let (marked_time, _level) = v;
-            now.signed_duration_since(*marked_time)
-                < Duration::seconds(ANOMALY_STABILITY_PERIOD * 2) // Keep for 2x stability period for safety
+        // Also cleanup old entries from ever_anomalous_cache
+        // Use ALL_SESSION_TIMEOUT to match the session tracking timeout
+        self.ever_anomalous_cache.retain(|_session_uid, _| {
+            // Keep the entry if the session is still being tracked
+            // This prevents losing the "ever anomalous" state for active sessions
+            // The cleanup will happen naturally when sessions expire from all tracking
+            true // For now, keep all entries - they'll be cleaned up when the analyzer stops
         });
     }
 
-    /// Apply anomaly stability period to prevent rapid state changes
-    /// Once a session is marked as anomalous, it stays anomalous for ANOMALY_STABILITY_PERIOD
-    fn apply_anomaly_stability(
+    /// Apply permanent anomaly marking - once a session is anomalous, it never goes back to normal
+    fn apply_permanent_anomaly_marking(
         &self,
         session_uid: &str,
         calculated_level: SessionCriticality,
     ) -> SessionCriticality {
-        let now = Utc::now();
+        // Check if session was ever marked as anomalous
+        if let Some(entry) = self.ever_anomalous_cache.get(session_uid) {
+            let previous_anomalous_level = entry.value();
 
-        // Check if session has been marked as anomalous recently
-        if let Some(entry) = self.anomaly_stability_cache.get(session_uid) {
-            let (marked_time, marked_level) = entry.value();
-            let time_since_marked = now.signed_duration_since(*marked_time);
-
-            // If within stability period and was marked as anomalous, keep the anomalous state
-            if time_since_marked < Duration::seconds(ANOMALY_STABILITY_PERIOD) {
-                match marked_level {
-                    SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
-                        // Session is within stability period and was anomalous - keep anomalous
-                        debug!("Applying anomaly stability for session {}: keeping {} state for {:?} more", 
-                               session_uid, marked_level,
-                               Duration::seconds(ANOMALY_STABILITY_PERIOD) - time_since_marked);
-                        return *marked_level;
-                    }
-                    SessionCriticality::Normal => {
-                        // Was marked normal, use calculated level
-                    }
+            match calculated_level {
+                SessionCriticality::Normal => {
+                    // Session was anomalous before but model now says normal - keep it anomalous
+                    debug!(
+                        "Preventing session {} from going back to normal (was {})",
+                        session_uid, previous_anomalous_level
+                    );
+                    return *previous_anomalous_level;
                 }
-            } else {
-                // Stability period expired, remove from cache
-                drop(entry);
-                self.anomaly_stability_cache.remove(session_uid);
+                SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
+                    // Allow moving between anomalous levels - update cache with new level
+                    drop(entry);
+                    self.ever_anomalous_cache
+                        .insert(session_uid.to_string(), calculated_level);
+                    return calculated_level;
+                }
+            }
+        } else {
+            // Session was never anomalous before
+            match calculated_level {
+                SessionCriticality::Normal => {
+                    // Normal session stays normal
+                    return calculated_level;
+                }
+                SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
+                    // First time being marked as anomalous - add to cache
+                    debug!(
+                        "Marking session {} as permanently anomalous ({})",
+                        session_uid, calculated_level
+                    );
+                    self.ever_anomalous_cache
+                        .insert(session_uid.to_string(), calculated_level);
+                    return calculated_level;
+                }
             }
         }
-
-        // Update stability cache if session is becoming anomalous
-        if calculated_level != SessionCriticality::Normal {
-            self.anomaly_stability_cache
-                .insert(session_uid.to_string(), (now, calculated_level));
-            debug!(
-                "Marking session {} as {} in stability cache",
-                session_uid, calculated_level
-            );
-        }
-
-        calculated_level
     }
 }
 
@@ -1781,6 +1778,7 @@ impl SessionAnalyzer {
             // Clear temporary data
             model_write.recent_data.clear();
             model_write.session_cache.clear();
+            model_write.ever_anomalous_cache.clear();
 
             // Reset training state
             model_write.forest = None;
