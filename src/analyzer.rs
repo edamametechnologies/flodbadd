@@ -1019,6 +1019,23 @@ pub struct AnalysisResult {
 }
 
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
+///
+/// ## Thread Safety
+///
+/// **Critical Operations (Mutually Exclusive):**
+/// - `analyze_sessions()` - Main analysis operation
+/// - `start()` - Starts the analyzer
+/// - `stop()` - Stops the analyzer
+///
+/// These operations use an internal `operation_guard` mutex to ensure they cannot
+/// run concurrently with each other.
+///
+/// **Read Operations (Concurrent Safe):**
+/// - `get_*()` methods - Can run concurrently with each other
+/// - `cleanup_session_cache()` - Can run concurrently
+///
+/// Multiple threads can call read operations simultaneously, though cleanup
+/// operations may do redundant work.
 pub struct SessionAnalyzer {
     model: CustomRwLock<Option<CustomRwLock<IsolationForestModel>>>,
     anomalous_sessions: CustomDashMap<String, SessionInfo>,
@@ -1034,6 +1051,11 @@ pub struct SessionAnalyzer {
     threshold_recalc_interval: Duration,
     running: Arc<AtomicBool>,
     last_analysis_time: Arc<CustomRwLock<Option<DateTime<Utc>>>>,
+    // Concurrency guard - prevents multiple concurrent operations
+    // This mutex ensures that analyze_sessions(), start(), and stop() operations
+    // are mutually exclusive. Getter methods can run concurrently with each other
+    // but may do redundant cleanup work.
+    operation_guard: Arc<CustomMutex<()>>,
 }
 
 impl SessionAnalyzer {
@@ -1060,6 +1082,7 @@ impl SessionAnalyzer {
             threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_HOURS),
             running: Arc::new(AtomicBool::new(false)),
             last_analysis_time: Arc::new(CustomRwLock::new(None)),
+            operation_guard: Arc::new(CustomMutex::new(())),
         }
     }
 
@@ -1076,7 +1099,13 @@ impl SessionAnalyzer {
     /// Analyze and update the criticality of a batch of sessions.
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
+    ///
+    /// **Note: This method is not thread-safe for concurrent access.**
+    /// The operation_guard ensures only one analysis operation runs at a time.
     pub async fn analyze_sessions(&self, sessions: &mut [SessionInfo]) -> AnalysisResult {
+        // Acquire the operation guard to prevent concurrent access
+        let _guard = self.operation_guard.lock().await;
+
         // Note: Cache cleanup is handled at sessions retrieval time
 
         let mut result = AnalysisResult {
@@ -1280,8 +1309,8 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
-                let mut found_new_blacklisted = false;
-                let mut found_new_anomalous = false;
+                let mut found_new_blacklisted = 0;
+                let mut found_new_anomalous = 0;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
                 {
@@ -1311,7 +1340,7 @@ impl SessionAnalyzer {
                     if Self::is_anomalous(&session.criticality) {
                         if !self.anomalous_sessions.contains_key(&session.uid) {
                             // Track if we found new anomalous sessions (for consistency with regular analysis)
-                            found_new_anomalous = true;
+                            found_new_anomalous += 1;
                         }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
@@ -1324,7 +1353,7 @@ impl SessionAnalyzer {
                     if Self::is_blacklisted(&session.criticality) {
                         if !self.blacklisted_sessions.contains_key(&session.uid) {
                             // Track if we found new blacklisted sessions (for consistency with regular analysis)
-                            found_new_blacklisted = true;
+                            found_new_blacklisted += 1;
                         }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
@@ -1343,8 +1372,8 @@ impl SessionAnalyzer {
 
                     result.anomalous_count = total_anom_count;
                     result.blacklisted_count = total_bl_count;
-                    result.new_blacklisted_found = found_new_blacklisted;
-                    result.new_anomalous_found = found_new_anomalous;
+                    result.new_blacklisted_found = found_new_blacklisted > 0;
+                    result.new_anomalous_found = found_new_anomalous > 0;
 
                     info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} new / {} total anomalous, {} new / {} total blacklisted.", sessions_len, found_new_anomalous, total_anom_count, found_new_blacklisted, total_bl_count);
                     return result;
@@ -1578,11 +1607,6 @@ impl SessionAnalyzer {
         }
 
         // Overall batch completion log - use a simple Instant for this function's total time.
-        // This was complex before, so simplifying. If add_data_time was the start:
-        // info!("Analyzer: analyze_sessions batch completed for {} sessions (total processing time: {:?})",
-        //       sessions_len, add_data_time.elapsed());
-        // For a true total time of the function, a start_time at the function beginning is needed.
-        // Let's omit this specific complex log for now as it was potentially incorrect.
         debug!(
             "Analyzer: analyze_sessions call finished for {} sessions.",
             sessions_len
@@ -1600,6 +1624,9 @@ impl SessionAnalyzer {
 
     /// Get a session by its UID
     /// Prioritizes anomalous and blacklisted versions to preserve historical criticality
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously without issues.
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
         // Check blacklisted sessions first (highest priority for criticality preservation)
         if let Some(entry) = self.blacklisted_sessions.get(uid) {
@@ -1639,6 +1666,9 @@ impl SessionAnalyzer {
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.
     /// Also cleans up old entries.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_anomalous_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         self.anomalous_sessions
@@ -1649,6 +1679,9 @@ impl SessionAnalyzer {
 
     /// Gets the current count of anomalous sessions.
     /// Also cleans up old entries.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_anomalous_status(&self) -> usize {
         self.cleanup_tracked_sessions();
         self.anomalous_sessions.len()
@@ -1656,6 +1689,9 @@ impl SessionAnalyzer {
 
     /// Retrieves a snapshot of currently tracked blacklisted sessions.
     /// Also cleans up old entries.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         self.blacklisted_sessions
@@ -1668,6 +1704,9 @@ impl SessionAnalyzer {
     /// This includes sessions from all states: normal, suspicious, abnormal, and blacklisted.
     /// Sessions are available even during warmup period.
     /// Also cleans up old entries.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         let mut sessions: Vec<SessionInfo> = self
@@ -1684,6 +1723,9 @@ impl SessionAnalyzer {
     /// Retrieves all current sessions that have been processed by the analyzer.
     /// Sessions are available even during warmup period.
     /// Also cleans up old entries.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
@@ -1703,6 +1745,9 @@ impl SessionAnalyzer {
 
     /// Public async method to trigger session_cache cleanup.
     /// Call this periodically from a background task or timer.
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn cleanup_session_cache(&self) {
         let model_lock = self.model.read().await;
         if let Some(model) = &*model_lock {
@@ -1712,7 +1757,13 @@ impl SessionAnalyzer {
 
     /// Start the analyzer (set running flag, prepare for background tasks if needed)
     /// Start with preserved security findings if available
+    ///
+    /// **Note: This method is not thread-safe for concurrent access.**
+    /// The operation_guard ensures only one start/stop/analyze operation runs at a time.
     pub async fn start(&self) {
+        // Acquire the operation guard to prevent concurrent start/stop operations
+        let _guard = self.operation_guard.lock().await;
+
         if self.running.swap(true, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already running");
             return;
@@ -1739,7 +1790,13 @@ impl SessionAnalyzer {
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
     /// Preserve critical security findings across restarts
+    ///
+    /// **Note: This method is not thread-safe for concurrent access.**
+    /// The operation_guard ensures only one start/stop/analyze operation runs at a time.
     pub async fn stop(&self) {
+        // Acquire the operation guard to prevent concurrent start/stop operations
+        let _guard = self.operation_guard.lock().await;
+
         if !self.running.swap(false, Ordering::SeqCst) {
             debug!("LanscanAnalyzer already stopped");
             return;
@@ -1807,6 +1864,9 @@ impl SessionAnalyzer {
     }
 
     /// Debug method to get anomaly score and thresholds for a session (testing purposes only)
+    ///
+    /// **Note: This method is thread-safe for concurrent access.**
+    /// Multiple threads can call this simultaneously without issues.
     pub async fn debug_score_and_thresholds(
         &self,
         session: &SessionInfo,
@@ -1829,7 +1889,11 @@ impl SessionAnalyzer {
     }
 
     /// Set custom thresholds for testing purposes
+    ///
+    /// **Note: This method is not thread-safe for concurrent access.**
+    /// The operation_guard ensures only one configuration operation runs at a time.
     pub async fn set_test_thresholds(&self, suspicious: f64, abnormal: f64) {
+        let _guard = self.operation_guard.lock().await;
         let model_guard = self.model.read().await;
         if let Some(model) = &*model_guard {
             let mut model_write = model.write().await;
@@ -1839,7 +1903,11 @@ impl SessionAnalyzer {
     }
 
     /// Disable warmup for testing purposes
+    ///
+    /// **Note: This method is not thread-safe for concurrent access.**
+    /// The operation_guard ensures only one configuration operation runs at a time.
     pub async fn disable_warmup_for_testing(&self) {
+        let _guard = self.operation_guard.lock().await;
         self.warm_up_active.store(false, Ordering::Relaxed);
         // Also ensure we have a model ready
         let model_guard = self.model.read().await;
