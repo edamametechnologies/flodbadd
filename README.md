@@ -96,15 +96,18 @@ Each network session is converted to a 10-dimensional feature vector:
 - **Warm-up period** - Initial training on baseline traffic (configurable, default 2 minutes)
 - **Dynamic thresholds** - Percentile-based thresholds (93rd for suspicious, 95th for abnormal)
 - **Continuous learning** - Model retraining with sliding window (300 samples default)
+- **Permanent anomaly marking** - Once marked as anomalous, sessions never revert to normal status
 - **Non-destructive analysis** - Preserves existing security tags while adding anomaly classifications
 
 ### Criticality Tagging
 Sessions receive comma-separated criticality tags:
-- `anomaly:normal` - Normal behavior
+- `anomaly:normal` - Normal behavior (only for sessions never marked as anomalous)
 - `anomaly:suspicious` - 93rd+ percentile anomaly score
 - `anomaly:abnormal` - 95th+ percentile anomaly score
 - `blacklist:<list_name>` - Matches IP blacklist
 - Multiple tags can coexist (e.g., `anomaly:suspicious,blacklist:malware_c2`)
+
+**Important**: Once a session is marked as `suspicious` or `abnormal`, it maintains that anomalous status permanently, even if subsequent model scoring would classify it as normal. This prevents security-relevant anomalies from being masked by model retraining or threshold changes. Sessions can still transition between `suspicious` and `abnormal` states based on updated scoring.
 
 ---
 
