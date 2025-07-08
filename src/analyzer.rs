@@ -1280,8 +1280,6 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
-                let mut anom_count = 0;
-                let mut bl_count = 0;
                 let mut found_new_blacklisted = false;
                 let mut found_new_anomalous = false;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
@@ -1317,7 +1315,6 @@ impl SessionAnalyzer {
                         }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
-                        anom_count += 1; // Count ALL anomalous sessions for consistency
                     } else {
                         // Remove from collection if session is no longer anomalous
                         self.anomalous_sessions.remove(&session.uid);
@@ -1331,7 +1328,6 @@ impl SessionAnalyzer {
                         }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
-                        bl_count += 1; // Count ALL blacklisted sessions for consistency
                     } else {
                         // Remove from collection if session is no longer blacklisted
                         self.blacklisted_sessions.remove(&session.uid);
@@ -1341,12 +1337,16 @@ impl SessionAnalyzer {
                 // The current batch of sessions has been added to `recent_data` and training ensured.
                 // They will be analyzed once warm-up completes.
                 if !initial_batch_analyzed_post_warmup {
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    // Get total counts from collections (not just current batch)
+                    let total_anom_count = self.anomalous_sessions.len();
+                    let total_bl_count = self.blacklisted_sessions.len();
+
+                    result.anomalous_count = total_anom_count;
+                    result.blacklisted_count = total_bl_count;
                     result.new_blacklisted_found = found_new_blacklisted;
                     result.new_anomalous_found = found_new_anomalous;
 
-                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, anom_count, bl_count);
+                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} new / {} total anomalous, {} new / {} total blacklisted.", sessions_len, found_new_anomalous, total_anom_count, found_new_blacklisted, total_bl_count);
                     return result;
                 }
             }
@@ -1454,8 +1454,6 @@ impl SessionAnalyzer {
                     let feature_stats = model_guard.compute_feature_stats_bulk();
                     drop(model_guard);
 
-                    let mut anom_count = 0;
-                    let mut bl_count = 0;
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
@@ -1491,7 +1489,6 @@ impl SessionAnalyzer {
                             }
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
-                            anom_count += 1;
                         } else {
                             // Remove from collection if session is no longer anomalous
                             self.anomalous_sessions.remove(&session.uid);
@@ -1502,7 +1499,6 @@ impl SessionAnalyzer {
                             }
                             self.blacklisted_sessions
                                 .insert(session.uid.clone(), session.clone());
-                            bl_count += 1;
                         } else {
                             // Remove from collection if session is no longer blacklisted
                             self.blacklisted_sessions.remove(&session.uid);
@@ -1516,20 +1512,22 @@ impl SessionAnalyzer {
                             );
                         }
                     }
+                    // Get total counts from collections (not just current batch)
+                    let total_anom_count = self.anomalous_sessions.len();
+                    let total_bl_count = self.blacklisted_sessions.len();
+
                     info!("Analyzer ({}): Analysis of {} sessions completed in {:?}. Found: {} anomalous, {} blacklisted.",
-                          operation_type, sessions_len, analyze_start_time.elapsed(), anom_count, bl_count);
+                          operation_type, sessions_len, analyze_start_time.elapsed(), total_anom_count, total_bl_count);
 
                     // Update result with findings
                     result.new_anomalous_found = found_new_anomalous;
                     result.new_blacklisted_found = found_new_blacklisted;
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    result.anomalous_count = total_anom_count;
+                    result.blacklisted_count = total_bl_count;
                 } else {
                     warn!("Analyzer (Regular Op/Post-Warmup): No forest model available for analysis. Sessions will not be scored for anomalies.");
 
                     // Count existing anomalous/blacklisted sessions even without forest model
-                    let mut anom_count = 0;
-                    let mut bl_count = 0;
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
@@ -1550,7 +1548,6 @@ impl SessionAnalyzer {
                             }
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
-                            anom_count += 1;
                         } else {
                             // Remove from collection if session is no longer anomalous
                             self.anomalous_sessions.remove(&session.uid);
@@ -1562,17 +1559,20 @@ impl SessionAnalyzer {
                             }
                             self.blacklisted_sessions
                                 .insert(session.uid.clone(), session.clone());
-                            bl_count += 1;
                         } else {
                             // Remove from collection if session is no longer blacklisted
                             self.blacklisted_sessions.remove(&session.uid);
                         }
                     }
 
+                    // Get total counts from collections (not just current batch)
+                    let total_anom_count = self.anomalous_sessions.len();
+                    let total_bl_count = self.blacklisted_sessions.len();
+
                     result.new_anomalous_found = found_new_anomalous;
                     result.new_blacklisted_found = found_new_blacklisted;
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    result.anomalous_count = total_anom_count;
+                    result.blacklisted_count = total_bl_count;
                 }
             }
         }
