@@ -23,8 +23,8 @@ examples = ["clap", "tracing-subscriber"]
 # Core dependencies
 edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backend.git", branch = "main" }
 # Local copy in order to allow rapid development/debug
-undeadlock = { path = "../undeadlock" }
-#undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
+#undeadlock = { path = "../undeadlock" }
+undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 # Local copy in order to allow rapid development/debug
 #edamame_models = { path = "../edamame_models" }
 edamame_models = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
