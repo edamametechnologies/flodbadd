@@ -151,12 +151,12 @@ impl FlodbaddCapture {
         info!("Whitelist exceptions cleared and session states reset to Unknown.");
     }
 
-    pub async fn set_whitelist(&self, whitelist_name: &str) {
+    pub async fn set_whitelist(&self, whitelist_name: &str) -> Result<()> {
         // Check if the whitelist is valid (either a standard whitelist or our custom one)
         let is_custom = whitelist_name == "custom_whitelist";
         if !whitelist_name.is_empty() && !is_custom && !is_valid_whitelist(whitelist_name).await {
             error!("Invalid whitelist name: {}", whitelist_name);
-            return;
+            return Err(anyhow!("Invalid whitelist name: {}", whitelist_name));
         }
 
         // Set the new whitelist name
@@ -177,6 +177,8 @@ impl FlodbaddCapture {
             whitelist_name
         );
         self.update_sessions().await;
+
+        Ok(())
     }
 
     pub async fn get_whitelist_name(&self) -> String {
@@ -1771,7 +1773,7 @@ impl FlodbaddCapture {
         !self.blacklisted_sessions.read().await.is_empty()
     }
 
-    pub async fn set_custom_blacklists(&self, blacklist_json: &str) -> Result<(), anyhow::Error> {
+    pub async fn set_custom_blacklists(&self, blacklist_json: &str) -> Result<()> {
         let result = blacklists::set_custom_blacklists(blacklist_json).await;
 
         // Force immediate blacklist recomputation after setting custom blacklists
@@ -2289,7 +2291,9 @@ mod tests {
     #[serial]
     async fn test_session_management_revert() {
         let capture = Arc::new(FlodbaddCapture::new());
-        capture.set_whitelist("github").await;
+        capture.set_whitelist("github").await.unwrap_or_else(|e| {
+            panic!("Error setting whitelist: {}", e);
+        });
         capture.set_filter(SessionFilter::All).await; // Include all sessions in the filter
 
         // Create a synthetic packet from Azure's IP to a random high port
@@ -2359,7 +2363,9 @@ mod tests {
     #[serial]
     async fn test_populate_domain_names() {
         let capture = Arc::new(FlodbaddCapture::new());
-        capture.set_whitelist("github").await;
+        capture.set_whitelist("github").await.unwrap_or_else(|e| {
+            panic!("Error setting whitelist: {}", e);
+        });
 
         // Initialize the resolver component
         let resolver = Arc::new(FlodbaddResolver::new());
@@ -3634,7 +3640,9 @@ mod tests {
 
         // Set github whitelist
         println!("Setting github whitelist");
-        capture.set_whitelist("github").await;
+        capture.set_whitelist("github").await.unwrap_or_else(|e| {
+            panic!("Error setting whitelist: {}", e);
+        });
 
         // Apply the custom blacklist
         let _ = capture
@@ -4118,7 +4126,9 @@ mod tests {
 
         // Reset to standard github whitelist
         capture.set_custom_whitelists("").await;
-        capture.set_whitelist("github").await;
+        capture.set_whitelist("github").await.unwrap_or_else(|e| {
+            panic!("Error setting whitelist: {}", e);
+        });
         // Don't update here yet
 
         // Process packets with github whitelist
@@ -4710,7 +4720,9 @@ mod tests {
     async fn test_blacklisted_sessions_list_maintenance() {
         // Create a new capture instance
         let capture = Arc::new(FlodbaddCapture::new());
-        capture.set_whitelist("github").await;
+        capture.set_whitelist("github").await.unwrap_or_else(|e| {
+            panic!("Error setting whitelist: {}", e);
+        });
         capture.set_filter(SessionFilter::All).await;
 
         // Create a custom blacklist that blacklists a specific IP

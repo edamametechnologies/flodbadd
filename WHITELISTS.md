@@ -505,7 +505,7 @@ async fn main() -> anyhow::Result<()> {
     let capture = FlodbaddCapture::new();
     
     // Set a predefined whitelist
-    capture.set_whitelist("corporate_standard").await;
+    capture.set_whitelist("corporate_standard").await?;
     
     // Or create a custom whitelist from current traffic
     let custom_whitelist = capture.create_custom_whitelists().await?;
