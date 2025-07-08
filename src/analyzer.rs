@@ -666,7 +666,7 @@ impl IsolationForestModel {
                 "analyze_session resulted in empty criticality for {}!",
                 session.uid
             );
-            // Fallback: Use the calculated anomaly level if somehow all tags were lost
+            // Fallback: Use the anomaly level (after permanent marking) if somehow all tags were lost
             session.criticality = format!("anomaly:{}", anomaly_level);
             session.last_modified = chrono::Utc::now();
         }
@@ -1350,7 +1350,15 @@ impl SessionAnalyzer {
                     // and add them to the appropriate collections. This is used for testing purposes.
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
-                    if Self::is_anomalous(&session.criticality) {
+                    // Must check both current criticality AND ever_anomalous_cache for permanent marking
+                    let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                        let model_read_guard = model_rwlock.read().await;
+                        model_read_guard
+                            .ever_anomalous_cache
+                            .contains_key(&session.uid)
+                    };
+
+                    if should_be_anomalous {
                         if !self.anomalous_sessions.contains_key(&session.uid) {
                             // Track if we found new anomalous sessions (for consistency with regular analysis)
                             found_new_anomalous += 1;
@@ -1358,7 +1366,7 @@ impl SessionAnalyzer {
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
                     } else {
-                        // Remove from collection if session is no longer anomalous
+                        // Only remove if session was never marked as anomalous
                         self.anomalous_sessions.remove(&session.uid);
                     }
 
@@ -1511,7 +1519,14 @@ impl SessionAnalyzer {
                             let model_read_guard = model_rwlock.read().await;
                             let in_cache =
                                 model_read_guard.session_cache.get(&session.uid).is_some();
-                            !in_cache || session.last_modified > prev_analysis_time
+                            let is_ever_anomalous = model_read_guard
+                                .ever_anomalous_cache
+                                .contains_key(&session.uid);
+
+                            // Always re-analyze sessions that were ever anomalous to ensure permanent marking
+                            is_ever_anomalous
+                                || !in_cache
+                                || session.last_modified > prev_analysis_time
                         };
 
                         if needs_analysis {
@@ -1525,14 +1540,23 @@ impl SessionAnalyzer {
                         self.all_sessions
                             .insert(session.uid.clone(), session.clone());
 
-                        if Self::is_anomalous(&session.criticality) {
+                        // Check if session should be in anomalous collection
+                        // Must check both current criticality AND ever_anomalous_cache for permanent marking
+                        let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                            let model_read_guard = model_rwlock.read().await;
+                            model_read_guard
+                                .ever_anomalous_cache
+                                .contains_key(&session.uid)
+                        };
+
+                        if should_be_anomalous {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
                                 found_new_anomalous = true;
                             }
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
                         } else {
-                            // Remove from collection if session is no longer anomalous
+                            // Only remove if session was never marked as anomalous
                             self.anomalous_sessions.remove(&session.uid);
                         }
                         if Self::is_blacklisted(&session.criticality) {
@@ -1584,14 +1608,22 @@ impl SessionAnalyzer {
                             .insert(session.uid.clone(), session.clone());
 
                         // Update session collections for consistency with other paths
-                        if Self::is_anomalous(&session.criticality) {
+                        // Must check both current criticality AND ever_anomalous_cache for permanent marking
+                        let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                            let model_read_guard = model_rwlock.read().await;
+                            model_read_guard
+                                .ever_anomalous_cache
+                                .contains_key(&session.uid)
+                        };
+
+                        if should_be_anomalous {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
                                 found_new_anomalous = true;
                             }
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
                         } else {
-                            // Remove from collection if session is no longer anomalous
+                            // Only remove if session was never marked as anomalous
                             self.anomalous_sessions.remove(&session.uid);
                         }
 
@@ -1847,10 +1879,10 @@ impl SessionAnalyzer {
         if let Some(model) = &*model_guard {
             let mut model_write = model.write().await;
 
-            // Clear temporary data
+            // Clear temporary data (preserve ever_anomalous_cache for permanent marking)
             model_write.recent_data.clear();
             model_write.session_cache.clear();
-            model_write.ever_anomalous_cache.clear();
+            // DON'T clear ever_anomalous_cache - it stores permanent anomaly marking state
 
             // Reset training state
             model_write.forest = None;
@@ -3729,5 +3761,145 @@ mod tests {
         }
 
         new_sessions
+    }
+
+    /// Test permanent anomaly marking in collections - ensure sessions never leave anomalous collection
+    #[tokio::test]
+    async fn test_permanent_anomaly_marking_in_collections() {
+        let analyzer = SessionAnalyzer::new();
+        analyzer.start().await;
+        analyzer.disable_warmup_for_testing().await;
+
+        // Set very low thresholds to easily trigger anomalies
+        analyzer.set_test_thresholds(0.1, 0.2).await;
+
+        // Create a session that will be marked as anomalous
+        let session_uid = Uuid::new_v4().to_string();
+        let mut anomalous_session = create_test_session_with_criticality(
+            session_uid.clone(),
+            "anomaly:normal".to_string(),
+            Utc::now(),
+        );
+
+        // Make the session have anomalous features (high bytes) to trigger anomaly
+        anomalous_session.stats.inbound_bytes = 1_000_000;
+        anomalous_session.stats.outbound_bytes = 1_000_000;
+
+        // First analysis - should mark as anomalous
+        let mut sessions1 = vec![anomalous_session.clone()];
+        let result1 = analyzer.analyze_sessions(&mut sessions1).await;
+
+        println!("First analysis result: {:?}", result1);
+        println!(
+            "Session criticality after first analysis: {}",
+            sessions1[0].criticality
+        );
+
+        // Verify session is in anomalous collection
+        let anomalous_sessions = analyzer.get_anomalous_sessions().await;
+        let anomalous_count_1 = anomalous_sessions.len();
+        assert!(
+            anomalous_count_1 > 0,
+            "Session should be in anomalous collection after first analysis"
+        );
+
+        let found_session = anomalous_sessions.iter().find(|s| s.uid == session_uid);
+        assert!(
+            found_session.is_some(),
+            "Our specific session should be in anomalous collection"
+        );
+
+        // Verify session is marked as anomalous
+        let session_is_anomalous = analyzer
+            .get_session_by_uid(&session_uid)
+            .await
+            .map(|s| {
+                s.criticality.contains("anomaly:suspicious")
+                    || s.criticality.contains("anomaly:abnormal")
+            })
+            .unwrap_or(false);
+        assert!(
+            session_is_anomalous,
+            "Session should be marked as anomalous"
+        );
+
+        println!(
+            "✅ After first analysis: {} anomalous sessions, session marked as anomalous",
+            anomalous_count_1
+        );
+
+        // Now add many normal sessions to retrain the model and potentially change thresholds
+        let mut normal_sessions = Vec::new();
+        for i in 0..200 {
+            let normal_session = create_test_session_with_criticality(
+                format!("normal_{}", i),
+                "anomaly:normal".to_string(),
+                Utc::now(),
+            );
+            normal_sessions.push(normal_session);
+        }
+
+        // Second analysis - lots of normal sessions should retrain model
+        let result2 = analyzer.analyze_sessions(&mut normal_sessions).await;
+        println!("Second analysis (normal sessions) result: {:?}", result2);
+
+        // Third analysis - re-analyze the original session (should stay anomalous due to permanent marking)
+        let mut sessions3 = vec![anomalous_session.clone()];
+        let result3 = analyzer.analyze_sessions(&mut sessions3).await;
+
+        println!("Third analysis result: {:?}", result3);
+        println!(
+            "Session criticality after third analysis: {}",
+            sessions3[0].criticality
+        );
+
+        // CRITICAL TEST: Verify session is STILL in anomalous collection
+        let final_anomalous_sessions = analyzer.get_anomalous_sessions().await;
+        let final_anomalous_count = final_anomalous_sessions.len();
+
+        println!("Final anomalous sessions count: {}", final_anomalous_count);
+
+        // Find our specific session in the final collection
+        let final_found_session = final_anomalous_sessions
+            .iter()
+            .find(|s| s.uid == session_uid);
+        assert!(
+            final_found_session.is_some(),
+            "CRITICAL: Session should STILL be in anomalous collection due to permanent marking"
+        );
+
+        // Verify the session is still marked as anomalous (not normal)
+        let final_session_is_anomalous = analyzer
+            .get_session_by_uid(&session_uid)
+            .await
+            .map(|s| {
+                s.criticality.contains("anomaly:suspicious")
+                    || s.criticality.contains("anomaly:abnormal")
+            })
+            .unwrap_or(false);
+        assert!(
+            final_session_is_anomalous,
+            "Session should still be marked as anomalous"
+        );
+
+        // The count should never decrease due to permanent marking
+        assert!(
+            final_anomalous_count >= 1,
+            "Anomalous count should never decrease due to permanent marking (was {}, now {})",
+            anomalous_count_1,
+            final_anomalous_count
+        );
+
+        println!("✅ PERMANENT ANOMALY MARKING TEST PASSED!");
+        println!("   - Session was initially marked as anomalous");
+        println!("   - Model was retrained with normal sessions");
+        println!("   - Session remained in anomalous collection");
+        println!("   - Session remained marked as anomalous");
+        println!(
+            "   - Count never decreased: {} -> {}",
+            anomalous_count_1, final_anomalous_count
+        );
+
+        analyzer.stop().await;
     }
 }
