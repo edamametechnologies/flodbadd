@@ -1523,10 +1523,16 @@ impl SessionAnalyzer {
                                 .ever_anomalous_cache
                                 .contains_key(&session.uid);
 
-                            // Always re-analyze sessions that were ever anomalous to ensure permanent marking
-                            is_ever_anomalous
-                                || !in_cache
-                                || session.last_modified > prev_analysis_time
+                            // Standard analysis conditions
+                            let standard_needs_analysis = !in_cache || session.last_modified > prev_analysis_time;
+                            
+                            // Force re-analysis for ever-anomalous sessions ONLY if their current criticality 
+                            // suggests they might go back to normal (no explicit anomaly/blacklist tags)
+                            let force_reanalysis_for_permanent_marking = is_ever_anomalous 
+                                && !Self::is_anomalous(&session.criticality) 
+                                && !Self::is_blacklisted(&session.criticality);
+
+                            standard_needs_analysis || force_reanalysis_for_permanent_marking
                         };
 
                         if needs_analysis {
