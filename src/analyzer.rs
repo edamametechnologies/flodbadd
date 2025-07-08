@@ -1497,16 +1497,21 @@ impl SessionAnalyzer {
                         last_analysis_time_guard.unwrap_or(now)
                     };
 
-                    let model_write_guard = model_rwlock.write().await;
-
+                    // Process each session individually to avoid holding write lock during analysis
                     for (idx, session) in sessions.iter_mut().enumerate() {
                         let needs_analysis = {
+                            // Acquire lock briefly to check cache status
+                            let model_read_guard = model_rwlock.read().await;
                             let in_cache =
-                                model_write_guard.session_cache.get(&session.uid).is_some();
+                                model_read_guard.session_cache.get(&session.uid).is_some();
                             !in_cache || session.last_modified > prev_analysis_time
                         };
+
                         if needs_analysis {
+                            // Acquire write lock only for the analysis of this specific session
+                            let model_write_guard = model_rwlock.write().await;
                             model_write_guard.analyze_session(session, &feature_stats);
+                            drop(model_write_guard); // Explicitly release the lock
                         }
 
                         // Store all sessions regardless of classification
