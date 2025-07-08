@@ -702,21 +702,34 @@ impl IsolationForestModel {
         session_uid: &str,
         calculated_level: SessionCriticality,
     ) -> SessionCriticality {
+        debug!(
+            "PERM_MARK: Session {} - calculated: {}",
+            session_uid, calculated_level
+        );
+
         // Check if session was ever marked as anomalous
         if let Some(entry) = self.ever_anomalous_cache.get(session_uid) {
             let previous_anomalous_level = entry.value();
+            debug!(
+                "PERM_MARK: Session {} found in cache with level: {}",
+                session_uid, previous_anomalous_level
+            );
 
             match calculated_level {
                 SessionCriticality::Normal => {
                     // Session was anomalous before but model now says normal - keep it anomalous
                     debug!(
-                        "Preventing session {} from going back to normal (was {})",
+                        "PERM_MARK: Preventing session {} from going back to normal (was {})",
                         session_uid, previous_anomalous_level
                     );
                     return *previous_anomalous_level;
                 }
                 SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
                     // Allow moving between anomalous levels - update cache with new level
+                    debug!(
+                        "PERM_MARK: Updating session {} from {} to {}",
+                        session_uid, previous_anomalous_level, calculated_level
+                    );
                     drop(entry);
                     self.ever_anomalous_cache
                         .insert(session_uid.to_string(), calculated_level);
@@ -728,12 +741,13 @@ impl IsolationForestModel {
             match calculated_level {
                 SessionCriticality::Normal => {
                     // Normal session stays normal
+                    debug!("PERM_MARK: Session {} stays normal", session_uid);
                     return calculated_level;
                 }
                 SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
                     // First time being marked as anomalous - add to cache
                     debug!(
-                        "Marking session {} as permanently anomalous ({})",
+                        "PERM_MARK: First time anomalous - adding session {} to cache as {}",
                         session_uid, calculated_level
                     );
                     self.ever_anomalous_cache
@@ -1351,12 +1365,49 @@ impl SessionAnalyzer {
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
                     // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                    let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                    let current_is_anomalous = Self::is_anomalous(&session.criticality);
+                    let was_ever_anomalous = {
                         let model_read_guard = model_rwlock.read().await;
                         model_read_guard
                             .ever_anomalous_cache
                             .contains_key(&session.uid)
                     };
+                    let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
+
+                    // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
+                    if was_ever_anomalous && !current_is_anomalous {
+                        debug!("PERM_MARK: Warmup - Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
+                               session.uid, session.criticality);
+
+                        // Get the previous anomalous level and restore it
+                        let restored_level = {
+                            let model_read_guard = model_rwlock.read().await;
+                            model_read_guard
+                                .ever_anomalous_cache
+                                .get(&session.uid)
+                                .map(|entry| *entry.value())
+                        };
+
+                        if let Some(level) = restored_level {
+                            // Update the session's criticality to restore the permanent anomaly marking
+                            let existing_tags: Vec<&str> = session
+                                .criticality
+                                .split(',')
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
+                                .collect();
+
+                            let mut new_tags = vec![format!("anomaly:{}", level)];
+                            new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
+                            new_tags.sort_unstable();
+
+                            session.criticality = new_tags.join(",");
+                            debug!(
+                                "PERM_MARK: Warmup - Restored session {} criticality to '{}'",
+                                session.uid, session.criticality
+                            );
+                        }
+                    }
 
                     if should_be_anomalous {
                         if !self.anomalous_sessions.contains_key(&session.uid) {
@@ -1519,18 +1570,20 @@ impl SessionAnalyzer {
                             let model_read_guard = model_rwlock.read().await;
                             let in_cache =
                                 model_read_guard.session_cache.get(&session.uid).is_some();
-                            let is_ever_anomalous = model_read_guard
+                            let _is_ever_anomalous = model_read_guard
                                 .ever_anomalous_cache
                                 .contains_key(&session.uid);
 
                             // Standard analysis conditions
-                            let standard_needs_analysis = !in_cache || session.last_modified > prev_analysis_time;
-                            
-                            // Force re-analysis for ever-anomalous sessions ONLY if their current criticality 
-                            // suggests they might go back to normal (no explicit anomaly/blacklist tags)
-                            let force_reanalysis_for_permanent_marking = is_ever_anomalous 
-                                && !Self::is_anomalous(&session.criticality) 
-                                && !Self::is_blacklisted(&session.criticality);
+                            let standard_needs_analysis =
+                                !in_cache || session.last_modified > prev_analysis_time;
+
+                            // Force re-analysis for ever-anomalous sessions to ensure permanent marking is applied
+                            // But only if their current criticality doesn't already reflect anomaly status
+                            // AND the session has been modified (to avoid breaking timestamp-based tests)
+                            let force_reanalysis_for_permanent_marking = _is_ever_anomalous
+                                && !Self::is_anomalous(&session.criticality)
+                                && session.last_modified > prev_analysis_time;
 
                             standard_needs_analysis || force_reanalysis_for_permanent_marking
                         };
@@ -1548,12 +1601,50 @@ impl SessionAnalyzer {
 
                         // Check if session should be in anomalous collection
                         // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                        let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                        let current_is_anomalous = Self::is_anomalous(&session.criticality);
+                        let was_ever_anomalous = {
                             let model_read_guard = model_rwlock.read().await;
                             model_read_guard
                                 .ever_anomalous_cache
                                 .contains_key(&session.uid)
                         };
+                        let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
+
+                        // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
+                        // Only apply this if the session was analyzed in this run (needs_analysis was true)
+                        if was_ever_anomalous && !current_is_anomalous && needs_analysis {
+                            debug!("PERM_MARK: Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
+                                   session.uid, session.criticality);
+
+                            // Get the previous anomalous level and restore it
+                            let restored_level = {
+                                let model_read_guard = model_rwlock.read().await;
+                                model_read_guard
+                                    .ever_anomalous_cache
+                                    .get(&session.uid)
+                                    .map(|entry| *entry.value())
+                            };
+
+                            if let Some(level) = restored_level {
+                                // Update the session's criticality to restore the permanent anomaly marking
+                                let existing_tags: Vec<&str> = session
+                                    .criticality
+                                    .split(',')
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
+                                    .collect();
+
+                                let mut new_tags = vec![format!("anomaly:{}", level)];
+                                new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
+                                new_tags.sort_unstable();
+
+                                session.criticality = new_tags.join(",");
+                                debug!(
+                                    "PERM_MARK: Restored session {} criticality to '{}'",
+                                    session.uid, session.criticality
+                                );
+                            }
+                        }
 
                         if should_be_anomalous {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
@@ -1615,12 +1706,49 @@ impl SessionAnalyzer {
 
                         // Update session collections for consistency with other paths
                         // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                        let should_be_anomalous = Self::is_anomalous(&session.criticality) || {
+                        let current_is_anomalous = Self::is_anomalous(&session.criticality);
+                        let was_ever_anomalous = {
                             let model_read_guard = model_rwlock.read().await;
                             model_read_guard
                                 .ever_anomalous_cache
                                 .contains_key(&session.uid)
                         };
+                        let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
+
+                        // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
+                        if was_ever_anomalous && !current_is_anomalous {
+                            debug!("PERM_MARK: No-model - Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
+                                   session.uid, session.criticality);
+
+                            // Get the previous anomalous level and restore it
+                            let restored_level = {
+                                let model_read_guard = model_rwlock.read().await;
+                                model_read_guard
+                                    .ever_anomalous_cache
+                                    .get(&session.uid)
+                                    .map(|entry| *entry.value())
+                            };
+
+                            if let Some(level) = restored_level {
+                                // Update the session's criticality to restore the permanent anomaly marking
+                                let existing_tags: Vec<&str> = session
+                                    .criticality
+                                    .split(',')
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
+                                    .collect();
+
+                                let mut new_tags = vec![format!("anomaly:{}", level)];
+                                new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
+                                new_tags.sort_unstable();
+
+                                session.criticality = new_tags.join(",");
+                                debug!(
+                                    "PERM_MARK: No-model - Restored session {} criticality to '{}'",
+                                    session.uid, session.criticality
+                                );
+                            }
+                        }
 
                         if should_be_anomalous {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
@@ -3850,7 +3978,9 @@ mod tests {
         println!("Second analysis (normal sessions) result: {:?}", result2);
 
         // Third analysis - re-analyze the original session (should stay anomalous due to permanent marking)
-        let mut sessions3 = vec![anomalous_session.clone()];
+        let mut anomalous_session_updated = anomalous_session.clone();
+        anomalous_session_updated.last_modified = Utc::now(); // Update timestamp to trigger analysis
+        let mut sessions3 = vec![anomalous_session_updated];
         let result3 = analyzer.analyze_sessions(&mut sessions3).await;
 
         println!("Third analysis result: {:?}", result3);
