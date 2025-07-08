@@ -68,6 +68,9 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = 86400; // 24 hours
 
+// Define a stability period for anomaly decisions to prevent flakiness
+static ANOMALY_STABILITY_PERIOD: i64 = 600; // 10 minutes - once marked anomalous, stay anomalous for this period
+
 // Define default values for warm-up settings
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
@@ -110,6 +113,8 @@ struct IsolationForestModel {
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
+    /// Cache to track when sessions were first marked as anomalous to provide stability
+    anomaly_stability_cache: CustomDashMap<String, (DateTime<Utc>, SessionCriticality)>,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: Arc<AtomicBool>,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
@@ -137,6 +142,7 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
             session_cache: CustomDashMap::new("session_cache"),
+            anomaly_stability_cache: CustomDashMap::new("anomaly_stability_cache"),
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
@@ -584,7 +590,7 @@ impl IsolationForestModel {
                     debug!("Scored session {} with score={}", session.uid, score);
                 }
 
-                let level = if score >= self.abnormal_threshold {
+                let calculated_level = if score >= self.abnormal_threshold {
                     SessionCriticality::Abnormal
                 } else if score >= self.suspicious_threshold {
                     SessionCriticality::Suspicious
@@ -592,9 +598,12 @@ impl IsolationForestModel {
                     SessionCriticality::Normal
                 };
 
+                // Apply stability period to prevent flakiness
+                let final_level = self.apply_anomaly_stability(&session.uid, calculated_level);
+
                 // Generate diagnostic string only for non-normal levels
                 let diag_time = std::time::Instant::now();
-                let diag_str = if level != SessionCriticality::Normal {
+                let diag_str = if final_level != SessionCriticality::Normal {
                     let diagnostic = self.generate_anomaly_diagnostic(&features, feature_stats); // reuse stats
                     if detailed_logging && diag_time.elapsed().as_millis() > 20 {
                         debug!(
@@ -608,7 +617,7 @@ impl IsolationForestModel {
                     "".to_string()
                 };
 
-                (level, diag_str)
+                (final_level, diag_str)
             } else {
                 // If we couldn't compute a score (no forest), default to Normal
                 if detailed_logging {
@@ -711,6 +720,61 @@ impl IsolationForestModel {
             let (_score, _features, last_modified) = v;
             now <= *last_modified + Duration::seconds(ANALYZER_CACHE_TIMEOUT)
         });
+
+        // Also cleanup expired anomaly stability cache entries
+        self.anomaly_stability_cache.retain(|_, v| {
+            let (marked_time, _level) = v;
+            now.signed_duration_since(*marked_time)
+                < Duration::seconds(ANOMALY_STABILITY_PERIOD * 2) // Keep for 2x stability period for safety
+        });
+    }
+
+    /// Apply anomaly stability period to prevent rapid state changes
+    /// Once a session is marked as anomalous, it stays anomalous for ANOMALY_STABILITY_PERIOD
+    fn apply_anomaly_stability(
+        &self,
+        session_uid: &str,
+        calculated_level: SessionCriticality,
+    ) -> SessionCriticality {
+        let now = Utc::now();
+
+        // Check if session has been marked as anomalous recently
+        if let Some(entry) = self.anomaly_stability_cache.get(session_uid) {
+            let (marked_time, marked_level) = entry.value();
+            let time_since_marked = now.signed_duration_since(*marked_time);
+
+            // If within stability period and was marked as anomalous, keep the anomalous state
+            if time_since_marked < Duration::seconds(ANOMALY_STABILITY_PERIOD) {
+                match marked_level {
+                    SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
+                        // Session is within stability period and was anomalous - keep anomalous
+                        debug!("Applying anomaly stability for session {}: keeping {} state for {:?} more", 
+                               session_uid, marked_level,
+                               Duration::seconds(ANOMALY_STABILITY_PERIOD) - time_since_marked);
+                        return *marked_level;
+                    }
+                    SessionCriticality::Normal => {
+                        // Was marked normal, use calculated level
+                    }
+                }
+            } else {
+                // Stability period expired, remove from cache
+                drop(entry);
+                self.anomaly_stability_cache.remove(session_uid);
+            }
+        }
+
+        // Update stability cache if session is becoming anomalous
+        if calculated_level != SessionCriticality::Normal {
+            self.anomaly_stability_cache
+                .insert(session_uid.to_string(), (now, calculated_level));
+            debug!(
+                "Marking session {} as {} in stability cache",
+                session_uid, calculated_level
+            );
+        }
+
+        calculated_level
     }
 }
 
@@ -1252,6 +1316,8 @@ impl SessionAnalyzer {
                 // Still actively warming up.
                 let mut anom_count = 0;
                 let mut bl_count = 0;
+                let mut found_new_blacklisted = false;
+                let mut found_new_anomalous = false;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
                 {
@@ -1280,10 +1346,12 @@ impl SessionAnalyzer {
                     // Populate the anomalous sessions (sessions already marked as anomalous)
                     if Self::is_anomalous(&session.criticality) {
                         if !self.anomalous_sessions.contains_key(&session.uid) {
-                            anom_count += 1;
+                            // Track if we found new anomalous sessions (for consistency with regular analysis)
+                            found_new_anomalous = true;
                         }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
+                        anom_count += 1; // Count ALL anomalous sessions for consistency
                     } else {
                         // Remove from collection if session is no longer anomalous
                         self.anomalous_sessions.remove(&session.uid);
@@ -1292,10 +1360,12 @@ impl SessionAnalyzer {
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
                         if !self.blacklisted_sessions.contains_key(&session.uid) {
-                            bl_count += 1;
+                            // Track if we found new blacklisted sessions (for consistency with regular analysis)
+                            found_new_blacklisted = true;
                         }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
+                        bl_count += 1; // Count ALL blacklisted sessions for consistency
                     } else {
                         // Remove from collection if session is no longer blacklisted
                         self.blacklisted_sessions.remove(&session.uid);
@@ -1307,6 +1377,8 @@ impl SessionAnalyzer {
                 if !initial_batch_analyzed_post_warmup {
                     result.anomalous_count = anom_count;
                     result.blacklisted_count = bl_count;
+                    result.new_blacklisted_found = found_new_blacklisted;
+                    result.new_anomalous_found = found_new_anomalous;
 
                     info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, anom_count, bl_count);
                     return result;
@@ -1487,6 +1559,8 @@ impl SessionAnalyzer {
                     // Count existing anomalous/blacklisted sessions even without forest model
                     let mut anom_count = 0;
                     let mut bl_count = 0;
+                    let mut found_new_anomalous = false;
+                    let mut found_new_blacklisted = false;
 
                     for session in sessions.iter_mut() {
                         if !session.criticality.contains("blacklist:") {
@@ -1498,15 +1572,34 @@ impl SessionAnalyzer {
                         self.all_sessions
                             .insert(session.uid.clone(), session.clone());
 
-                        // Count sessions after any updates
+                        // Update session collections for consistency with other paths
                         if Self::is_anomalous(&session.criticality) {
+                            if !self.anomalous_sessions.contains_key(&session.uid) {
+                                found_new_anomalous = true;
+                            }
+                            self.anomalous_sessions
+                                .insert(session.uid.clone(), session.clone());
                             anom_count += 1;
+                        } else {
+                            // Remove from collection if session is no longer anomalous
+                            self.anomalous_sessions.remove(&session.uid);
                         }
+
                         if Self::is_blacklisted(&session.criticality) {
+                            if !self.blacklisted_sessions.contains_key(&session.uid) {
+                                found_new_blacklisted = true;
+                            }
+                            self.blacklisted_sessions
+                                .insert(session.uid.clone(), session.clone());
                             bl_count += 1;
+                        } else {
+                            // Remove from collection if session is no longer blacklisted
+                            self.blacklisted_sessions.remove(&session.uid);
                         }
                     }
 
+                    result.new_anomalous_found = found_new_anomalous;
+                    result.new_blacklisted_found = found_new_blacklisted;
                     result.anomalous_count = anom_count;
                     result.blacklisted_count = bl_count;
                 }

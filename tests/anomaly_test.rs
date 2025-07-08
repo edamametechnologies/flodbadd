@@ -905,13 +905,11 @@ async fn test_blacklist_preservation() {
     );
 
     // For debugging - let's be more flexible with this assertion
-    if result.blacklisted_count != 3 {
-        println!(
-            "WARNING: Expected 3 blacklisted sessions, but got {}",
-            result.blacklisted_count
-        );
-        println!("This may be a tracking issue in the analyzer.");
-    }
+    assert!(
+        result.blacklisted_count == 3,
+        "Expected 3 blacklisted sessions, but got {}",
+        result.blacklisted_count
+    );
 
     analyzer.stop().await;
 }
