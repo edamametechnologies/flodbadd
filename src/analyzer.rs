@@ -162,7 +162,8 @@ impl IsolationForestModel {
     }
 
     /// Train (or retrain) the Isolation Forest model on the recent data.
-    /// This function is now async and includes a timeout for training.
+    /// This function is now async and NEVER blocks on training completion.
+    /// Training completion is handled separately in analyze_sessions.
     async fn train_model(&mut self, force_training: bool) {
         let now = Utc::now();
         debug!("train_model: Entry point - checking if training needed");
@@ -184,50 +185,16 @@ impl IsolationForestModel {
             self.training_in_progress.load(Ordering::Relaxed)
         );
 
-        // -------------------------------------------------------------
-        // Phase 1 – Check if a previous training task is still running
-        // -------------------------------------------------------------
-        if let Some(handle) = &mut self.training_handle {
-            debug!(
-                "train_model: Found existing handle - is_finished={}",
-                handle.is_finished()
-            );
-            if handle.is_finished() {
-                // The blocking thread has finished – gather the result and update state
-                debug!("train_model: Previous task finished, getting result");
-                match handle.await {
-                    Ok(Ok(forest)) => {
-                        info!("train_model: Background training completed successfully");
-                        self.forest = Some(forest);
-                        self.last_training_time = Utc::now(); // Update last successful training time
-                    }
-                    Ok(Err(e)) => {
-                        warn!("train_model: Background training returned error: {:?}", e);
-                        self.forest = None;
-                    }
-                    Err(join_error) => {
-                        error!(
-                            "train_model: Background training panicked: {:?}",
-                            join_error
-                        );
-                        self.forest = None;
-                    }
-                }
-
-                // Clear the handle & flag
-                self.training_handle = None;
-                self.training_in_progress.store(false, Ordering::Release);
-                debug!("train_model: Cleared handle and flag");
-            } else {
-                // A training task is still in progress – do nothing further
-                debug!("train_model: Existing training task still running – skip");
-                return;
-            }
+        // CRITICAL FIX: DO NOT process completed training here to avoid deadlocks
+        // Training completion is handled in the dedicated section at the beginning of analyze_sessions
+        
+        // Check if a training task is already in progress
+        if self.training_in_progress.load(Ordering::Relaxed) {
+            debug!("train_model: Training already in progress – skip");
+            return;
         }
 
-        // -------------------------------------------------------------
-        // Phase 2 – Spawn a new training task if we have (enough) data
-        // -------------------------------------------------------------
+        // Check if we have enough data to train
         if self.recent_data.is_empty() {
             debug!("train_model: No data available – skipping training");
             return;
@@ -317,6 +284,9 @@ impl IsolationForestModel {
             "train_model: Spawned new background training task ({} samples)",
             self.recent_data.len()
         );
+        
+        // CRITICAL: Return immediately without waiting for completion
+        // Training completion will be processed in analyze_sessions
     }
 
     /// Compute means & std-devs for **all** features in one pass.
