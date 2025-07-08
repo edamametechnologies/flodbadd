@@ -1110,8 +1110,7 @@ impl SessionAnalyzer {
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
     pub async fn analyze_sessions(&self, sessions: &mut [SessionInfo]) -> AnalysisResult {
-        // Clean up expired session_cache entries before analysis
-        self.cleanup_session_cache().await;
+        // Note: Cache cleanup is handled at sessions retrieval time
 
         let mut result = AnalysisResult {
             sessions_analyzed: sessions.len(),
