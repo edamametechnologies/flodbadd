@@ -110,8 +110,6 @@ struct IsolationForestModel {
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
-    /// Cache to track sessions that were ever marked as anomalous (never allow them to go back to normal)
-    ever_anomalous_cache: CustomDashMap<String, SessionCriticality>,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: Arc<AtomicBool>,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
@@ -139,7 +137,6 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
             session_cache: CustomDashMap::new("session_cache"),
-            ever_anomalous_cache: CustomDashMap::new("ever_anomalous_cache"),
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
@@ -159,8 +156,6 @@ impl IsolationForestModel {
     }
 
     /// Train (or retrain) the Isolation Forest model on the recent data.
-    /// This function is now async and NEVER blocks on training completion.
-    /// Training completion is handled separately in analyze_sessions.
     async fn train_model(&mut self, force_training: bool) {
         let now = Utc::now();
         debug!("train_model: Entry point - checking if training needed");
@@ -182,16 +177,50 @@ impl IsolationForestModel {
             self.training_in_progress.load(Ordering::Relaxed)
         );
 
-        // Don't process completed training here to avoid deadlocks
-        // Training completion is handled in the dedicated section at the beginning of analyze_sessions
+        // -------------------------------------------------------------
+        // Phase 1 – Check if a previous training task is still running
+        // -------------------------------------------------------------
+        if let Some(handle) = &mut self.training_handle {
+            debug!(
+                "train_model: Found existing handle - is_finished={}",
+                handle.is_finished()
+            );
+            if handle.is_finished() {
+                // The blocking thread has finished – gather the result and update state
+                debug!("train_model: Previous task finished, getting result");
+                match handle.await {
+                    Ok(Ok(forest)) => {
+                        info!("train_model: Background training completed successfully");
+                        self.forest = Some(forest);
+                        self.last_training_time = Utc::now(); // Update last successful training time
+                    }
+                    Ok(Err(e)) => {
+                        warn!("train_model: Background training returned error: {:?}", e);
+                        self.forest = None;
+                    }
+                    Err(join_error) => {
+                        error!(
+                            "train_model: Background training panicked: {:?}",
+                            join_error
+                        );
+                        self.forest = None;
+                    }
+                }
 
-        // Check if a training task is already in progress
-        if self.training_in_progress.load(Ordering::Relaxed) {
-            debug!("train_model: Training already in progress – skip");
-            return;
+                // Clear the handle & flag
+                self.training_handle = None;
+                self.training_in_progress.store(false, Ordering::Release);
+                debug!("train_model: Cleared handle and flag");
+            } else {
+                // A training task is still in progress – do nothing further
+                debug!("train_model: Existing training task still running – skip");
+                return;
+            }
         }
 
-        // Check if we have enough data to train
+        // -------------------------------------------------------------
+        // Phase 2 – Spawn a new training task if we have (enough) data
+        // -------------------------------------------------------------
         if self.recent_data.is_empty() {
             debug!("train_model: No data available – skipping training");
             return;
@@ -281,9 +310,6 @@ impl IsolationForestModel {
             "train_model: Spawned new background training task ({} samples)",
             self.recent_data.len()
         );
-
-        // Return immediately without waiting for completion
-        // Training completion will be processed in analyze_sessions
     }
 
     /// Compute means & std-devs for **all** features in one pass.
@@ -550,51 +576,47 @@ impl IsolationForestModel {
 
         // Determine criticality level and generate diagnostic if applicable
         let diagnostic_time = std::time::Instant::now();
-        let (anomaly_level, anomaly_diagnostic) = if let Some((score, features)) =
-            score_and_features
-        {
-            if detailed_logging {
-                debug!("Scored session {} with score={}", session.uid, score);
-            }
+        let (anomaly_level, anomaly_diagnostic) =
+            if let Some((score, features)) = score_and_features {
+                if detailed_logging {
+                    debug!("Scored session {} with score={}", session.uid, score);
+                }
 
-            let calculated_level = if score >= self.abnormal_threshold {
-                SessionCriticality::Abnormal
-            } else if score >= self.suspicious_threshold {
-                SessionCriticality::Suspicious
+                let level = if score >= self.abnormal_threshold {
+                    SessionCriticality::Abnormal
+                } else if score >= self.suspicious_threshold {
+                    SessionCriticality::Suspicious
+                } else {
+                    SessionCriticality::Normal
+                };
+
+                // Generate diagnostic string only for non-normal levels
+                let diag_time = std::time::Instant::now();
+                let diag_str = if level != SessionCriticality::Normal {
+                    let diagnostic = self.generate_anomaly_diagnostic(&features, feature_stats); // reuse stats
+                    if detailed_logging && diag_time.elapsed().as_millis() > 20 {
+                        debug!(
+                            "Diagnostic generation for session {} took {:?}",
+                            session.uid,
+                            diag_time.elapsed()
+                        );
+                    }
+                    diagnostic
+                } else {
+                    "".to_string()
+                };
+
+                (level, diag_str)
             } else {
-                SessionCriticality::Normal
-            };
-
-            // Check if session was ever anomalous - if so, never allow it to go back to normal
-            let final_level = self.apply_permanent_anomaly_marking(&session.uid, calculated_level);
-
-            // Generate diagnostic string only for non-normal levels
-            let diag_time = std::time::Instant::now();
-            let diag_str = if final_level != SessionCriticality::Normal {
-                let diagnostic = self.generate_anomaly_diagnostic(&features, feature_stats); // reuse stats
-                if detailed_logging && diag_time.elapsed().as_millis() > 20 {
+                // If we couldn't compute a score (no forest), default to Normal
+                if detailed_logging {
                     debug!(
-                        "Diagnostic generation for session {} took {:?}",
-                        session.uid,
-                        diag_time.elapsed()
+                        "No score available for session {}, using default Normal",
+                        session.uid
                     );
                 }
-                diagnostic
-            } else {
-                "".to_string()
+                (SessionCriticality::Normal, "".to_string())
             };
-
-            (final_level, diag_str)
-        } else {
-            // If we couldn't compute a score (no forest), default to Normal
-            if detailed_logging {
-                debug!(
-                    "No score available for session {}, using default Normal",
-                    session.uid
-                );
-            }
-            (SessionCriticality::Normal, "".to_string())
-        };
 
         if detailed_logging && diagnostic_time.elapsed().as_millis() > 30 {
             debug!(
@@ -666,7 +688,7 @@ impl IsolationForestModel {
                 "analyze_session resulted in empty criticality for {}!",
                 session.uid
             );
-            // Fallback: Use the anomaly level (after permanent marking) if somehow all tags were lost
+            // Fallback: Use the calculated anomaly level if somehow all tags were lost
             session.criticality = format!("anomaly:{}", anomaly_level);
             session.last_modified = chrono::Utc::now();
         }
@@ -685,77 +707,6 @@ impl IsolationForestModel {
             let (_score, _features, last_modified) = v;
             now <= *last_modified + Duration::seconds(ANALYZER_CACHE_TIMEOUT)
         });
-
-        // Also cleanup old entries from ever_anomalous_cache
-        // Use ALL_SESSION_TIMEOUT to match the session tracking timeout
-        self.ever_anomalous_cache.retain(|_session_uid, _| {
-            // Keep the entry if the session is still being tracked
-            // This prevents losing the "ever anomalous" state for active sessions
-            // The cleanup will happen naturally when sessions expire from all tracking
-            true // For now, keep all entries - they'll be cleaned up when the analyzer stops
-        });
-    }
-
-    /// Apply permanent anomaly marking - once a session is anomalous, it never goes back to normal
-    fn apply_permanent_anomaly_marking(
-        &self,
-        session_uid: &str,
-        calculated_level: SessionCriticality,
-    ) -> SessionCriticality {
-        debug!(
-            "PERM_MARK: Session {} - calculated: {}",
-            session_uid, calculated_level
-        );
-
-        // Check if session was ever marked as anomalous
-        if let Some(entry) = self.ever_anomalous_cache.get(session_uid) {
-            let previous_anomalous_level = entry.value();
-            debug!(
-                "PERM_MARK: Session {} found in cache with level: {}",
-                session_uid, previous_anomalous_level
-            );
-
-            match calculated_level {
-                SessionCriticality::Normal => {
-                    // Session was anomalous before but model now says normal - keep it anomalous
-                    debug!(
-                        "PERM_MARK: Preventing session {} from going back to normal (was {})",
-                        session_uid, previous_anomalous_level
-                    );
-                    return *previous_anomalous_level;
-                }
-                SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
-                    // Allow moving between anomalous levels - update cache with new level
-                    debug!(
-                        "PERM_MARK: Updating session {} from {} to {}",
-                        session_uid, previous_anomalous_level, calculated_level
-                    );
-                    drop(entry);
-                    self.ever_anomalous_cache
-                        .insert(session_uid.to_string(), calculated_level);
-                    return calculated_level;
-                }
-            }
-        } else {
-            // Session was never anomalous before
-            match calculated_level {
-                SessionCriticality::Normal => {
-                    // Normal session stays normal
-                    debug!("PERM_MARK: Session {} stays normal", session_uid);
-                    return calculated_level;
-                }
-                SessionCriticality::Suspicious | SessionCriticality::Abnormal => {
-                    // First time being marked as anomalous - add to cache
-                    debug!(
-                        "PERM_MARK: First time anomalous - adding session {} to cache as {}",
-                        session_uid, calculated_level
-                    );
-                    self.ever_anomalous_cache
-                        .insert(session_uid.to_string(), calculated_level);
-                    return calculated_level;
-                }
-            }
-        }
     }
 }
 
@@ -1033,30 +984,6 @@ pub struct AnalysisResult {
 }
 
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
-///
-/// ## Thread Safety
-///
-/// **Analysis Operations (Reader-Writer Pattern):**
-/// - `analyze_sessions()` - Exclusive writer operation (uses analysis_lock)
-/// - Multiple analysis operations cannot run concurrently
-///
-/// **Configuration Operations (Exclusive):**
-/// - `set_test_thresholds()`, `disable_warmup_for_testing()` - Uses config_lock
-/// - Cannot run concurrently with each other or with analysis
-///
-/// **Lifecycle Operations (Exclusive):**
-/// - `start()`, `stop()` - Uses lifecycle_lock
-/// - Cannot run concurrently with each other but can run with read operations
-///
-/// **Read Operations (Fully Concurrent):**
-/// - `get_*()` methods - Can run concurrently with each other and most other operations
-/// - `cleanup_session_cache()` - Can run concurrently with read operations
-///
-/// **Debug Operations (Shared Read):**
-/// - `debug_score_and_thresholds()` - Uses shared read access
-///
-/// This design allows multiple concurrent read operations while ensuring data consistency
-/// for write operations.
 pub struct SessionAnalyzer {
     model: CustomRwLock<Option<CustomRwLock<IsolationForestModel>>>,
     anomalous_sessions: CustomDashMap<String, SessionInfo>,
@@ -1072,14 +999,6 @@ pub struct SessionAnalyzer {
     threshold_recalc_interval: Duration,
     running: Arc<AtomicBool>,
     last_analysis_time: Arc<CustomRwLock<Option<DateTime<Utc>>>>,
-
-    // Fine-grained concurrency control
-    /// Protects the main analysis operation - ensures only one analysis runs at a time
-    analysis_lock: Arc<CustomMutex<()>>,
-    /// Protects configuration changes - ensures config changes are atomic
-    config_lock: Arc<CustomMutex<()>>,
-    /// Protects lifecycle operations (start/stop) - ensures clean state transitions
-    lifecycle_lock: Arc<CustomMutex<()>>,
 }
 
 impl SessionAnalyzer {
@@ -1106,9 +1025,6 @@ impl SessionAnalyzer {
             threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_HOURS),
             running: Arc::new(AtomicBool::new(false)),
             last_analysis_time: Arc::new(CustomRwLock::new(None)),
-            analysis_lock: Arc::new(CustomMutex::new(())),
-            config_lock: Arc::new(CustomMutex::new(())),
-            lifecycle_lock: Arc::new(CustomMutex::new(())),
         }
     }
 
@@ -1125,15 +1041,9 @@ impl SessionAnalyzer {
     /// Analyze and update the criticality of a batch of sessions.
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
-    ///
-    /// **Note: This method uses exclusive locking for thread safety.**
-    /// The analysis_lock ensures only one analysis operation runs at a time,
-    /// but read operations can run concurrently with this method.
     pub async fn analyze_sessions(&self, sessions: &mut [SessionInfo]) -> AnalysisResult {
-        // Acquire the analysis lock to prevent concurrent analysis operations
-        let _guard = self.analysis_lock.lock().await;
-
-        // Note: Cache cleanup is handled at sessions retrieval time
+        // Clean up expired session_cache entries before analysis
+        self.cleanup_session_cache().await;
 
         let mut result = AnalysisResult {
             sessions_analyzed: sessions.len(),
@@ -1151,7 +1061,7 @@ impl SessionAnalyzer {
         };
 
         if !model_initialized {
-            info!("LanscanAnalyzer: Auto-starting as model is not initialized");
+            info!("Analyzer: Auto-starting as model is not initialized");
             self.start().await;
         }
 
@@ -1336,8 +1246,8 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
-                let mut found_new_blacklisted = 0;
-                let mut found_new_anomalous = 0;
+                let mut anom_count = 0;
+                let mut bl_count = 0;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
                 {
@@ -1364,68 +1274,21 @@ impl SessionAnalyzer {
                     // and add them to the appropriate collections. This is used for testing purposes.
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
-                    // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                    let current_is_anomalous = Self::is_anomalous(&session.criticality);
-                    let was_ever_anomalous = {
-                        let model_read_guard = model_rwlock.read().await;
-                        model_read_guard
-                            .ever_anomalous_cache
-                            .contains_key(&session.uid)
-                    };
-                    let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
-
-                    // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
-                    if was_ever_anomalous && !current_is_anomalous {
-                        debug!("PERM_MARK: Warmup - Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
-                               session.uid, session.criticality);
-
-                        // Get the previous anomalous level and restore it
-                        let restored_level = {
-                            let model_read_guard = model_rwlock.read().await;
-                            model_read_guard
-                                .ever_anomalous_cache
-                                .get(&session.uid)
-                                .map(|entry| *entry.value())
-                        };
-
-                        if let Some(level) = restored_level {
-                            // Update the session's criticality to restore the permanent anomaly marking
-                            let existing_tags: Vec<&str> = session
-                                .criticality
-                                .split(',')
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
-                                .collect();
-
-                            let mut new_tags = vec![format!("anomaly:{}", level)];
-                            new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
-                            new_tags.sort_unstable();
-
-                            session.criticality = new_tags.join(",");
-                            debug!(
-                                "PERM_MARK: Warmup - Restored session {} criticality to '{}'",
-                                session.uid, session.criticality
-                            );
-                        }
-                    }
-
-                    if should_be_anomalous {
+                    if Self::is_anomalous(&session.criticality) {
                         if !self.anomalous_sessions.contains_key(&session.uid) {
-                            // Track if we found new anomalous sessions (for consistency with regular analysis)
-                            found_new_anomalous += 1;
+                            anom_count += 1;
                         }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
                     } else {
-                        // Only remove if session was never marked as anomalous
+                        // Remove from collection if session is no longer anomalous
                         self.anomalous_sessions.remove(&session.uid);
                     }
 
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
                         if !self.blacklisted_sessions.contains_key(&session.uid) {
-                            // Track if we found new blacklisted sessions (for consistency with regular analysis)
-                            found_new_blacklisted += 1;
+                            bl_count += 1;
                         }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
@@ -1438,16 +1301,10 @@ impl SessionAnalyzer {
                 // The current batch of sessions has been added to `recent_data` and training ensured.
                 // They will be analyzed once warm-up completes.
                 if !initial_batch_analyzed_post_warmup {
-                    // Get total counts from collections (not just current batch)
-                    let total_anom_count = self.anomalous_sessions.len();
-                    let total_bl_count = self.blacklisted_sessions.len();
+                    result.anomalous_count = anom_count;
+                    result.blacklisted_count = bl_count;
 
-                    result.anomalous_count = total_anom_count;
-                    result.blacklisted_count = total_bl_count;
-                    result.new_blacklisted_found = found_new_blacklisted > 0;
-                    result.new_anomalous_found = found_new_anomalous > 0;
-
-                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} new / {} total anomalous, {} new / {} total blacklisted.", sessions_len, found_new_anomalous, total_anom_count, found_new_blacklisted, total_bl_count);
+                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, anom_count, bl_count);
                     return result;
                 }
             }
@@ -1555,6 +1412,8 @@ impl SessionAnalyzer {
                     let feature_stats = model_guard.compute_feature_stats_bulk();
                     drop(model_guard);
 
+                    let mut anom_count = 0;
+                    let mut bl_count = 0;
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
@@ -1563,97 +1422,31 @@ impl SessionAnalyzer {
                         last_analysis_time_guard.unwrap_or(now)
                     };
 
-                    // Process each session individually to avoid holding write lock during analysis
+                    let model_write_guard = model_rwlock.write().await;
+
                     for (idx, session) in sessions.iter_mut().enumerate() {
                         let needs_analysis = {
-                            // Acquire lock briefly to check cache status
-                            let model_read_guard = model_rwlock.read().await;
                             let in_cache =
-                                model_read_guard.session_cache.get(&session.uid).is_some();
-                            let _is_ever_anomalous = model_read_guard
-                                .ever_anomalous_cache
-                                .contains_key(&session.uid);
-
-                            // Standard analysis conditions
-                            let standard_needs_analysis =
-                                !in_cache || session.last_modified > prev_analysis_time;
-
-                            // Force re-analysis for ever-anomalous sessions to ensure permanent marking is applied
-                            // But only if their current criticality doesn't already reflect anomaly status
-                            // AND the session has been modified (to avoid breaking timestamp-based tests)
-                            let force_reanalysis_for_permanent_marking = _is_ever_anomalous
-                                && !Self::is_anomalous(&session.criticality)
-                                && session.last_modified > prev_analysis_time;
-
-                            standard_needs_analysis || force_reanalysis_for_permanent_marking
+                                model_write_guard.session_cache.get(&session.uid).is_some();
+                            !in_cache || session.last_modified > prev_analysis_time
                         };
-
                         if needs_analysis {
-                            // Acquire write lock only for the analysis of this specific session
-                            let model_write_guard = model_rwlock.write().await;
                             model_write_guard.analyze_session(session, &feature_stats);
-                            drop(model_write_guard); // Explicitly release the lock
                         }
 
                         // Store all sessions regardless of classification
                         self.all_sessions
                             .insert(session.uid.clone(), session.clone());
 
-                        // Check if session should be in anomalous collection
-                        // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                        let current_is_anomalous = Self::is_anomalous(&session.criticality);
-                        let was_ever_anomalous = {
-                            let model_read_guard = model_rwlock.read().await;
-                            model_read_guard
-                                .ever_anomalous_cache
-                                .contains_key(&session.uid)
-                        };
-                        let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
-
-                        // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
-                        // Only apply this if the session was analyzed in this run (needs_analysis was true)
-                        if was_ever_anomalous && !current_is_anomalous && needs_analysis {
-                            debug!("PERM_MARK: Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
-                                   session.uid, session.criticality);
-
-                            // Get the previous anomalous level and restore it
-                            let restored_level = {
-                                let model_read_guard = model_rwlock.read().await;
-                                model_read_guard
-                                    .ever_anomalous_cache
-                                    .get(&session.uid)
-                                    .map(|entry| *entry.value())
-                            };
-
-                            if let Some(level) = restored_level {
-                                // Update the session's criticality to restore the permanent anomaly marking
-                                let existing_tags: Vec<&str> = session
-                                    .criticality
-                                    .split(',')
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
-                                    .collect();
-
-                                let mut new_tags = vec![format!("anomaly:{}", level)];
-                                new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
-                                new_tags.sort_unstable();
-
-                                session.criticality = new_tags.join(",");
-                                debug!(
-                                    "PERM_MARK: Restored session {} criticality to '{}'",
-                                    session.uid, session.criticality
-                                );
-                            }
-                        }
-
-                        if should_be_anomalous {
+                        if Self::is_anomalous(&session.criticality) {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
                                 found_new_anomalous = true;
                             }
                             self.anomalous_sessions
                                 .insert(session.uid.clone(), session.clone());
+                            anom_count += 1;
                         } else {
-                            // Only remove if session was never marked as anomalous
+                            // Remove from collection if session is no longer anomalous
                             self.anomalous_sessions.remove(&session.uid);
                         }
                         if Self::is_blacklisted(&session.criticality) {
@@ -1662,6 +1455,7 @@ impl SessionAnalyzer {
                             }
                             self.blacklisted_sessions
                                 .insert(session.uid.clone(), session.clone());
+                            bl_count += 1;
                         } else {
                             // Remove from collection if session is no longer blacklisted
                             self.blacklisted_sessions.remove(&session.uid);
@@ -1675,24 +1469,20 @@ impl SessionAnalyzer {
                             );
                         }
                     }
-                    // Get total counts from collections (not just current batch)
-                    let total_anom_count = self.anomalous_sessions.len();
-                    let total_bl_count = self.blacklisted_sessions.len();
-
                     info!("Analyzer ({}): Analysis of {} sessions completed in {:?}. Found: {} anomalous, {} blacklisted.",
-                          operation_type, sessions_len, analyze_start_time.elapsed(), total_anom_count, total_bl_count);
+                          operation_type, sessions_len, analyze_start_time.elapsed(), anom_count, bl_count);
 
                     // Update result with findings
                     result.new_anomalous_found = found_new_anomalous;
                     result.new_blacklisted_found = found_new_blacklisted;
-                    result.anomalous_count = total_anom_count;
-                    result.blacklisted_count = total_bl_count;
+                    result.anomalous_count = anom_count;
+                    result.blacklisted_count = bl_count;
                 } else {
                     warn!("Analyzer (Regular Op/Post-Warmup): No forest model available for analysis. Sessions will not be scored for anomalies.");
 
                     // Count existing anomalous/blacklisted sessions even without forest model
-                    let mut found_new_anomalous = false;
-                    let mut found_new_blacklisted = false;
+                    let mut anom_count = 0;
+                    let mut bl_count = 0;
 
                     for session in sessions.iter_mut() {
                         if !session.criticality.contains("blacklist:") {
@@ -1704,88 +1494,21 @@ impl SessionAnalyzer {
                         self.all_sessions
                             .insert(session.uid.clone(), session.clone());
 
-                        // Update session collections for consistency with other paths
-                        // Must check both current criticality AND ever_anomalous_cache for permanent marking
-                        let current_is_anomalous = Self::is_anomalous(&session.criticality);
-                        let was_ever_anomalous = {
-                            let model_read_guard = model_rwlock.read().await;
-                            model_read_guard
-                                .ever_anomalous_cache
-                                .contains_key(&session.uid)
-                        };
-                        let should_be_anomalous = current_is_anomalous || was_ever_anomalous;
-
-                        // Apply permanent marking protection if session was ever anomalous but current criticality doesn't reflect it
-                        if was_ever_anomalous && !current_is_anomalous {
-                            debug!("PERM_MARK: No-model - Session {} was ever anomalous but current criticality '{}' says normal - applying permanent marking", 
-                                   session.uid, session.criticality);
-
-                            // Get the previous anomalous level and restore it
-                            let restored_level = {
-                                let model_read_guard = model_rwlock.read().await;
-                                model_read_guard
-                                    .ever_anomalous_cache
-                                    .get(&session.uid)
-                                    .map(|entry| *entry.value())
-                            };
-
-                            if let Some(level) = restored_level {
-                                // Update the session's criticality to restore the permanent anomaly marking
-                                let existing_tags: Vec<&str> = session
-                                    .criticality
-                                    .split(',')
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty() && !s.starts_with("anomaly:"))
-                                    .collect();
-
-                                let mut new_tags = vec![format!("anomaly:{}", level)];
-                                new_tags.extend(existing_tags.iter().map(|s| s.to_string()));
-                                new_tags.sort_unstable();
-
-                                session.criticality = new_tags.join(",");
-                                debug!(
-                                    "PERM_MARK: No-model - Restored session {} criticality to '{}'",
-                                    session.uid, session.criticality
-                                );
-                            }
+                        // Count sessions after any updates
+                        if Self::is_anomalous(&session.criticality) {
+                            anom_count += 1;
                         }
-
-                        if should_be_anomalous {
-                            if !self.anomalous_sessions.contains_key(&session.uid) {
-                                found_new_anomalous = true;
-                            }
-                            self.anomalous_sessions
-                                .insert(session.uid.clone(), session.clone());
-                        } else {
-                            // Only remove if session was never marked as anomalous
-                            self.anomalous_sessions.remove(&session.uid);
-                        }
-
                         if Self::is_blacklisted(&session.criticality) {
-                            if !self.blacklisted_sessions.contains_key(&session.uid) {
-                                found_new_blacklisted = true;
-                            }
-                            self.blacklisted_sessions
-                                .insert(session.uid.clone(), session.clone());
-                        } else {
-                            // Remove from collection if session is no longer blacklisted
-                            self.blacklisted_sessions.remove(&session.uid);
+                            bl_count += 1;
                         }
                     }
 
-                    // Get total counts from collections (not just current batch)
-                    let total_anom_count = self.anomalous_sessions.len();
-                    let total_bl_count = self.blacklisted_sessions.len();
-
-                    result.new_anomalous_found = found_new_anomalous;
-                    result.new_blacklisted_found = found_new_blacklisted;
-                    result.anomalous_count = total_anom_count;
-                    result.blacklisted_count = total_bl_count;
+                    result.anomalous_count = anom_count;
+                    result.blacklisted_count = bl_count;
                 }
             }
         }
 
-        // Overall batch completion log - use a simple Instant for this function's total time.
         debug!(
             "Analyzer: analyze_sessions call finished for {} sessions.",
             sessions_len
@@ -1803,9 +1526,6 @@ impl SessionAnalyzer {
 
     /// Get a session by its UID
     /// Prioritizes anomalous and blacklisted versions to preserve historical criticality
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously without issues.
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
         // Check blacklisted sessions first (highest priority for criticality preservation)
         if let Some(entry) = self.blacklisted_sessions.get(uid) {
@@ -1845,9 +1565,6 @@ impl SessionAnalyzer {
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.
     /// Also cleans up old entries.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_anomalous_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         self.anomalous_sessions
@@ -1858,9 +1575,6 @@ impl SessionAnalyzer {
 
     /// Gets the current count of anomalous sessions.
     /// Also cleans up old entries.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_anomalous_status(&self) -> usize {
         self.cleanup_tracked_sessions();
         self.anomalous_sessions.len()
@@ -1868,9 +1582,6 @@ impl SessionAnalyzer {
 
     /// Retrieves a snapshot of currently tracked blacklisted sessions.
     /// Also cleans up old entries.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         self.blacklisted_sessions
@@ -1883,9 +1594,6 @@ impl SessionAnalyzer {
     /// This includes sessions from all states: normal, suspicious, abnormal, and blacklisted.
     /// Sessions are available even during warmup period.
     /// Also cleans up old entries.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         let mut sessions: Vec<SessionInfo> = self
@@ -1902,9 +1610,6 @@ impl SessionAnalyzer {
     /// Retrieves all current sessions that have been processed by the analyzer.
     /// Sessions are available even during warmup period.
     /// Also cleans up old entries.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
         self.cleanup_tracked_sessions();
         let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
@@ -1924,9 +1629,6 @@ impl SessionAnalyzer {
 
     /// Public async method to trigger session_cache cleanup.
     /// Call this periodically from a background task or timer.
-    ///
-    /// **Note: This method is thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously, though cleanup may be redundant.
     pub async fn cleanup_session_cache(&self) {
         let model_lock = self.model.read().await;
         if let Some(model) = &*model_lock {
@@ -1936,16 +1638,9 @@ impl SessionAnalyzer {
 
     /// Start the analyzer (set running flag, prepare for background tasks if needed)
     /// Start with preserved security findings if available
-    ///
-    /// **Note: This method uses exclusive lifecycle locking.**
-    /// The lifecycle_lock ensures only one start/stop operation runs at a time,
-    /// but read operations can run concurrently with this method.
     pub async fn start(&self) {
-        // Acquire the lifecycle lock to prevent concurrent start/stop operations
-        let _guard = self.lifecycle_lock.lock().await;
-
         if self.running.swap(true, Ordering::SeqCst) {
-            debug!("LanscanAnalyzer already running");
+            debug!("Analyzer already running");
             return;
         }
 
@@ -1956,11 +1651,11 @@ impl SessionAnalyzer {
 
         if anomalous_count > 0 || blacklisted_count > 0 || all_sessions_count > 0 {
             info!(
-                "LanscanAnalyzer started with preserved sessions: {} anomalous, {} blacklisted, {} total",
+                "Analyzer started with preserved sessions: {} anomalous, {} blacklisted, {} total",
                 anomalous_count, blacklisted_count, all_sessions_count
             );
         } else {
-            info!("LanscanAnalyzer started");
+            info!("Analyzer started");
         }
 
         // Instantiate the IsolationForestModel
@@ -1970,19 +1665,12 @@ impl SessionAnalyzer {
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
     /// Preserve critical security findings across restarts
-    ///
-    /// **Note: This method uses exclusive lifecycle locking.**
-    /// The lifecycle_lock ensures only one start/stop operation runs at a time,
-    /// but read operations can run concurrently with this method.
     pub async fn stop(&self) {
-        // Acquire the lifecycle lock to prevent concurrent start/stop operations
-        let _guard = self.lifecycle_lock.lock().await;
-
         if !self.running.swap(false, Ordering::SeqCst) {
-            debug!("LanscanAnalyzer already stopped");
+            debug!("Analyzer already stopped");
             return;
         }
-        info!("LanscanAnalyzer stopped - preserving security findings");
+        info!("Analyzer stopped - preserving security findings");
 
         // First abort any training task
         let abort_result = {
@@ -2013,10 +1701,9 @@ impl SessionAnalyzer {
         if let Some(model) = &*model_guard {
             let mut model_write = model.write().await;
 
-            // Clear temporary data (preserve ever_anomalous_cache for permanent marking)
+            // Clear temporary data
             model_write.recent_data.clear();
             model_write.session_cache.clear();
-            // DON'T clear ever_anomalous_cache - it stores permanent anomaly marking state
 
             // Reset training state
             model_write.forest = None;
@@ -2045,10 +1732,6 @@ impl SessionAnalyzer {
     }
 
     /// Debug method to get anomaly score and thresholds for a session (testing purposes only)
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously without issues.
-    /// Uses shared read access to the model.
     pub async fn debug_score_and_thresholds(
         &self,
         session: &SessionInfo,
@@ -2071,12 +1754,7 @@ impl SessionAnalyzer {
     }
 
     /// Set custom thresholds for testing purposes
-    ///
-    /// **Note: This method uses exclusive configuration locking.**
-    /// The config_lock ensures configuration changes are atomic and don't
-    /// interfere with analysis operations.
     pub async fn set_test_thresholds(&self, suspicious: f64, abnormal: f64) {
-        let _guard = self.config_lock.lock().await;
         let model_guard = self.model.read().await;
         if let Some(model) = &*model_guard {
             let mut model_write = model.write().await;
@@ -2086,12 +1764,7 @@ impl SessionAnalyzer {
     }
 
     /// Disable warmup for testing purposes
-    ///
-    /// **Note: This method uses exclusive configuration locking.**
-    /// The config_lock ensures configuration changes are atomic and don't
-    /// interfere with analysis operations.
     pub async fn disable_warmup_for_testing(&self) {
-        let _guard = self.config_lock.lock().await;
         self.warm_up_active.store(false, Ordering::Relaxed);
         // Also ensure we have a model ready
         let model_guard = self.model.read().await;
@@ -2129,176 +1802,7 @@ impl SessionAnalyzer {
             }
         }
     }
-
-    /// Check if the analyzer is currently running
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Can be called from multiple threads without any locking.
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
-    }
-
-    /// Check if the analyzer is currently in warm-up mode
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Can be called from multiple threads without any locking.
-    pub fn is_warming_up(&self) -> bool {
-        self.warm_up_active.load(Ordering::Relaxed)
-    }
-
-    /// Get analyzer statistics for monitoring and debugging
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously without issues.
-    pub async fn get_stats(&self) -> AnalyzerStats {
-        // No locks needed for reading atomic values and collection sizes
-        AnalyzerStats {
-            is_running: self.is_running(),
-            is_warming_up: self.is_warming_up(),
-            total_sessions: self.all_sessions.len(),
-            anomalous_sessions: self.anomalous_sessions.len(),
-            blacklisted_sessions: self.blacklisted_sessions.len(),
-            warm_up_elapsed_seconds: if self.warm_up_start_time.load(Ordering::Relaxed) > 0 {
-                let now = Utc::now().timestamp() as u64;
-                let start = self.warm_up_start_time.load(Ordering::Relaxed);
-                if now >= start {
-                    Some(now - start)
-                } else {
-                    Some(0)
-                }
-            } else {
-                None
-            },
-        }
-    }
-
-    /// Batch operation: Get multiple sessions by UIDs concurrently
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Multiple threads can call this simultaneously without issues.
-    pub async fn get_sessions_by_uids(&self, uids: &[String]) -> Vec<Option<SessionInfo>> {
-        // Since each lookup is independent, we can do them concurrently
-        let mut results = Vec::with_capacity(uids.len());
-        for uid in uids {
-            results.push(self.get_session_by_uid(uid).await);
-        }
-        results
-    }
-
-    /// Concurrent-safe method to check if analysis is currently in progress
-    ///
-    /// **Note: This method is fully thread-safe for concurrent access.**
-    /// Can be called from multiple threads to check analysis status.
-    /// Returns true if analysis is likely in progress, false otherwise.
-    pub fn is_analysis_in_progress(&self) -> bool {
-        // Since CustomMutex doesn't have try_lock, we'll use an alternative approach
-        // This is a best-effort check - it may have false negatives but no false positives
-
-        // Check if we're in warm-up mode (analysis might be happening)
-        if self.is_warming_up() {
-            return true;
-        }
-
-        // If not running, definitely no analysis
-        if !self.is_running() {
-            return false;
-        }
-
-        // For a more accurate check, we could add an atomic flag that tracks analysis state
-        // But for now, we'll return false as a conservative estimate
-        false
-    }
 }
-
-/// Statistics about the analyzer state, used for monitoring and debugging
-#[derive(Debug, Clone)]
-pub struct AnalyzerStats {
-    pub is_running: bool,
-    pub is_warming_up: bool,
-    pub total_sessions: usize,
-    pub anomalous_sessions: usize,
-    pub blacklisted_sessions: usize,
-    pub warm_up_elapsed_seconds: Option<u64>,
-}
-
-/// Example usage patterns for concurrent access to the SessionAnalyzer
-///
-/// ```rust,no_run
-/// use std::sync::Arc;
-/// use tokio::time::{sleep, Duration};
-///
-/// async fn concurrent_analyzer_example() {
-///     let analyzer = Arc::new(SessionAnalyzer::new());
-///     
-///     // Start the analyzer once
-///     analyzer.start().await;
-///     
-///     // Clone the Arc for use in multiple concurrent tasks
-///     let analyzer_clone1 = Arc::clone(&analyzer);
-///     let analyzer_clone2 = Arc::clone(&analyzer);
-///     let analyzer_clone3 = Arc::clone(&analyzer);
-///     
-///     // Task 1: Continuous monitoring (can run concurrently with everything)
-///     let monitor_task = tokio::spawn(async move {
-///         loop {
-///             let stats = analyzer_clone1.get_stats().await;
-///             println!("Stats: {:?}", stats);
-///             
-///             // Check if analysis is in progress without blocking
-///             if !analyzer_clone1.is_analysis_in_progress() {
-///                 println!("Analysis is idle");
-///             }
-///             
-///             sleep(Duration::from_secs(5)).await;
-///         }
-///     });
-///     
-///     // Task 2: Periodic session retrieval (can run concurrently)
-///     let retrieval_task = tokio::spawn(async move {
-///         loop {
-///             // These can all run concurrently
-///             let (anomalous, blacklisted, all_sessions) = tokio::join!(
-///                 analyzer_clone2.get_anomalous_sessions(),
-///                 analyzer_clone2.get_blacklisted_sessions(),
-///                 analyzer_clone2.get_current_sessions()
-///             );
-///             
-///             println!("Retrieved {} anomalous, {} blacklisted, {} current sessions",
-///                      anomalous.len(), blacklisted.len(), all_sessions.len());
-///             
-///             sleep(Duration::from_secs(3)).await;
-///         }
-///     });
-///     
-///     // Task 3: Analysis operations (exclusive, but other tasks can still run)
-///     let analysis_task = tokio::spawn(async move {
-///         loop {
-///             // Get some sessions to analyze (this is concurrent-safe)
-///             let current_sessions = analyzer_clone3.get_current_sessions().await;
-///             
-///             if !current_sessions.is_empty() {
-///                 // Convert to mutable for analysis
-///                 let mut sessions_to_analyze = current_sessions;
-///                 
-///                 // This operation is exclusive but doesn't block other read operations
-///                 let result = analyzer_clone3.analyze_sessions(&mut sessions_to_analyze).await;
-///                 
-///                 println!("Analysis result: {:?}", result);
-///             }
-///             
-///             sleep(Duration::from_secs(10)).await;
-///         }
-///     });
-///     
-///     // All tasks can run concurrently
-///     // Only analyze_sessions() operations are mutually exclusive
-///     tokio::select! {
-///         _ = monitor_task => {},
-///         _ = retrieval_task => {},
-///         _ = analysis_task => {},
-///     }
-/// }
-/// ```
 
 #[cfg(test)]
 mod tests {
@@ -3374,166 +2878,6 @@ mod tests {
         println!("   - All session retrieval methods work consistently");
     }
 
-    /// Test concurrent access to the analyzer to verify thread safety
-    #[tokio::test]
-    async fn test_concurrent_analyzer_access() {
-        use std::sync::Arc;
-        use tokio::time::{sleep, Duration};
-
-        let analyzer = Arc::new(SessionAnalyzer::new());
-        analyzer.start().await;
-        analyzer.disable_warmup_for_testing().await;
-        analyzer.set_test_thresholds(0.1, 0.2).await;
-
-        // Create test sessions
-        let mut test_sessions = vec![
-            create_test_session_with_criticality(
-                Uuid::new_v4().to_string(),
-                "blacklist:test1".to_string(),
-                Utc::now(),
-            ),
-            create_test_session_with_criticality(
-                Uuid::new_v4().to_string(),
-                "custom:test2".to_string(),
-                Utc::now(),
-            ),
-        ];
-
-        // Add initial sessions
-        analyzer.analyze_sessions(&mut test_sessions).await;
-
-        // Clone analyzer for concurrent access
-        let analyzer1 = Arc::clone(&analyzer);
-        let analyzer2 = Arc::clone(&analyzer);
-        let analyzer3 = Arc::clone(&analyzer);
-        let analyzer4 = Arc::clone(&analyzer);
-
-        // Task 1: Multiple concurrent read operations
-        let read_task1 = tokio::spawn(async move {
-            for i in 0..10 {
-                let (anomalous, blacklisted, stats) = tokio::join!(
-                    analyzer1.get_anomalous_sessions(),
-                    analyzer1.get_blacklisted_sessions(),
-                    analyzer1.get_stats()
-                );
-
-                println!(
-                    "Read task 1, iteration {}: {} anomalous, {} blacklisted, running: {}",
-                    i,
-                    anomalous.len(),
-                    blacklisted.len(),
-                    stats.is_running
-                );
-
-                sleep(Duration::from_millis(50)).await;
-            }
-        });
-
-        // Task 2: Another set of concurrent read operations
-        let read_task2 = tokio::spawn(async move {
-            for i in 0..10 {
-                let (current, all_sessions) =
-                    tokio::join!(analyzer2.get_current_sessions(), analyzer2.get_sessions());
-
-                let is_running = analyzer2.is_running();
-                let is_warming_up = analyzer2.is_warming_up();
-                let analysis_in_progress = analyzer2.is_analysis_in_progress();
-
-                println!("Read task 2, iteration {}: {} current, {} total, running: {}, warming: {}, analyzing: {}", 
-                         i, current.len(), all_sessions.len(), is_running, is_warming_up, analysis_in_progress);
-
-                sleep(Duration::from_millis(75)).await;
-            }
-        });
-
-        // Task 3: Analysis operations (should be exclusive but not block reads)
-        let analysis_task = tokio::spawn(async move {
-            for i in 0..5 {
-                let mut analysis_sessions = vec![create_test_session_with_criticality(
-                    Uuid::new_v4().to_string(),
-                    format!("test_analysis_{}", i),
-                    Utc::now(),
-                )];
-
-                println!("Analysis task starting iteration {}", i);
-                let result = analyzer3.analyze_sessions(&mut analysis_sessions).await;
-                println!("Analysis task completed iteration {}: {:?}", i, result);
-
-                sleep(Duration::from_millis(100)).await;
-            }
-        });
-
-        // Task 4: Batch operations
-        let batch_task = tokio::spawn(async move {
-            for i in 0..5 {
-                let uids = vec![
-                    test_sessions[0].uid.clone(),
-                    test_sessions[1].uid.clone(),
-                    "non_existent_uid".to_string(),
-                ];
-
-                let batch_results = analyzer4.get_sessions_by_uids(&uids).await;
-                let found_count = batch_results.iter().filter(|r| r.is_some()).count();
-
-                println!(
-                    "Batch task iteration {}: found {} of {} sessions",
-                    i,
-                    found_count,
-                    uids.len()
-                );
-
-                sleep(Duration::from_millis(120)).await;
-            }
-        });
-
-        // Run all tasks concurrently
-        let (read1_result, read2_result, analysis_result, batch_result) =
-            tokio::join!(read_task1, read_task2, analysis_task, batch_task);
-
-        // Verify all tasks completed successfully
-        assert!(
-            read1_result.is_ok(),
-            "Read task 1 should complete successfully"
-        );
-        assert!(
-            read2_result.is_ok(),
-            "Read task 2 should complete successfully"
-        );
-        assert!(
-            analysis_result.is_ok(),
-            "Analysis task should complete successfully"
-        );
-        assert!(
-            batch_result.is_ok(),
-            "Batch task should complete successfully"
-        );
-
-        // Verify final state
-        let final_stats = analyzer.get_stats().await;
-        println!("Final stats: {:?}", final_stats);
-
-        assert!(final_stats.is_running, "Analyzer should still be running");
-        assert!(final_stats.total_sessions > 0, "Should have sessions");
-        assert!(
-            !analyzer.is_analysis_in_progress(),
-            "Analysis should be complete"
-        );
-
-        // Verify sessions can still be retrieved
-        let final_sessions = analyzer.get_sessions().await;
-        assert!(
-            final_sessions.len() >= 2,
-            "Should have at least initial sessions"
-        );
-
-        analyzer.stop().await;
-        println!("✅ Concurrent analyzer access test completed successfully!");
-        println!("   - Multiple read operations ran concurrently without blocking");
-        println!("   - Analysis operations were exclusive but didn't block reads");
-        println!("   - Batch operations worked correctly");
-        println!("   - All concurrent tasks completed successfully");
-    }
-
     /// Test start/stop/start sequence with actual network capture and traffic generation
     /// Verifies that packets are actually captured after both first start and second start
     #[tokio::test]
@@ -3895,147 +3239,5 @@ mod tests {
         }
 
         new_sessions
-    }
-
-    /// Test permanent anomaly marking in collections - ensure sessions never leave anomalous collection
-    #[tokio::test]
-    async fn test_permanent_anomaly_marking_in_collections() {
-        let analyzer = SessionAnalyzer::new();
-        analyzer.start().await;
-        analyzer.disable_warmup_for_testing().await;
-
-        // Set very low thresholds to easily trigger anomalies
-        analyzer.set_test_thresholds(0.1, 0.2).await;
-
-        // Create a session that will be marked as anomalous
-        let session_uid = Uuid::new_v4().to_string();
-        let mut anomalous_session = create_test_session_with_criticality(
-            session_uid.clone(),
-            "anomaly:normal".to_string(),
-            Utc::now(),
-        );
-
-        // Make the session have anomalous features (high bytes) to trigger anomaly
-        anomalous_session.stats.inbound_bytes = 1_000_000;
-        anomalous_session.stats.outbound_bytes = 1_000_000;
-
-        // First analysis - should mark as anomalous
-        let mut sessions1 = vec![anomalous_session.clone()];
-        let result1 = analyzer.analyze_sessions(&mut sessions1).await;
-
-        println!("First analysis result: {:?}", result1);
-        println!(
-            "Session criticality after first analysis: {}",
-            sessions1[0].criticality
-        );
-
-        // Verify session is in anomalous collection
-        let anomalous_sessions = analyzer.get_anomalous_sessions().await;
-        let anomalous_count_1 = anomalous_sessions.len();
-        assert!(
-            anomalous_count_1 > 0,
-            "Session should be in anomalous collection after first analysis"
-        );
-
-        let found_session = anomalous_sessions.iter().find(|s| s.uid == session_uid);
-        assert!(
-            found_session.is_some(),
-            "Our specific session should be in anomalous collection"
-        );
-
-        // Verify session is marked as anomalous
-        let session_is_anomalous = analyzer
-            .get_session_by_uid(&session_uid)
-            .await
-            .map(|s| {
-                s.criticality.contains("anomaly:suspicious")
-                    || s.criticality.contains("anomaly:abnormal")
-            })
-            .unwrap_or(false);
-        assert!(
-            session_is_anomalous,
-            "Session should be marked as anomalous"
-        );
-
-        println!(
-            "✅ After first analysis: {} anomalous sessions, session marked as anomalous",
-            anomalous_count_1
-        );
-
-        // Now add many normal sessions to retrain the model and potentially change thresholds
-        let mut normal_sessions = Vec::new();
-        for i in 0..200 {
-            let normal_session = create_test_session_with_criticality(
-                format!("normal_{}", i),
-                "anomaly:normal".to_string(),
-                Utc::now(),
-            );
-            normal_sessions.push(normal_session);
-        }
-
-        // Second analysis - lots of normal sessions should retrain model
-        let result2 = analyzer.analyze_sessions(&mut normal_sessions).await;
-        println!("Second analysis (normal sessions) result: {:?}", result2);
-
-        // Third analysis - re-analyze the original session (should stay anomalous due to permanent marking)
-        let mut anomalous_session_updated = anomalous_session.clone();
-        anomalous_session_updated.last_modified = Utc::now(); // Update timestamp to trigger analysis
-        let mut sessions3 = vec![anomalous_session_updated];
-        let result3 = analyzer.analyze_sessions(&mut sessions3).await;
-
-        println!("Third analysis result: {:?}", result3);
-        println!(
-            "Session criticality after third analysis: {}",
-            sessions3[0].criticality
-        );
-
-        // CRITICAL TEST: Verify session is STILL in anomalous collection
-        let final_anomalous_sessions = analyzer.get_anomalous_sessions().await;
-        let final_anomalous_count = final_anomalous_sessions.len();
-
-        println!("Final anomalous sessions count: {}", final_anomalous_count);
-
-        // Find our specific session in the final collection
-        let final_found_session = final_anomalous_sessions
-            .iter()
-            .find(|s| s.uid == session_uid);
-        assert!(
-            final_found_session.is_some(),
-            "CRITICAL: Session should STILL be in anomalous collection due to permanent marking"
-        );
-
-        // Verify the session is still marked as anomalous (not normal)
-        let final_session_is_anomalous = analyzer
-            .get_session_by_uid(&session_uid)
-            .await
-            .map(|s| {
-                s.criticality.contains("anomaly:suspicious")
-                    || s.criticality.contains("anomaly:abnormal")
-            })
-            .unwrap_or(false);
-        assert!(
-            final_session_is_anomalous,
-            "Session should still be marked as anomalous"
-        );
-
-        // The count should never decrease due to permanent marking
-        assert!(
-            final_anomalous_count >= 1,
-            "Anomalous count should never decrease due to permanent marking (was {}, now {})",
-            anomalous_count_1,
-            final_anomalous_count
-        );
-
-        println!("✅ PERMANENT ANOMALY MARKING TEST PASSED!");
-        println!("   - Session was initially marked as anomalous");
-        println!("   - Model was retrained with normal sessions");
-        println!("   - Session remained in anomalous collection");
-        println!("   - Session remained marked as anomalous");
-        println!(
-            "   - Count never decreased: {} -> {}",
-            anomalous_count_1, final_anomalous_count
-        );
-
-        analyzer.stop().await;
     }
 }
