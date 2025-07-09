@@ -5139,28 +5139,22 @@ mod tests {
             .expect("Failed to build reqwest client");
 
         let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
-        let mut test_success = false;
-        let mut retry_count = 0;
-        while !test_success && retry_count < 10 {
-            match client.get(target_url).send().await {
-                Ok(response) => {
-                    println!(
-                        "Traffic generation successful (Status: {})",
-                        response.status()
-                    );
-                    let _ = response.bytes().await;
-                    test_success = true;
-                }
-                Err(e) => {
-                    println!("Traffic generation failed: {}", e);
-                }
+        match client.get(target_url).send().await {
+            Ok(response) => {
+                println!(
+                    "Traffic generation successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+                test_success = true;
             }
-            retry_count += 1;
-            println!("Waiting for traffic generation to succeed, retrying...");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            Err(e) => {
+                println!("Traffic generation failed: {}", e);
+            }
         }
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait 1x the pooling period to ensure sessions are synced
+        tokio::time::sleep(Duration::from_secs(60)).await;
 
         let initial_sessions = capture.get_sessions(false).await;
         let initial_count = initial_sessions.len();
@@ -5190,28 +5184,22 @@ mod tests {
             .expect("Failed to build reqwest client");
 
         let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
-        let mut test_success = false;
-        let mut retry_count = 0;
-        while !test_success && retry_count < 10 {
-            match client.get(target_url).send().await {
-                Ok(response) => {
-                    println!(
-                        "Traffic generation successful (Status: {})",
-                        response.status()
-                    );
-                    let _ = response.bytes().await;
-                    test_success = true;
-                }
-                Err(e) => {
-                    println!("Traffic generation failed: {}", e);
-                }
+        match client.get(target_url).send().await {
+            Ok(response) => {
+                println!(
+                    "Traffic generation successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+                test_success = true;
             }
-            retry_count += 1;
-            println!("Waiting for traffic generation to succeed, retrying...");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            Err(e) => {
+                println!("Traffic generation failed: {}", e);
+            }
         }
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait 1x the pooling period to ensure sessions are synced
+        tokio::time::sleep(Duration::from_secs(60)).await;
 
         let stop_sessions = capture.get_sessions(false).await;
         let stop_count = stop_sessions.len();
@@ -5246,28 +5234,22 @@ mod tests {
             .expect("Failed to build reqwest client");
 
         let target_url = "https://2.na.dl.wireshark.org/src/wireshark-latest.tar.xz";
-        let mut test_success = false;
-        let mut retry_count = 0;
-        while !test_success && retry_count < 10 {
-            match client.get(target_url).send().await {
-                Ok(response) => {
-                    println!(
-                        "Traffic generation successful (Status: {})",
-                        response.status()
-                    );
-                    let _ = response.bytes().await;
-                    test_success = true;
-                }
-                Err(e) => {
-                    println!("Traffic generation failed: {}", e);
-                }
+        match client.get(target_url).send().await {
+            Ok(response) => {
+                println!(
+                    "Traffic generation successful (Status: {})",
+                    response.status()
+                );
+                let _ = response.bytes().await;
+                test_success = true;
             }
-            retry_count += 1;
-            println!("Waiting for traffic generation to succeed, retrying...");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            Err(e) => {
+                println!("Traffic generation failed: {}", e);
+            }
         }
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait 1x the pooling period to ensure sessions are synced
+        tokio::time::sleep(Duration::from_secs(60)).await;
 
         let restart_sessions = capture.get_sessions(false).await;
         let restart_count = restart_sessions.len();
