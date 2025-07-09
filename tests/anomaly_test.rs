@@ -1036,7 +1036,7 @@ async fn test_minimal_anomaly() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
-    println!("\n=== Minimal Anomaly Test (improved) ===");
+    println!("\n=== Minimal Anomaly Test ===");
 
     // 1. Generate 100 realistic, variable normal sessions
     let mut rng = rand::thread_rng();
