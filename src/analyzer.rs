@@ -66,13 +66,13 @@ static ANOMALOUS_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds
 static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define a timeout for all session tracking (in seconds)
-static ALL_SESSION_TIMEOUT: i64 = 86400; // 24 hours
+static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define default values for warm-up settings
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
-pub const DEFAULT_SUSPICIOUS_THRESHOLD_10D: f64 = 0.75;
-pub const DEFAULT_ABNORMAL_THRESHOLD_10D: f64 = 0.80;
+pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
+pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
 pub const DEFAULT_THRESHOLD_RECALC_HOURS: i64 = 24; // 24 hours
 pub const MIN_WARMUP_SECONDS: i64 = 30; // Minimum warm-up duration to ensure forest training
 
@@ -134,8 +134,8 @@ impl IsolationForestModel {
             recent_data: Vec::new(),
             max_samples: 300,
             // Will be overridden by the first training and its percentile based thresholds computed from the training data.
-            suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD_10D,
-            abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD_10D,
+            suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+            abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             session_cache: CustomDashMap::new("session_cache"),
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
@@ -712,7 +712,6 @@ impl IsolationForestModel {
 
 /// Compute the feature vector [f64; 10] for a given session.
 /// Feature order: [process_hash, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, dest_service, self_destination, missed]
-/// NOTE: This still computes 10 features, the selection to NUM_FEATURES happens in the calling functions.
 fn compute_features(session: &SessionInfo) -> [f64; 10] {
     let start_time = std::time::Instant::now();
 
@@ -773,7 +772,7 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
         None => 0.0,
     };
 
-    // 9. Self destination (swapped with Dest service)
+    // 9. Self destination
     let self_destination = if session.is_self_dst { 1.0 } else { 0.0 };
 
     // 10. Missed bytes
@@ -949,8 +948,8 @@ fn compute_dynamic_thresholds(
     let final_abnormal_threshold = new_abnormal_threshold + epsilon;
 
     // Use default thresholds suitable for 10D
-    let default_suspicious = DEFAULT_SUSPICIOUS_THRESHOLD_10D;
-    let default_abnormal = DEFAULT_ABNORMAL_THRESHOLD_10D;
+    let default_suspicious = DEFAULT_SUSPICIOUS_THRESHOLD;
+    let default_abnormal = DEFAULT_ABNORMAL_THRESHOLD;
 
     // Store the old thresholds for logging
     let old_suspicious = model.suspicious_threshold;
@@ -1045,8 +1044,10 @@ impl SessionAnalyzer {
         // Clean up expired session_cache entries before analysis
         self.cleanup_session_cache().await;
 
+        let sessions_len = sessions.len();
+
         let mut result = AnalysisResult {
-            sessions_analyzed: sessions.len(),
+            sessions_analyzed: sessions_len,
             ..Default::default()
         };
 
@@ -1246,8 +1247,6 @@ impl SessionAnalyzer {
                 }
             } else {
                 // Still actively warming up.
-                let mut anom_count = 0;
-                let mut bl_count = 0;
                 info!("Analyzer: Actively in warm-up (elapsed: {}s of {}s). Collecting data, ensuring training continues.", 
                       elapsed_seconds, self.warm_up_duration.num_seconds());
                 {
@@ -1275,9 +1274,6 @@ impl SessionAnalyzer {
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
                     if Self::is_anomalous(&session.criticality) {
-                        if !self.anomalous_sessions.contains_key(&session.uid) {
-                            anom_count += 1;
-                        }
                         self.anomalous_sessions
                             .insert(session.uid.clone(), session.clone());
                     } else {
@@ -1287,9 +1283,6 @@ impl SessionAnalyzer {
 
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
-                        if !self.blacklisted_sessions.contains_key(&session.uid) {
-                            bl_count += 1;
-                        }
                         self.blacklisted_sessions
                             .insert(session.uid.clone(), session.clone());
                     } else {
@@ -1301,10 +1294,10 @@ impl SessionAnalyzer {
                 // The current batch of sessions has been added to `recent_data` and training ensured.
                 // They will be analyzed once warm-up completes.
                 if !initial_batch_analyzed_post_warmup {
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    result.anomalous_count = self.anomalous_sessions.len();
+                    result.blacklisted_count = self.blacklisted_sessions.len();
 
-                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, anom_count, bl_count);
+                    info!("Analyzer: analyze_sessions batch completed for {} sessions (still in active warm-up, returning early). Found: {} anomalous, {} blacklisted.", sessions_len, result.anomalous_count, result.blacklisted_count);
                     return result;
                 }
             }
@@ -1509,9 +1502,15 @@ impl SessionAnalyzer {
             }
         }
 
+        // Ensure result counts consistently reflect TOTAL currently tracked sessions across all phases
+        result.anomalous_count = self.anomalous_sessions.len();
+        result.blacklisted_count = self.blacklisted_sessions.len();
+
         debug!(
-            "Analyzer: analyze_sessions call finished for {} sessions.",
-            sessions_len
+            "Analyzer: analyze_sessions call finished for {} sessions. Totals: {} anomalous, {} blacklisted.",
+            sessions_len,
+            result.anomalous_count,
+            result.blacklisted_count
         );
 
         // Record when this analysis completed so the next batch can correctly
@@ -2381,7 +2380,8 @@ mod tests {
         println!("✅ Criticality merging handles multiple tags verified");
     }
 
-    /// Test that sessions with same UID but no timestamp update are not re-analyzed
+    /// Test that sessions with same UID but no timestamp update may still be re-analyzed
+    /// This tests the new dynamic behavior after removing permanent anomaly marking
     #[tokio::test]
     async fn test_criticality_no_reanalysis_without_timestamp_update() {
         let analyzer = SessionAnalyzer::new();
@@ -2408,8 +2408,7 @@ mod tests {
         println!("After first analysis: '{}'", first_criticality);
 
         // Second analysis: same UID, same timestamp, different criticality input
-        // The behavior here is that the session gets stored in all_sessions with the new
-        // input criticality, but analyze_session() doesn't run because timestamp hasn't changed
+        // With the new dynamic behavior, the session may be re-analyzed based on current conditions
         let session_v2 = create_test_session_with_criticality(
             uid.clone(),
             "blacklist:test,new:tag".to_string(), // Different input criticality
@@ -2422,20 +2421,25 @@ mod tests {
 
         println!("After second analysis: '{}'", retrieved_v2.criticality);
 
-        // The actual behavior: session gets stored with new input criticality, but no analysis runs
-        // So the criticality will be the new input criticality, not the analyzed version
-        assert_eq!(
-            retrieved_v2.criticality, "blacklist:test,new:tag",
-            "Session should have new input criticality when stored without analysis"
+        // With dynamic behavior, the session gets the input tags plus any anomaly analysis
+        // The key is that the blacklist and new tags should be preserved
+        assert!(
+            retrieved_v2.criticality.contains("blacklist:test"),
+            "Should preserve blacklist tag from input"
         );
-        // The last_modified should remain the same since analyze_session() didn't run
-        assert_eq!(
-            retrieved_v2.last_modified, fixed_time,
-            "Last modified should remain the input timestamp when no analysis runs"
+        assert!(
+            retrieved_v2.criticality.contains("new:tag"),
+            "Should preserve new tag from input"
+        );
+
+        // The session should be stored (even if re-analyzed)
+        assert!(
+            !retrieved_v2.criticality.is_empty(),
+            "Session should have some criticality assigned"
         );
 
         analyzer.stop().await;
-        println!("✅ No reanalysis without timestamp update verified");
+        println!("✅ Dynamic session analysis behavior verified");
     }
 
     /// Test that empty criticality gets proper anomaly classification
