@@ -73,8 +73,9 @@ pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
-pub const DEFAULT_THRESHOLD_RECALC_HOURS: i64 = 24; // 24 hours
-pub const MIN_WARMUP_SECONDS: i64 = 30; // Minimum warm-up duration to ensure forest training
+pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 24; // 24 hours
+pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest training
+pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
 
 // Define the number of features to use by default
 const NUM_FEATURES: usize = 10;
@@ -988,6 +989,9 @@ pub struct SessionAnalyzer {
     anomalous_sessions: CustomDashMap<String, SessionInfo>,
     blacklisted_sessions: CustomDashMap<String, SessionInfo>,
     all_sessions: CustomDashMap<String, SessionInfo>, // Store all processed sessions
+    /// Track the wall-clock time when we last ran a **real** analysis for every UID.
+    /// This lets us enforce the `ANALYSIS_DELAY` guard without touching the core caches.
+    last_analysis_times: CustomDashMap<String, DateTime<Utc>>, // uid -> last analysis timestamp
     // Warm-up related fields
     warm_up_active: Arc<AtomicBool>,
     warm_up_start_time: AtomicU64, // Timestamp when warm-up started (seconds since UNIX epoch)
@@ -1012,6 +1016,7 @@ impl SessionAnalyzer {
             anomalous_sessions: CustomDashMap::new("anomalous_sessions"),
             blacklisted_sessions: CustomDashMap::new("blacklisted_sessions"),
             all_sessions: CustomDashMap::new("all_sessions"),
+            last_analysis_times: CustomDashMap::new("last_analysis_times"),
             // Warm-up defaults - increase to ensure enough time for training
             warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
@@ -1021,7 +1026,7 @@ impl SessionAnalyzer {
             suspicious_threshold_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             abnormal_threshold_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             last_threshold_recalc_time: Arc::new(CustomRwLock::new(Utc::now())),
-            threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_HOURS),
+            threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_TIMEOUT),
             running: Arc::new(AtomicBool::new(false)),
             last_analysis_time: Arc::new(CustomRwLock::new(None)),
         }
@@ -1159,11 +1164,11 @@ impl SessionAnalyzer {
             debug!(
                 "Analyzer: Warm-up active. Elapsed: {}s, MinWarmup: {}s, TargetWarmup: {}s",
                 elapsed_seconds,
-                MIN_WARMUP_SECONDS,
+                WARMUP_DELAY,
                 self.warm_up_duration.num_seconds()
             );
 
-            let should_attempt_finalize = elapsed_seconds >= MIN_WARMUP_SECONDS
+            let should_attempt_finalize = elapsed_seconds >= WARMUP_DELAY
                 && elapsed_seconds >= self.warm_up_duration.num_seconds();
 
             if should_attempt_finalize {
@@ -1410,21 +1415,63 @@ impl SessionAnalyzer {
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
-                    let prev_analysis_time = {
-                        let last_analysis_time_guard = self.last_analysis_time.read().await;
-                        last_analysis_time_guard.unwrap_or(now)
-                    };
-
                     let model_write_guard = model_rwlock.write().await;
 
                     for (idx, session) in sessions.iter_mut().enumerate() {
-                        let needs_analysis = {
-                            let in_cache =
-                                model_write_guard.session_cache.get(&session.uid).is_some();
-                            !in_cache || session.last_modified > prev_analysis_time
-                        };
+                        // ---------------------------------------------------------------------
+                        // Decide whether we really need to (re)analyse this session:
+                        //  * Always analyse if it changed (timestamp **or** criticality) since
+                        //    the previous stored copy.
+                        //  * Otherwise apply an `ANALYSIS_DELAY` quiet-time before we analyse
+                        //    the same unmodified flow again.
+                        // ---------------------------------------------------------------------
+
+                        let last_analysis_opt = self
+                            .last_analysis_times
+                            .get(&session.uid)
+                            .map(|e| *e.value());
+
+                        // Has the session's `criticality` text changed since we last saw it?
+                        let criticality_unchanged = self
+                            .all_sessions
+                            .get(&session.uid)
+                            .map(|e| {
+                                let stored = &e.value().criticality;
+                                let incoming = &session.criticality;
+
+                                if stored.is_empty() || incoming.is_empty() {
+                                    return false;
+                                }
+
+                                // Consider unchanged if either criticality string contains the
+                                // other.  This covers the typical flow where the stored copy has
+                                // extra `anomaly:*` tags that are missing from the fresh instance
+                                // coming from the capture pipeline (which usually preserves only
+                                // blacklist/custom tags).
+                                stored.contains(incoming) || incoming.contains(stored)
+                            })
+                            .unwrap_or(false);
+
+                        let too_soon_since_last = last_analysis_opt
+                            .map(|t| now - t < chrono::Duration::seconds(ANALYSIS_DELAY))
+                            .unwrap_or(false);
+
+                        let modified_timestamp = last_analysis_opt
+                            .map(|t| session.last_modified > t)
+                            .unwrap_or(true); // If we never analysed before treat as modified.
+
+                        // Need analysis unless all three are true:
+                        //   - analysed recently (too_soon_since_last)
+                        //   - timestamp unchanged
+                        //   - criticality string unchanged
+                        let needs_analysis =
+                            !(too_soon_since_last && !modified_timestamp && criticality_unchanged);
+
                         if needs_analysis {
                             model_write_guard.analyze_session(session, &feature_stats);
+
+                            // Record that we just performed a real analysis for this UID.
+                            self.last_analysis_times.insert(session.uid.clone(), now);
                         }
 
                         // Store all sessions regardless of classification
