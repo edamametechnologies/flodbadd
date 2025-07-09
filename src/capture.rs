@@ -82,13 +82,11 @@ pub struct FlodbaddCapture {
     filter: Arc<CustomRwLock<SessionFilter>>,
     dns_packet_processor: Arc<CustomRwLock<Option<Arc<DnsPacketProcessor>>>>,
     edamame_model_update_task_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
-    update_in_progress: Arc<AtomicBool>, // New field to track when update is in progress
+    update_in_progress: Arc<AtomicBool>,
     last_get_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_current_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_blacklisted_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_whitelist_exceptions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
-    /// Serialises access to update_sessions so callers await instead of spinning.
-    update_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FlodbaddCapture {
@@ -110,7 +108,7 @@ impl FlodbaddCapture {
             filter: Arc::new(CustomRwLock::new(SessionFilter::GlobalOnly)),
             dns_packet_processor: Arc::new(CustomRwLock::new(None)),
             edamame_model_update_task_handle: Arc::new(CustomRwLock::new(None)),
-            update_in_progress: Arc::new(AtomicBool::new(false)), // Initialize to false
+            update_in_progress: Arc::new(AtomicBool::new(false)),
             last_get_sessions_fetch_timestamp: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
                 std::time::UNIX_EPOCH,
             ))),
@@ -127,7 +125,6 @@ impl FlodbaddCapture {
             >::from(
                 std::time::UNIX_EPOCH,
             ))),
-            update_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1573,7 +1570,6 @@ impl FlodbaddCapture {
             self.whitelist_exceptions.clone(),
             self.blacklisted_sessions.clone(),
             self.update_in_progress.clone(),
-            self.update_mutex.clone(),
         )
         .await;
     }
@@ -1800,11 +1796,12 @@ impl FlodbaddCapture {
         whitelist_exceptions: Arc<CustomRwLock<Vec<Session>>>,
         blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
         update_in_progress: Arc<AtomicBool>,
-        update_mutex: Arc<tokio::sync::Mutex<()>>,
     ) {
-        // Acquire the mutex to ensure only one update executes at a time.
-        // Other callers will await here instead of polling.
-        let _guard = update_mutex.lock().await;
+        if update_in_progress.load(Ordering::Relaxed) {
+            debug!("update_sessions_internal called while session sync is in progress, skipping");
+            return;
+        }
+
         // A second safety flag (kept for diagnostics) – but we do not spin any more.
 
         // Set the flag to indicate update is starting
@@ -2028,67 +2025,6 @@ impl FlodbaddCapture {
             drop(handle_option_guard); // Release lock even if not running
         }
         debug!("Finished stopping cloud model update task.");
-    }
-
-    /// Force immediate domain name resolution for sessions
-    pub async fn sync_domain_resolution(&self) {
-        info!("Starting immediate domain resolution sync");
-
-        // Get current DNS resolutions
-        let resolver_guard = self.resolver.read().await;
-        let dns_guard = self.dns_packet_processor.read().await;
-
-        if let (Some(resolver), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
-            // First integrate any pending DNS responses
-            Self::integrate_dns_with_resolver(resolver, dns_proc).await;
-
-            // Then populate domain names immediately for all sessions
-            Self::populate_domain_names(
-                &self.sessions,
-                &Some(resolver.clone()),
-                &dns_proc.get_dns_resolutions(),
-                &self.current_sessions,
-            )
-            .await;
-
-            info!("Immediate domain resolution sync completed");
-        } else {
-            warn!("DNS resolver or processor not available for immediate sync");
-        }
-    }
-
-    /// Force immediate L7 process resolution for sessions
-    pub async fn sync_l7_resolution(&self) {
-        info!("Starting immediate L7 resolution sync");
-
-        let l7_guard = self.l7.read().await;
-        if let Some(l7) = l7_guard.as_ref() {
-            // Force the L7 resolver to process its queue immediately
-            l7.force_immediate_resolution().await;
-
-            // Then populate L7 data for all current sessions
-            Self::populate_l7(&self.sessions, &Some(l7.clone()), &self.current_sessions).await;
-
-            info!("Immediate L7 resolution sync completed");
-        } else {
-            warn!("L7 resolver not available for immediate sync");
-        }
-    }
-
-    /// Force immediate synchronization of all async session data (domains, L7, blacklists)
-    pub async fn sync_all_session_data(&self) {
-        info!("Starting comprehensive immediate session data sync");
-
-        // Sync domain resolution
-        self.sync_domain_resolution().await;
-
-        // Sync L7 process resolution
-        self.sync_l7_resolution().await;
-
-        // Force blacklist re-evaluation (existing sessions)
-        self.update_sessions().await;
-
-        info!("Comprehensive immediate session data sync completed");
     }
 }
 
