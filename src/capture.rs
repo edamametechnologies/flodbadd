@@ -5146,10 +5146,9 @@ mod tests {
                     response.status()
                 );
                 let _ = response.bytes().await;
-                test_success = true;
             }
             Err(e) => {
-                println!("Traffic generation failed: {}", e);
+                panic!("Traffic generation failed: {}", e);
             }
         }
 
@@ -5191,10 +5190,9 @@ mod tests {
                     response.status()
                 );
                 let _ = response.bytes().await;
-                test_success = true;
             }
             Err(e) => {
-                println!("Traffic generation failed: {}", e);
+                panic!("Traffic generation failed: {}", e);
             }
         }
 
@@ -5241,10 +5239,9 @@ mod tests {
                     response.status()
                 );
                 let _ = response.bytes().await;
-                test_success = true;
             }
             Err(e) => {
-                println!("Traffic generation failed: {}", e);
+                panic!("Traffic generation failed: {}", e);
             }
         }
 
