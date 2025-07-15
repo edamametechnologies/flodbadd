@@ -378,7 +378,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     # We need to wait a long time for musl aarch64 due to the use of qemu
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     env:
       CARGO_TERM_COLOR: always

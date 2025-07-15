@@ -1049,6 +1049,26 @@ impl SessionAnalyzer {
         // Clean up expired session_cache entries before analysis
         self.cleanup_session_cache().await;
 
+        // Reject sessions that are too old (can happen after a restart of capture)
+        let cutoff = Utc::now() - CONNECTION_RETENTION_TIMEOUT;
+        let mut filtered_sessions = Vec::with_capacity(sessions.len());
+        for s in sessions.iter() {
+            if s.last_modified > cutoff {
+                filtered_sessions.push(s.clone());
+            }
+        }
+        if sessions.len() != filtered_sessions.len() {
+            warn!(
+                "Analyzer: Filtered {} sessions out of {} due to age",
+                sessions.len() - filtered_sessions.len(),
+                sessions.len()
+            );
+        }
+        // Overwrite the original slice with the filtered sessions
+        let len = filtered_sessions.len().min(sessions.len());
+        sessions[..len].clone_from_slice(&filtered_sessions[..len]);
+        let sessions = &mut sessions[..len];
+
         let sessions_len = sessions.len();
 
         let mut result = AnalysisResult {
