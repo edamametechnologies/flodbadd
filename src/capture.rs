@@ -5148,7 +5148,21 @@ mod tests {
                 let _ = response.bytes().await;
             }
             Err(e) => {
-                panic!("Traffic generation failed: {}", e);
+                println!("Traffic generation failed: {}", e);
+                // Second attempt
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match client.get(target_url).send().await {
+                    Ok(response) => {
+                        println!(
+                            "Traffic generation successful (Status: {})",
+                            response.status()
+                        );
+                        let _ = response.bytes().await;
+                    }
+                    Err(e) => {
+                        panic!("Traffic generation failed: {}", e);
+                    }
+                }
             }
         }
 
@@ -5192,7 +5206,21 @@ mod tests {
                 let _ = response.bytes().await;
             }
             Err(e) => {
-                panic!("Traffic generation failed: {}", e);
+                println!("Traffic generation failed: {}", e);
+                // Second attempt
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match client.get(target_url).send().await {
+                    Ok(response) => {
+                        println!(
+                            "Traffic generation successful (Status: {})",
+                            response.status()
+                        );
+                        let _ = response.bytes().await;
+                    }
+                    Err(e) => {
+                        panic!("Traffic generation failed: {}", e);
+                    }
+                }
             }
         }
 
@@ -5241,7 +5269,21 @@ mod tests {
                 let _ = response.bytes().await;
             }
             Err(e) => {
-                panic!("Traffic generation failed: {}", e);
+                println!("Traffic generation failed: {}", e);
+                // Second attempt
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match client.get(target_url).send().await {
+                    Ok(response) => {
+                        println!(
+                            "Traffic generation successful (Status: {})",
+                            response.status()
+                        );
+                        let _ = response.bytes().await;
+                    }
+                    Err(e) => {
+                        panic!("Traffic generation failed: {}", e);
+                    }
+                }
             }
         }
 
