@@ -29,32 +29,88 @@ mod linux {
     use std::sync::Arc;
     use tracing::{debug, error, info, warn};
 
-    // Match the simplified eBPF program structures
+    // Match the eBPF program structures
     #[repr(C)]
     #[derive(Clone, Copy, Zeroable, Pod)]
-    struct Key {
-        padding: [u8; 16], // Simple padding to ensure alignment
+    struct SessionKey {
+        src_ip: [u32; 4], // IPv4/IPv6 address (IPv4 uses first element)
+        dst_ip: [u32; 4], // IPv4/IPv6 address (IPv4 uses first element)
+        src_port: u16,
+        dst_port: u16,
+        protocol: u8, // TCP=6, UDP=17
+        family: u8,   // AF_INET=2, AF_INET6=10
+        padding: u16, // Ensure alignment
     }
 
-    unsafe impl AyaPod for Key {}
+    unsafe impl AyaPod for SessionKey {}
 
     #[repr(C)]
     #[derive(Clone, Copy, Zeroable, Pod)]
-    struct Value {
+    struct ProcessInfo {
         pid: u32,
+        uid: u32,
+        start_time: u64,
+        process_name: [u8; 16],
+        process_path: [u8; 256],
+        username: [u8; 32],
     }
 
-    unsafe impl AyaPod for Value {}
+    unsafe impl AyaPod for ProcessInfo {}
 
-    // Convert Session into Key (trivial conversion in the minimal version)
-    fn session_to_key(_s: &Session) -> Key {
-        Key { padding: [0; 16] }
+    // Convert Session into SessionKey
+    fn session_to_key(s: &Session) -> SessionKey {
+        let mut key = SessionKey {
+            src_ip: [0; 4],
+            dst_ip: [0; 4],
+            src_port: s.src_port,
+            dst_port: s.dst_port,
+            protocol: match s.protocol {
+                crate::sessions::Protocol::TCP => 6,
+                crate::sessions::Protocol::UDP => 17,
+            },
+            family: match s.src_ip {
+                std::net::IpAddr::V4(_) => 2,  // AF_INET
+                std::net::IpAddr::V6(_) => 10, // AF_INET6
+            },
+            padding: 0,
+        };
+
+        // Set IP addresses
+        match s.src_ip {
+            std::net::IpAddr::V4(ipv4) => {
+                key.src_ip[0] = u32::from(ipv4);
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                let octets = ipv6.octets();
+                key.src_ip[0] = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
+                key.src_ip[1] = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
+                key.src_ip[2] = u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]);
+                key.src_ip[3] =
+                    u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+            }
+        }
+
+        match s.dst_ip {
+            std::net::IpAddr::V4(ipv4) => {
+                key.dst_ip[0] = u32::from(ipv4);
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                let octets = ipv6.octets();
+                key.dst_ip[0] = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
+                key.dst_ip[1] = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
+                key.dst_ip[2] = u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]);
+                key.dst_ip[3] =
+                    u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+            }
+        }
+
+        key
     }
 
     // Internal singleton that owns the BPF instance and user-space map copy
     pub struct Inner {
         _bpf: Ebpf,
-        map: AyaHashMap<MapData, Key, Value>,
+        map: AyaHashMap<MapData, SessionKey, ProcessInfo>,
     }
 
     impl Inner {
@@ -260,7 +316,7 @@ mod linux {
             }
 
             // Obtain the `l7_connections` hash map from the object
-            let map: AyaHashMap<_, Key, Value> = match bpf.take_map("l7_connections") {
+            let map: AyaHashMap<_, SessionKey, ProcessInfo> = match bpf.take_map("l7_connections") {
                 Some(m) => match AyaHashMap::try_from(m) {
                     Ok(h) => h,
                     Err(e) => {
@@ -285,13 +341,45 @@ mod linux {
         fn lookup_session(&self, session: &Session) -> Option<SessionL7> {
             let key = session_to_key(session);
             match self.map.get(&key, 0) {
-                Ok(val) => {
-                    // In the simplified version, we only have the PID
+                Ok(info) => {
+                    // Convert C strings to Rust strings safely
+                    let process_name = String::from_utf8_lossy(
+                        &info.process_name
+                            [..info.process_name.iter().position(|&c| c == 0).unwrap_or(16)],
+                    )
+                    .to_string();
+
+                    let process_path = String::from_utf8_lossy(
+                        &info.process_path[..info
+                            .process_path
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(256)],
+                    )
+                    .to_string();
+
+                    let username = String::from_utf8_lossy(
+                        &info.username[..info.username.iter().position(|&c| c == 0).unwrap_or(32)],
+                    )
+                    .to_string();
+
                     Some(SessionL7 {
-                        pid: val.pid,
-                        process_name: format!("pid-{}", val.pid), // Simplified: just show the pid
-                        process_path: format!("/proc/{}", val.pid),
-                        username: String::new(),
+                        pid: info.pid,
+                        process_name: if process_name.is_empty() {
+                            format!("pid-{}", info.pid)
+                        } else {
+                            process_name
+                        },
+                        process_path: if process_path.is_empty() {
+                            format!("/proc/{}", info.pid)
+                        } else {
+                            process_path
+                        },
+                        username: if username.is_empty() || username == "unknown" {
+                            format!("uid-{}", info.uid)
+                        } else {
+                            username
+                        },
                     })
                 }
                 Err(e) => {

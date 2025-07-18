@@ -16,7 +16,7 @@ async_fn_in_trait = "allow"
 default = []
 asyncpacketcapture = []
 packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "sysinfo", "netstat2" ]
-ebpf = [ "aya", "bytemuck", "nix" ]
+ebpf = [ "aya", "bytemuck", "nix", "l7_ebpf_program" ]
 examples = ["clap", "tracing-subscriber"]
 
 [dependencies]
@@ -142,6 +142,8 @@ mockall = "0.13.1"
 reqwest = { version = "0.12.5", default-features = false, features = ["blocking", "rustls-tls"] }
 # 4.2.0 creates issues
 zip = "3.0.0"
+# eBPF program build component
+l7_ebpf_program = { path = "ebpf/l7_ebpf_program", optional = true }
 
 [[example]]
 name = "lan_scan"

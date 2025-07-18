@@ -5,16 +5,7 @@
 // defined by its protocol, source IP/port, and destination IP/port (struct `Session`),
 // with the local process responsible for it.
 //
-// ---
-//
-// **2024 Improvements:**
-// - The system now caches and checks process start time (from sysinfo) for PID reuse protection, ensuring accurate process association even when PIDs are recycled by the OS.
-// - After a failed resolution attempt, the resolver immediately refreshes process and socket tables and retries once before incrementing retry count or re-queueing. This greatly improves accuracy for short-lived and non-ephemeral sessions.
-// - These changes significantly reduce 'unknown process' results and false associations due to PID reuse, prioritizing accuracy above all.
-//
-// ---
-//
-// The core components are:
+// Core components:
 // - `FlodbaddL7`: The main struct managing the L7 resolution process.
 // - `SessionL7`: Struct holding the resolved process information (PID, name, path, username).
 // - `L7Resolution`: Struct stored in `l7_map`, containing the Option<SessionL7>,
@@ -45,6 +36,11 @@
 //    Connections likely involving ephemeral ports use a faster initial retry.
 // 6. After max retries, the connection is marked as `FailedMaxRetries` in `l7_map`.
 // 7. Resolved entries in `l7_map` have a Time-To-Live (TTL) and are evicted by the cleanup task.
+//
+// Resolution improvements:
+// - The system now caches and checks process start time (from sysinfo) for PID reuse protection, ensuring accurate process association even when PIDs are recycled by the OS.
+// - After a failed resolution attempt, the resolver immediately refreshes process and socket tables and retries once before incrementing retry count or re-queueing. This greatly improves accuracy for short-lived and non-ephemeral sessions.
+// - These changes significantly reduce 'unknown process' results and false associations due to PID reuse, prioritizing accuracy above all.
 //
 // This system aims to handle the ephemeral nature of network connections and process lifecycles
 // by combining direct matching with caching, PID reuse protection, and retry mechanisms.

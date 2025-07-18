@@ -2,12 +2,23 @@
 name = "l7_ebpf_program"
 version = "0.1.0"
 edition = "2021"
+description = "eBPF program for L7 network session resolution"
+build = "build.rs"
 
 [lib]
-crate-type = ["staticlib"] # produce .a archive; build script extracts .o
+name = "l7_ebpf_program"
+path = "src/lib.rs"
 
 [dependencies]
-aya_ebpf = { package = "aya-ebpf", version = "0.1.1" }
+# No runtime dependencies for eBPF program compilation
 
-[profile.release]
-panic = "abort"
+[build-dependencies]
+# Build dependencies for compiling eBPF program
+
+[features]
+default = []
+ebpf = []
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+features = ["ebpf"]
