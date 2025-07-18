@@ -2,16 +2,26 @@
 use reqwest;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use std::env;
-#[cfg(all(feature = "ebpf", target_os = "linux"))]
+#[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
-#[cfg(all(target_os = "windows", feature = "packetcapture"))]
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    feature = "packetcapture"
+))]
 use std::fs;
-#[cfg(all(target_os = "windows", feature = "packetcapture"))]
+#[cfg(target_os = "windows")]
+use std::fs::{create_dir_all, File};
+#[cfg(target_os = "windows")]
+use std::io::Write;
+#[cfg(target_os = "windows")]
+use std::path::Path;
+#[cfg(all(feature = "ebpf", target_os = "linux"))]
+use std::path::Path;
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    feature = "packetcapture"
+))]
 use std::path::PathBuf;
-#[cfg(all(feature = "ebpf", target_os = "linux"))]
-use std::path::{Path, PathBuf};
-#[cfg(all(feature = "ebpf", target_os = "linux"))]
-use std::process::Command;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
@@ -19,9 +29,6 @@ fn main() {
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
     {
-        use std::io::Write;
-        use std::process::Command;
-
         println!("cargo:rerun-if-env-changed=NPCAP_SDK_PATH");
 
         if let Ok(npcap_path) = env::var("NPCAP_SDK_PATH") {
@@ -75,11 +82,11 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     // Create output directory
     if let Some(parent) = zip_path.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
 
     // Write zip file
-    let mut file = fs::File::create(&zip_path)?;
+    let mut file = File::create(&zip_path)?;
     file.write_all(&bytes)?;
 
     println!("Downloaded {} bytes to {}", bytes.len(), zip_path.display());
@@ -93,11 +100,11 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         let outpath = npcap_dir.join(file.name());
 
         if file.name().ends_with('/') {
-            fs::create_dir_all(&outpath)?;
+            create_dir_all(&outpath)?;
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    fs::create_dir_all(p)?;
+                    create_dir_all(p)?;
                 }
             }
             let mut outfile = fs::File::create(&outpath)?;
@@ -160,7 +167,7 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     // Create output directory
     if let Some(parent) = obj_file.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
 
     // Check for required tools
