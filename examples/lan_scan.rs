@@ -1,116 +1,49 @@
-//! Example: LAN Scanner
+//! Example: LAN Neighbor Scan
 //!
-//! This example demonstrates how to perform a LAN scan to discover devices on the local network.
-//! It will scan all available network interfaces and display discovered devices.
+//! This minimal example lists the network interfaces available on the host
+//! and performs a simple neighbor discovery (ARP/NDP) on the default
+//! interface using the current `flodbadd` public API.
+use flodbadd::interface::{get_all_interfaces, get_default_interface};
+#[cfg(all(any(target_os = "macos", target_os = "linux", target_os = "windows"),))]
+use flodbadd::neighbors::scan_neighbors;
 
-use flodbadd::device_info::DeviceInfo;
-use flodbadd::ip::get_all_interfaces;
-use flodbadd::scanner::{NetworkScanner, ScannerConfig};
-use std::thread::sleep;
-use std::time::Duration;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialise basic logging so that the library can emit tracing output.
+    tracing_subscriber::fmt::init();
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Flodbadd LAN Scanner Example ===\n");
-
-    // Initialize tracing for debug output
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
-
-    // Get all network interfaces
-    let interfaces = get_all_interfaces()?;
-    println!("Found {} network interfaces:", interfaces.len());
-    for interface in &interfaces {
-        println!("  - {} ({})", interface.name, interface.ip);
-    }
-    println!();
-
-    // Create scanner configuration
-    let config = ScannerConfig {
-        timeout: Duration::from_secs(5),
-        concurrent_scans: 100,
-        scan_ports: vec![80, 443, 22, 21, 23, 25, 110, 139, 445, 3389, 8080],
-        enable_mdns: true,
-        enable_arp: true,
-    };
-
-    // Create network scanner
-    let mut scanner = NetworkScanner::new(config)?;
-
-    // Start scanning
-    println!("Starting LAN scan...");
-    scanner.start_scan(&interfaces)?;
-
-    // Wait for scan to complete (or timeout after 30 seconds)
-    let mut devices: Vec<DeviceInfo> = Vec::new();
-    let scan_duration = Duration::from_secs(30);
-    let start_time = std::time::Instant::now();
-
-    while start_time.elapsed() < scan_duration {
-        // Get current scan results
-        devices = scanner.get_discovered_devices()?;
-
-        // Display progress
-        print!("\rScanning... Found {} devices", devices.len());
-        use std::io::{self, Write};
-        io::stdout().flush()?;
-
-        // Check if scan is complete
-        if scanner.is_scan_complete()? {
-            break;
+    // Enumerate all (validated) interfaces.
+    let interfaces = get_all_interfaces();
+    println!("Found {} interface(s):", interfaces.len());
+    for iface in &interfaces.interfaces {
+        if let Some(v4) = &iface.ipv4 {
+            println!("  - {} (IPv4: {})", iface.name, v4.ip);
+        } else {
+            println!("  - {} (no IPv4)", iface.name);
         }
-
-        sleep(Duration::from_millis(500));
     }
 
-    // Stop scanning
-    scanner.stop_scan()?;
-    println!("\n\nScan complete!\n");
+    // Pick the OS-determined default interface – bail out if none.
+    let Some(default_iface) = get_default_interface() else {
+        eprintln!("No suitable default interface detected.");
+        return Ok(());
+    };
+    println!("\nScanning neighbours on '{}':", default_iface.name);
 
-    // Display results
-    if devices.is_empty() {
-        println!("No devices found on the network.");
-    } else {
-        println!("Discovered {} devices:\n", devices.len());
+    // Run the neighbour scan (ARP/NDP); this call is async and cross-platform.
+    #[cfg(all(any(target_os = "macos", target_os = "linux", target_os = "windows"),))]
+    let neighbours = scan_neighbors(Some(&default_iface.name)).await?;
+    #[cfg(all(any(target_os = "macos", target_os = "linux", target_os = "windows"),))]
+    println!("Discovered {} neighbour group(s):", neighbours.len());
 
-        for (idx, device) in devices.iter().enumerate() {
-            println!("Device #{}:", idx + 1);
-            println!("  IP Address: {}", device.get_ip_address());
-
-            if let Some(mac) = device.get_mac_address() {
-                println!("  MAC Address: {}", mac);
-            }
-
-            if !device.hostname.is_empty() {
-                println!("  Hostname: {}", device.hostname);
-            }
-
-            if !device.device_vendor.is_empty() {
-                println!("  Vendor: {}", device.device_vendor);
-            }
-
-            if !device.os_name.is_empty() {
-                println!("  OS: {} {}", device.os_name, device.os_version);
-            }
-
-            if !device.open_ports.is_empty() {
-                println!("  Open Ports:");
-                for port in &device.open_ports {
-                    println!("    - {} ({})", port.port, port.service);
-                }
-            }
-
-            if !device.mdns_services.is_empty() {
-                println!("  mDNS Services:");
-                for service in &device.mdns_services {
-                    println!("    - {}", service);
-                }
-            }
-
-            println!("  Device Type: {}", device.device_type);
-            println!("  Criticality: {}", device.criticality);
-            println!();
+    #[cfg(all(any(target_os = "macos", target_os = "linux", target_os = "windows"),))]
+    for (mac, v4_addrs, v6_addrs) in neighbours {
+        println!("\nMAC: {mac}");
+        if !v4_addrs.is_empty() {
+            println!("  IPv4: {:?}", v4_addrs);
+        }
+        if !v6_addrs.is_empty() {
+            println!("  IPv6: {:?}", v6_addrs);
         }
     }
 

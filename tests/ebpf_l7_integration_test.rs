@@ -1,10 +1,8 @@
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 mod ebpf_integration_tests {
     use flodbadd::l7_ebpf;
-    use flodbadd::sessions::{Protocol, Session, SessionL7};
+    use flodbadd::sessions::{Protocol, Session};
     use serial_test::serial;
-    use std::net::IpAddr;
-    use std::process::Command;
     use std::time::Duration;
     use tokio::time::sleep;
 
@@ -83,7 +81,7 @@ mod ebpf_integration_tests {
         // Start a simple HTTP server
         let server_handle = tokio::spawn(async move {
             use std::io::Write;
-            use std::net::{TcpListener, TcpStream};
+            use std::net::TcpListener;
 
             let listener = match TcpListener::bind(format!("127.0.0.1:{}", test_port)) {
                 Ok(l) => l,
@@ -114,7 +112,7 @@ mod ebpf_integration_tests {
 
         // Make a client connection
         let client_handle = tokio::spawn(async move {
-            use std::io::Read;
+            use std::io::{Read, Write};
             use std::net::TcpStream;
 
             match TcpStream::connect(format!("127.0.0.1:{}", test_port)) {
@@ -256,7 +254,7 @@ mod ebpf_integration_tests {
         }
 
         let elapsed = start_time.elapsed();
-        let avg_time = elapsed / num_lookups;
+        let avg_time = elapsed / num_lookups.into();
 
         println!("Performance test: {} lookups in {:?}", num_lookups, elapsed);
         println!("Average lookup time: {:?}", avg_time);
