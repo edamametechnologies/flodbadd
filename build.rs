@@ -4,24 +4,10 @@ use reqwest;
 use std::env;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    feature = "packetcapture"
-))]
+#[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "packetcapture"))]
 use std::fs;
-#[cfg(target_os = "windows")]
-use std::fs::{create_dir_all, File};
-#[cfg(target_os = "windows")]
-use std::io::Write;
-#[cfg(target_os = "windows")]
+#[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::path::Path;
-#[cfg(all(feature = "ebpf", target_os = "linux"))]
-use std::path::Path;
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    feature = "packetcapture"
-))]
-use std::path::PathBuf;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
@@ -82,7 +68,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     // Create output directory
     if let Some(parent) = zip_path.parent() {
-        create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)?;
     }
 
     // Write zip file
@@ -92,7 +78,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     println!("Downloaded {} bytes to {}", bytes.len(), zip_path.display());
 
     // Extract the zip file
-    let file = fs::File::open(&zip_path)?;
+    let file = std::fs::File::open(&zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
@@ -104,10 +90,10 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    create_dir_all(p)?;
+                    std::fs::create_dir_all(p)?;
                 }
             }
-            let mut outfile = fs::File::create(&outpath)?;
+            let mut outfile = std::fs::File::create(&outpath)?;
             std::io::copy(&mut file, &mut outfile)?;
         }
     }
@@ -115,7 +101,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     println!("Extracted Npcap SDK to {}", npcap_dir.display());
 
     // Clean up zip file
-    let _ = fs::remove_file(&zip_path);
+    let _ = std::fs::remove_file(&zip_path);
 
     Ok(())
 }
@@ -167,7 +153,7 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     // Create output directory
     if let Some(parent) = obj_file.parent() {
-        create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)?;
     }
 
     // Check for required tools
