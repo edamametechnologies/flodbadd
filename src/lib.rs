@@ -1,7 +1,3 @@
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 pub mod analyzer;
 pub mod arp;
 pub mod asn;
