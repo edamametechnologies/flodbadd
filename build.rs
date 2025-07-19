@@ -1,7 +1,5 @@
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use reqwest;
-#[cfg(all(target_os = "windows", feature = "packetcapture"))]
-use std::env;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
