@@ -4,8 +4,6 @@ use reqwest;
 use std::env;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
-#[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "packetcapture"))]
-use std::fs;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::path::Path;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
@@ -72,7 +70,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     }
 
     // Write zip file
-    let mut file = File::create(&zip_path)?;
+    let mut file = std::fs::File::create(&zip_path)?;
     file.write_all(&bytes)?;
 
     println!("Downloaded {} bytes to {}", bytes.len(), zip_path.display());
@@ -86,7 +84,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         let outpath = npcap_dir.join(file.name());
 
         if file.name().ends_with('/') {
-            create_dir_all(&outpath)?;
+            std::fs::create_dir_all(&outpath)?;
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
@@ -108,8 +106,6 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn handle_ebpf_build() {
-    use std::process::Command;
-
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/build.rs");
 

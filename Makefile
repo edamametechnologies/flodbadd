@@ -17,6 +17,10 @@ clean:
 	rm -rf ./build/
 	rm -rf ./target/
 
+check:
+	cargo hack check --all-features --all-targets
+	cargo hack check --all-features --all-targets --target=aarch64-apple-ios
+	cargo hack check --all-features --all-targets --target=aarch64-unknown-linux-gnu
 
 ios:
 	cargo build --target=aarch64-apple-ios

@@ -1,131 +1,111 @@
-//! Example demonstrating how to use the SessionAnalyzer for anomaly detection
+//! Example: Using the `SessionAnalyzer` for anomaly detection with the
+//! current `flodbadd` API.
 //!
-//! This example shows how to:
-//! - Create a SessionAnalyzer instance
-//! - Analyze network sessions for anomalies
-//! - Handle the warm-up period
-//! - Retrieve anomalous sessions
-
-use flodbadd::capture::start_packet_capture;
-use flodbadd::sessions::SessionInfo;
-use flodbadd::{AnalysisResult, SessionAnalyzer, SessionCriticality};
+//! The sample simply feeds a small set of synthetic sessions to the
+//! analyzer and prints the resulting statistics.
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use chrono::Utc;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use flodbadd::analyzer::{AnalysisResult, SessionAnalyzer};
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use flodbadd::sessions::{Protocol, SessionInfo};
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use std::net::IpAddr;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use std::str::FromStr;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{info, warn};
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use tokio::time::{sleep, Duration};
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    #[cfg(all(
+        any(target_os = "macos", target_os = "linux", target_os = "windows"),
+        feature = "packetcapture"
+    ))]
+    {
+        tracing_subscriber::fmt::init();
 
-    // Create the session analyzer
-    let analyzer = Arc::new(SessionAnalyzer::new());
+        // Create & start the analyzer.
+        let analyzer = Arc::new(SessionAnalyzer::new());
+        analyzer.start().await;
 
-    // Start the analyzer
-    analyzer.start().await;
-    info!("Session analyzer started");
-
-    // Simulate getting sessions (in a real app, these would come from packet capture)
-    let mut sessions = generate_sample_sessions();
-
-    // Analyze sessions multiple times to demonstrate warm-up period
-    for i in 0..5 {
-        info!("Analysis round {}", i + 1);
-
-        // Analyze the sessions
-        let result: AnalysisResult = analyzer.analyze_sessions(&mut sessions).await;
+        // Generate a handful of synthetic sessions and analyse them.
+        let mut sessions = generate_sample_sessions();
+        let AnalysisResult {
+            sessions_analyzed,
+            anomalous_count,
+            blacklisted_count,
+            new_anomalous_found,
+            new_blacklisted_found,
+            ..
+        } = analyzer.analyze_sessions(&mut sessions).await;
 
         info!(
-            "Analyzed {} sessions: {} anomalous, {} blacklisted (new anomalous: {}, new blacklisted: {})",
-            result.sessions_analyzed,
-            result.anomalous_count,
-            result.blacklisted_count,
-            result.new_anomalous_found,
-            result.new_blacklisted_found
+            "Analyzed {sessions_analyzed} sessions → anomalous: {anomalous_count} (new: {new_anomalous_found}), blacklisted: {blacklisted_count} (new: {new_blacklisted_found})"
         );
 
-        // Print some details about anomalous sessions
-        for session in &sessions {
-            if session.criticality.contains("anomaly:suspicious")
-                || session.criticality.contains("anomaly:abnormal")
-            {
-                info!(
-                    "Anomalous session: {} -> {} (criticality: {})",
-                    session.src_ip, session.dst_ip, session.criticality
-                );
-            }
-        }
+        // Give the background model a moment (purely illustrative).
+        sleep(Duration::from_secs(1)).await;
 
-        // Wait a bit before next analysis
-        sleep(Duration::from_secs(30)).await;
-
-        // Generate some new sessions for next round
-        sessions.extend(generate_sample_sessions());
+        analyzer.stop().await;
     }
-
-    // Get all tracked anomalous sessions
-    let anomalous = analyzer.get_anomalous_sessions().await;
-    info!("Total anomalous sessions tracked: {}", anomalous.len());
-
-    // Clean up
-    analyzer.stop().await;
-    info!("Session analyzer stopped");
-
     Ok(())
 }
 
-/// Generate some sample sessions for testing
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
 fn generate_sample_sessions() -> Vec<SessionInfo> {
-    use chrono::Utc;
-    use std::net::IpAddr;
-    use std::str::FromStr;
+    let now = Utc::now();
 
-    let mut sessions = Vec::new();
+    let mut normal = SessionInfo::default();
+    normal.session.protocol = Protocol::TCP;
+    normal.session.src_ip = IpAddr::from_str("192.168.1.10").unwrap();
+    normal.session.src_port = 50000;
+    normal.session.dst_ip = IpAddr::from_str("93.184.216.34").unwrap(); // example.com
+    normal.session.dst_port = 80;
+    normal.stats.start_time = now;
+    normal.stats.last_activity = now;
 
-    // Normal sessions
-    for i in 0..10 {
-        let mut session = SessionInfo::default();
-        session.uid = format!("normal_{}", i);
-        session.src_ip = IpAddr::from_str("192.168.1.100").unwrap();
-        session.dst_ip = IpAddr::from_str(&format!("192.168.1.{}", 200 + i)).unwrap();
-        session.dst_port = 80;
-        session.stats.inbound_bytes = 1024 * (i as u64 + 1);
-        session.stats.outbound_bytes = 512 * (i as u64 + 1);
-        session.stats.orig_pkts = 10 + i as u64;
-        session.stats.resp_pkts = 8 + i as u64;
-        session.stats.start_time = Utc::now();
-        session.stats.last_activity = Utc::now();
-        sessions.push(session);
-    }
+    let mut large_transfer = SessionInfo::default();
+    large_transfer.session.protocol = Protocol::TCP;
+    large_transfer.session.src_ip = IpAddr::from_str("10.0.0.5").unwrap();
+    large_transfer.session.src_port = 40000;
+    large_transfer.session.dst_ip = IpAddr::from_str("185.220.101.1").unwrap(); // TOR exit (example)
+    large_transfer.session.dst_port = 443;
+    large_transfer.stats.inbound_bytes = 50 * 1024 * 1024; // 50 MiB
+    large_transfer.stats.outbound_bytes = 100 * 1024;
+    large_transfer.stats.start_time = now;
+    large_transfer.stats.last_activity = now;
 
-    // Some potentially anomalous sessions
-    for i in 0..3 {
-        let mut session = SessionInfo::default();
-        session.uid = format!("suspicious_{}", i);
-        session.src_ip = IpAddr::from_str("10.0.0.100").unwrap();
-        session.dst_ip = IpAddr::from_str(&format!("185.220.101.{}", i + 1)).unwrap(); // Tor exit node range
-        session.dst_port = 443;
-        session.stats.inbound_bytes = 1024 * 1024 * 50; // Large data transfer
-        session.stats.outbound_bytes = 1024 * 100;
-        session.stats.orig_pkts = 5000;
-        session.stats.resp_pkts = 4800;
-        session.stats.missed_bytes = 1024 * 10; // Some missed data
-        session.stats.start_time = Utc::now();
-        session.stats.last_activity = Utc::now();
-        sessions.push(session);
-    }
-
-    // A blacklisted session (would normally be detected by blacklist DB)
-    let mut blacklisted = SessionInfo::default();
-    blacklisted.uid = "blacklisted_1".to_string();
-    blacklisted.src_ip = IpAddr::from_str("192.168.1.150").unwrap();
-    blacklisted.dst_ip = IpAddr::from_str("198.51.100.1").unwrap(); // Known C2 server (example)
-    blacklisted.dst_port = 4444;
-    blacklisted.criticality = "blacklist:known_c2_server".to_string(); // Pre-marked as blacklisted
-    blacklisted.stats.start_time = Utc::now();
-    blacklisted.stats.last_activity = Utc::now();
-    sessions.push(blacklisted);
-
-    sessions
+    vec![normal, large_transfer]
 }
