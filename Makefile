@@ -11,6 +11,7 @@ unused_dependencies:
 
 format:
 	cargo fmt
+	cd ebpf && cargo fmt
 
 clean:
 	cargo clean
