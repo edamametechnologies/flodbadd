@@ -967,7 +967,7 @@ dependencies = [
  "serial_test",
  "tokio",
  "tracing",
- "undeadlock 0.9.50 (git+https://github.com/edamametechnologies/undeadlock?branch=main)",
+ "undeadlock",
 ]
 
 [[package]]
@@ -1195,7 +1195,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "undeadlock 0.9.50",
+ "undeadlock",
  "users",
  "uuid",
  "wez-mdns",
@@ -3745,17 +3745,6 @@ name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
-
-[[package]]
-name = "undeadlock"
-version = "0.9.50"
-dependencies = [
- "dashmap",
- "futures",
- "once_cell",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "undeadlock"
