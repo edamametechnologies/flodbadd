@@ -186,11 +186,11 @@ impl FlodbaddCapture {
         *self.filter.write().await = filter;
     }
 
-    pub async fn start(&self, interfaces: &FlodbaddInterfaces) {
+    pub async fn start(&self, interfaces: &FlodbaddInterfaces) -> Result<()> {
         // Check if the capture task is already running
         if self.is_capturing().await {
             warn!("Capture task already running, skipping start");
-            return;
+            return Ok(());
         }
 
         info!("Starting capture");
@@ -250,57 +250,33 @@ impl FlodbaddCapture {
         // Set the interface
         *self.interfaces.write().await = interfaces.clone();
 
-        // Start tasks
+        // Start capture tasks
         // If the capture task is already running, return
-        if !self.capture_task_handles.is_empty() {
+        if self.is_capturing().await {
             warn!("Capture task already running");
-            return;
+            return Ok(());
         }
 
-        let _start_time = std::time::Instant::now();
-
-        // Then start the capture task to populate the sessions map
+        let start_time = Instant::now();
         self.start_capture_tasks().await;
+        let elapsed_ms = start_time.elapsed().as_millis();
 
-        let elapsed_ms = _start_time.elapsed().as_millis();
-        if elapsed_ms > 1_000 {
-            warn!(
-                "start_capture_task initialisation took {} ms (interfaces processed: {}).",
-                elapsed_ms,
-                self.capture_task_handles.len()
-            );
-        } else {
-            trace!("start_capture_task completed in {} ms", elapsed_ms);
-        }
-
-        // Wait briefly until at least one capture task is registered so callers can rely on is_capturing()
-        use tokio::time::{sleep, Duration};
-        // Increase timeout for CI environments where interface detection and pcap startup may be slower
-        const CAPTURE_START_TIMEOUT_MS: u64 = 60000; // 60 s upper bound
-        let start_wait = std::time::Instant::now();
-        while !self.is_capturing().await
-            && start_wait.elapsed().as_millis() < CAPTURE_START_TIMEOUT_MS as u128
-        {
-            info!(
-                "Waiting for capture task(s) to start... (elapsed: {}ms, tasks: {})",
-                start_wait.elapsed().as_millis(),
-                self.capture_task_handles.len()
-            );
-            sleep(Duration::from_millis(1000)).await;
-        }
-
+        // Check if the capture tasks are running
         if self.is_capturing().await {
             info!(
                 "Capture task(s) started successfully after {}ms (tasks={}).",
-                start_wait.elapsed().as_millis(),
+                elapsed_ms,
                 self.capture_task_handles.len()
             );
+            return Ok(());
         } else {
-            error!(
-                "Capture task(s) failed to start after {}ms timeout (tasks={}).",
-                start_wait.elapsed().as_millis(),
+            let error_message = format!(
+                "Capture task(s) failed to start after {}ms (tasks={}).",
+                elapsed_ms,
                 self.capture_task_handles.len()
             );
+            error!("{}", error_message);
+            return Err(anyhow!("{}", error_message));
         }
     }
 
@@ -425,7 +401,8 @@ impl FlodbaddCapture {
         debug!("All fetch timestamps reset to epoch");
     }
 
-    pub async fn restart(&self, interfaces: &FlodbaddInterfaces) {
+    // This won't clear the sessions map, so it's not a full restart
+    pub async fn restart(&self, interfaces: &FlodbaddInterfaces) -> Result<()> {
         // Only restart if capturing and if the interface string has changed
         if !self.is_capturing().await || self.interfaces.read().await.eq(interfaces) {
             warn!(
@@ -433,13 +410,23 @@ impl FlodbaddCapture {
                 self.is_capturing().await,
                 self.interfaces.read().await.eq(interfaces)
             );
-            return;
+            return Ok(());
         };
 
         info!("Restarting capture with interfaces: {:?}", interfaces);
         // Only restart the capture task
         self.stop_capture_tasks().await;
         self.start_capture_tasks().await;
+
+        // Check if the capture tasks are running
+        if self.is_capturing().await {
+            info!("Capture task(s) restarted successfully.");
+            return Ok(());
+        } else {
+            let error_message = format!("Capture task(s) failed to restart.");
+            error!("{}", error_message);
+            return Err(anyhow!("{}", error_message));
+        }
     }
 
     pub async fn is_capturing(&self) -> bool {
@@ -932,6 +919,7 @@ impl FlodbaddCapture {
                     return;
                 }
             };
+
             // Initialize the local IP cache with the default interface
             let interfaces = FlodbaddInterfaces {
                 interfaces: vec![default_interface.clone()],
@@ -2025,6 +2013,10 @@ impl FlodbaddCapture {
             drop(handle_option_guard); // Release lock even if not running
         }
         debug!("Finished stopping cloud model update task.");
+    }
+
+    pub async fn get_packet_stats(&self) -> crate::packetstats::PacketStats {
+        crate::packetstats::get_packet_stats()
     }
 }
 
@@ -3231,6 +3223,13 @@ mod tests {
         whitelists::reset_to_default().await;
         blacklists::reset_to_default().await;
 
+        // Get initial packet stats
+        let initial_packet_stats = capture.get_packet_stats().await;
+        println!(
+            "Initial packet stats - total_processed: {}",
+            initial_packet_stats.total_processed
+        );
+
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -3245,7 +3244,11 @@ mod tests {
         // --- Start Capture ---
         println!("Starting capture...");
         capture.start(&interfaces).await;
-        assert!(capture.is_capturing().await, "Capture should be running");
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         let target_domain = "www.google.com";
         println!("Generating traffic from {}...", target_domain);
@@ -3274,20 +3277,31 @@ mod tests {
             }
         }
 
-        sleep(Duration::from_secs(15)).await;
+        sleep(Duration::from_secs(5)).await;
+
+        // Check packet stats after traffic generation
+        let post_traffic_stats = capture.get_packet_stats().await;
+        let packets_processed =
+            post_traffic_stats.total_processed - initial_packet_stats.total_processed;
+        println!(
+            "After traffic generation - total_processed: {} (delta: {})",
+            post_traffic_stats.total_processed, packets_processed
+        );
 
         // --- Initial Session Check ---
         println!("Performing initial session check...");
         let initial_sessions = capture.get_sessions(false).await;
         assert!(
             !initial_sessions.is_empty(),
-            "Capture should have sessions after initial wait"
+            "Capture should have sessions after initial wait. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!("Found {} initial sessions.", initial_sessions.len());
         let initial_current_sessions = capture.get_current_sessions(false).await;
         assert!(
             !initial_current_sessions.is_empty(),
-            "Capture should have current sessions"
+            "Capture should have current sessions. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!(
             "Found {} initial current sessions.",
@@ -3298,7 +3312,14 @@ mod tests {
         println!("--- Starting Whitelist Test ---");
         // Stabilize sessions (DNS, L7) before creating whitelist
         println!("Stabilizing sessions before whitelist creation (updating & waiting 10s)...");
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(5)).await;
+
+        // Check packet stats after stabilization
+        let pre_whitelist_stats = capture.get_packet_stats().await;
+        println!(
+            "Before whitelist creation - total_processed: {}",
+            pre_whitelist_stats.total_processed
+        );
 
         let custom_whitelist_result = capture.create_custom_whitelists().await;
         assert!(
@@ -3329,8 +3350,15 @@ mod tests {
         );
 
         capture.set_custom_whitelists(&custom_whitelist_json).await;
-        println!("Applied custom whitelist. Waiting 30s for re-evaluation...");
-        sleep(Duration::from_secs(30)).await;
+        println!("Applied custom whitelist. Waiting 10s for re-evaluation...");
+        sleep(Duration::from_secs(10)).await;
+
+        // Check packet stats after whitelist application
+        let post_whitelist_stats = capture.get_packet_stats().await;
+        println!(
+            "After whitelist application - total_processed: {}",
+            post_whitelist_stats.total_processed
+        );
 
         let sessions_after_whitelist = capture.get_sessions(false).await;
         let total_sessions = sessions_after_whitelist.len();
@@ -3353,12 +3381,12 @@ mod tests {
         }
         assert!(
             unknown_count < total_sessions / 3,
-            "Expected minimal unknown sessions after applying generated whitelist, found {}",
-            unknown_count
+            "Expected minimal unknown sessions after applying generated whitelist, found {}. Packet stats: total_processed={}", 
+            unknown_count, post_whitelist_stats.total_processed
         );
         println!(
-            "Whitelist conformance check passed (NonConforming: {}, Unknown: {}).",
-            non_conforming_count, unknown_count
+            "Whitelist conformance check passed (NonConforming: {}, Unknown: {}). Packet stats: total_processed={}",
+            non_conforming_count, unknown_count, post_whitelist_stats.total_processed
         );
         println!("--- Whitelist Test Completed ---");
 
@@ -3391,8 +3419,15 @@ mod tests {
             &blacklists::is_custom().await,
             "Blacklist model should be custom"
         );
-        println!("Custom blacklist applied. Waiting 15s for initial processing...");
-        sleep(Duration::from_secs(15)).await;
+        println!("Custom blacklist applied. Waiting 10s for initial processing...");
+        sleep(Duration::from_secs(10)).await;
+
+        // Check packet stats after blacklist application
+        let post_blacklist_stats = capture.get_packet_stats().await;
+        println!(
+            "After blacklist application - total_processed: {}",
+            post_blacklist_stats.total_processed
+        );
 
         println!(
             "Generating traffic from {} (HEAD request)...",
@@ -3420,8 +3455,8 @@ mod tests {
             }
         }
 
-        println!("Traffic generated. Waiting 45s for session capture and blacklist evaluation...");
-        sleep(Duration::from_secs(45)).await;
+        println!("Traffic generated. Waiting 10s for session capture and blacklist evaluation...");
+        sleep(Duration::from_secs(10)).await;
 
         println!("Checking sessions for blacklist tags...");
         let sessions_after_blacklist = capture.get_sessions(false).await;
@@ -4531,6 +4566,14 @@ mod tests {
     async fn test_capture_start_stop() {
         println!("--- Starting test_capture_start_stop ---");
         let capture = Arc::new(FlodbaddCapture::new());
+
+        // Get initial packet stats
+        let initial_stats = capture.get_packet_stats().await;
+        println!(
+            "Initial packet stats - total_processed: {}",
+            initial_stats.total_processed
+        );
+
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -4573,21 +4616,31 @@ mod tests {
         }
 
         // Wait a short time for the traffic to be captured
-        println!("Waiting 45s for traffic to be captured...");
-        sleep(Duration::from_secs(45)).await;
+        println!("Waiting 10s for traffic to be captured...");
+        sleep(Duration::from_secs(10)).await;
+
+        // Check packet stats after traffic generation
+        let post_traffic_stats = capture.get_packet_stats().await;
+        let packets_processed = post_traffic_stats.total_processed - initial_stats.total_processed;
+        println!(
+            "After traffic generation - total_processed: {} (delta: {})",
+            post_traffic_stats.total_processed, packets_processed
+        );
 
         // Check sessions
         println!("Performing initial session check...");
         let initial_sessions = capture.get_sessions(false).await;
         assert!(
             !initial_sessions.is_empty(),
-            "Capture should have sessions after traffic generation"
+            "Capture should have sessions after traffic generation. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!("Found {} initial sessions.", initial_sessions.len());
         let initial_current_sessions = capture.get_current_sessions(false).await;
         assert!(
             !initial_current_sessions.is_empty(),
-            "Capture should have current sessions"
+            "Capture should have current sessions. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!(
             "Found {} initial current sessions.",
@@ -4599,6 +4652,14 @@ mod tests {
         capture.stop().await;
         assert!(!capture.is_capturing().await, "Capture should have stopped");
         println!("Capture stopped successfully.");
+
+        // Final packet stats check
+        let final_stats = capture.get_packet_stats().await;
+        println!(
+            "Final packet stats - total_processed: {} (total test delta: {})",
+            final_stats.total_processed,
+            final_stats.total_processed - initial_stats.total_processed
+        );
 
         println!("--- test_capture_start_stop completed successfully ---");
     }
@@ -4974,8 +5035,11 @@ mod tests {
         let capture = Arc::new(FlodbaddCapture::new());
 
         // Start capture
-        capture.start(&interfaces).await;
-        assert!(capture.is_capturing().await, "Capture should be active");
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         // Add some mock sessions to verify they get cleared
         let test_session = Session {
@@ -5153,6 +5217,7 @@ mod tests {
             Err(e) => {
                 println!("Traffic generation failed: {}", e);
                 // Second attempt
+                println!("Waiting 10s before second attempt...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 match client.get(target_url).send().await {
                     Ok(response) => {
@@ -5169,8 +5234,7 @@ mod tests {
             }
         }
 
-        // Wait 1x the pooling period to ensure sessions are synced
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         let initial_sessions = capture.get_sessions(false).await;
         let initial_count = initial_sessions.len();
@@ -5227,8 +5291,8 @@ mod tests {
             }
         }
 
-        // Wait 1x the pooling period to ensure sessions are synced
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        println!("Waiting 10s for traffic to be captured...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         let stop_sessions = capture.get_sessions(false).await;
         let stop_count = stop_sessions.len();
@@ -5242,11 +5306,11 @@ mod tests {
 
         // === SECOND START ===
         println!("=== SECOND START ===");
-        capture.start(&interfaces).await;
-        assert!(
-            capture.is_capturing().await,
-            "Second start: Capture should be running again"
-        );
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         // Verify that task handles are recreated
         assert!(
@@ -5274,6 +5338,7 @@ mod tests {
             Err(e) => {
                 println!("Traffic generation failed: {}", e);
                 // Second attempt
+                println!("Waiting 10s before second attempt...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 match client.get(target_url).send().await {
                     Ok(response) => {
@@ -5290,8 +5355,8 @@ mod tests {
             }
         }
 
-        // Wait 1x the pooling period to ensure sessions are synced
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        println!("Waiting 10s for traffic to be captured...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         let restart_sessions = capture.get_sessions(false).await;
         let restart_count = restart_sessions.len();
@@ -5454,27 +5519,32 @@ mod tests {
         analyzer.disable_warmup_for_testing().await;
         analyzer.set_test_thresholds(0.1, 0.2).await;
 
-        capture.start(&interfaces).await;
-        assert!(
-            capture.is_capturing().await,
-            "Capture should be running after first start"
-        );
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         // Wait for capture to initialize
         sleep(Duration::from_secs(2)).await;
 
         // Generate traffic and verify capture
         println!("=== GENERATING TRAFFIC AFTER FIRST START ===");
+        let pre_first_traffic_stats = capture.get_packet_stats().await;
         let first_start_sessions =
             generate_traffic_and_verify_capture(&capture, &analyzer, "first start").await;
+        let post_first_traffic_stats = capture.get_packet_stats().await;
 
         assert!(
             first_start_sessions > 0,
-            "Should have captured sessions after first start"
+            "Should have captured sessions after first start. Packet stats: total_processed={} -> {} (delta: {})",
+            pre_first_traffic_stats.total_processed, post_first_traffic_stats.total_processed,
+            post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
         );
         println!(
-            "✅ First start: Captured {} sessions successfully",
-            first_start_sessions
+            "✅ First start: Captured {} sessions successfully, {} packets processed",
+            first_start_sessions,
+            post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
         );
 
         // Get initial session details for comparison
@@ -5516,27 +5586,32 @@ mod tests {
         // === SECOND START (RESTART) ===
         println!("=== SECOND START: Restarting capture ===");
 
-        capture.start(&interfaces).await;
-        assert!(
-            capture.is_capturing().await,
-            "Capture should be running after restart"
-        );
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         // Wait for capture to re-initialize
         sleep(Duration::from_secs(2)).await;
 
         // Generate traffic and verify capture works after restart
         println!("=== GENERATING TRAFFIC AFTER RESTART ===");
+        let pre_restart_stats = capture.get_packet_stats().await;
         let restart_sessions =
             generate_traffic_and_verify_capture(&capture, &analyzer, "restart").await;
+        let post_restart_stats = capture.get_packet_stats().await;
 
         assert!(
             restart_sessions > 0,
-            "Should have captured new sessions after restart"
+            "Should have captured new sessions after restart. Packet stats: total_processed={} -> {} (delta: {})",
+            pre_restart_stats.total_processed, post_restart_stats.total_processed,
+            post_restart_stats.total_processed - pre_restart_stats.total_processed
         );
         println!(
-            "✅ Restart: Captured {} new sessions successfully",
-            restart_sessions
+            "✅ Restart: Captured {} new sessions successfully, {} packets processed",
+            restart_sessions,
+            post_restart_stats.total_processed - pre_restart_stats.total_processed
         );
 
         // Verify total session count has increased
@@ -5599,7 +5674,12 @@ mod tests {
 
         let sessions_before_third_start = analyzer.get_sessions().await.len();
 
-        capture.start(&interfaces).await;
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
+
         assert!(
             capture.is_capturing().await,
             "Should be running for third cycle"
@@ -5608,18 +5688,24 @@ mod tests {
         sleep(Duration::from_secs(2)).await;
 
         // Generate one more round of traffic
+        let pre_third_stats = capture.get_packet_stats().await;
         let third_cycle_sessions =
             generate_traffic_and_verify_capture(&capture, &analyzer, "third cycle").await;
+        let post_third_stats = capture.get_packet_stats().await;
 
         let sessions_after_third_start = analyzer.get_sessions().await.len();
         println!(
-            "Third cycle: {} -> {} sessions",
-            sessions_before_third_start, sessions_after_third_start
+            "Third cycle: {} -> {} sessions, {} packets processed",
+            sessions_before_third_start,
+            sessions_after_third_start,
+            post_third_stats.total_processed - pre_third_stats.total_processed
         );
 
         assert!(
             sessions_after_third_start >= sessions_before_third_start,
-            "Session count should not decrease in third cycle"
+            "Session count should not decrease in third cycle. Packet stats: total_processed={} -> {} (delta: {})",
+            pre_third_stats.total_processed, post_third_stats.total_processed,
+            post_third_stats.total_processed - pre_third_stats.total_processed
         );
 
         // === CLEANUP ===
@@ -5659,9 +5745,14 @@ mod tests {
 
         println!("Generating network traffic for {}...", phase);
 
-        // Get initial session count
+        // Get initial session count and packet stats
         let initial_sessions = capture.get_sessions(false).await;
         let initial_count = initial_sessions.len();
+        let initial_packet_stats = capture.get_packet_stats().await;
+        println!(
+            "{}: Initial packet stats - total_processed: {}, new_sessions: {}",
+            phase, initial_packet_stats.total_processed, initial_packet_stats.new_sessions
+        );
 
         // Generate HTTP traffic to a reliable endpoint
         let client = match reqwest::Client::builder()
@@ -5744,15 +5835,35 @@ mod tests {
         // Wait for capture to process the traffic
         sleep(Duration::from_secs(3)).await;
 
-        // Check if new sessions were captured
+        // Check if new sessions were captured and verify packet stats
         let final_sessions = capture.get_sessions(false).await;
         let final_count = final_sessions.len();
         let new_sessions = final_count.saturating_sub(initial_count);
+        let final_packet_stats = capture.get_packet_stats().await;
+        let packets_processed =
+            final_packet_stats.total_processed - initial_packet_stats.total_processed;
 
         println!(
-            "{}: {} -> {} sessions (+{})",
-            phase, initial_count, final_count, new_sessions
+            "{}: {} -> {} sessions (+{}), packets processed: {}",
+            phase, initial_count, final_count, new_sessions, packets_processed
         );
+
+        // Diagnostic check: if no sessions but packets were processed, log warning
+        if new_sessions == 0 && packets_processed > 0 {
+            println!("WARNING [{}]: {} packets processed but no new sessions created. Final stats: total={}, new_sessions={}, updated_sessions={}", 
+                    phase, packets_processed, final_packet_stats.total_processed,
+                    final_packet_stats.new_sessions, final_packet_stats.updated_sessions);
+        } else if new_sessions > 0 && packets_processed == 0 {
+            println!(
+                "WARNING [{}]: {} new sessions but no packets processed - this is unexpected",
+                phase, new_sessions
+            );
+        } else {
+            println!(
+                "DEBUG [{}]: Stats consistent - {} packets processed, {} new sessions",
+                phase, packets_processed, new_sessions
+            );
+        }
 
         // If we have new sessions, analyze them
         if new_sessions > 0 {
