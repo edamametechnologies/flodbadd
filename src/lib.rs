@@ -36,6 +36,7 @@ pub mod oui_db;
     feature = "packetcapture"
 ))]
 pub mod packets;
+pub mod packetstats;
 pub mod port_info;
 pub mod port_vulns;
 pub mod port_vulns_db;

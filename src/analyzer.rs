@@ -1432,6 +1432,7 @@ impl SessionAnalyzer {
 
                     let mut anom_count = 0;
                     let mut bl_count = 0;
+                    let mut skip_count = 0;
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
@@ -1492,6 +1493,8 @@ impl SessionAnalyzer {
 
                             // Record that we just performed a real analysis for this UID.
                             self.last_analysis_times.insert(session.uid.clone(), now);
+                        } else {
+                            skip_count += 1;
                         }
 
                         // Store all sessions regardless of classification
@@ -1520,11 +1523,14 @@ impl SessionAnalyzer {
                             // Remove from collection if session is no longer blacklisted
                             self.blacklisted_sessions.remove(&session.uid);
                         }
-                        if (idx + 1) % 100 == 0 {
+                        if (idx + 1) % 500 == 0 {
                             debug!(
-                                "Analyzer ({}): Analyzed {}/{} sessions.",
+                                "Analyzer ({}): Analyzed {}, {} skipped, {} anomalous, {} blacklisted, {} total.",
                                 operation_type,
                                 idx + 1,
+                                skip_count,
+                                anom_count,
+                                bl_count,
                                 sessions_len
                             );
                         }

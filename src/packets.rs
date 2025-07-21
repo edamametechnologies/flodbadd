@@ -1,12 +1,12 @@
 use crate::asn::*;
 use crate::ip::is_lan_ip;
 use crate::l7::FlodbaddL7;
+use crate::packetstats::PACKET_STATS;
 use crate::port_vulns::get_name_from_port;
 use crate::sessions::session_macros::*;
 use crate::sessions::*;
 use chrono::Utc;
 use dashmap::mapref::entry::Entry;
-use lazy_static::lazy_static;
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv4::Ipv4Packet;
@@ -16,71 +16,14 @@ use pnet_packet::udp::UdpPacket;
 use pnet_packet::Packet as PnetPacket;
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio;
-use tracing::{info, trace, warn};
+use tracing::{trace, warn};
 use undeadlock::*;
 use uuid::Uuid;
 
 const TCP_PSH: u8 = 0x08; // PSH (push) flag in TCP
-
-lazy_static! {
-    static ref PACKET_STATS: PacketStats = PacketStats::new();
-}
-
-struct PacketStats {
-    total_processed: AtomicU64,
-    tcp_processed: AtomicU64,
-    udp_processed: AtomicU64,
-    ipv4_processed: AtomicU64,
-    ipv6_processed: AtomicU64,
-    new_sessions: AtomicU64,
-    updated_sessions: AtomicU64,
-    last_log_time: AtomicU64,
-}
-
-impl PacketStats {
-    fn new() -> Self {
-        Self {
-            total_processed: AtomicU64::new(0),
-            tcp_processed: AtomicU64::new(0),
-            udp_processed: AtomicU64::new(0),
-            ipv4_processed: AtomicU64::new(0),
-            ipv6_processed: AtomicU64::new(0),
-            new_sessions: AtomicU64::new(0),
-            updated_sessions: AtomicU64::new(0),
-            last_log_time: AtomicU64::new(0),
-        }
-    }
-    fn log_and_reset(&self) {
-        if self.last_log_time.load(Ordering::Relaxed) == 0
-            || Utc::now().timestamp_millis() as u64 - self.last_log_time.load(Ordering::Relaxed)
-                > 30000
-        {
-            self.last_log_time
-                .store(Utc::now().timestamp_millis() as u64, Ordering::Relaxed);
-        } else {
-            return;
-        }
-
-        let total = self.total_processed.swap(0, Ordering::Relaxed);
-        let tcp = self.tcp_processed.swap(0, Ordering::Relaxed);
-        let udp = self.udp_processed.swap(0, Ordering::Relaxed);
-        let ipv4 = self.ipv4_processed.swap(0, Ordering::Relaxed);
-        let ipv6 = self.ipv6_processed.swap(0, Ordering::Relaxed);
-        let new = self.new_sessions.swap(0, Ordering::Relaxed);
-        let updated = self.updated_sessions.swap(0, Ordering::Relaxed);
-
-        // Only log if there was activity in the interval
-        if total > 0 {
-            info!(
-                "Packet Stats (last 30s): Total={}, TCP={}, UDP={}, IPv4={}, IPv6={}, NewSessions={}, UpdatedSessions={}",
-                total, tcp, udp, ipv4, ipv6, new, updated
-            );
-        }
-    }
-}
 
 #[derive(Debug, PartialEq)]
 pub enum ParsedPacket {
