@@ -1653,9 +1653,35 @@ impl SessionAnalyzer {
     }
 
     /// Retrieves a snapshot of currently tracked blacklisted sessions.
-    /// Also cleans up old entries.
+    /// Also cleans up old entries and opportunistically refreshes the
+    /// `blacklisted_sessions` cache from `all_sessions`.
+    ///
+    /// Rationale: on some platforms the capture layer can update a session's
+    /// `criticality` field with a `blacklist:*` tag a few milliseconds before
+    /// the next scheduled `analyze_sessions()` run.  If a UI/API request is
+    /// made in that tiny window the session would be visible through
+    /// `get_sessions()` (which returns **all** sessions) but still missing from
+    /// `get_blacklisted_sessions()` because the dedicated blacklist cache has
+    /// not been refreshed yet.  By checking `all_sessions` on every call we
+    /// guarantee immediate consistency without waiting for the next analysis
+    /// cycle.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
+        // Remove expired entries first.
         self.cleanup_tracked_sessions();
+
+        // Opportunistically add any newly-blacklisted sessions that are not yet
+        // present in the dedicated cache.
+        for entry in self.all_sessions.iter() {
+            let session = entry.value();
+            if Self::is_blacklisted(&session.criticality)
+                && !self.blacklisted_sessions.contains_key(&session.uid)
+            {
+                // Insert a fresh clone so the cache is immediately consistent.
+                self.blacklisted_sessions
+                    .insert(session.uid.clone(), session.clone());
+            }
+        }
+
         self.blacklisted_sessions
             .iter()
             .map(|entry| entry.value().clone())
