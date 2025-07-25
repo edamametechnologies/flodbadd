@@ -1538,7 +1538,7 @@ impl FlodbaddCapture {
         }
     }
 
-    async fn update_sessions(&self) {
+    pub async fn update_sessions(&self) {
         // Skip if not capturing and not running in test mode
         if !self.is_capturing().await && !cfg!(test) {
             debug!("update_sessions skipped - not capturing");
