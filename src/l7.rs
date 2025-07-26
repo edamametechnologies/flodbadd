@@ -1940,7 +1940,13 @@ mod ebpf_tests {
         let capture = FlodbaddCapture::new();
         let interfaces = FlodbaddInterfaces::new();
         println!("Starting capture on interfaces: {}", interfaces);
-        capture.start(&interfaces).await;
+
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
+
         sleep(std::time::Duration::from_secs(3)).await;
         let mut found_connection = false;
         let mut sessions = vec![];

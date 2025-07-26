@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     let interfaces = get_valid_network_interfaces();
     let capture = FlodbaddCapture::new();
     
-    capture.start(&interfaces).await;
+    let _ = capture.start(&interfaces).await;
     
     // Let it capture for 30 seconds
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;

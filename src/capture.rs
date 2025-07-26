@@ -38,9 +38,15 @@ use std::time::Instant;
     feature = "asyncpacketcapture"
 ))]
 use tokio::select;
+use tokio::sync::Notify;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*; // Add this import // Add Duration import
+
+// Public notify that fires whenever the security models (black-, white-list, rules)
+// have been fully processed after at least one update cycle.  Tests and higher-level
+// API layers can await it instead of using arbitrary sleeps.
+pub static MODEL_SYNCED: Notify = Notify::const_new();
 
 /*
  * DNS Resolution Logic:
@@ -70,7 +76,8 @@ use undeadlock::*; // Add this import // Add Duration import
 pub struct FlodbaddCapture {
     interfaces: Arc<CustomRwLock<FlodbaddInterfaces>>,
     capture_task_handles: Arc<CustomDashMap<String, TaskHandle>>,
-    sessions: Arc<CustomDashMap<Session, SessionInfo>>,
+    // Public for tests
+    pub sessions: Arc<CustomDashMap<Session, SessionInfo>>,
     current_sessions: Arc<CustomRwLock<Vec<Session>>>,
     resolver: Arc<CustomRwLock<Option<Arc<FlodbaddResolver>>>>,
     l7: Arc<CustomRwLock<Option<Arc<FlodbaddL7>>>>,
@@ -83,6 +90,7 @@ pub struct FlodbaddCapture {
     dns_packet_processor: Arc<CustomRwLock<Option<Arc<DnsPacketProcessor>>>>,
     edamame_model_update_task_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
     update_in_progress: Arc<AtomicBool>,
+    update_pending: Arc<AtomicBool>,
     last_get_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_current_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_blacklisted_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
@@ -109,6 +117,7 @@ impl FlodbaddCapture {
             dns_packet_processor: Arc::new(CustomRwLock::new(None)),
             edamame_model_update_task_handle: Arc::new(CustomRwLock::new(None)),
             update_in_progress: Arc::new(AtomicBool::new(false)),
+            update_pending: Arc::new(AtomicBool::new(false)),
             last_get_sessions_fetch_timestamp: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
                 std::time::UNIX_EPOCH,
             ))),
@@ -1558,6 +1567,7 @@ impl FlodbaddCapture {
             self.whitelist_exceptions.clone(),
             self.blacklisted_sessions.clone(),
             self.update_in_progress.clone(),
+            self.update_pending.clone(),
         )
         .await;
     }
@@ -1784,106 +1794,122 @@ impl FlodbaddCapture {
         whitelist_exceptions: Arc<CustomRwLock<Vec<Session>>>,
         blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
         update_in_progress: Arc<AtomicBool>,
+        update_pending: Arc<AtomicBool>,
     ) {
-        if update_in_progress.load(Ordering::Relaxed) {
-            debug!("update_sessions_internal called while session sync is in progress, skipping");
+        if update_in_progress.swap(true, Ordering::AcqRel) {
+            // Another thread is already doing the heavy work – just mark that
+            // one more pass is required and return.
+            update_pending.store(true, Ordering::Release);
+            debug!("update_sessions_internal: worker already running – marked pending");
             return;
         }
 
-        // A second safety flag (kept for diagnostics) – but we do not spin any more.
+        loop {
+            // A second safety flag (kept for diagnostics) – but we do not spin any more.
 
-        // Set the flag to indicate update is starting
-        update_in_progress.store(true, Ordering::Relaxed);
+            // Set the flag to indicate update is starting
+            update_in_progress.store(true, Ordering::Relaxed);
 
-        debug!("update_sessions started");
-        // Update the sessions status and current sessions
-        Self::update_sessions_status(&sessions, &current_sessions).await;
-        debug!("update_sessions_status done");
+            debug!("update_sessions started");
+            // Update the sessions status and current sessions
+            Self::update_sessions_status(&sessions, &current_sessions).await;
+            debug!("update_sessions_status done");
 
-        // Update L7 information for all sessions
-        {
-            let l7_guard = l7.read().await;
-            if let Some(l7_arc) = l7_guard.as_ref() {
-                Self::populate_l7(&sessions, &Some(l7_arc.clone()), &current_sessions).await;
-            }
-        }
-        debug!("populate_l7 done");
-
-        // Enrich DNS resolutions with DNS packet processor information
-        {
-            let resolver_guard = resolver.read().await;
-            let dns_guard = dns_packet_processor.read().await;
-            if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
-                Self::integrate_dns_with_resolver(res, dns_proc).await;
-            }
-        }
-        debug!("integrate_dns_with_resolver done");
-
-        // Then update resolver information for all sessions
-        {
-            let resolver_guard = resolver.read().await;
-            let dns_guard = dns_packet_processor.read().await;
-            if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
-                Self::populate_domain_names(
-                    &sessions,
-                    &Some(res.clone()),
-                    &dns_proc.get_dns_resolutions(),
-                    &current_sessions,
-                )
-                .await;
-            }
-        }
-        debug!("populate_domain_names done");
-
-        // Update blacklist information incrementally using helper from module
-        blacklists::recompute_blacklist_for_sessions(&sessions, &blacklisted_sessions).await;
-        debug!("recompute_blacklist_for_sessions done");
-
-        // Get just the vector of blacklisted sessions once, without holding the lock
-        // and then use it for processing. This avoids holding the read lock while updating sessions.
-        let blacklisted_sessions_vec = blacklisted_sessions.read().await.clone();
-
-        // After blacklist computation, update whitelist status for blacklisted sessions
-        // Use the cloned vector instead of holding a lock on the original
-        for blacklisted_session in blacklisted_sessions_vec {
-            if let Some(mut entry) = sessions.get_mut(&blacklisted_session) {
-                if entry.is_whitelisted == WhitelistState::Unknown {
-                    entry.is_whitelisted = WhitelistState::NonConforming;
-                    if entry.whitelist_reason.is_none() {
-                        entry.whitelist_reason = Some("Session is blacklisted".to_string());
-                    }
-                    // Update last_modified since the whitelist state/reason changed due to blacklist
-                    entry.last_modified = Utc::now();
+            // Update L7 information for all sessions
+            {
+                let l7_guard = l7.read().await;
+                if let Some(l7_arc) = l7_guard.as_ref() {
+                    Self::populate_l7(&sessions, &Some(l7_arc.clone()), &current_sessions).await;
                 }
             }
-        }
+            debug!("populate_l7 done");
 
-        // Update whitelist information incrementally
-        whitelists::recompute_whitelist_for_sessions(
-            &whitelist_name,
-            &sessions,
-            &whitelist_exceptions,
-            &whitelist_conformance,
-            &last_whitelist_exception_time,
-        )
-        .await;
-        debug!("recompute_whitelist_for_sessions done");
-
-        // Final conformance check
-        if !whitelist_conformance.load(Ordering::Relaxed) {
-            let has_non_conforming = sessions
-                .iter()
-                .any(|entry| entry.value().is_whitelisted == WhitelistState::NonConforming);
-            if !has_non_conforming {
-                info!("Resetting whitelist_conformance flag as no currently tracked sessions are non-conforming.");
-                whitelist_conformance.store(true, Ordering::Relaxed);
+            // Enrich DNS resolutions with DNS packet processor information
+            {
+                let resolver_guard = resolver.read().await;
+                let dns_guard = dns_packet_processor.read().await;
+                if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
+                    Self::integrate_dns_with_resolver(res, dns_proc).await;
+                }
             }
+            debug!("integrate_dns_with_resolver done");
+
+            // Then update resolver information for all sessions
+            {
+                let resolver_guard = resolver.read().await;
+                let dns_guard = dns_packet_processor.read().await;
+                if let (Some(res), Some(dns_proc)) = (resolver_guard.as_ref(), dns_guard.as_ref()) {
+                    Self::populate_domain_names(
+                        &sessions,
+                        &Some(res.clone()),
+                        &dns_proc.get_dns_resolutions(),
+                        &current_sessions,
+                    )
+                    .await;
+                }
+            }
+            debug!("populate_domain_names done");
+
+            // Update blacklist information incrementally using helper from module
+            blacklists::recompute_blacklist_for_sessions(&sessions, &blacklisted_sessions).await;
+            debug!("recompute_blacklist_for_sessions done");
+
+            // Get just the vector of blacklisted sessions once, without holding the lock
+            // and then use it for processing. This avoids holding the read lock while updating sessions.
+            let blacklisted_sessions_vec = blacklisted_sessions.read().await.clone();
+
+            // After blacklist computation, update whitelist status for blacklisted sessions
+            // Use the cloned vector instead of holding a lock on the original
+            for blacklisted_session in blacklisted_sessions_vec {
+                if let Some(mut entry) = sessions.get_mut(&blacklisted_session) {
+                    if entry.is_whitelisted == WhitelistState::Unknown {
+                        entry.is_whitelisted = WhitelistState::NonConforming;
+                        if entry.whitelist_reason.is_none() {
+                            entry.whitelist_reason = Some("Session is blacklisted".to_string());
+                        }
+                        // Update last_modified since the whitelist state/reason changed due to blacklist
+                        entry.last_modified = Utc::now();
+                    }
+                }
+            }
+
+            // Update whitelist information incrementally
+            whitelists::recompute_whitelist_for_sessions(
+                &whitelist_name,
+                &sessions,
+                &whitelist_exceptions,
+                &whitelist_conformance,
+                &last_whitelist_exception_time,
+            )
+            .await;
+            debug!("recompute_whitelist_for_sessions done");
+
+            // Final conformance check
+            if !whitelist_conformance.load(Ordering::Relaxed) {
+                let has_non_conforming = sessions
+                    .iter()
+                    .any(|entry| entry.value().is_whitelisted == WhitelistState::NonConforming);
+                if !has_non_conforming {
+                    info!("Resetting whitelist_conformance flag as no currently tracked sessions are non-conforming.");
+                    whitelist_conformance.store(true, Ordering::Relaxed);
+                }
+            }
+
+            debug!("update_sessions finished");
+
+            // Reset the flag to indicate update is complete
+            update_in_progress.store(false, Ordering::Relaxed);
+
+            // If another thread queued work while we were busy we loop once more
+            if !update_pending.swap(false, Ordering::AcqRel) {
+                // No pending work – release the guard and wake waiters
+                update_in_progress.store(false, Ordering::Release);
+                MODEL_SYNCED.notify_waiters();
+                break;
+            }
+            // Otherwise stay in the loop and process again immediately
+            debug!("update_sessions_internal: processing additional queued update");
         }
-
-        debug!("update_sessions finished");
-
-        // Reset the flag to indicate update is complete
-        update_in_progress.store(false, Ordering::Relaxed);
     }
 
     // Internal static version of integrate_dns_with_resolver
@@ -3243,7 +3269,6 @@ mod tests {
 
         // --- Start Capture ---
         println!("Starting capture...");
-        capture.start(&interfaces).await;
         let capture_start_result = capture.start(&interfaces).await;
         if let Err(e) = capture_start_result {
             error!("Capture start failed: {}", e);
@@ -4587,7 +4612,12 @@ mod tests {
 
         // Start capture
         println!("Starting capture...");
-        capture.start(&interfaces).await;
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
+
         assert!(capture.is_capturing().await, "Capture should be running");
 
         // Generate traffic instead of waiting 60 seconds
@@ -4988,7 +5018,11 @@ mod tests {
         let capture = Arc::new(FlodbaddCapture::new());
 
         // Start capture (stand-alone mode within test)
-        capture.start(&interfaces).await;
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
 
         // Allow a small grace period for tasks to spawn
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -5191,7 +5225,13 @@ mod tests {
 
         // === FIRST START ===
         println!("=== FIRST START ===");
-        capture.start(&interfaces).await;
+
+        let capture_start_result = capture.start(&interfaces).await;
+        if let Err(e) = capture_start_result {
+            error!("Capture start failed: {}", e);
+            panic!("Capture start failed: {}", e);
+        }
+
         assert!(
             capture.is_capturing().await,
             "First start: Capture should be running"
