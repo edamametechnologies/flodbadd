@@ -4,20 +4,13 @@
 //! waits a few seconds, then prints the number of sessions that were
 //! observed.  It demonstrates the public `FlodbaddCapture` API.
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
+#![cfg(all(
+    feature = "packetcapture",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+
 use flodbadd::capture::FlodbaddCapture;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use flodbadd::interface::get_all_interfaces;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
@@ -39,7 +32,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Start the capture (requires `packetcapture` feature and sufficient privileges)
         let capture = FlodbaddCapture::new();
-        capture.start(&interfaces).await;
+        match capture.start(&interfaces).await {
+            Ok(_) => println!("Capture started successfully"),
+            Err(e) => {
+                println!("Capture failed to start: {}", e);
+                return Ok(());
+            }
+        }
 
         // Capture for 5 seconds
         sleep(Duration::from_secs(5)).await;

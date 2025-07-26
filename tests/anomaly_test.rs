@@ -1,46 +1,21 @@
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
+//! This test exercises low-level session statistics. Requires the `packetcapture` feature because it
+//! depends on the `packets` module.
+#![cfg(all(
+    feature = "packetcapture",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+
 use chrono::{Duration, Utc};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use flodbadd::analyzer::SessionAnalyzer;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use flodbadd::sessions::{
     Protocol, Session, SessionInfo, SessionL7, SessionStats, SessionStatus, WhitelistState,
 };
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use rand::Rng;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use std::net::{IpAddr, Ipv4Addr};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use tokio::time::{sleep, Duration as TokioDuration};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use uuid::Uuid;
 
 /// Helper to create a realistic SessionInfo with proper defaults
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn create_basic_session(
     src_ip: IpAddr,
     src_port: u16,
@@ -99,10 +74,6 @@ fn create_basic_session(
 }
 
 /// Helper to properly calculate derived stats like real traffic would
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn finalize_session_stats(session: &mut SessionInfo) {
     let stats = &mut session.stats;
 
@@ -131,11 +102,6 @@ fn finalize_session_stats(session: &mut SessionInfo) {
 }
 
 /// Generate normal web browsing traffic patterns
-
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_normal_web_traffic(count: usize) -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::hours(1);
@@ -179,10 +145,6 @@ fn generate_normal_web_traffic(count: usize) -> Vec<SessionInfo> {
 }
 
 /// Generate C&C beacon traffic pattern - periodic, small packets, consistent timing
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_beacon_traffic(beacon_interval_seconds: i64, beacon_count: usize) -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::hours(2);
@@ -232,10 +194,6 @@ fn generate_beacon_traffic(beacon_interval_seconds: i64, beacon_count: usize) ->
 }
 
 /// Generate data exfiltration traffic pattern - large outbound transfers
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_exfiltration_traffic() -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::minutes(30);
@@ -275,10 +233,6 @@ fn generate_exfiltration_traffic() -> Vec<SessionInfo> {
 }
 
 /// Generate port scanning traffic pattern - many short connections
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_port_scan_traffic() -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::minutes(5);
@@ -323,10 +277,6 @@ fn generate_port_scan_traffic() -> Vec<SessionInfo> {
 }
 
 /// Generate DNS tunneling traffic pattern - unusually large DNS queries
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_dns_tunnel_traffic() -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::hours(1);
@@ -365,10 +315,6 @@ fn generate_dns_tunnel_traffic() -> Vec<SessionInfo> {
 }
 
 /// Generate cryptomining traffic pattern - sustained high CPU, external pool connections
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_cryptomining_traffic() -> Vec<SessionInfo> {
     let mut sessions = Vec::new();
     let base_time = Utc::now() - Duration::hours(6);
@@ -413,10 +359,6 @@ fn generate_cryptomining_traffic() -> Vec<SessionInfo> {
 }
 
 /// Wait until the analyser reports that warm-up has finished **and** a forest is available.
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 async fn wait_for_analyzer_ready(analyzer: &SessionAnalyzer, timeout_secs: u64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -453,10 +395,6 @@ async fn wait_for_analyzer_ready(analyzer: &SessionAnalyzer, timeout_secs: u64) 
     }
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 #[tokio::test]
 async fn test_c2_beacon_detection() {
     let analyzer = SessionAnalyzer::new();
@@ -759,10 +697,6 @@ async fn test_dns_tunnel_detection() {
     analyzer.stop().await;
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 #[tokio::test]
 async fn test_cryptomining_detection() {
     let analyzer = SessionAnalyzer::new();
@@ -832,10 +766,6 @@ async fn test_cryptomining_detection() {
     analyzer.stop().await;
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 #[tokio::test]
 async fn test_mixed_anomaly_detection() {
     let analyzer = SessionAnalyzer::new();
@@ -927,10 +857,6 @@ async fn test_mixed_anomaly_detection() {
     analyzer.stop().await;
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 #[tokio::test]
 async fn test_blacklist_preservation() {
     let analyzer = SessionAnalyzer::new();
@@ -1007,10 +933,6 @@ async fn test_blacklist_preservation() {
     analyzer.stop().await;
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 #[tokio::test]
 async fn test_basic_anomaly_detection_debug() {
     let analyzer = SessionAnalyzer::new();
@@ -1129,10 +1051,6 @@ async fn test_basic_anomaly_detection_debug() {
 }
 
 #[tokio::test]
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 async fn test_minimal_anomaly() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;

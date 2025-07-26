@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*;
@@ -285,10 +285,17 @@ lazy_static! {
     // Track the last time we ran the recomputation as well as the blacklist
     static ref LAST_BLACKLIST_RUN: Arc<CustomRwLock<DateTime<Utc>>> =
         Arc::new(CustomRwLock::new(DateTime::<Utc>::from(std::time::UNIX_EPOCH)));
-
-    // Flag indicating a full blacklist recompute is required.
-    static ref NEED_FULL_RECOMPUTE_BLACKLIST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 }
+
+// Monotonically increasing revision number for the blacklist data.
+// Every time the underlying model changes we bump the counter.  Workers that
+// are already in the middle of a computation will notice that the revision
+// they started with is stale and automatically run a second pass so that no
+// update is ever missed.
+static BLACKLIST_REVISION: AtomicU64 = AtomicU64::new(0);
+
+// Last revision that was fully processed by `recompute_blacklist_for_sessions`.
+static LAST_PROCESSED_BLACKLIST_REVISION: AtomicU64 = AtomicU64::new(0);
 
 // Private helper function to clear the cache
 fn clear_ip_cache() {
@@ -336,7 +343,8 @@ pub async fn is_ip_blacklisted(ip: &str) -> (bool, Vec<String>) {
     for blacklist_name in blacklist_names {
         trace!("Checking blacklist: {} for IP: {}", blacklist_name, ip);
 
-        let result = list_data_instance.is_ip_in_blacklist(ip, &blacklist_name);
+        let ip_str = ip.to_string();
+        let result = list_data_instance.is_ip_in_blacklist(&ip_str, &blacklist_name);
 
         match result {
             Ok(true) => {
@@ -385,7 +393,7 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     // Clear IP cache as underlying data changed
     clear_ip_cache();
     // Signal need for full recomputation
-    NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+    BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
 
     match status {
         UpdateStatus::Updated => info!("Blacklists were successfully updated."),
@@ -407,7 +415,7 @@ pub async fn set_custom_blacklists(blacklist_json: &str) -> Result<(), anyhow::E
         info!("Received empty JSON, resetting blacklists to default.");
         LISTS.reset_to_default().await; // This will re-initialize with filtering
         clear_ip_cache();
-        NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+        BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
         return Ok(());
     }
 
@@ -420,7 +428,7 @@ pub async fn set_custom_blacklists(blacklist_json: &str) -> Result<(), anyhow::E
             let blacklist = Blacklists::new_from_json(blacklist_data, false);
             LISTS.set_custom_data(blacklist).await;
             clear_ip_cache();
-            NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+            BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
             return Ok(());
         }
         Err(e) => {
@@ -430,7 +438,7 @@ pub async fn set_custom_blacklists(blacklist_json: &str) -> Result<(), anyhow::E
             );
             LISTS.reset_to_default().await;
             clear_ip_cache(); // Clear cache after reset due to error
-            NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+            BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
             return Err(anyhow!("Error parsing custom blacklist JSON: {}", e));
         }
     }
@@ -459,275 +467,297 @@ pub async fn recompute_blacklist_for_sessions(
 ) {
     debug!("Starting incremental blacklist recomputation");
 
-    // Determine if a full recomputation has been signalled via the global flag.
-    let db_changed = NEED_FULL_RECOMPUTE_BLACKLIST.swap(false, Ordering::SeqCst);
+    // The recomputation may run multiple times back-to-back until it has
+    // processed the most recent revision.  In normal operation that means one
+    // (and only one) extra pass if the model changed while the worker was
+    // busy.
 
-    // Snapshot last run timestamp (then release lock to avoid holding across await)
-    let last_run_ts = {
-        let guard = LAST_BLACKLIST_RUN.read().await;
-        *guard
-    };
+    loop {
+        let revision_at_start = BLACKLIST_REVISION.load(Ordering::Acquire);
 
-    let full_recompute = db_changed;
-
-    // Collection phase - gather all data we need without holding locks
-    // ----------------------------------------------------------------------------------
-
-    // 1a. Get all current blacklist names and create working sets
-    let list_data = LISTS.data.read().await.clone(); // Take a clone to avoid holding the lock
-    let blacklist_names: Vec<String> = list_data
-        .blacklists
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect();
-
-    // 1b. Collect existing blacklisted sessions (with filtering)
-    let existing_blacklisted = {
-        let current = blacklisted_sessions.read().await.clone();
-        // Only keep sessions that still exist in the map
-        current
-            .into_iter()
-            .filter(|session| sessions.contains_key(session))
-            .collect::<Vec<Session>>()
-    };
-
-    // 1c. Collect sessions we need to evaluate with their snapshots
-    let (sessions_to_evaluate, session_snapshots) = {
-        // Determine which sessions to evaluate based on full_recompute flag
-        let to_evaluate: Vec<Session> = if full_recompute {
-            // If full recompute, gather all sessions
-            sessions.iter().map(|entry| entry.key().clone()).collect()
-        } else {
-            // Otherwise just sessions modified since last run
-            sessions
-                .iter()
-                .filter(|entry| entry.value().last_modified > last_run_ts)
-                .map(|entry| entry.key().clone())
-                .collect()
+        // Snapshot last run timestamp (then release lock to avoid holding across await)
+        let last_run_ts = {
+            let guard = LAST_BLACKLIST_RUN.read().await;
+            *guard
         };
 
-        // Take snapshots of all sessions we need to evaluate
-        let mut snapshots = HashMap::with_capacity(to_evaluate.len());
-        for session_key in &to_evaluate {
-            if let Some(entry) = sessions.get(session_key) {
-                snapshots.insert(session_key.clone(), entry.clone());
+        let full_recompute =
+            revision_at_start != LAST_PROCESSED_BLACKLIST_REVISION.load(Ordering::Acquire);
+
+        // Collection phase - gather all data we need without holding locks
+        // ----------------------------------------------------------------------------------
+
+        // 1a. Get all current blacklist names and create working sets
+        let list_data = LISTS.data.read().await.clone(); // Take a clone to avoid holding the lock
+        let blacklist_names: Vec<String> = list_data
+            .blacklists
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        // 1b. Collect existing blacklisted sessions (with filtering)
+        let existing_blacklisted = {
+            let current = blacklisted_sessions.read().await.clone();
+            // Only keep sessions that still exist in the map
+            current
+                .into_iter()
+                .filter(|session| sessions.contains_key(session))
+                .collect::<Vec<Session>>()
+        };
+
+        // 1c. Collect sessions we need to evaluate with their snapshots
+        let (sessions_to_evaluate, session_snapshots) = {
+            // Determine which sessions to evaluate based on full_recompute flag
+            let to_evaluate: Vec<Session> = if full_recompute {
+                // If full recompute, gather all sessions
+                sessions.iter().map(|entry| entry.key().clone()).collect()
+            } else {
+                // Otherwise just sessions modified since last run
+                sessions
+                    .iter()
+                    .filter(|entry| entry.value().last_modified > last_run_ts)
+                    .map(|entry| entry.key().clone())
+                    .collect()
+            };
+
+            // Take snapshots of all sessions we need to evaluate
+            let mut snapshots = HashMap::with_capacity(to_evaluate.len());
+            for session_key in &to_evaluate {
+                if let Some(entry) = sessions.get(session_key) {
+                    snapshots.insert(session_key.clone(), entry.clone());
+                }
             }
+
+            (to_evaluate, snapshots)
+        };
+
+        info!(
+            "Blacklist evaluation: evaluating {} sessions out of total {}",
+            sessions_to_evaluate.len(),
+            sessions.len()
+        );
+
+        // Evaluation phase - compute all blacklist results without locks
+        // ----------------------------------------------------------------------------------
+
+        // Start with existing blacklisted sessions as our base
+        let mut new_blacklisted_sessions = existing_blacklisted.clone();
+
+        // Store update information for each session
+        struct SessionUpdate {
+            key: Session,
+            new_criticality: String,
         }
 
-        (to_evaluate, snapshots)
-    };
+        info!("Processing {} sessions", sessions_to_evaluate.len());
 
-    info!(
-        "Blacklist evaluation: evaluating {} sessions out of total {}",
-        sessions_to_evaluate.len(),
-        sessions.len()
-    );
-
-    // Evaluation phase - compute all blacklist results without locks
-    // ----------------------------------------------------------------------------------
-
-    // Start with existing blacklisted sessions as our base
-    let mut new_blacklisted_sessions = existing_blacklisted.clone();
-
-    // Store update information for each session
-    struct SessionUpdate {
-        key: Session,
-        new_criticality: String,
-    }
-
-    info!("Processing {} sessions", sessions_to_evaluate.len());
-
-    // OPTIMIZATION 1: IP Deduplication Strategy
-    // Build unique IP set first to eliminate redundant CIDR checks
-    let unique_ips: HashSet<IpAddr> = sessions_to_evaluate
-        .iter()
-        .filter_map(|session_key| session_snapshots.get(session_key))
-        .flat_map(|snapshot| {
-            let mut ips = Vec::new();
-            if !snapshot.is_local_src {
-                ips.push(snapshot.session.src_ip);
-            }
-            if !snapshot.is_local_dst {
-                ips.push(snapshot.session.dst_ip);
-            }
-            ips
-        })
-        .collect();
-
-    info!(
-        "IP deduplication: checking {} unique IPs instead of {} session IPs",
-        unique_ips.len(),
-        sessions_to_evaluate.len() * 2 // Approximate, some sessions might have local IPs
-    );
-
-    // OPTIMIZATION 2: Parallel Processing with Rayon
-    // Batch check all unique IPs against all blacklists once using parallel processing
-    let ip_blacklist_results: HashMap<IpAddr, Vec<String>> = unique_ips
-        .par_iter() // Parallel iterator
-        .map(|ip| {
-            let ip_str = ip.to_string();
-            let matching_lists: Vec<String> = blacklist_names
-                .iter()
-                .filter(|list_name| {
-                    list_data
-                        .is_ip_in_blacklist(&ip_str, list_name)
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-            (*ip, matching_lists)
-        })
-        .collect();
-
-    info!(
-        "Completed parallel IP blacklist matching for {} unique IPs",
-        ip_blacklist_results.len()
-    );
-
-    // Now process all sessions in parallel using cached IP results
-    let session_results: Vec<(Session, String, bool)> = sessions_to_evaluate
-        .par_iter() // Parallel processing of sessions
-        .filter_map(|session_key| {
-            // Skip if we don't have a snapshot (session might have been removed)
-            session_snapshots.get(session_key).and_then(|snapshot| {
-                // Use cached blacklist results instead of expensive CIDR checks
-                let mut matching_names = Vec::<String>::new();
-
+        // OPTIMIZATION 1: IP Deduplication Strategy
+        // Build unique IP set first to eliminate redundant CIDR checks
+        let unique_ips: HashSet<IpAddr> = sessions_to_evaluate
+            .iter()
+            .filter_map(|session_key| session_snapshots.get(session_key))
+            .flat_map(|snapshot| {
+                let mut ips = Vec::new();
                 if !snapshot.is_local_src {
-                    if let Some(src_matches) = ip_blacklist_results.get(&snapshot.session.src_ip) {
-                        matching_names.extend(src_matches.iter().cloned());
-                    }
+                    ips.push(snapshot.session.src_ip);
                 }
-
                 if !snapshot.is_local_dst {
-                    if let Some(dst_matches) = ip_blacklist_results.get(&snapshot.session.dst_ip) {
-                        matching_names.extend(dst_matches.iter().cloned());
-                    }
+                    ips.push(snapshot.session.dst_ip);
                 }
-
-                // Remove duplicates if both src and dst matched the same blacklist
-                matching_names.sort();
-                matching_names.dedup();
-
-                // Build final criticality combining existing non-blacklist tags
-                let non_bl_tags: Vec<String> = snapshot
-                    .criticality
-                    .split(',')
-                    .filter(|s| !s.is_empty() && !s.starts_with("blacklist:"))
-                    .map(|s| s.to_string())
-                    .collect();
-
-                let mut final_tags = non_bl_tags;
-                if !matching_names.is_empty() {
-                    let new_tags: Vec<String> = matching_names
-                        .iter()
-                        .map(|n| format!("blacklist:{}", n))
-                        .collect();
-                    final_tags.extend(new_tags);
-                }
-
-                final_tags.sort();
-                final_tags.dedup();
-                let new_criticality = final_tags.join(",");
-
-                // Return session info regardless of whether criticality changed
-                Some((
-                    session_key.clone(),
-                    new_criticality,
-                    !matching_names.is_empty(),
-                ))
+                ips
             })
-        })
-        .collect();
+            .collect();
 
-    // Process parallel results and build the final updates and blacklisted sessions list
-    let mut updates: Vec<SessionUpdate> = Vec::new();
-    for (session_key, new_criticality, is_blacklisted) in session_results {
-        // Update our working blacklisted sessions list
-        if is_blacklisted {
-            if !new_blacklisted_sessions.contains(&session_key) {
-                new_blacklisted_sessions.push(session_key.clone());
+        info!(
+            "IP deduplication: checking {} unique IPs instead of {} session IPs",
+            unique_ips.len(),
+            sessions_to_evaluate.len() * 2 // Approximate, some sessions might have local IPs
+        );
+
+        // OPTIMIZATION 2: Parallel Processing with Rayon
+        // Batch check all unique IPs against all blacklists once using parallel processing
+        let ip_blacklist_results: HashMap<IpAddr, Vec<String>> = unique_ips
+            .par_iter() // Parallel iterator
+            .map(|ip| {
+                let ip_str = ip.to_string();
+                let matching_lists: Vec<String> = blacklist_names
+                    .iter()
+                    .filter(|list_name| {
+                        list_data
+                            .is_ip_in_blacklist(&ip_str, list_name)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                (*ip, matching_lists)
+            })
+            .collect();
+
+        info!(
+            "Completed parallel IP blacklist matching for {} unique IPs",
+            ip_blacklist_results.len()
+        );
+
+        // Now process all sessions in parallel using cached IP results
+        let session_results: Vec<(Session, String, bool)> = sessions_to_evaluate
+            .par_iter() // Parallel processing of sessions
+            .filter_map(|session_key| {
+                // Skip if we don't have a snapshot (session might have been removed)
+                session_snapshots.get(session_key).and_then(|snapshot| {
+                    // Use cached blacklist results instead of expensive CIDR checks
+                    let mut matching_names = Vec::<String>::new();
+
+                    if !snapshot.is_local_src {
+                        if let Some(src_matches) =
+                            ip_blacklist_results.get(&snapshot.session.src_ip)
+                        {
+                            matching_names.extend(src_matches.iter().cloned());
+                        }
+                    }
+
+                    if !snapshot.is_local_dst {
+                        if let Some(dst_matches) =
+                            ip_blacklist_results.get(&snapshot.session.dst_ip)
+                        {
+                            matching_names.extend(dst_matches.iter().cloned());
+                        }
+                    }
+
+                    // Remove duplicates if both src and dst matched the same blacklist
+                    matching_names.sort();
+                    matching_names.dedup();
+
+                    // Build final criticality combining existing non-blacklist tags
+                    let non_bl_tags: Vec<String> = snapshot
+                        .criticality
+                        .split(',')
+                        .filter(|s| !s.is_empty() && !s.starts_with("blacklist:"))
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    let mut final_tags = non_bl_tags;
+                    if !matching_names.is_empty() {
+                        let new_tags: Vec<String> = matching_names
+                            .iter()
+                            .map(|n| format!("blacklist:{}", n))
+                            .collect();
+                        final_tags.extend(new_tags);
+                    }
+
+                    final_tags.sort();
+                    final_tags.dedup();
+                    let new_criticality = final_tags.join(",");
+
+                    // Return session info regardless of whether criticality changed
+                    Some((
+                        session_key.clone(),
+                        new_criticality,
+                        !matching_names.is_empty(),
+                    ))
+                })
+            })
+            .collect();
+
+        // Process parallel results and build the final updates and blacklisted sessions list
+        let mut updates: Vec<SessionUpdate> = Vec::new();
+        for (session_key, new_criticality, is_blacklisted) in session_results {
+            // Update our working blacklisted sessions list
+            if is_blacklisted {
+                if !new_blacklisted_sessions.contains(&session_key) {
+                    new_blacklisted_sessions.push(session_key.clone());
+                }
+            } else {
+                new_blacklisted_sessions.retain(|s| s != &session_key);
             }
+
+            // Only add to actual updates if criticality changed
+            if let Some(snapshot) = session_snapshots.get(&session_key) {
+                if snapshot.criticality != new_criticality {
+                    updates.push(SessionUpdate {
+                        key: session_key,
+                        new_criticality,
+                    });
+                }
+            }
+        }
+
+        // Update phase - apply all changes with minimal lock time
+        // ----------------------------------------------------------------------------------
+
+        trace!(
+            "Applying {} blacklist updates with minimal lock time",
+            updates.len()
+        );
+
+        // Store the update count before consuming the vector
+        let update_count = updates.len();
+
+        // Apply updates to sessions - very brief locks per session
+        let now = Utc::now();
+        for update in updates {
+            // Very brief write lock just for the update
+            if let Some(mut entry) = sessions.get_mut(&update.key) {
+                let info_mut = entry.value_mut();
+
+                // Update criticality if different
+                if info_mut.criticality != update.new_criticality {
+                    info_mut.criticality = update.new_criticality;
+                    info_mut.last_modified = now;
+                }
+            }
+        }
+
+        // OPTIMIZATION 3: Minimize write lock time by preparing data before acquiring the lock
+        new_blacklisted_sessions.sort();
+        new_blacklisted_sessions.dedup();
+
+        // Check if the blacklisted sessions list has actually changed
+        let has_changed = {
+            let current = blacklisted_sessions.read().await;
+            let mut current_sorted = current.clone();
+            current_sorted.sort();
+            current_sorted != new_blacklisted_sessions
+        };
+
+        // Only acquire write lock if the list changed
+        if has_changed {
+            let old_len = blacklisted_sessions.read().await.len();
+            trace!(
+                "Updating blacklisted sessions list: {} items -> {} items",
+                old_len,
+                new_blacklisted_sessions.len()
+            );
+            *blacklisted_sessions.write().await = new_blacklisted_sessions;
         } else {
-            new_blacklisted_sessions.retain(|s| s != &session_key);
+            trace!(
+                "Blacklisted sessions list unchanged ({} items)",
+                new_blacklisted_sessions.len()
+            );
         }
 
-        // Only add to actual updates if criticality changed
-        if let Some(snapshot) = session_snapshots.get(&session_key) {
-            if snapshot.criticality != new_criticality {
-                updates.push(SessionUpdate {
-                    key: session_key,
-                    new_criticality,
-                });
-            }
+        // Update last run timestamp.
+        {
+            let mut guard = LAST_BLACKLIST_RUN.write().await;
+            *guard = Utc::now();
         }
-    }
 
-    // Update phase - apply all changes with minimal lock time
-    // ----------------------------------------------------------------------------------
-
-    trace!(
-        "Applying {} blacklist updates with minimal lock time",
-        updates.len()
-    );
-
-    // Store the update count before consuming the vector
-    let update_count = updates.len();
-
-    // Apply updates to sessions - very brief locks per session
-    let now = Utc::now();
-    for update in updates {
-        // Very brief write lock just for the update
-        if let Some(mut entry) = sessions.get_mut(&update.key) {
-            let info_mut = entry.value_mut();
-
-            // Update criticality if different
-            if info_mut.criticality != update.new_criticality {
-                info_mut.criticality = update.new_criticality;
-                info_mut.last_modified = now;
-            }
-        }
-    }
-
-    // OPTIMIZATION 3: Minimize write lock time by preparing data before acquiring the lock
-    new_blacklisted_sessions.sort();
-    new_blacklisted_sessions.dedup();
-
-    // Check if the blacklisted sessions list has actually changed
-    let has_changed = {
-        let current = blacklisted_sessions.read().await;
-        let mut current_sorted = current.clone();
-        current_sorted.sort();
-        current_sorted != new_blacklisted_sessions
-    };
-
-    // Only acquire write lock if the list changed
-    if has_changed {
-        let old_len = blacklisted_sessions.read().await.len();
-        trace!(
-            "Updating blacklisted sessions list: {} items -> {} items",
-            old_len,
-            new_blacklisted_sessions.len()
+        info!(
+            "Optimized blacklist recomputation completed ({} sessions evaluated, {} updates applied, revision {})",
+            sessions_to_evaluate.len(),
+            update_count,
+            revision_at_start
         );
-        *blacklisted_sessions.write().await = new_blacklisted_sessions;
-    } else {
-        trace!(
-            "Blacklisted sessions list unchanged ({} items)",
-            new_blacklisted_sessions.len()
-        );
-    }
 
-    // Update last run timestamp.
-    {
-        let mut guard = LAST_BLACKLIST_RUN.write().await;
-        *guard = Utc::now();
-    }
+        // Mark this revision as processed
+        LAST_PROCESSED_BLACKLIST_REVISION.store(revision_at_start, Ordering::Release);
 
-    info!(
-        "Optimized blacklist recomputation completed ({} sessions evaluated, {} updates applied)",
-        sessions_to_evaluate.len(),
-        update_count
-    );
+        // If no new revision appeared while we were working, we are done.
+        if BLACKLIST_REVISION.load(Ordering::Acquire) == revision_at_start {
+            break;
+        }
+
+        debug!("Blacklist model changed during recompute – running one more pass");
+    }
 }
 
 // ----- Public wrapper helpers (LISTS remains private) -----
@@ -736,7 +766,7 @@ pub async fn recompute_blacklist_for_sessions(
 pub async fn reset_to_default() {
     LISTS.reset_to_default().await;
     clear_ip_cache();
-    NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+    BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Returns `true` when a custom blacklist set is active.
@@ -762,7 +792,7 @@ pub async fn get_blacklists() -> String {
 pub async fn overwrite_with_test_data(data: Blacklists) {
     LISTS.overwrite_with_test_data(data).await;
     clear_ip_cache();
-    NEED_FULL_RECOMPUTE_BLACKLIST.store(true, Ordering::SeqCst);
+    BLACKLIST_REVISION.fetch_add(1, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -772,7 +802,8 @@ mod tests {
 
     async fn initialize_test_blacklists() {
         IP_CACHE.clear();
-        NEED_FULL_RECOMPUTE_BLACKLIST.store(false, Ordering::SeqCst);
+        BLACKLIST_REVISION.store(0, Ordering::SeqCst);
+        LAST_PROCESSED_BLACKLIST_REVISION.store(0, Ordering::SeqCst);
 
         let test_blacklist_json = BlacklistsJSON {
             date: "2025-03-29".to_string(),
@@ -1072,7 +1103,8 @@ mod tests {
     async fn test_local_range_filtering() {
         // Ensure a clean state for IP_CACHE and the recompute flag
         IP_CACHE.clear();
-        NEED_FULL_RECOMPUTE_BLACKLIST.store(false, Ordering::SeqCst);
+        BLACKLIST_REVISION.store(0, Ordering::SeqCst);
+        LAST_PROCESSED_BLACKLIST_REVISION.store(0, Ordering::SeqCst);
 
         let test_blacklist_json_with_locals = BlacklistsJSON {
             date: "2025-04-01".to_string(),

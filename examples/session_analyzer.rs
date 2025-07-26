@@ -3,87 +3,51 @@
 //!
 //! The sample simply feeds a small set of synthetic sessions to the
 //! analyzer and prints the resulting statistics.
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
+
+#![cfg(all(
+    feature = "packetcapture",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+
 use chrono::Utc;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use flodbadd::analyzer::{AnalysisResult, SessionAnalyzer};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use flodbadd::sessions::{Protocol, SessionInfo};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use std::net::IpAddr;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use std::str::FromStr;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use std::sync::Arc;
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use tokio::time::{sleep, Duration};
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(all(
-        any(target_os = "macos", target_os = "linux", target_os = "windows"),
-        feature = "packetcapture"
-    ))]
-    {
-        tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::init();
 
-        // Create & start the analyzer.
-        let analyzer = Arc::new(SessionAnalyzer::new());
-        analyzer.start().await;
+    // Create & start the analyzer.
+    let analyzer = Arc::new(SessionAnalyzer::new());
+    analyzer.start().await;
 
-        // Generate a handful of synthetic sessions and analyse them.
-        let mut sessions = generate_sample_sessions();
-        let AnalysisResult {
-            sessions_analyzed,
-            anomalous_count,
-            blacklisted_count,
-            new_anomalous_found,
-            new_blacklisted_found,
-            ..
-        } = analyzer.analyze_sessions(&mut sessions).await;
+    // Generate a handful of synthetic sessions and analyse them.
+    let mut sessions = generate_sample_sessions();
+    let AnalysisResult {
+        sessions_analyzed,
+        anomalous_count,
+        blacklisted_count,
+        new_anomalous_found,
+        new_blacklisted_found,
+        ..
+    } = analyzer.analyze_sessions(&mut sessions).await;
 
-        info!(
-            "Analyzed {sessions_analyzed} sessions → anomalous: {anomalous_count} (new: {new_anomalous_found}), blacklisted: {blacklisted_count} (new: {new_blacklisted_found})"
-        );
+    info!(
+        "Analyzed {sessions_analyzed} sessions → anomalous: {anomalous_count} (new: {new_anomalous_found}), blacklisted: {blacklisted_count} (new: {new_blacklisted_found})"
+    );
 
-        // Give the background model a moment (purely illustrative).
-        sleep(Duration::from_secs(1)).await;
+    // Give the background model a moment (purely illustrative).
+    sleep(Duration::from_secs(1)).await;
 
-        analyzer.stop().await;
-    }
+    analyzer.stop().await;
     Ok(())
 }
 
-#[cfg(all(
-    any(target_os = "macos", target_os = "linux", target_os = "windows"),
-    feature = "packetcapture"
-))]
 fn generate_sample_sessions() -> Vec<SessionInfo> {
     let now = Utc::now();
 

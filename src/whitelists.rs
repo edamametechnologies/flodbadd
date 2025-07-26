@@ -11,10 +11,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, trace, warn};
 use undeadlock::*;
+
+// -------------------------------------------------------------------------------------------------
+// Model-change tracking for whitelists
+// -------------------------------------------------------------------------------------------------
+
+// Incremented on every structural change to the whitelist model (custom list
+// loaded, default reset, augmentation, etc.).  Having a monotonic counter lets
+// concurrent workers detect mid-flight changes without relying on lossy
+// boolean flags.
+static WHITELIST_REVISION: AtomicU64 = AtomicU64::new(0);
 
 // Constants
 const WHITELISTS_FILE_NAME: &str = "whitelists-db.json";
@@ -749,6 +759,7 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     ENDPOINT_CACHE.clear();
     // Signal downstream that a full whitelist recomputation is needed
     NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+    WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
 
     match status {
         UpdateStatus::Updated => info!("Whitelists were successfully updated."),
@@ -772,6 +783,7 @@ pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::E
         LISTS.reset_to_default().await;
         ENDPOINT_CACHE.clear(); // Clear cache after reset
         NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+        WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
         return Ok(());
     }
 
@@ -784,6 +796,7 @@ pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::E
             LISTS.set_custom_data(whitelist).await;
             ENDPOINT_CACHE.clear(); // Clear cache after successful set
             NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+            WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
             return Ok(());
         }
         Err(e) => {
@@ -794,6 +807,7 @@ pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::E
             LISTS.reset_to_default().await;
             ENDPOINT_CACHE.clear(); // Clear cache after reset due to error
             NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+            WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
             return Err(anyhow!("Error parsing custom whitelist JSON: {}", e));
         }
     }
@@ -1029,6 +1043,7 @@ pub async fn reset_to_default() {
     LISTS.reset_to_default().await;
     ENDPOINT_CACHE.clear();
     NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+    WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
 }
 
 /// `true` when custom whitelist data is loaded.
@@ -1047,6 +1062,7 @@ pub async fn overwrite_with_test_data(data: Whitelists) {
     LISTS.overwrite_with_test_data(data).await;
     ENDPOINT_CACHE.clear();
     NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+    WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
 }
 
 pub async fn get_whitelists() -> String {
