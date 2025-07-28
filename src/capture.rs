@@ -38,15 +38,9 @@ use std::time::Instant;
     feature = "asyncpacketcapture"
 ))]
 use tokio::select;
-use tokio::sync::Notify;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*; // Add this import // Add Duration import
-
-// Public notify that fires whenever the security models (black-, white-list, rules)
-// have been fully processed after at least one update cycle.  Tests and higher-level
-// API layers can await it instead of using arbitrary sleeps.
-pub static MODEL_SYNCED: Notify = Notify::const_new();
 
 /*
  * DNS Resolution Logic:
@@ -1902,9 +1896,8 @@ impl FlodbaddCapture {
 
             // If another thread queued work while we were busy we loop once more
             if !update_pending.swap(false, Ordering::AcqRel) {
-                // No pending work – release the guard and wake waiters
+                // No pending work – release the guard
                 update_in_progress.store(false, Ordering::Release);
-                MODEL_SYNCED.notify_waiters();
                 break;
             }
             // Otherwise stay in the loop and process again immediately
