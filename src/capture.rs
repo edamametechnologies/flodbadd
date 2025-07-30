@@ -406,29 +406,55 @@ impl FlodbaddCapture {
 
     // This won't clear the sessions map, so it's not a full restart
     pub async fn restart(&self, interfaces: &FlodbaddInterfaces) -> Result<()> {
-        // Only restart if capturing and if the interface string has changed
-        if !self.is_capturing().await || self.interfaces.read().await.eq(interfaces) {
-            warn!(
-                "Not restarting capture as it's not capturing or interface has not changed {} = {}",
-                self.is_capturing().await,
-                self.interfaces.read().await.eq(interfaces)
-            );
-            return Ok(());
-        };
+        // Proceed only if we are currently capturing or interfaces have changed,
+        // otherwise there is nothing to do.
+        let is_capturing = self.is_capturing().await;
 
-        info!("Restarting capture with interfaces: {:?}", interfaces);
-        // Only restart the capture task
-        self.stop_capture_tasks().await;
+        if !is_capturing {
+            warn!("Restart skipped – not capturing");
+            return Ok(());
+        }
+
+        // Ignore if the interfaces names are the same (capture is not influenced by the interfaces IP changes)
+        let existing_interfaces = self.interfaces.read().await.clone();
+        let mut interfaces_changed = false;
+        for (i, iface) in existing_interfaces.interfaces.iter().enumerate() {
+            if iface.name != interfaces.interfaces[i].name {
+                interfaces_changed = true;
+                break;
+            }
+        }
+
+        if !interfaces_changed {
+            warn!("Attempting to restart capture but interface names are the same, skipping...");
+            return Ok(());
+        }
+
+        info!(
+            "Restarting capture (capturing={}, interfaces_changed={:?}) on {:?}",
+            is_capturing, interfaces_changed, interfaces
+        );
+
+        // Stop existing capture tasks if any are running.
+        if is_capturing {
+            self.stop_capture_tasks().await;
+        }
+
+        // Update the interfaces before starting new tasks so that the fresh
+        // settings are used by `start_capture_tasks`.
+        *self.interfaces.write().await = interfaces.clone();
+
+        // Start the capture tasks with the new interface set.
         self.start_capture_tasks().await;
 
-        // Check if the capture tasks are running
+        // Verify the capture task status.
         if self.is_capturing().await {
             info!("Capture task(s) restarted successfully.");
-            return Ok(());
+            Ok(())
         } else {
-            let error_message = format!("Capture task(s) failed to restart.");
+            let error_message = "Capture task(s) failed to restart.".to_string();
             error!("{}", error_message);
-            return Err(anyhow!("{}", error_message));
+            Err(anyhow!(error_message))
         }
     }
 
