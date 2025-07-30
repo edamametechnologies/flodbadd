@@ -572,6 +572,28 @@ pub fn get_valid_network_interfaces() -> FlodbaddInterfaces {
     }
 }
 
+// Filter out temporary IPv6 addresses that regularly change
+pub fn filter_temporary_ipv6_addresses(interfaces: FlodbaddInterfaces) -> FlodbaddInterfaces {
+    let mut filtered_interfaces = interfaces.clone();
+    for interface in filtered_interfaces.interfaces.iter_mut() {
+        // Skip temporary IPv6 addresses that regularly change
+        if !interface.ipv6.is_empty() {
+            let mut filtered_ipv6 = interface.ipv6.clone();
+            for ipv6 in interface.ipv6.iter_mut() {
+                if let FlodbaddInterfaceAddrTypeV6::Temporary(ipv6) = ipv6 {
+                    let _ = ipv6;
+                    continue;
+                } else {
+                    // Keep other IPv6 addresses
+                    filtered_ipv6.push(ipv6.clone());
+                }
+            }
+            interface.ipv6 = filtered_ipv6;
+        }
+    }
+    interfaces
+}
+
 /// Return the **signatures** of each interface as a `Vec<String>`.
 pub fn get_signature_of_valid_interfaces(interfaces: FlodbaddInterfaces) -> Vec<String> {
     // The previous code incorrectly tried to return FlodbaddInterfaces.
