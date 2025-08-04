@@ -49,9 +49,8 @@ impl DnsPacketProcessor {
                             return;
                         }
                         // Store the transaction ID and domain name
-                        let queries = self.pending_dns_queries.write().await;
                         debug!("DNS Query to {} ({})", domain_name, tx_id);
-                        queries.insert(
+                        self.pending_dns_queries.insert(
                             tx_id,
                             PendingQuery {
                                 domain_name,
@@ -62,10 +61,7 @@ impl DnsPacketProcessor {
                 } else {
                     // DNS Response
                     // Retrieve the domain name using the transaction ID
-                    let pending_query = {
-                        let queries = self.pending_dns_queries.write().await;
-                        queries.remove(&tx_id)
-                    };
+                    let pending_query = { self.pending_dns_queries.remove(&tx_id) };
                     if let Some((_, pending_query)) = pending_query {
                         debug!(
                             "DNS Response from {} ({})",
@@ -111,8 +107,7 @@ impl DnsPacketProcessor {
                 }
                 let now = Instant::now();
                 // Clean up expired DNS queries
-                let queries = pending_dns_queries.write().await;
-                queries.retain(|_, pending_query| {
+                pending_dns_queries.retain(|_, pending_query| {
                     now.duration_since(pending_query.timestamp) < Duration::from_secs(30)
                 });
             }
