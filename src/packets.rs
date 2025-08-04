@@ -269,6 +269,16 @@ pub async fn process_parsed_packet(
         return;
     }
 
+    // Fast path: update existing session with minimal lock time
+    if let Some(mut entry) = sessions.get_mut(&key) {
+        PACKET_STATS
+            .updated_sessions
+            .fetch_add(1, Ordering::Relaxed);
+        update_session_stats(&mut entry.stats, &parsed_packet, now, is_originator);
+        entry.last_modified = now;
+        return;
+    }
+
     // Use entry().or_insert_with() to atomically check and insert if not exists
     let entry = sessions.entry(key.clone());
     match entry {
