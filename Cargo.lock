@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "flodbadd"
-version = "0.9.57"
+version = "0.9.59"
 dependencies = [
  "anyhow",
  "arp-toolkit",

@@ -1,6 +1,6 @@
 // Built in default profile db
 pub static DEVICE_PROFILES: &str = r#"{
-  "date": "April 11th 2025",
+  "date": "August 09th 2025",
   "profiles": [
     {
       "conditions": [
@@ -11,7 +11,8 @@ pub static DEVICE_PROFILES: &str = r#"{
                 "Leaf": {
                   "mdns_services": [
                     "ipp",
-                    "printer"
+                    "printer",
+                    "airprint"
                   ]
                 }
               },
@@ -59,6 +60,13 @@ pub static DEVICE_PROFILES: &str = r#"{
                 "Leaf": {
                   "banners": [
                     "raspbian"
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "hostnames": [
+                    "raspberrypi"
                   ]
                 }
               }
@@ -111,6 +119,57 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "harman"
                   ]
                 }
+              },
+              {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "spotify-connect"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "vendors": [
+                          "amazon"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "AND"
+                }
+              },
+              {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "raop",
+                          "airplay"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "mediaremotetv"
+                        ],
+                        "negate": true
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "vendors": [
+                          "apple"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "AND"
+                }
               }
             ],
             "type": "OR"
@@ -126,9 +185,88 @@ pub static DEVICE_PROFILES: &str = r#"{
             "sub_conditions": [
               {
                 "Leaf": {
+                  "banners": [
+                    "router"
+                  ]
+                }
+              },
+              {
+                "Leaf": {
                   "open_ports": [
                     53
                   ]
+                }
+              },
+              {
+                "Leaf": {
+                  "open_ports": [
+                    21,
+                    22,
+                    23
+                  ]
+                }
+              },
+              {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          25,
+                          587
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          25,
+                          465
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          110,
+                          995
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          143,
+                          993
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          119,
+                          563
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          25,
+                          110
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          25,
+                          143
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "OR"
                 }
               }
             ],
@@ -145,8 +283,26 @@ pub static DEVICE_PROFILES: &str = r#"{
             "sub_conditions": [
               {
                 "Leaf": {
-                  "open_ports": [
-                    62078
+                  "mdns_services": [
+                    "googlecast",
+                    "androidtvremote",
+                    "raop",
+                    "hap"
+                  ],
+                  "negate": true
+                }
+              },
+              {
+                "Leaf": {
+                  "negate": true,
+                  "vendors": [
+                    "samsung",
+                    "vizio",
+                    "tcl",
+                    "hisense",
+                    "toshiba",
+                    "philips",
+                    "tpvision"
                   ]
                 }
               },
@@ -156,24 +312,30 @@ pub static DEVICE_PROFILES: &str = r#"{
                     {
                       "Leaf": {
                         "open_ports": [
-                          49152
+                          62078
                         ]
                       }
                     },
                     {
                       "Leaf": {
-                        "vendors": [
-                          "apple",
-                          ""
+                        "mdns_services": [
+                          "apple-mobdev2"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          49152
                         ]
                       }
                     }
                   ],
-                  "type": "AND"
+                  "type": "OR"
                 }
               }
             ],
-            "type": "OR"
+            "type": "AND"
           }
         }
       ],
@@ -190,9 +352,35 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "apple"
                   ]
                 }
+              },
+              {
+                "Leaf": {
+                  "negate": true,
+                  "open_ports": [
+                    62078
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "mdns_services": [
+                    "apple-mobdev2"
+                  ],
+                  "negate": true
+                }
+              },
+              {
+                "Leaf": {
+                  "mdns_services": [
+                    "airplay",
+                    "googlecast",
+                    "androidtvremote"
+                  ],
+                  "negate": true
+                }
               }
             ],
-            "type": "OR"
+            "type": "AND"
           }
         }
       ],
@@ -226,14 +414,29 @@ pub static DEVICE_PROFILES: &str = r#"{
           "Node": {
             "sub_conditions": [
               {
-                "Leaf": {
-                  "vendors": [
-                    "dell",
-                    "lenovo",
-                    "acer",
-                    "msi",
-                    "asus"
-                  ]
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "vendors": [
+                          "dell",
+                          "lenovo",
+                          "acer",
+                          "msi",
+                          "asus",
+                          "intel corporate"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "banners": [
+                          "ubuntu"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "OR"
                 }
               },
               {
@@ -263,7 +466,9 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "asustor",
                     "drobo",
                     "wd",
-                    "seagate"
+                    "seagate",
+                    "qnap",
+                    "terramaster"
                   ]
                 }
               }
@@ -282,7 +487,7 @@ pub static DEVICE_PROFILES: &str = r#"{
               {
                 "Leaf": {
                   "vendors": [
-                    "sony",
+                    "microsoft",
                     "microsoft",
                     "nintendo"
                   ]
@@ -324,13 +529,28 @@ pub static DEVICE_PROFILES: &str = r#"{
                 }
               },
               {
-                "Leaf": {
-                  "mdns_services": [
-                    "mqtt",
-                    "hap",
-                    "_hue",
-                    "miio"
-                  ]
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "mqtt",
+                          "hap",
+                          "hue",
+                          "miio"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "airplay"
+                        ],
+                        "negate": true
+                      }
+                    }
+                  ],
+                  "type": "AND"
                 }
               },
               {
@@ -341,7 +561,16 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "tuya",
                     "dyson",
                     "physical graph",
-                    "philips lighting"
+                    "philips lighting",
+                    "shelly",
+                    "tasmota"
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "banners": [
+                    "shelly"
                   ]
                 }
               }
@@ -359,54 +588,72 @@ pub static DEVICE_PROFILES: &str = r#"{
             "sub_conditions": [
               {
                 "Leaf": {
-                  "open_ports": [
-                    8001,
-                    8002,
-                    8080
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "open_ports": [
-                    3000,
-                    3001,
-                    18181
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "open_ports": [
-                    8008,
-                    8009,
-                    8443,
-                    9000
-                  ]
-                }
-              },
-              {
-                "Leaf": {
+                  "negate": true,
                   "vendors": [
-                    "tcl",
-                    "hisense",
-                    "vizio",
-                    "sharp",
-                    "toshiba"
+                    "freebox"
                   ]
                 }
               },
               {
-                "Leaf": {
-                  "mdns_services": [
-                    "androidtvremote",
-                    "googlecast",
-                    "airplay"
-                  ]
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          8001,
+                          8002,
+                          8080
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          3000,
+                          3001,
+                          18181
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          8008,
+                          8009,
+                          8443,
+                          9000
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "vendors": [
+                          "tcl",
+                          "hisense",
+                          "vizio",
+                          "sharp",
+                          "toshiba",
+                          "lg",
+                          "sony",
+                          "apple"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "androidtvremote",
+                          "googlecast",
+                          "airplay"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "OR"
                 }
               }
             ],
-            "type": "OR"
+            "type": "AND"
           }
         }
       ],
@@ -433,7 +680,12 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "vivotek",
                     "flir",
                     "nest",
-                    "arlo"
+                    "arlo",
+                    "reolink",
+                    "amcrest",
+                    "wyze",
+                    "d-link",
+                    "foscam"
                   ]
                 }
               }
@@ -482,5 +734,5 @@ pub static DEVICE_PROFILES: &str = r#"{
       "device_type": "NetworkDevice"
     }
   ],
-  "signature": "668dface3a45fc82f044dfb25618000ffbcfb773b9d3891e4345c459b1916184"
+  "signature": "83e703da51e0ecbc354914d4b99b19a69f75006068af1eacd7ff999db788bc26"
 }"#;
