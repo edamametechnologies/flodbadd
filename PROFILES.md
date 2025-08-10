@@ -6,7 +6,7 @@ This document describes the device profiling mechanism used by `flodbadd` for id
 
 - **Goal**: Map observed network signals to a high‑level `device_type` (e.g., `Printer`, `SmartTV`).
 - **Data**: A JSON document with a set of rules. Each rule declares a `device_type` and one or more boolean conditions.
-- **Engine**: Evaluates conditions case‑insensitively and returns the first matching `device_type`. If no rule matches, the result is `"Unknown"`.
+- **Engine**: Evaluates conditions case‑insensitively and returns the first matching `device_type` in the JSON order. If no rule matches, the result is `"Unknown"`.
 - **Updates**: Rules can be remotely updated via a cloud model file named `lanscan-profiles-db.json`.
 
 ### JSON Schema
@@ -60,7 +60,16 @@ Notes:
 - `Leaf(Attributes)` computes the conjunction of the attribute checks, then applies `negate` if present.
 - `Node` combines `sub_conditions` either with `AND` (all must match) or `OR` (any may match).
 - Within a `DeviceTypeRule`, the rule’s `conditions` are evaluated with an implicit OR: if any top‑level condition matches, the `device_type` is selected.
-- The engine iterates rules in unspecified map order and returns on the first match. Design your rules so a device type has a single rule with all relevant OR/AND structure inside. Duplicating `device_type` entries may overwrite earlier entries (map key is `device_type`).
+- The engine iterates rules strictly in the JSON order and returns on the first match (first‑match‑wins). Place more specific rules before generic ones.
+- Avoid overlapping rules that would match the same device across multiple `device_type`s. If overlaps are unavoidable, the earlier rule wins due to ordering.
+- Keep one `DeviceTypeRule` per `device_type` whenever possible. Duplicate entries for the same `device_type` are processed independently but are discouraged; prefer expressing alternatives inside a single rule using `Node` with `AND`/`OR`.
+
+### Validation and Overlap Checks
+
+- The companion validation scripts (in the `threatmodels` repository) assume no reliance on ordering for correctness and will flag test devices that match multiple `device_type`s as overlapping. Fix overlaps by:
+  - Consolidating rules for the same `device_type` using `OR`/`AND` trees, or
+  - Refining constraints so only one `device_type` matches for a given device, and
+  - Re‑ordering rules so that more specific matches precede broader ones when appropriate.
 
 ### Matching Details (from `profiles.rs`)
 
@@ -106,6 +115,8 @@ PC but not a DNS server (negate example):
 ### Authoring Guidelines
 
 - Keep one `DeviceTypeRule` per `device_type`. Use nested `Node` constructs to express complex logic.
+- Order matters: the engine is first‑match‑wins in JSON order. Put the most specific rules earlier, and avoid overlaps between different `device_type`s.
+- Validate with the test set; overlaps will be reported by the validator and should be resolved before publishing.
 - Prefer lower‑case strings; matching is case‑insensitive, but lower‑case improves readability.
 - Use `mdns_services` with substrings that appear in typical service names (e.g., `"ipp"` matches `_ipp._tcp.local.`).
 - Be conservative with `banners` as they vary across services and firmware.

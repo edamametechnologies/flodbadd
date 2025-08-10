@@ -103,7 +103,7 @@ pub static DEVICE_PROFILES: &str = r#"{
               {
                 "Leaf": {
                   "mdns_services": [
-                    "_sonos",
+                    "sonos",
                     "bose",
                     "jbl",
                     "harman"
@@ -302,7 +302,9 @@ pub static DEVICE_PROFILES: &str = r#"{
                     "hisense",
                     "toshiba",
                     "philips",
-                    "tpvision"
+                    "tpvision",
+                    "roku",
+                    "lg"
                   ]
                 }
               },
@@ -372,7 +374,6 @@ pub static DEVICE_PROFILES: &str = r#"{
               {
                 "Leaf": {
                   "mdns_services": [
-                    "airplay",
                     "googlecast",
                     "androidtvremote"
                   ],
@@ -587,14 +588,6 @@ pub static DEVICE_PROFILES: &str = r#"{
           "Node": {
             "sub_conditions": [
               {
-                "Leaf": {
-                  "negate": true,
-                  "vendors": [
-                    "freebox"
-                  ]
-                }
-              },
-              {
                 "Node": {
                   "sub_conditions": [
                     {
@@ -634,8 +627,7 @@ pub static DEVICE_PROFILES: &str = r#"{
                           "sharp",
                           "toshiba",
                           "lg",
-                          "sony",
-                          "apple"
+                          "roku"
                         ]
                       }
                     },
@@ -643,8 +635,7 @@ pub static DEVICE_PROFILES: &str = r#"{
                       "Leaf": {
                         "mdns_services": [
                           "androidtvremote",
-                          "googlecast",
-                          "airplay"
+                          "googlecast"
                         ]
                       }
                     }
