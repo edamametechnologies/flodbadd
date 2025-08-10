@@ -1,6 +1,6 @@
 // Built in default profile db
 pub static DEVICE_PROFILES: &str = r#"{
-  "date": "August 09th 2025",
+  "date": "August 10th 2025",
   "profiles": [
     {
       "conditions": [
@@ -184,6 +184,298 @@ pub static DEVICE_PROFILES: &str = r#"{
           "Node": {
             "sub_conditions": [
               {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "apple-mobdev2"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "companion-link"
+                        ],
+                        "negate": true
+                      }
+                    }
+                  ],
+                  "type": "AND"
+                }
+              },
+              {
+                "Leaf": {
+                  "open_ports": [
+                    62078
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "iPhone"
+    },
+    {
+      "conditions": [
+        {
+          "Leaf": {
+            "mdns_services": [
+              "companion-link"
+            ]
+          }
+        }
+      ],
+      "device_type": "Apple PC"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Leaf": {
+                  "vendors": [
+                    "oneplus",
+                    "motorola",
+                    "nokia",
+                    "htc"
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "Smartphone"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Leaf": {
+                  "vendors": [
+                    "synology",
+                    "asustor",
+                    "drobo",
+                    "wd",
+                    "seagate",
+                    "qnap",
+                    "terramaster"
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "NAS"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Leaf": {
+                  "vendors": [
+                    "microsoft",
+                    "microsoft",
+                    "nintendo"
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "hostnames": [
+                    "ps4",
+                    "ps5",
+                    "xbox"
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "GameConsole"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Leaf": {
+                  "open_ports": [
+                    1883
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "open_ports": [
+                    8883
+                  ]
+                }
+              },
+              {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "mqtt",
+                          "hue",
+                          "miio"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "AND"
+                }
+              },
+              {
+                "Leaf": {
+                  "vendors": [
+                    "wemo",
+                    "lifx",
+                    "tuya",
+                    "dyson",
+                    "physical graph",
+                    "philips lighting",
+                    "shelly",
+                    "tasmota",
+                    "ecobee",
+                    "lutron"
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "IoT"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Node": {
+                  "sub_conditions": [
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          8001,
+                          8002,
+                          8080
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          3000,
+                          3001
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          8008,
+                          8009,
+                          8443,
+                          9000
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "vendors": [
+                          "tcl",
+                          "hisense",
+                          "vizio",
+                          "sharp",
+                          "toshiba",
+                          "lg",
+                          "roku"
+                        ]
+                      }
+                    },
+                    {
+                      "Leaf": {
+                        "mdns_services": [
+                          "androidtvremote",
+                          "googlecast"
+                        ]
+                      }
+                    }
+                  ],
+                  "type": "OR"
+                }
+              }
+            ],
+            "type": "AND"
+          }
+        }
+      ],
+      "device_type": "SmartTV"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
+                "Leaf": {
+                  "mdns_services": [
+                    "axis-video"
+                  ]
+                }
+              },
+              {
+                "Leaf": {
+                  "vendors": [
+                    "hikvision",
+                    "dahua",
+                    "axis",
+                    "vivotek",
+                    "flir",
+                    "nest",
+                    "arlo",
+                    "reolink",
+                    "amcrest",
+                    "wyze",
+                    "d-link",
+                    "foscam"
+                  ]
+                }
+              }
+            ],
+            "type": "OR"
+          }
+        }
+      ],
+      "device_type": "Camera"
+    },
+    {
+      "conditions": [
+        {
+          "Node": {
+            "sub_conditions": [
+              {
                 "Leaf": {
                   "banners": [
                     "router"
@@ -282,139 +574,6 @@ pub static DEVICE_PROFILES: &str = r#"{
           "Node": {
             "sub_conditions": [
               {
-                "Leaf": {
-                  "mdns_services": [
-                    "googlecast",
-                    "androidtvremote",
-                    "raop",
-                    "hap"
-                  ],
-                  "negate": true
-                }
-              },
-              {
-                "Leaf": {
-                  "negate": true,
-                  "vendors": [
-                    "samsung",
-                    "vizio",
-                    "tcl",
-                    "hisense",
-                    "toshiba",
-                    "philips",
-                    "tpvision",
-                    "roku",
-                    "lg"
-                  ]
-                }
-              },
-              {
-                "Node": {
-                  "sub_conditions": [
-                    {
-                      "Leaf": {
-                        "open_ports": [
-                          62078
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "apple-mobdev2"
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "open_ports": [
-                          49152
-                        ]
-                      }
-                    }
-                  ],
-                  "type": "OR"
-                }
-              }
-            ],
-            "type": "AND"
-          }
-        }
-      ],
-      "device_type": "iPhone"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "vendors": [
-                    "apple"
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "negate": true,
-                  "open_ports": [
-                    62078
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "mdns_services": [
-                    "apple-mobdev2"
-                  ],
-                  "negate": true
-                }
-              },
-              {
-                "Leaf": {
-                  "mdns_services": [
-                    "googlecast",
-                    "androidtvremote"
-                  ],
-                  "negate": true
-                }
-              }
-            ],
-            "type": "AND"
-          }
-        }
-      ],
-      "device_type": "Apple PC"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "vendors": [
-                    "oneplus",
-                    "motorola",
-                    "nokia",
-                    "htc"
-                  ]
-                }
-              }
-            ],
-            "type": "OR"
-          }
-        }
-      ],
-      "device_type": "Smartphone"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
                 "Node": {
                   "sub_conditions": [
                     {
@@ -463,238 +622,6 @@ pub static DEVICE_PROFILES: &str = r#"{
               {
                 "Leaf": {
                   "vendors": [
-                    "synology",
-                    "asustor",
-                    "drobo",
-                    "wd",
-                    "seagate",
-                    "qnap",
-                    "terramaster"
-                  ]
-                }
-              }
-            ],
-            "type": "OR"
-          }
-        }
-      ],
-      "device_type": "NAS"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "vendors": [
-                    "microsoft",
-                    "microsoft",
-                    "nintendo"
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "hostnames": [
-                    "ps4",
-                    "ps5",
-                    "xbox"
-                  ]
-                }
-              }
-            ],
-            "type": "OR"
-          }
-        }
-      ],
-      "device_type": "GameConsole"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "open_ports": [
-                    1883
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "open_ports": [
-                    8883
-                  ]
-                }
-              },
-              {
-                "Node": {
-                  "sub_conditions": [
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "mqtt",
-                          "hap",
-                          "hue",
-                          "miio"
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "airplay"
-                        ],
-                        "negate": true
-                      }
-                    }
-                  ],
-                  "type": "AND"
-                }
-              },
-              {
-                "Leaf": {
-                  "vendors": [
-                    "wemo",
-                    "lifx",
-                    "tuya",
-                    "dyson",
-                    "physical graph",
-                    "philips lighting",
-                    "shelly",
-                    "tasmota"
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "banners": [
-                    "shelly"
-                  ]
-                }
-              }
-            ],
-            "type": "OR"
-          }
-        }
-      ],
-      "device_type": "IoT"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Node": {
-                  "sub_conditions": [
-                    {
-                      "Leaf": {
-                        "open_ports": [
-                          8001,
-                          8002,
-                          8080
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "open_ports": [
-                          3000,
-                          3001,
-                          18181
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "open_ports": [
-                          8008,
-                          8009,
-                          8443,
-                          9000
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "vendors": [
-                          "tcl",
-                          "hisense",
-                          "vizio",
-                          "sharp",
-                          "toshiba",
-                          "lg",
-                          "roku"
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "androidtvremote",
-                          "googlecast"
-                        ]
-                      }
-                    }
-                  ],
-                  "type": "OR"
-                }
-              }
-            ],
-            "type": "AND"
-          }
-        }
-      ],
-      "device_type": "SmartTV"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "mdns_services": [
-                    "axis-video"
-                  ]
-                }
-              },
-              {
-                "Leaf": {
-                  "vendors": [
-                    "hikvision",
-                    "dahua",
-                    "axis",
-                    "vivotek",
-                    "flir",
-                    "nest",
-                    "arlo",
-                    "reolink",
-                    "amcrest",
-                    "wyze",
-                    "d-link",
-                    "foscam"
-                  ]
-                }
-              }
-            ],
-            "type": "OR"
-          }
-        }
-      ],
-      "device_type": "Camera"
-    },
-    {
-      "conditions": [
-        {
-          "Node": {
-            "sub_conditions": [
-              {
-                "Leaf": {
-                  "vendors": [
                     "alliedtelesis",
                     "alcatel-lucent",
                     "arista",
@@ -725,5 +652,5 @@ pub static DEVICE_PROFILES: &str = r#"{
       "device_type": "NetworkDevice"
     }
   ],
-  "signature": "83e703da51e0ecbc354914d4b99b19a69f75006068af1eacd7ff999db788bc26"
+  "signature": "6265417e4407b3e7d17e7daf489c9ae9243477cc4d544969946c61669b249f7d"
 }"#;
