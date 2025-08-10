@@ -74,7 +74,11 @@ impl DeviceTypeList {
 
         let profiles_vec = Arc::new(device_info.profiles);
 
-        DeviceTypeList { date: device_info.date, signature: device_info.signature, profiles: profiles_vec }
+        DeviceTypeList {
+            date: device_info.date,
+            signature: device_info.signature,
+            profiles: profiles_vec,
+        }
     }
 }
 
