@@ -140,36 +140,6 @@ pub static DEVICE_PROFILES: &str = r#"{
                   ],
                   "type": "AND"
                 }
-              },
-              {
-                "Node": {
-                  "sub_conditions": [
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "raop",
-                          "airplay"
-                        ]
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "mdns_services": [
-                          "mediaremotetv"
-                        ],
-                        "negate": true
-                      }
-                    },
-                    {
-                      "Leaf": {
-                        "vendors": [
-                          "apple"
-                        ]
-                      }
-                    }
-                  ],
-                  "type": "AND"
-                }
               }
             ],
             "type": "OR"
@@ -594,6 +564,15 @@ pub static DEVICE_PROFILES: &str = r#"{
                           "ubuntu"
                         ]
                       }
+                    },
+                    {
+                      "Leaf": {
+                        "open_ports": [
+                          135,
+                          139,
+                          445
+                        ]
+                      }
                     }
                   ],
                   "type": "OR"
@@ -652,5 +631,5 @@ pub static DEVICE_PROFILES: &str = r#"{
       "device_type": "NetworkDevice"
     }
   ],
-  "signature": "6265417e4407b3e7d17e7daf489c9ae9243477cc4d544969946c61669b249f7d"
+  "signature": "4b9db3cccb17ca3bcbe489883f938567942c12d48dfeff01d7a4259533638590"
 }"#;
