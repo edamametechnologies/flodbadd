@@ -64,23 +64,17 @@ impl CloudSignature for DeviceTypeList {
 pub struct DeviceTypeList {
     pub date: String,
     pub signature: String,
-    pub profiles: Arc<CustomDashMap<String, DeviceTypeRule>>,
+    // Preserve JSON order: iterate rules in the exact order provided by the file
+    pub profiles: Arc<Vec<DeviceTypeRule>>,
 }
 
 impl DeviceTypeList {
     pub fn new_from_json(device_info: DeviceTypeListJSON) -> Self {
         info!("Loading device profiles from JSON");
 
-        let profiles = Arc::new(CustomDashMap::new("Profiles"));
-        for profile in device_info.profiles {
-            profiles.insert(profile.device_type.clone(), profile);
-        }
+        let profiles_vec = Arc::new(device_info.profiles);
 
-        DeviceTypeList {
-            date: device_info.date,
-            signature: device_info.signature,
-            profiles,
-        }
+        DeviceTypeList { date: device_info.date, signature: device_info.signature, profiles: profiles_vec }
     }
 }
 
@@ -158,10 +152,11 @@ pub async fn device_type(
         .collect();
 
     // Clone the Arc to avoid holding the lock during iteration
-    let profiles_map = PROFILES.data.read().await.profiles.clone();
+    let profiles_vec = PROFILES.data.read().await.profiles.clone();
 
-    for profile in profiles_map.iter() {
-        for condition in &profile.value().conditions {
+    // Respect JSON order: first matching rule wins
+    for profile in profiles_vec.iter() {
+        for condition in &profile.conditions {
             if match_condition(
                 condition,
                 &open_ports_set,
@@ -170,8 +165,8 @@ pub async fn device_type(
                 &hostname_lower,
                 &banners_lower,
             ) {
-                trace!("Match for device type {:?}", profile.value().device_type);
-                let result = profile.value().device_type.clone();
+                trace!("Match for device type {:?}", profile.device_type);
+                let result = profile.device_type.clone();
 
                 // Store in cache before returning
                 DEVICE_TYPE_CACHE.insert(key, result.clone());
