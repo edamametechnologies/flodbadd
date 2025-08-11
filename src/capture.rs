@@ -531,11 +531,14 @@ impl FlodbaddCapture {
         self.update_sessions().await;
 
         // Create a whitelist using all sessions instead of just current sessions
-        let sessions_vec: Vec<SessionInfo> = self
+        let mut sessions_vec: Vec<SessionInfo> = self
             .sessions
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
+
+        // Exclude ingress sessions
+        sessions_vec.retain(|session| !crate::ip::is_local_ip(&session.session.dst_ip));
 
         let whitelist = Whitelists::new_from_sessions(&sessions_vec);
         let whitelist_json = WhitelistsJSON::from(whitelist);
