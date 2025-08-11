@@ -241,6 +241,13 @@ pub fn is_lan_ip(ip: &IpAddr) -> bool {
     local
 }
 
+pub fn is_local_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => is_lan_ipv4_fast(ipv4),
+        IpAddr::V6(ipv6) => is_local_ipv6(ipv6),
+    }
+}
+
 /// Convert an IPv4 netmask to a CIDR prefix
 pub fn mask_to_prefix(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
