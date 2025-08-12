@@ -31,13 +31,7 @@ android:
 
 
 windows_test:
-	mkdir -p ./target/debug
-	wget https://github.com/edamametechnologies/edamame_posture_cli/raw/refs/heads/main/windows/Packet.dll -O ./target/debug/Packet.dll
-	chmod +x ./target/debug/Packet.dll
-	wget https://github.com/edamametechnologies/edamame_posture_cli/raw/refs/heads/main/windows/wpcap.dll -O ./target/debug/wpcap.dll
-	chmod +x ./target/debug/wpcap.dll
-	# No capture tests on Windows for now
-	cargo test -- --nocapture
+	PATH="/c/Windows/System32/Npcap:$$PATH" cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
 unix_test:
 	cargo test -- --nocapture

@@ -3,7 +3,9 @@ use reqwest;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
@@ -11,12 +13,15 @@ fn main() {
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
     {
+        // Ensure Npcap runtime is installed for tests/runtime capture
+        ensure_npcap_installed();
+
         println!("cargo:rerun-if-env-changed=NPCAP_SDK_PATH");
 
         if let Ok(npcap_path) = env::var("NPCAP_SDK_PATH") {
             println!("cargo:rustc-link-search=native={}/Lib/x64", npcap_path);
-            println!("cargo:rustc-link-lib=static=Packet");
-            println!("cargo:rustc-link-lib=static=wpcap");
+            println!("cargo:rustc-link-lib=dylib=Packet");
+            println!("cargo:rustc-link-lib=dylib=wpcap");
             println!("Using user-provided Npcap SDK at: {}", npcap_path);
         } else {
             println!("cargo:warning=Attempting to download Npcap SDK");
@@ -31,13 +36,51 @@ fn main() {
                 }
             }
 
-            if npcap_dir.exists() {
+            // Determine arch-specific lib subdirectory (x64 vs x86)
+            let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".into());
+            let lib_subdir = if target_arch == "x86_64" {
+                "x64"
+            } else {
+                "x86"
+            };
+
+            // Try installed SDK first (Program Files), then fallback to downloaded one
+            let mut linked = false;
+            if let Some(installed_lib_dir) = find_installed_npcap_sdk_lib_dir(lib_subdir) {
                 println!(
-                    "cargo:rustc-link-search=native={}/Lib/x64",
-                    npcap_dir.display()
+                    "cargo:rustc-link-search=native={}",
+                    installed_lib_dir.display()
                 );
-                println!("cargo:rustc-link-lib=static=Packet");
-                println!("cargo:rustc-link-lib=static=wpcap");
+                linked = true;
+            }
+
+            if !linked && npcap_dir.exists() {
+                if let Some(lib_dir) = find_npcap_lib_dir(&npcap_dir, lib_subdir) {
+                    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+                    linked = true;
+                } else {
+                    println!(
+                        "cargo:warning=Could not locate Lib/{} under extracted Npcap SDK at {}",
+                        lib_subdir,
+                        npcap_dir.display()
+                    );
+                    let fallback = npcap_dir.join("Lib").join(lib_subdir);
+                    if contains_wpcap_and_packet(&fallback) {
+                        println!("cargo:rustc-link-search=native={}", fallback.display());
+                        linked = true;
+                    } else {
+                        println!("cargo:warning=No {} libraries found in downloaded SDK; set NPCAP_SDK_PATH to a matching SDK (e.g., C:\\Program Files\\Npcap\\SDK) or set NPCAP_SDK_URL to a zip that contains Lib\\{}", lib_subdir, lib_subdir);
+                    }
+                }
+            }
+
+            if linked {
+                println!("cargo:rustc-link-lib=dylib=Packet");
+                println!("cargo:rustc-link-lib=dylib=wpcap");
+            } else {
+                println!(
+                    "cargo:warning=Npcap SDK libs not found; set NPCAP_SDK_PATH to the SDK root"
+                );
             }
         }
     }
@@ -50,10 +93,95 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+fn ensure_npcap_installed() {
+    let system_root = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let npcap_dir = Path::new(&system_root).join("System32").join("Npcap");
+    let dll_to_check = npcap_dir.join("wpcap.dll");
+
+    if dll_to_check.exists() {
+        println!("Npcap detected at {}", npcap_dir.display());
+        return;
+    }
+
+    println!(
+        "cargo:warning=Npcap not found at {} — attempting silent install",
+        npcap_dir.display()
+    );
+
+    // Download installer
+    let out_dir = env::var("OUT_DIR").unwrap_or_else(|_| "target".to_string());
+    let installer_url = env::var("NPCAP_INSTALLER_URL").unwrap_or_else(|_| {
+        "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
+            .to_string()
+    });
+    let installer_path = Path::new(&out_dir).join("npcap-0.96.exe");
+
+    match reqwest::blocking::get(&installer_url).and_then(|r| r.bytes()) {
+        Ok(bytes) => {
+            if let Some(parent) = installer_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::File::create(&installer_path) {
+                if std::io::Write::write_all(&mut f, &bytes).is_ok() {
+                    println!("Downloaded Npcap installer to {}", installer_path.display());
+                }
+            }
+        }
+        Err(e) => {
+            println!("cargo:warning=Failed to download Npcap installer: {}", e);
+            return;
+        }
+    }
+
+    // Try msiexec silent install first, as requested; if it fails, fall back to EXE silent switch
+    let msiexec_status = Command::new("msiexec")
+        .args([
+            "/i",
+            installer_path.to_str().unwrap_or_default(),
+            "-q",
+            "-s",
+            "/norestart",
+        ])
+        .status();
+
+    let mut installed = dll_to_check.exists();
+
+    if msiexec_status.map(|s| !s.success()).unwrap_or(true) {
+        println!("cargo:warning=msiexec install did not succeed; falling back to EXE silent mode");
+        let _ = Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "/wait",
+                installer_path.to_str().unwrap_or_default(),
+                "/S",
+            ])
+            .status();
+
+        installed = dll_to_check.exists();
+    }
+
+    if installed {
+        println!(
+            "Npcap installation detected after install attempt at {}",
+            npcap_dir.display()
+        );
+    } else {
+        println!("cargo:warning=Npcap still not detected after install attempt; you may need to install manually with administrator privileges.");
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
 
-    let url = "https://npcap.com/dist/npcap-sdk-1.13.zip";
+    // Allow overriding the SDK download URL via env var, default to archived link
+    let url = env::var("NPCAP_SDK_URL").unwrap_or_else(|_| {
+        // Archive of the Npcap SDK zip to improve reliability when npcap.com is unavailable
+        // If you need a different version, set NPCAP_SDK_URL accordingly.
+        "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-sdk-0.1.zip"
+            .to_string()
+    });
     let zip_path = npcap_dir.with_extension("zip");
 
     println!("Downloading Npcap SDK from: {}", url);
@@ -100,6 +228,75 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     let _ = std::fs::remove_file(&zip_path);
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn find_npcap_lib_dir(root: &Path, lib_subdir: &str) -> Option<PathBuf> {
+    // 1) Prefer a direct Lib/x64 under root
+    let direct = root.join("Lib").join(lib_subdir);
+    if contains_wpcap_and_packet(&direct) {
+        return Some(direct);
+    }
+
+    // 2) If SDK extracted under a subfolder (e.g., npcap-sdk-0.1), check those first
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let candidate = p.join("Lib").join(lib_subdir);
+                if contains_wpcap_and_packet(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // 3) Fallback: recursive search but prefer any path containing x64
+    let mut best: Option<PathBuf> = None;
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    if name.eq_ignore_ascii_case("wpcap.lib") {
+                        if let Some(parent) = path.parent() {
+                            let parent_dir = parent.to_path_buf();
+                            let parent_sl = parent_dir.to_string_lossy().to_ascii_lowercase();
+                            if parent_sl.contains(&lib_subdir.to_ascii_lowercase()) {
+                                return Some(parent_dir);
+                            }
+                            best.get_or_insert(parent_dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+#[cfg(target_os = "windows")]
+fn contains_wpcap_and_packet(dir: &Path) -> bool {
+    dir.is_dir() && dir.join("wpcap.lib").is_file() && dir.join("Packet.lib").is_file()
+}
+
+#[cfg(target_os = "windows")]
+fn find_installed_npcap_sdk_lib_dir(lib_subdir: &str) -> Option<PathBuf> {
+    let possible_roots = [
+        r"C:\\npcap-sdk",
+        r"C:\\Program Files\\Npcap\\SDK",
+        r"C:\\Program Files (x86)\\Npcap\\SDK",
+    ];
+    for root in possible_roots {
+        let path = Path::new(root).join("Lib").join(lib_subdir);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
