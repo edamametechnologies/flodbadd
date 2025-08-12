@@ -3211,11 +3211,6 @@ mod tests {
     #[tokio::test]
     #[serial] // Marked serial due to potential global state modification
     async fn test_default_interface_has_device() {
-        // Not working on windows in the CI/CD pipeline yet (no pcap support)
-        if cfg!(windows) {
-            return;
-        }
-
         // Get the default network interface (FlodbaddInterfaces)
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
@@ -3234,14 +3229,13 @@ mod tests {
     }
 
     // Test uses get_admin_status
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "Skipped on Windows: default device/interface mapping differs with Npcap loopback"
+    )]
     #[tokio::test]
     #[serial] // Marked serial due to potential global state modification
     async fn test_default_device_has_interface() {
-        // Not working on windows in the CI/CD pipeline yet (no pcap support)
-        if cfg!(windows) {
-            return;
-        }
-
         let default_device = match FlodbaddCapture::get_default_device().await {
             Ok(device) => device,
             Err(e) => {
@@ -3262,12 +3256,6 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_start_capture() {
-        // Not working on windows in the CI/CD pipeline yet (no pcap support)
-        if cfg!(windows) {
-            println!("Skipping test_start_capture_if_admin: pcap feature not fully supported on Windows CI yet");
-            return;
-        }
-
         // --- Test Setup ---
         println!("Setting up capture test...");
         let capture = Arc::new(FlodbaddCapture::new());
@@ -5021,11 +5009,6 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_capture_flag_consistency() {
-        // Skip on Windows CI due to pcap limitations
-        if cfg!(windows) {
-            return;
-        }
-
         // Acquire a default valid interface; skip test if none detected (e.g., in sandbox)
         let default_interface = match get_default_interface() {
             Some(iface) => iface,
@@ -5074,11 +5057,6 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_capture_session_clearing_on_stop() {
-        // Skip on Windows CI due to pcap limitations
-        if cfg!(windows) {
-            return;
-        }
-
         // Acquire a default valid interface; skip test if none detected (e.g., in sandbox)
         let default_interface = match get_default_interface() {
             Some(iface) => iface,
@@ -5230,12 +5208,6 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_capture_start_stop_start_sequence() {
-        // Skip on Windows CI due to pcap limitations
-        if cfg!(windows) {
-            println!("Skipping start/stop/start test: Not fully supported on Windows yet");
-            return;
-        }
-
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -5554,12 +5526,6 @@ mod tests {
         use std::time::Duration;
         use tokio::time::sleep;
 
-        // Skip on Windows CI due to pcap limitations
-        if cfg!(windows) {
-            println!("Skipping capture start/stop/start test: Not fully supported on Windows yet");
-            return;
-        }
-
         let default_interface = match get_default_interface() {
             Some(interface) => interface,
             None => {
@@ -5803,11 +5769,6 @@ mod tests {
     ) -> usize {
         use std::time::Duration;
         use tokio::time::sleep;
-
-        if cfg!(windows) {
-            println!("Skipping traffic generation: Not supported on Windows yet");
-            return 0;
-        }
 
         println!("Generating network traffic for {}...", phase);
 
