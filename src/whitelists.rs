@@ -29,18 +29,37 @@ static WHITELIST_REVISION: AtomicU64 = AtomicU64::new(0);
 // Constants
 const WHITELISTS_FILE_NAME: &str = "whitelists-db.json";
 
+/// Endpoint rule supporting domain(s), IPs and ports with list/range semantics.
+///
+/// Notes:
+/// - Domains can be expressed as a single `domain` or a list in `domains`.
+///   Each entry supports wildcards (e.g. `*.example.com`, `example.*`, or `api.*.example.com`).
+/// - IPs can be a single `ip` or a list in `ips`. Each entry can be an IP, CIDR,
+///   or explicit inclusive range in the form `start-end` for IPv4/IPv6.
+/// - Ports can be a single `port` or a list/ranges via `ports`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)] // Enforce no unknown fields
 pub struct WhitelistEndpoint {
     pub domain: Option<String>,
+    pub domains: Option<Vec<String>>,
     pub ip: Option<String>,
+    pub ips: Option<Vec<String>>,
     pub port: Option<u16>,
+    pub ports: Option<Vec<PortSpec>>,
     pub protocol: Option<String>,
     pub as_number: Option<u32>,
     pub as_country: Option<String>,
     pub as_owner: Option<String>,
     pub process: Option<String>,
     pub description: Option<String>,
+}
+
+/// Port specification supporting single values or inclusive ranges.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum PortSpec {
+    Single(u16),
+    Range { start: u16, end: u16 },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -128,6 +147,7 @@ impl Whitelists {
                 } else {
                     session.dst_domain.clone()
                 },
+                domains: None,
                 // Always include the IP address as a fallback to when the domain is set but not resolved
                 ip: Some(session.session.dst_ip.to_string()),
                 // Always include the port
@@ -147,6 +167,8 @@ impl Whitelists {
                     session.session.dst_ip,
                     session.session.dst_port
                 )),
+                ports: None,
+                ips: None,
             };
 
             // Create a fingerprint tuple that uniquely identifies this endpoint
@@ -239,28 +261,52 @@ impl Whitelists {
             serde_json::from_str(json_b).context("Failed to parse second whitelist JSON")?;
 
         // Helper to fingerprint an endpoint for deduplication
-        fn fingerprint(
-            ep: &WhitelistEndpoint,
-        ) -> (
-            Option<String>,
-            Option<String>,
-            Option<u16>,
-            Option<String>,
-            Option<u32>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) {
-            (
-                ep.domain.clone(),
-                ep.ip.clone(),
-                ep.port,
-                ep.protocol.clone(),
-                ep.as_number,
-                ep.as_country.clone(),
-                ep.as_owner.clone(),
-                ep.process.clone(),
-            )
+        fn fingerprint(ep: &WhitelistEndpoint) -> String {
+            // Normalize ports and ips to stable JSON for hashing/dedup
+            let mut obj = serde_json::json!({
+                "domain": ep.domain,
+                "domains": ep.domains,
+                "ip": ep.ip,
+                "port": ep.port,
+                "protocol": ep.protocol,
+                "as_number": ep.as_number,
+                "as_country": ep.as_country,
+                "as_owner": ep.as_owner,
+                "process": ep.process,
+            });
+            if let Some(domains) = &ep.domains {
+                let mut d = domains.clone();
+                d.sort();
+                obj["domains"] = serde_json::Value::Array(
+                    d.into_iter()
+                        .map(|s| serde_json::Value::String(s))
+                        .collect(),
+                );
+            }
+            if let Some(ports) = &ep.ports {
+                let mut ports_norm: Vec<serde_json::Value> = ports
+                    .iter()
+                    .map(|p| match p {
+                        PortSpec::Single(v) => serde_json::json!({"single": v}),
+                        PortSpec::Range { start, end } => {
+                            serde_json::json!({"start": start, "end": end})
+                        }
+                    })
+                    .collect();
+                ports_norm.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                obj["ports"] = serde_json::Value::Array(ports_norm);
+            }
+            if let Some(ips) = &ep.ips {
+                let mut ips_norm = ips.clone();
+                ips_norm.sort();
+                obj["ips"] = serde_json::Value::Array(
+                    ips_norm
+                        .into_iter()
+                        .map(|s| serde_json::Value::String(s))
+                        .collect(),
+                );
+            }
+            obj.to_string()
         }
 
         // Build a map name -> WhitelistInfo (merged)
@@ -306,6 +352,221 @@ impl Whitelists {
         };
 
         Ok(serde_json::to_string(&output)?)
+    }
+
+    /// Produce a factorized version of a single whitelist by merging endpoints that share
+    /// the same non-address attributes (protocol, AS, process) and combining their address
+    /// specifications:
+    /// - Domains are merged into `domains` (keeping `domain` when only one remains).
+    /// - Ports are coalesced, merging overlapping/adjacent ranges (e.g., 80, 81-82 → 80-82).
+    /// - IP specs are deduplicated (preserving list semantics; no CIDR synthesis is attempted).
+    pub fn factorize_whitelist(input: &WhitelistInfo) -> WhitelistInfo {
+        // Group key excludes ports and IPs
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        struct Key {
+            domains: Vec<String>, // normalized, empty means no domain restriction
+            protocol: Option<String>,
+            as_number: Option<u32>,
+            as_country: Option<String>,
+            as_owner: Option<String>,
+            process: Option<String>,
+        }
+
+        fn normalize_ports(single: Option<u16>, list: &Option<Vec<PortSpec>>) -> Vec<PortSpec> {
+            let mut out: Vec<PortSpec> = Vec::new();
+            if let Some(v) = single {
+                out.push(PortSpec::Single(v));
+            }
+            if let Some(vec) = list {
+                out.extend(vec.clone());
+            }
+            // Dedup and merge overlapping/adjacent ranges
+            // First expand to ranges
+            let mut ranges: Vec<(u16, u16)> = Vec::new();
+            for spec in out {
+                match spec {
+                    PortSpec::Single(v) => ranges.push((v, v)),
+                    PortSpec::Range { start, end } => {
+                        let (a, b) = if start <= end {
+                            (start, end)
+                        } else {
+                            (end, start)
+                        };
+                        ranges.push((a, b));
+                    }
+                }
+            }
+            if ranges.is_empty() {
+                return Vec::new();
+            }
+            ranges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut merged: Vec<(u16, u16)> = Vec::new();
+            for (s, e) in ranges {
+                if let Some(last) = merged.last_mut() {
+                    if s <= last.1.saturating_add(1) {
+                        if e > last.1 {
+                            last.1 = e;
+                        }
+                        continue;
+                    }
+                }
+                merged.push((s, e));
+            }
+            // Convert back to PortSpec
+            merged
+                .into_iter()
+                .map(|(s, e)| {
+                    if s == e {
+                        PortSpec::Single(s)
+                    } else {
+                        PortSpec::Range { start: s, end: e }
+                    }
+                })
+                .collect()
+        }
+
+        fn normalize_ips(single: &Option<String>, list: &Option<Vec<String>>) -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            if let Some(s) = single {
+                out.push(s.clone());
+            }
+            if let Some(vec) = list {
+                out.extend(vec.clone());
+            }
+            out.sort();
+            out.dedup();
+            out
+        }
+
+        let mut groups: std::collections::HashMap<
+            Key,
+            (Vec<PortSpec>, Vec<String>, Option<String>),
+        > = std::collections::HashMap::new();
+
+        for ep in &input.endpoints {
+            // Normalize domain(s)
+            let mut domains_vec: Vec<String> = Vec::new();
+            if let Some(d) = &ep.domain {
+                domains_vec.push(d.clone());
+            }
+            if let Some(ds) = &ep.domains {
+                domains_vec.extend(ds.clone());
+            }
+            domains_vec.sort();
+            domains_vec.dedup();
+
+            let key = Key {
+                domains: domains_vec,
+                protocol: ep.protocol.clone(),
+                as_number: ep.as_number,
+                as_country: ep.as_country.clone(),
+                as_owner: ep.as_owner.clone(),
+                process: ep.process.clone(),
+            };
+
+            let ports = normalize_ports(ep.port, &ep.ports);
+            let ips = normalize_ips(&ep.ip, &ep.ips);
+
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (Vec::new(), Vec::new(), None));
+            entry.0.extend(ports);
+            entry.1.extend(ips);
+            // Keep first description if present
+            if entry.2.is_none() {
+                entry.2 = ep.description.clone();
+            }
+        }
+
+        // Post-process to dedup and merge port ranges per group
+        let mut endpoints: Vec<WhitelistEndpoint> = Vec::with_capacity(groups.len());
+        for (key, (ports, mut ips, description)) in groups {
+            // Merge port ranges again (in case multiple endpoints added overlapping specs)
+            let merged_ports = {
+                // Convert to Option<u16> + list and reuse normalize
+                fn merge_all(list: Vec<PortSpec>) -> Vec<PortSpec> {
+                    let mut ranges: Vec<(u16, u16)> = Vec::new();
+                    for spec in list {
+                        match spec {
+                            PortSpec::Single(v) => ranges.push((v, v)),
+                            PortSpec::Range { start, end } => {
+                                let (a, b) = if start <= end {
+                                    (start, end)
+                                } else {
+                                    (end, start)
+                                };
+                                ranges.push((a, b));
+                            }
+                        }
+                    }
+                    if ranges.is_empty() {
+                        return Vec::new();
+                    }
+                    ranges.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    let mut merged: Vec<(u16, u16)> = Vec::new();
+                    for (s, e) in ranges {
+                        if let Some(last) = merged.last_mut() {
+                            if s <= last.1.saturating_add(1) {
+                                if e > last.1 {
+                                    last.1 = e;
+                                }
+                                continue;
+                            }
+                        }
+                        merged.push((s, e));
+                    }
+                    merged
+                        .into_iter()
+                        .map(|(s, e)| {
+                            if s == e {
+                                PortSpec::Single(s)
+                            } else {
+                                PortSpec::Range { start: s, end: e }
+                            }
+                        })
+                        .collect()
+                }
+                merge_all(ports)
+            };
+
+            // Dedup IPs strings
+            ips.sort();
+            ips.dedup();
+
+            // Preserve single domain when exactly one, else store in `domains`
+            let (domain_single, domains_list) = if key.domains.len() == 1 {
+                (Some(key.domains[0].clone()), None)
+            } else if key.domains.is_empty() {
+                (None, None)
+            } else {
+                (None, Some(key.domains.clone()))
+            };
+
+            endpoints.push(WhitelistEndpoint {
+                domain: domain_single,
+                domains: domains_list,
+                ip: None,
+                port: None,
+                protocol: key.protocol,
+                as_number: key.as_number,
+                as_country: key.as_country,
+                as_owner: key.as_owner,
+                process: key.process,
+                description,
+                ports: if merged_ports.is_empty() {
+                    None
+                } else {
+                    Some(merged_ports)
+                },
+                ips: if ips.is_empty() { None } else { Some(ips) },
+            });
+        }
+
+        WhitelistInfo {
+            name: input.name.clone(),
+            extends: input.extends.clone(),
+            endpoints,
+        }
     }
 }
 
@@ -473,7 +734,7 @@ fn endpoint_matches_with_reason(
 ) -> (bool, Option<String>) {
     // Process name, protocol and port are fundamental for service identification - they must match
     let protocol_match = protocol_matches(protocol, &endpoint.protocol);
-    let port_match = port_matches(port, endpoint.port);
+    let port_match = ports_match(port, endpoint.port, &endpoint.ports);
     let process_match = process_matches(process, &endpoint.process);
 
     if !protocol_match || !port_match || !process_match {
@@ -500,18 +761,20 @@ fn endpoint_matches_with_reason(
         return (false, Some(reasons.join(", ")));
     }
 
-    // Check if we have a domain match
-    let domain_match = domain_matches(session_domain, &endpoint.domain);
-    let domain_specified = endpoint.domain.is_some();
+    // Check if we have a domain/domains match
+    let domain_match = domains_match(session_domain, &endpoint.domain, &endpoint.domains);
+    let domain_specified =
+        endpoint.domain.is_some() || endpoint.domains.as_ref().map_or(false, |v| !v.is_empty());
 
     // If domain is specified and matches, other checks are irrelevant
     if domain_specified && domain_match {
         return (true, None);
     }
 
-    // Check if we have an IP match
-    let ip_match = ip_matches(session_ip, &endpoint.ip);
-    let ip_specified = endpoint.ip.is_some();
+    // Check if we have an IP match (single or any from list)
+    let ip_match = ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips);
+    let ip_specified =
+        endpoint.ip.is_some() || endpoint.ips.as_ref().map_or(false, |list| !list.is_empty());
 
     // If IP is specified and matches, return true
     if ip_specified && ip_match {
@@ -611,115 +874,177 @@ fn endpoint_matches_with_reason(
 /// Helper function to match domain names with optional wildcards.
 fn domain_matches(session_domain: Option<&str>, endpoint_domain: &Option<String>) -> bool {
     match endpoint_domain {
-        Some(pattern) => match session_domain {
-            Some(domain) => {
-                // Convert both to lowercase for case-insensitive matching
-                let domain = domain.to_lowercase();
-                let pattern = pattern.to_lowercase();
-
-                // Check if pattern contains a wildcard
-                if pattern.contains('*') {
-                    // Handle prefix wildcard (*.example.com)
-                    if pattern.starts_with("*.") {
-                        let suffix = &pattern[2..]; // Remove the "*." prefix
-
-                        // If domain exactly matches suffix (e.g., "example.com" vs "*.example.com"),
-                        // this should NOT match since *.example.com means there must be a subdomain
-                        if domain == suffix {
-                            return false;
-                        }
-
-                        // For a valid subdomain match:
-                        // 1. Domain must end with the suffix
-                        // 2. The character before the suffix must be a dot (.)
-                        return domain.ends_with(suffix)
-                            && domain.len() > suffix.len()
-                            && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.';
-                    }
-
-                    // Handle suffix wildcard (example.*)
-                    if pattern.ends_with(".*") {
-                        let prefix = &pattern[..pattern.len() - 2]; // Remove the ".*" suffix
-
-                        // For wildcard to match:
-                        // 1. domain must start with the prefix
-                        // 2. if the domain is longer than the prefix, the next character must be a dot
-                        //    (ensuring prefix is a complete domain component)
-                        if domain.starts_with(prefix) {
-                            if domain.len() == prefix.len() {
-                                // Domain exactly matches prefix, which is valid
-                                return true;
-                            } else if domain.len() > prefix.len()
-                                && domain.as_bytes()[prefix.len()] == b'.'
-                            {
-                                // Domain has the prefix followed by a dot and any TLD, which is valid
-                                // For suffix wildcards (example.*), we want to match any TLD
-                                return true;
-                            }
-                        }
-
-                        // All other cases are not matches
-                        return false;
-                    }
-
-                    // Handle middle position wildcard (prefix.*.suffix)
-                    let parts: Vec<&str> = pattern.split('*').collect();
-                    if parts.len() == 2 {
-                        let prefix = parts[0];
-                        let suffix = parts[1];
-
-                        // For wildcard to match, domain must start with prefix and end with suffix
-                        // and the domain must be longer than just the prefix and suffix combined
-                        return domain.starts_with(prefix)
-                            && domain.ends_with(suffix)
-                            && domain.len() > prefix.len() + suffix.len();
-                    }
-
-                    // Unsupported wildcard pattern
-                    return false;
-                }
-
-                // Exact match for non-wildcard patterns
-                domain == pattern
-            }
-            None => false,
-        },
-        None => true, // No domain specified in the endpoint, so it's a match
+        Some(pattern) => session_domain
+            .map(|d| single_domain_matches(d, pattern))
+            .unwrap_or(false),
+        None => true,
     }
 }
 
-/// Helper function to match IP addresses and prefixes.
-fn ip_matches(session_ip: Option<&str>, endpoint_ip: &Option<String>) -> bool {
-    match endpoint_ip {
-        Some(pattern) => match session_ip {
-            Some(ip_str) => {
-                let ip_addr = match ip_str.parse::<IpAddr>() {
-                    Ok(ip) => ip,
-                    Err(_) => return false,
-                };
-
-                if pattern.contains('/') {
-                    // Pattern is an IP network (e.g., "192.168.1.0/24")
-                    match pattern.parse::<IpNet>() {
-                        Ok(ip_network) => ip_network.contains(&ip_addr),
-                        Err(_) => false,
-                    }
-                } else {
-                    // Pattern is a single IP address
-                    match pattern.parse::<IpAddr>() {
-                        Ok(pattern_ip) => pattern_ip == ip_addr,
-                        Err(_) => false,
-                    }
+fn domains_match(
+    session_domain: Option<&str>,
+    single: &Option<String>,
+    many: &Option<Vec<String>>,
+) -> bool {
+    // If multiple domains are provided, any can match
+    if let Some(list) = many {
+        if let Some(d) = session_domain {
+            for pat in list {
+                if single_domain_matches(d, pat) {
+                    return true;
                 }
             }
-            None => false,
-        },
-        None => true, // No IP specified in the endpoint, so it's a match
+            return false;
+        }
+        return false;
     }
+    domain_matches(session_domain, single)
+}
+
+fn single_domain_matches(session_domain: &str, pattern: &str) -> bool {
+    // Case-insensitive
+    let domain = session_domain.to_lowercase();
+    let pattern = pattern.to_lowercase();
+
+    if pattern.contains('*') {
+        // Prefix wildcard (*.example.com)
+        if pattern.starts_with("*.") {
+            let suffix = &pattern[2..];
+            if domain == suffix {
+                return false;
+            }
+            return domain.ends_with(suffix)
+                && domain.len() > suffix.len()
+                && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.';
+        }
+        // Suffix wildcard (example.*)
+        if pattern.ends_with(".*") {
+            let prefix = &pattern[..pattern.len() - 2];
+            if domain.starts_with(prefix) {
+                if domain.len() == prefix.len() {
+                    return true;
+                }
+                if domain.len() > prefix.len() && domain.as_bytes()[prefix.len()] == b'.' {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Middle wildcard prefix.*.suffix
+        if let Some(pos) = pattern.find('*') {
+            let (pre, suf_with) = pattern.split_at(pos);
+            let suf = &suf_with[1..];
+            return domain.starts_with(pre)
+                && domain.ends_with(suf)
+                && domain.len() > pre.len() + suf.len();
+        }
+        return false;
+    }
+    domain == pattern
+}
+
+/// Helper function to match IP addresses against single, CIDR, or explicit range patterns.
+fn ip_matches_pattern(session_ip: &IpAddr, pattern: &str) -> bool {
+    if pattern.contains('/') {
+        // CIDR notation
+        return pattern
+            .parse::<IpNet>()
+            .map(|net| net.contains(session_ip))
+            .unwrap_or(false);
+    }
+    if let Some((start, end)) = pattern.split_once('-') {
+        // Explicit inclusive range start-end
+        if let (Ok(start_ip), Ok(end_ip)) =
+            (start.trim().parse::<IpAddr>(), end.trim().parse::<IpAddr>())
+        {
+            if std::mem::discriminant(&start_ip) != std::mem::discriminant(&end_ip) {
+                return false;
+            }
+            match (start_ip, end_ip, session_ip) {
+                (IpAddr::V4(s), IpAddr::V4(e), IpAddr::V4(cur)) => {
+                    let s = u32::from(s);
+                    let e = u32::from(e);
+                    let c = u32::from(*cur);
+                    return if s <= e {
+                        c >= s && c <= e
+                    } else {
+                        c >= e && c <= s
+                    };
+                }
+                (IpAddr::V6(s), IpAddr::V6(e), IpAddr::V6(cur)) => {
+                    let s = u128::from(s);
+                    let e = u128::from(e);
+                    let c = u128::from(*cur);
+                    return if s <= e {
+                        c >= s && c <= e
+                    } else {
+                        c >= e && c <= s
+                    };
+                }
+                _ => return false,
+            }
+        }
+        return false;
+    }
+    // Single IP
+    pattern
+        .parse::<IpAddr>()
+        .map(|addr| &addr == session_ip)
+        .unwrap_or(false)
+}
+
+/// Match against optional single ip or a list of ip specs.
+fn ip_matches_any(
+    session_ip: Option<&str>,
+    endpoint_ip: &Option<String>,
+    endpoint_ips: &Option<Vec<String>>,
+) -> bool {
+    let ip_str = match session_ip {
+        Some(s) => s,
+        None => return false,
+    };
+    let addr: IpAddr = match ip_str.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    // If a single IP spec is provided, try it first
+    if let Some(spec) = endpoint_ip.as_ref() {
+        if ip_matches_pattern(&addr, spec) {
+            return true;
+        }
+    }
+    // Then try the list of specs
+    if let Some(specs) = endpoint_ips.as_ref() {
+        for spec in specs {
+            if ip_matches_pattern(&addr, spec) {
+                return true;
+            }
+        }
+    }
+    // If neither is specified, it's a match (no IP restriction)
+    endpoint_ip.is_none() && endpoint_ips.is_none()
 }
 
 /// Helper function to match ports.
-fn port_matches(port: u16, whitelist_port: Option<u16>) -> bool {
+fn ports_match(
+    port: u16,
+    whitelist_port: Option<u16>,
+    whitelist_ports: &Option<Vec<PortSpec>>,
+) -> bool {
+    // If a list exists, it takes precedence; also accept when neither is provided
+    if let Some(list) = whitelist_ports {
+        return list.iter().any(|spec| match spec {
+            PortSpec::Single(v) => *v == port,
+            PortSpec::Range { start, end } => {
+                if start <= end {
+                    port >= *start && port <= *end
+                } else {
+                    port >= *end && port <= *start
+                }
+            }
+        });
+    }
     whitelist_port.map_or(true, |wp| wp == port)
 }
 
@@ -792,7 +1117,15 @@ pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::E
     match whitelist_result {
         Ok(whitelist_data) => {
             info!("Successfully parsed custom whitelist JSON.");
-            let whitelist = Whitelists::new_from_json(whitelist_data);
+            // Factorize each whitelist before loading
+            let mut factored = whitelist_data.clone();
+            factored.whitelists = factored
+                .whitelists
+                .into_iter()
+                .map(|info| Whitelists::factorize_whitelist(&info))
+                .collect();
+
+            let whitelist = Whitelists::new_from_json(factored);
             LISTS.set_custom_data(whitelist).await;
             ENDPOINT_CACHE.clear(); // Clear cache after successful set
             NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
@@ -925,6 +1258,14 @@ pub async fn recompute_whitelist_for_sessions(
     for session_key in &sessions_to_evaluate {
         // Skip if we don't have a snapshot (might have been removed)
         if let Some(snapshot) = session_snapshots.get(session_key) {
+            // Egress-only whitelist policy: only evaluate sessions where traffic originates from us/local
+            let is_egress =
+                snapshot.is_self_src || (snapshot.is_local_src && !snapshot.is_local_dst);
+            if !is_egress {
+                // Mark as conforming for whitelist purposes and continue
+                evaluation_results.push((session_key.clone(), true, None));
+                continue;
+            }
             // Perform the whitelist check - this is done WITHOUT any locks held
             let (is_ok, reason) = is_session_in_whitelist(
                 snapshot.dst_domain.as_deref(),
@@ -1076,6 +1417,7 @@ pub async fn get_whitelists() -> String {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// Test that WhitelistInfo serialization includes name and extends fields
     #[test]
@@ -1085,6 +1427,7 @@ mod tests {
             extends: None,
             endpoints: vec![WhitelistEndpoint {
                 domain: Some("example.com".to_string()),
+                domains: None,
                 ip: Some("192.168.1.1".to_string()),
                 port: Some(443),
                 protocol: Some("TCP".to_string()),
@@ -1093,6 +1436,8 @@ mod tests {
                 as_owner: None,
                 process: Some("test_process".to_string()),
                 description: Some("Test endpoint".to_string()),
+                ports: None,
+                ips: None,
             }],
         };
 
@@ -1118,6 +1463,327 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ports_match_list_and_ranges() {
+        // Single port
+        assert!(ports_match(80, Some(80), &None));
+        assert!(!ports_match(81, Some(80), &None));
+
+        // List with singles and ranges
+        let list = Some(vec![
+            PortSpec::Single(80),
+            PortSpec::Range {
+                start: 1000,
+                end: 1002,
+            },
+        ]);
+        assert!(ports_match(80, None, &list));
+        assert!(ports_match(1001, None, &list));
+        assert!(!ports_match(1003, None, &list));
+    }
+
+    #[test]
+    fn test_ip_matches_any_list_and_ranges() {
+        // Only single or CIDR
+        assert!(ip_matches_any(
+            Some("10.0.0.1"),
+            &Some("10.0.0.1".into()),
+            &None
+        ));
+        assert!(ip_matches_any(
+            Some("10.0.0.2"),
+            &Some("10.0.0.0/24".into()),
+            &None
+        ));
+        assert!(!ip_matches_any(
+            Some("10.0.1.2"),
+            &Some("10.0.0.0/24".into()),
+            &None
+        ));
+
+        // With list including explicit range and CIDR
+        let ips = Some(vec![
+            "10.0.0.5-10.0.0.7".into(),
+            "192.168.0.0/30".into(),
+            "1.2.3.4".into(),
+        ]);
+        assert!(ip_matches_any(Some("10.0.0.5"), &None, &ips));
+        assert!(ip_matches_any(Some("10.0.0.7"), &None, &ips));
+        assert!(!ip_matches_any(Some("10.0.0.8"), &None, &ips));
+        assert!(ip_matches_any(Some("192.168.0.2"), &None, &ips));
+        assert!(!ip_matches_any(Some("192.168.0.4"), &None, &ips));
+        assert!(ip_matches_any(Some("1.2.3.4"), &None, &ips));
+    }
+
+    #[test]
+    fn test_factorize_whitelist_merges_ports_ips_and_preserves_domain() {
+        let info = WhitelistInfo {
+            name: "custom_whitelist".to_string(),
+            extends: None,
+            endpoints: vec![
+                WhitelistEndpoint {
+                    domain: Some("a.com".into()),
+                    domains: None,
+                    ip: Some("10.0.0.1".into()),
+                    port: Some(80),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: Some("proc".into()),
+                    description: Some("d1".into()),
+                    ports: Some(vec![PortSpec::Range { start: 81, end: 82 }]),
+                    ips: Some(vec!["10.0.0.1-10.0.0.2".into(), "192.168.0.0/31".into()]),
+                },
+                WhitelistEndpoint {
+                    domain: Some("a.com".into()),
+                    domains: None,
+                    ip: None,
+                    port: Some(82),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: Some("proc".into()),
+                    description: Some("d2".into()),
+                    ports: None,
+                    ips: Some(vec!["10.0.0.2".into()]),
+                },
+                WhitelistEndpoint {
+                    domain: Some("b.com".into()),
+                    domains: None,
+                    ip: Some("1.1.1.1".into()),
+                    port: Some(53),
+                    protocol: Some("UDP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: None,
+                    ports: None,
+                    ips: None,
+                },
+            ],
+        };
+
+        let factored = Whitelists::factorize_whitelist(&info);
+        // Expect 2 groups (a.com and b.com)
+        assert_eq!(factored.endpoints.len(), 2);
+
+        // Find a.com
+        let a = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.as_deref() == Some("a.com"))
+            .unwrap();
+        // Ports should be merged into a single range 80..=82
+        let ports = a.ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 1);
+        match &ports[0] {
+            PortSpec::Range { start, end } => {
+                assert_eq!((*start, *end), (80, 82));
+            }
+            _ => panic!("expected merged port range"),
+        }
+
+        // b.com remains separate
+        assert!(factored
+            .endpoints
+            .iter()
+            .any(|e| e.domain.as_deref() == Some("b.com")));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_set_custom_whitelists_factorizes() {
+        let json = r#"{
+            "date": "June 18th 2025",
+            "signature": null,
+            "whitelists": [
+                {
+                    "name": "custom_whitelist",
+                    "extends": null,
+                    "endpoints": [
+                        {"domain":"a.com","port":80,"protocol":"TCP","process":"p"},
+                        {"domain":"a.com","port":81,"protocol":"TCP","process":"p"}
+                    ]
+                }
+            ]
+        }"#;
+
+        set_custom_whitelists(json).await.expect("set ok");
+        let snap = current_json().await;
+        let info = snap
+            .whitelists
+            .iter()
+            .find(|w| w.name == "custom_whitelist")
+            .expect("exists");
+
+        // Expect a single endpoint with merged ports list/range
+        assert_eq!(info.endpoints.len(), 1);
+        let ep = &info.endpoints[0];
+        assert!(ep.ports.is_some());
+    }
+
+    #[cfg(all(
+        any(target_os = "macos", target_os = "linux", target_os = "windows"),
+        feature = "packetcapture"
+    ))]
+    #[tokio::test]
+    #[serial]
+    async fn test_augment_custom_whitelists_factorizes() {
+        // seed custom list with two endpoints that can be merged
+        let json = r#"{
+            "date": "June 18th 2025",
+            "signature": null,
+            "whitelists": [
+                {
+                    "name": "custom_whitelist",
+                    "extends": null,
+                    "endpoints": [
+                        {"domain":"a.com","port":80,"protocol":"TCP","process":"p"},
+                        {"domain":"a.com","port":81,"protocol":"TCP","process":"p"}
+                    ]
+                }
+            ]
+        }"#;
+        set_custom_whitelists(json).await.expect("set ok");
+
+        let cap = crate::capture::FlodbaddCapture::new();
+        let out = cap.augment_custom_whitelists().await.expect("augment ok");
+        let parsed: WhitelistsJSON = serde_json::from_str(&out).unwrap();
+        let info = parsed
+            .whitelists
+            .iter()
+            .find(|w| w.name == "custom_whitelist")
+            .unwrap();
+        assert_eq!(info.endpoints.len(), 1);
+        assert!(info.endpoints[0].ports.is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_egress_only_evaluation() {
+        // Prepare a whitelist that matches 8.8.8.8:53/UDP only
+        let wl_info = WhitelistInfo {
+            name: "egress_test".into(),
+            extends: None,
+            endpoints: vec![WhitelistEndpoint {
+                domain: None,
+                domains: None,
+                ip: Some("8.8.8.8".into()),
+                port: Some(53),
+                protocol: Some("UDP".into()),
+                as_number: None,
+                as_country: None,
+                as_owner: None,
+                process: None,
+                description: None,
+                ports: None,
+                ips: None,
+            }],
+        };
+        let map = CustomDashMap::new("Whitelists");
+        map.insert("egress_test".into(), wl_info);
+        let model = Whitelists {
+            date: "June 18th 2025".into(),
+            signature: None,
+            whitelists: Arc::new(map),
+        };
+        overwrite_with_test_data(model).await;
+
+        // Build sessions: one ingress (local dst) and one egress non-matching
+        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let ingress_key = Session {
+            protocol: crate::sessions::Protocol::UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+            src_port: 12345,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            dst_port: 9999,
+        };
+        let egress_key = Session {
+            protocol: crate::sessions::Protocol::UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            src_port: 12345,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+            dst_port: 9999,
+        };
+        let now = Utc::now();
+        sessions.insert(
+            ingress_key.clone(),
+            SessionInfo {
+                session: ingress_key.clone(),
+                status: crate::sessions::SessionStatus::default(),
+                stats: crate::sessions::SessionStats::new(now),
+                is_local_src: false,
+                is_local_dst: true,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: None,
+                dst_service: None,
+                l7: None,
+                src_asn: None,
+                dst_asn: None,
+                is_whitelisted: WhitelistState::Unknown,
+                criticality: String::new(),
+                dismissed: false,
+                whitelist_reason: None,
+                uid: "i".into(),
+                last_modified: now,
+            },
+        );
+        sessions.insert(
+            egress_key.clone(),
+            SessionInfo {
+                session: egress_key.clone(),
+                status: crate::sessions::SessionStatus::default(),
+                stats: crate::sessions::SessionStats::new(now),
+                is_local_src: true,
+                is_local_dst: false,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: None,
+                dst_service: None,
+                l7: None,
+                src_asn: None,
+                dst_asn: None,
+                is_whitelisted: WhitelistState::Unknown,
+                criticality: String::new(),
+                dismissed: false,
+                whitelist_reason: None,
+                uid: "e".into(),
+                last_modified: now,
+            },
+        );
+
+        let whitelist_name = Arc::new(CustomRwLock::new("egress_test".into()));
+        let whitelist_exceptions = Arc::new(CustomRwLock::new(Vec::new()));
+        let whitelist_conformance = Arc::new(AtomicBool::new(true));
+        let last_exception_time = Arc::new(CustomRwLock::new(now));
+
+        // Run recompute
+        recompute_whitelist_for_sessions(
+            &whitelist_name,
+            &sessions,
+            &whitelist_exceptions,
+            &whitelist_conformance,
+            &last_exception_time,
+        )
+        .await;
+
+        // Ingress should be treated as conforming (egress-only policy)
+        let ingress = sessions.get(&ingress_key).unwrap();
+        assert_eq!(ingress.is_whitelisted, WhitelistState::Conforming);
+
+        // Egress non-matching should be non-conforming and in exceptions
+        let egress = sessions.get(&egress_key).unwrap();
+        assert_eq!(egress.is_whitelisted, WhitelistState::NonConforming);
+        let ex = whitelist_exceptions.read().await.clone();
+        assert!(ex.contains(&egress_key));
+        assert!(!ex.contains(&ingress_key));
+    }
     /// Test that WhitelistsJSON serialization works correctly
     #[test]
     fn test_whitelists_json_serialization() {
@@ -1129,6 +1795,7 @@ mod tests {
                 extends: None,
                 endpoints: vec![WhitelistEndpoint {
                     domain: None,
+                    domains: None,
                     ip: Some("192.168.1.1".to_string()),
                     port: Some(443),
                     protocol: Some("TCP".to_string()),
@@ -1137,6 +1804,8 @@ mod tests {
                     as_owner: None,
                     process: Some("test_process".to_string()),
                     description: Some("Auto-generated endpoint".to_string()),
+                    ports: None,
+                    ips: None,
                 }],
             }],
         };
@@ -1176,6 +1845,7 @@ mod tests {
                 extends: None,
                 endpoints: vec![WhitelistEndpoint {
                     domain: Some("example.com".to_string()),
+                    domains: None,
                     ip: Some("93.184.216.34".to_string()),
                     port: Some(443),
                     protocol: Some("TCP".to_string()),
@@ -1187,6 +1857,8 @@ mod tests {
                         "Auto-generated from session: 192.168.1.100:50000 -> 93.184.216.34:443"
                             .to_string(),
                     ),
+                    ports: None,
+                    ips: None,
                 }],
             }],
         };
@@ -1377,6 +2049,7 @@ mod tests {
             extends: None,
             endpoints: vec![WhitelistEndpoint {
                 domain: Some("example.com".to_string()),
+                domains: None,
                 ip: Some("192.168.1.1".to_string()),
                 port: Some(443),
                 protocol: Some("TCP".to_string()),
@@ -1388,6 +2061,8 @@ mod tests {
                     "Auto-generated from session: 192.168.1.100:50000 -> 192.168.1.1:443"
                         .to_string(),
                 ),
+                ports: None,
+                ips: None,
             }],
         };
 
@@ -1543,6 +2218,7 @@ mod tests {
                 extends: Some(vec!["base".to_string(), "builder".to_string()]),
                 endpoints: vec![WhitelistEndpoint {
                     domain: Some("test.example.com".to_string()),
+                    domains: None,
                     ip: None,
                     port: Some(8080),
                     protocol: Some("TCP".to_string()),
@@ -1551,6 +2227,8 @@ mod tests {
                     as_owner: None,
                     process: Some("nodejs".to_string()),
                     description: Some("Custom Node.js service".to_string()),
+                    ports: None,
+                    ips: None,
                 }],
             }],
         };

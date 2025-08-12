@@ -611,11 +611,13 @@ impl FlodbaddCapture {
         });
 
         // 4. Assemble the final Whitelists structure
-        let whitelist_info = WhitelistInfo {
+        let raw_info = WhitelistInfo {
             name: "custom_whitelist".to_string(),
             extends: current_extends, // preserve any existing inheritance chain
             endpoints: combined_endpoints,
         };
+        // Factorize the whitelist prior to returning
+        let whitelist_info = Whitelists::factorize_whitelist(&raw_info);
 
         let whitelists = Whitelists {
             date: Local::now().format("%B %dth %Y").to_string(),

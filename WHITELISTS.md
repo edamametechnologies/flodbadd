@@ -25,16 +25,23 @@ pub struct WhitelistInfo {
 
 // Network endpoint specification with comprehensive matching criteria
 pub struct WhitelistEndpoint {
-    pub domain: Option<String>,      // Domain name (supports wildcards: *.example.com)
-    pub ip: Option<String>,          // IP address or CIDR range
-    pub port: Option<u16>,           // Port number (None = any port)
-    pub protocol: Option<String>,    // Protocol (TCP, UDP, ICMP, etc.)
-    pub as_number: Option<u32>,      // Autonomous System number
-    pub as_country: Option<String>,  // Country code for the AS (case-insensitive)
-    pub as_owner: Option<String>,    // AS owner/organization name (case-insensitive)
-    pub process: Option<String>,     // Process name (case-insensitive)
-    pub description: Option<String>, // Human-readable description for documentation
+    pub domain: Option<String>,       // Single domain (wildcards supported)
+    pub domains: Option<Vec<String>>, // List of domains (wildcards supported)
+    pub ip: Option<String>,           // Single IP or CIDR
+    pub port: Option<u16>,            // Single port
+    pub protocol: Option<String>,     // Protocol (TCP, UDP, ICMP, etc.)
+    pub as_number: Option<u32>,       // Autonomous System number
+    pub as_country: Option<String>,   // Country code for the AS (case-insensitive)
+    pub as_owner: Option<String>,     // AS owner/organization name (case-insensitive)
+    pub process: Option<String>,      // Process name (case-insensitive)
+    pub description: Option<String>,  // Human-readable description for documentation
+    pub ports: Option<Vec<PortSpec>>, // List of ports and/or ranges
+    pub ips: Option<Vec<String>>,     // List of IP specs (IP, CIDR, or explicit range "start-end")
 }
+
+// Port specification supports a single port or an inclusive range
+#[serde(untagged)]
+pub enum PortSpec { Single(u16), Range { start: u16, end: u16 } }
 ```
 
 ### JSON Serialization Format
@@ -165,7 +172,7 @@ pub fn endpoint_matches_with_reason(
     endpoint: &WhitelistEndpoint,
 ) -> (bool, Option<String>) {
     // 1. Fundamental criteria must match first
-    if !port_matches(port, endpoint.port) {
+    if !ports_match(port, endpoint.port, &endpoint.ports) {
         return (false, Some(format!("Port mismatch: {} vs {:?}", port, endpoint.port)));
     }
     
@@ -190,7 +197,7 @@ pub fn endpoint_matches_with_reason(
     }
     
     if ip_specified {
-        if ip_matches(session_ip, &endpoint.ip) {
+        if ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips) {
             return check_as_criteria(as_number, as_country, as_owner, endpoint);
         } else if domain_specified {
             return (false, Some("Both domain and IP mismatch".to_string()));
@@ -330,7 +337,7 @@ fn wildcard_match(domain: &str, pattern: &str) -> bool {
         let (prefix, suffix) = pattern.split_at(star_pos);
         let suffix = &suffix[1..]; // Remove the '*'
         return domain.starts_with(prefix) && 
-               domain.endsWith(suffix) &&
+                domain.ends_with(suffix) &&
                domain.len() > prefix.len() + suffix.len();
     }
     
@@ -338,41 +345,17 @@ fn wildcard_match(domain: &str, pattern: &str) -> bool {
 }
 ```
 
-### CIDR and IP Range Matching
+### CIDR, IP List and IP Range Matching
 
 Comprehensive IP address and CIDR range matching:
 
 ```rust
-fn ip_matches(session_ip: Option<&str>, endpoint_ip: &Option<String>) -> bool {
-    let (Some(session_ip), Some(endpoint_ip)) = (session_ip, endpoint_ip.as_ref()) else {
-        return false;
-    };
-    
-    // Parse session IP
-    let session_addr: IpAddr = match session_ip.parse() {
-        Ok(addr) => addr,
-        Err(_) => return false,
-    };
-    
-    if endpoint_ip.contains('/') {
-        // CIDR notation
-        match endpoint_ip.parse::<IpNet>() {
-            Ok(network) => network.contains(&session_addr),
-            Err(_) => false,
-        }
-    } else {
-        // Exact IP match
-        match endpoint_ip.parse::<IpAddr>() {
-            Ok(endpoint_addr) => session_addr == endpoint_addr,
-            Err(_) => false,
-        }
-    }
-}
+fn ip_matches_any(session_ip: Option<&str>, endpoint_ip: &Option<String>, endpoint_ips: &Option<Vec<String>>) -> bool { /* see code */ }
 ```
 
 ## Integration with Session Analysis
 
-### Real-time Whitelist Evaluation
+### Real-time Whitelist Evaluation (Egress-only)
 
 The system integrates tightly with the session analysis pipeline:
 
@@ -393,7 +376,7 @@ pub async fn recompute_whitelist_for_sessions(
     let mut new_exceptions = Vec::new();
     let mut conformance = true;
     
-    // Evaluate all sessions against the current whitelist
+    // Evaluate only egress sessions (originating from self/local but not local-local) against the current whitelist
     for session_entry in sessions.iter() {
         let session_info = session_entry.value();
         
