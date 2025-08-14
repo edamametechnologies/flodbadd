@@ -365,6 +365,7 @@ impl Whitelists {
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         struct Key {
             domains: Vec<String>, // normalized, empty means no domain restriction
+            ip: String,
             protocol: Option<String>,
             as_number: Option<u32>,
             as_country: Option<String>,
@@ -457,6 +458,7 @@ impl Whitelists {
 
             let key = Key {
                 domains: domains_vec,
+                ip: ep.ip.clone().unwrap_or_default(),
                 protocol: ep.protocol.clone(),
                 as_number: ep.as_number,
                 as_country: ep.as_country.clone(),
@@ -532,6 +534,13 @@ impl Whitelists {
             // Dedup IPs strings
             ips.sort();
             ips.dedup();
+            let (ip, ips) = if ips.len() > 1 {
+                (None, Some(ips))
+            } else if ips.len() == 1 {
+                (Some(ips[0].clone()), None)
+            } else {
+                (None, None)
+            };
 
             // Preserve single domain when exactly one, else store in `domains`
             let (domain_single, domains_list) = if key.domains.len() == 1 {
@@ -545,7 +554,7 @@ impl Whitelists {
             endpoints.push(WhitelistEndpoint {
                 domain: domain_single,
                 domains: domains_list,
-                ip: None,
+                ip: ip,
                 port: None,
                 protocol: key.protocol,
                 as_number: key.as_number,
@@ -558,7 +567,7 @@ impl Whitelists {
                 } else {
                     Some(merged_ports)
                 },
-                ips: if ips.is_empty() { None } else { Some(ips) },
+                ips: ips,
             });
         }
 
@@ -1299,7 +1308,7 @@ pub async fn recompute_whitelist_for_sessions(
 
     trace!(
         "Applying {} whitelist evaluations with minimal lock time",
-        evaluation_results.len()
+        evaluation_results.len(),
     );
 
     // Prepare exception list
