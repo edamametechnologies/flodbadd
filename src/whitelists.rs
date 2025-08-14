@@ -551,22 +551,35 @@ impl Whitelists {
                 (None, Some(key.domains.clone()))
             };
 
+            let (port, ports) = if merged_ports.len() == 1 {
+                match merged_ports[0] {
+                    PortSpec::Single(v) => (Some(v), None),
+                    PortSpec::Range { start, end } => {
+                        if start == end {
+                            (Some(start), None)
+                        } else {
+                            (None, Some(merged_ports))
+                        }
+                    }
+                }
+            } else if merged_ports.is_empty() {
+                (None, None)
+            } else {
+                (None, Some(merged_ports))
+            };
+
             endpoints.push(WhitelistEndpoint {
                 domain: domain_single,
                 domains: domains_list,
-                ip: ip,
-                port: None,
+                ip,
+                port,
                 protocol: key.protocol,
                 as_number: key.as_number,
                 as_country: key.as_country,
                 as_owner: key.as_owner,
                 process: key.process,
                 description,
-                ports: if merged_ports.is_empty() {
-                    None
-                } else {
-                    Some(merged_ports)
-                },
+                ports,
                 ips: ips,
             });
         }
