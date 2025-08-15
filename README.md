@@ -74,7 +74,7 @@ Flodbadd transforms raw network packets into enriched, security-aware sessions a
 
 ## Anomaly Detection System
 
-Flodbadd implements sophisticated on-device anomaly detection using an Extended Isolation Forest model:
+Flodbadd implements sophisticated on-device anomaly detection using an Extended Isolation Forest model. For a deep dive into the design, feature engineering, training pipeline, thresholds, diagnostics, and operational cadence, see [ANALYZER.md](./ANALYZER.md).
 
 ### Feature Engineering
 Each network session is converted to a 10-dimensional feature vector:
