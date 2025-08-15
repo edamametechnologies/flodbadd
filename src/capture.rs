@@ -551,7 +551,15 @@ impl FlodbaddCapture {
         }
     }
 
-    pub async fn augment_custom_whitelists(&self) -> Result<String> {
+    /// Augment custom whitelists by merging new whitelist with the existing custom whitelist
+    ///
+    /// # Arguments
+    /// * `self` - Reference to the FlodbaddCapture instance
+    ///
+    /// # Returns
+    /// * `Result<(String, f64)>` - Returns a tuple containing the new whitelist JSON string and the pourcentage of differences found between the old and the new custom
+    pub async fn augment_custom_whitelists(&self) -> Result<(String, f64)> {
+        let old_whitelist_json = crate::whitelists::current_json().await;
         // Ensure sessions are up to date so that exceptions have latest data
         self.update_sessions().await;
 
@@ -629,9 +637,13 @@ impl FlodbaddCapture {
             },
         };
 
-        let whitelist_json: WhitelistsJSON = whitelists.into();
-        let json_str = serde_json::to_string(&whitelist_json)?;
-        Ok(json_str)
+        let new_whitelist_json: WhitelistsJSON = whitelists.into();
+        // Check if the old whitelist is the same as the new one
+        let number_of_differences = new_whitelist_json
+            .clone()
+            .compare_whitelist(old_whitelist_json);
+        let json_str = serde_json::to_string(&new_whitelist_json)?;
+        Ok((json_str, number_of_differences))
     }
 
     pub async fn merge_custom_whitelists(
