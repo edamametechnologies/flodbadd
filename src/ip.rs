@@ -178,6 +178,17 @@ pub fn init_local_cache(interfaces: &FlodbaddInterfaces) {
                 FlodbaddInterfaceAddrTypeV6::LinkLocal(_info)
                 | FlodbaddInterfaceAddrTypeV6::Local(_info) => continue,
             };
+            // Guard against invalid/unknown prefixes. A prefix of 0 would cause every IPv6
+            // address to match the LAN cache (mask=0 → network=0), effectively making all
+            // IPv6 appear local and breaking global/local detection.
+            if prefix == 0 {
+                warn!(
+                    "Skipping IPv6 cache entry with invalid prefix 0 for address {} on interface {}",
+                    ip,
+                    interface.name
+                );
+                continue;
+            }
             let masked = apply_mask_v6(ip, prefix);
             let net = ipv6_to_u128(&masked);
             LAN_IPV6_LOCAL_NETS.entry(prefix).or_default().insert(net);
