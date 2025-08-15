@@ -73,7 +73,7 @@ pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
-pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 24; // 24 hours
+pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 6; // 6 hours
 pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest training
 pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
 
@@ -111,6 +111,10 @@ struct IsolationForestModel {
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
+    /// Per-UID sampling counters used to downsample repeated snapshots from the same flow
+    per_uid_downsample: CustomDashMap<String, u32>,
+    /// Only 1 out of `downsample_factor` snapshots per UID will be kept in `recent_data`
+    downsample_factor: u32,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: Arc<AtomicBool>,
     /// JoinHandle for the currently running training task (if any).  Only one training task is
@@ -138,16 +142,53 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             session_cache: CustomDashMap::new("session_cache"),
+            per_uid_downsample: CustomDashMap::new("per_uid_downsample"),
+            downsample_factor: 5,
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
-            min_training_interval: Duration::hours(24),
+            min_training_interval: Duration::hours(6),
         }
     }
 
     /// Add new session data to the analyzer's memory.
     /// If the buffer is full, remove the oldest entry.
     fn add_session_data(&mut self, session: &SessionInfo) {
+        // Skip known non-representative samples for training to avoid biasing the model
+        let crit = session.criticality.as_str();
+        let is_blacklisted = crit.contains("blacklist:");
+        let is_flagged_anomalous =
+            crit.contains("anomaly:suspicious") || crit.contains("anomaly:abnormal");
+
+        if is_blacklisted || is_flagged_anomalous {
+            trace!(
+                "add_session_data: Skipping training sample for {} (blacklisted: {}, anomalous: {})",
+                session.uid,
+                is_blacklisted,
+                is_flagged_anomalous
+            );
+            return;
+        }
+
+        // Downsample repeated snapshots from the same UID (keep only 1 in `downsample_factor`)
+        let next_count = self
+            .per_uid_downsample
+            .get(&session.uid)
+            .map(|e| *e.value())
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.per_uid_downsample
+            .insert(session.uid.clone(), next_count);
+        if self.downsample_factor > 1 && next_count % self.downsample_factor != 0 {
+            trace!(
+                "add_session_data: Downsampling UID {} (count={}, factor={})",
+                session.uid,
+                next_count,
+                self.downsample_factor
+            );
+            return;
+        }
+
         let features = compute_features(session); // Compute and use all 10 features
 
         if self.recent_data.len() >= self.max_samples {
@@ -652,7 +693,8 @@ impl IsolationForestModel {
 
         let final_criticality = final_tags.join(",");
 
-        // Only update if the value actually changed
+        // Only update if the value actually changed. Do not refresh last_modified otherwise,
+        // to allow caches/retention to expire naturally.
         if session.criticality != final_criticality {
             if detailed_logging {
                 debug!(
@@ -662,17 +704,6 @@ impl IsolationForestModel {
             }
             session.criticality = final_criticality;
             session.last_modified = chrono::Utc::now();
-        } else {
-            // Ensure last_modified is updated ONLY if analysis happened.
-            if score_and_features.is_some() {
-                session.last_modified = chrono::Utc::now();
-                if detailed_logging {
-                    debug!(
-                        "Re-analyzed session {} but criticality '{}' remains unchanged",
-                        session.uid, session.criticality
-                    );
-                }
-            }
         }
 
         if detailed_logging && update_time.elapsed().as_millis() > 20 {
@@ -736,8 +767,8 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
         None => 0.0,
     };
 
-    // 2. Duration
-    let duration = match session.stats.end_time {
+    // 2. Duration (log-scaled)
+    let duration_raw = match session.stats.end_time {
         Some(end_time) => {
             sanitize((end_time - session.stats.start_time).num_milliseconds() as f64 / 1000.0)
         }
@@ -746,12 +777,15 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
                 / 1000.0,
         ),
     };
+    let duration = sanitize((duration_raw + 1.0).ln());
 
-    // 3. Total bytes
-    let bytes = sanitize((session.stats.inbound_bytes + session.stats.outbound_bytes) as f64);
+    // 3. Total bytes (log-scaled)
+    let bytes_raw = sanitize((session.stats.inbound_bytes + session.stats.outbound_bytes) as f64);
+    let bytes = sanitize((bytes_raw + 1.0).ln());
 
-    // 4. Total packets
-    let packets = sanitize((session.stats.orig_pkts + session.stats.resp_pkts) as f64);
+    // 4. Total packets (log-scaled)
+    let packets_raw = sanitize((session.stats.orig_pkts + session.stats.resp_pkts) as f64);
+    let packets = sanitize((packets_raw + 1.0).ln());
 
     // 5. Segment interarrival
     let segment_interarrival = sanitize(session.stats.segment_interarrival);
@@ -907,7 +941,7 @@ fn compute_dynamic_thresholds(
     let mut scores: Vec<f64> = model
         .recent_data // This contains [f64; NUM_FEATURES]
         .iter()
-        .map(|features| forest.score(features)) // Score using NUM_FEATURES
+        .map(|features| forest.score_with_recursion_cap(features, 12)) // Match classification scoring
         .collect();
 
     if scores.is_empty() {
