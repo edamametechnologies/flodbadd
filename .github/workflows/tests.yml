@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'dev'
-      - 'main'
+      - "dev"
+      - "main"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -68,7 +68,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # We need to wait a long time for musl aarch64 due to the use of qemu
     timeout-minutes: 240
-    
+
     steps:
       - name: Setup EDAMAME Posture
         uses: edamametechnologies/edamame_posture_action@v0
@@ -212,7 +212,7 @@ jobs:
         if: steps.tests.outcome != 'success'
         uses: slackapi/slack-github-action@v1.26.0
         with:
-          channel-id: 'C072J0U9TH7'
+          channel-id: "C072J0U9TH7"
           slack-message: "Tests ran in ${{ github.workflow }} for ${{ github.repository }} for ${{ runner.os }} on branch ${{ github.ref }} failed: see https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -290,11 +290,17 @@ jobs:
         continue-on-error: true
 
       # Manual checkout for containers (actions/checkout@v4 requires node20 which is not supported on older Ubuntu containers)
-      - name: Manual checkout for containers
-        shell: bash
-        run: |
-          git clone https://github.com/${{ github.repository }}.git .
-          git checkout ${{ github.ref_name }}
+      # - name: Manual checkout for containers
+      #   shell: bash
+      #   run: |
+      #     git clone https://github.com/${{ github.repository }}.git .
+      #     git checkout ${{ github.ref_name }}
+
+      - name: Checkout (Node16-compatible)
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
 
       - name: Install additional packages
         shell: bash
@@ -320,7 +326,7 @@ jobs:
           #rustup component add --toolchain nightly llvm-tools-preview
           # Use nightly by default so that build.rs picks it up automatically
           #echo "RUSTUP_TOOLCHAIN=nightly" >> $HOME/.cargo/env
-          
+
       - name: Run tests
         id: tests
         shell: bash
@@ -343,7 +349,7 @@ jobs:
         if: steps.tests.outcome != 'success' && !contains(matrix.container_name, '18.04')
         uses: slackapi/slack-github-action@v1.26.0
         with:
-          channel-id: 'C072J0U9TH7'
+          channel-id: "C072J0U9TH7"
           slack-message: |
             *Container Test Results for ${{ github.repository }} (${{ matrix.container_name }})*:
             - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
@@ -499,7 +505,7 @@ jobs:
         if: steps.tests.outcome != 'success'
         uses: slackapi/slack-github-action@v1.26.0
         with:
-          channel-id: 'C072J0U9TH7'
+          channel-id: "C072J0U9TH7"
           slack-message: |
             *Alpine Test Results for ${{ github.repository }} (${{ matrix.arch }})*:
             - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
