@@ -298,9 +298,6 @@ jobs:
 
       - name: Checkout (Node16-compatible)
         uses: actions/checkout@v3
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
 
       - name: Install additional packages
         shell: bash
