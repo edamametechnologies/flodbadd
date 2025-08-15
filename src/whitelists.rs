@@ -91,7 +91,6 @@ impl WhitelistsJSON {
         let mut different = 0;
         let mut total = 0;
         for new_whitelist in &self.whitelists {
-            println!("Whitelist entry: {:#?}", new_whitelist);
             // Let's find the whitelist entry in the old whitelist
             let old_whitelist = old_whitelist_json
                 .whitelists
@@ -100,7 +99,6 @@ impl WhitelistsJSON {
             for new_endpoint in &new_whitelist.endpoints {
                 // Check if the old whitelist have this whitelist
                 if old_whitelist.is_none() {
-                    println!("Old whitelist not found for {}", new_whitelist.name);
                     total += 1;
                     different += 1;
                     continue;
@@ -108,11 +106,9 @@ impl WhitelistsJSON {
                 let old_whitelist_endpoints = old_whitelist.unwrap().endpoints.clone();
                 // Check if the new endpoint is in the old whitelist endpoints
                 if old_whitelist_endpoints.contains(new_endpoint) {
-                    println!("Endpoint already exists: {new_endpoint:?}");
                     total += 1;
                     continue; // No difference, skip to next endpoint
                 } else {
-                    println!("New endpoint found: {new_endpoint:?}");
                     total += 1;
                     different += 1; // Found a new endpoint
                 }
@@ -1648,7 +1644,6 @@ mod tests {
             .unwrap();
         // Ports should be merged into a single range 80..=82
         let ports = a.ports.as_ref().unwrap();
-        println!("Merged ports for a.com: {:?}", a.ports);
         assert_eq!(ports.len(), 2);
 
         // b.com remains separate
@@ -1716,7 +1711,7 @@ mod tests {
 
         let cap = crate::capture::FlodbaddCapture::new();
         let out = cap.augment_custom_whitelists().await.expect("augment ok");
-        let parsed: WhitelistsJSON = serde_json::from_str(&out).unwrap();
+        let parsed: WhitelistsJSON = serde_json::from_str(&out.0).unwrap();
         let info = parsed
             .whitelists
             .iter()
