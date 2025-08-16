@@ -1905,9 +1905,13 @@ impl FlodbaddCapture {
     ) {
         if update_in_progress.swap(true, Ordering::AcqRel) {
             // Another thread is already doing the heavy work – just mark that
-            // one more pass is required and return.
+            // one more pass is required and wait until it completes so callers
+            // that invoked update_sessions() observe a consistent view.
             update_pending.store(true, Ordering::Release);
-            debug!("update_sessions_internal: worker already running – marked pending");
+            debug!("update_sessions_internal: worker already running – waiting for completion");
+            while update_in_progress.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
             return;
         }
 
@@ -2004,16 +2008,15 @@ impl FlodbaddCapture {
 
             debug!("update_sessions finished");
 
-            // Reset the flag to indicate update is complete
-            update_in_progress.store(false, Ordering::Relaxed);
-
-            // If another thread queued work while we were busy we loop once more
+            // If another thread queued work while we were busy we loop once more.
+            // Keep the in-progress flag set across iterations to avoid a window
+            // where waiters briefly observe completion between passes.
             if !update_pending.swap(false, Ordering::AcqRel) {
-                // No pending work – release the guard
+                // No pending work – release the guard and exit
                 update_in_progress.store(false, Ordering::Release);
                 break;
             }
-            // Otherwise stay in the loop and process again immediately
+            // Otherwise stay in the loop and process again immediately (flag remains true)
             debug!("update_sessions_internal: processing additional queued update");
         }
     }
