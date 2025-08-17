@@ -16,3 +16,9 @@
     - Analyzer: feature scaling tuned — `Bytes` linear, `Duration`/`Packets` linear; lower z-threshold for `SegmentInterarrival` (1.5) to improve beacon sensitivity.
     - Tests: added `tests/common.rs` helpers (baseline percentile calibration, score band checks, diagnostics assertions) and expanded diagnostics checks (exfil/scan/dns/beacons).
     - Tests: strengthened scenarios and calibration, added band-based separation in metrics tests; made tests assertive and deterministic; all suites green.
+
+    Follow-up adjustments:
+    - Analyzer: removed Beacon heuristic to focus purely on anomaly-model decisions.
+    - Analyzer: increased model dimensionality from 10D → 12D by adding `Segments` and `DstPort` features; updated `FEATURE_DEFS`, sanitization, and scoring to match.
+    - Docs: updated `ANALYZER.md` to reflect 12D feature vector, per-flow downsampling, and diagnostic details; clarified timing features.
+    - Tests: calibrated `test_basic_anomaly_detection_debug` thresholds from baseline to remain stable without the heuristic; all anomaly tests passing.

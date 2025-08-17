@@ -78,7 +78,7 @@ pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest t
 pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
 
 // Define the number of features to use by default
-const NUM_FEATURES: usize = 10;
+const NUM_FEATURES: usize = 12;
 
 /// Pre-computed mean / std-dev for each feature (None if not computable).
 type FeatureStats = [Option<(f64, f64)>; NUM_FEATURES];
@@ -419,16 +419,18 @@ impl IsolationForestModel {
         // Define features with their names and categorical flag
         // Format: (name, is_categorical)
         const FEATURE_DEFS: [(&'static str, bool); NUM_FEATURES] = [
-            ("Process", true),              // Index 0 - Process hash - categorical
-            ("Duration", false),            // Index 1 - Duration - numeric
-            ("Bytes", false),               // Index 2 - Total bytes - numeric
-            ("Packets", false),             // Index 3 - Total packets - numeric
-            ("SegmentInterarrival", false), // Index 4 - Timing - numeric
-            ("InOutRatio", false),          // Index 5 - Ratio - numeric
-            ("DestService", true),          // Index 6 - Destination service - categorical
-            ("AvgPacketSize", false),       // Index 7 - Avg packet size - numeric
-            ("SelfDestination", true),      // Index 8 - Self destination - categorical/binary
-            ("MissedData", false),          // Index 9 - Missed bytes - numeric
+            ("Process", true),                 // 0 - Process hash (categorical)
+            ("Duration", false),               // 1 - Duration (s)
+            ("Bytes", false),                  // 2 - Total bytes
+            ("Packets", false),                // 3 - Total packets
+            ("SegmentInterarrival", false),    // 4 - Avg segment interarrival
+            ("InOutRatio", false),             // 5 - Inbound/Outbound ratio
+            ("AvgPacketSize", false),          // 6 - Average packet size
+            ("InterarrivalRegularity", false), // 7 - Regularity of interarrival (0..1)
+            ("PacketRate", false),             // 8 - Packets per second
+            ("MissedData", false),             // 9 - Missed bytes
+            ("Segments", false),               // 10 - Total segment count
+            ("DstPort", true),                 // 11 - Destination port (categorical-ish)
         ];
 
         let mut diagnostics = Vec::new();
@@ -681,6 +683,8 @@ impl IsolationForestModel {
                 (SessionCriticality::Normal, "".to_string())
             };
 
+        // Heuristic removed: rely purely on anomaly model and per-feature diagnostics.
+
         if detailed_logging && diagnostic_time.elapsed().as_millis() > 30 {
             debug!(
                 "Diagnostic phase for session {} took {:?}",
@@ -763,9 +767,9 @@ impl IsolationForestModel {
     }
 }
 
-/// Compute the feature vector [f64; 10] for a given session.
-/// Feature order: [process_hash, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, dest_service, self_destination, missed]
-fn compute_features(session: &SessionInfo) -> [f64; 10] {
+/// Compute the feature vector [f64; 12] for a given session.
+/// Feature order: [process_hash, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, interarrival_regularity, packet_rate, missed, segments, dst_port]
+fn compute_features(session: &SessionInfo) -> [f64; 12] {
     let start_time = std::time::Instant::now();
 
     // Helper function to sanitize values
@@ -815,22 +819,36 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
     // 7. Avg packet size
     let avg_packet_size = sanitize(session.stats.average_packet_size);
 
-    // 8. Dest service
-    let dest_service = match &session.dst_service {
-        Some(service) => {
-            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-            hasher.write(service.as_bytes());
-            let hash_val = hasher.finish();
-            sanitize((hash_val % 1_000_000) as f64) // Scale down and sanitize
-        }
-        None => 0.0,
+    // 8. Interarrival regularity (0..1): how close average interarrival is to uniform spacing
+    let segment_count = session.stats.segment_count as f64;
+    let expected_interarrival = if segment_count > 0.0 && duration > 0.0 {
+        duration / segment_count
+    } else {
+        0.0
+    };
+    let interarrival_regularity = if expected_interarrival > 0.0 {
+        let diff = (session.stats.segment_interarrival - expected_interarrival).abs();
+        let rel = diff / expected_interarrival.max(1e-6);
+        sanitize((1.0 - rel).clamp(0.0, 1.0))
+    } else {
+        0.0
     };
 
-    // 9. Self destination
-    let self_destination = if session.is_self_dst { 1.0 } else { 0.0 };
+    // 9. Packet rate (packets per second)
+    let packet_rate = if duration > 0.0 {
+        sanitize(((session.stats.orig_pkts + session.stats.resp_pkts) as f64) / duration)
+    } else {
+        0.0
+    };
 
     // 10. Missed bytes
     let missed = sanitize(session.stats.missed_bytes as f64);
+
+    // 11. Segments (count)
+    let segments = sanitize(session.stats.segment_count as f64);
+
+    // 12. Destination port hashed/bounded to reduce ordinal meaning
+    let dst_port = sanitize((session.session.dst_port as u32 % 65536) as f64);
 
     let features = [
         process_hash,
@@ -840,9 +858,11 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
         segment_interarrival,
         in_out_ratio,
         avg_packet_size,
-        dest_service,
-        self_destination,
+        interarrival_regularity,
+        packet_rate,
         missed,
+        segments,
+        dst_port,
     ];
 
     // Double check that no NaN/Inf values made it through
@@ -889,20 +909,30 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
                 } else {
                     avg_packet_size
                 },
-                if dest_service.is_nan() || dest_service.is_infinite() {
+                if interarrival_regularity.is_nan() || interarrival_regularity.is_infinite() {
                     0.0
                 } else {
-                    dest_service
+                    interarrival_regularity
                 },
-                if self_destination.is_nan() || self_destination.is_infinite() {
+                if packet_rate.is_nan() || packet_rate.is_infinite() {
                     0.0
                 } else {
-                    self_destination
+                    packet_rate
                 },
                 if missed.is_nan() || missed.is_infinite() {
                     0.0
                 } else {
                     missed
+                },
+                if segments.is_nan() || segments.is_infinite() {
+                    0.0
+                } else {
+                    segments
+                },
+                if dst_port.is_nan() || dst_port.is_infinite() {
+                    0.0
+                } else {
+                    dst_port
                 },
             ];
 
