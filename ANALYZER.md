@@ -8,31 +8,33 @@ This document explains the anomaly detection subsystem in Flodbadd: the algorith
 - Crate: `extended-isolation-forest` (see the workspace `extended-isolation-forest/`).
 - Why: Isolation Forest is robust, fast, and works well on-device with streaming data.
 
-## Feature Engineering (10D)
+## Feature Engineering (12D)
 
-Each session is converted into a fixed-length vector `[f64; 10]` in `flodbadd/src/analyzer.rs::compute_features()`:
+Each session is converted into a fixed-length vector `[f64; 12]` in `flodbadd/src/analyzer.rs::compute_features()`:
 
 1) Process Hash (categorical hashed → numeric)
-2) Duration (seconds, log-scaled ln(1 + x))
-3) Total Bytes (log-scaled ln(1 + x))
-4) Total Packets (log-scaled ln(1 + x))
-5) Segment Interarrival (numeric)
+2) Duration (seconds)
+3) Total Bytes (numeric)
+4) Total Packets (numeric)
+5) Segment Interarrival (seconds)
 6) Inbound/Outbound Ratio (numeric)
-7) Average Packet Size (numeric)
-8) Destination Service (categorical hashed → numeric)
-9) Self Destination (binary 0/1)
+7) Average Packet Size (bytes)
+8) Interarrival Regularity (0..1)
+9) Packet Rate (packets/second)
 10) Missed Bytes (numeric)
+11) Segments (count)
+12) Destination Port (categorical hashed)
 
 Notes:
 - Categorical values are hashed and mapped to bounded numeric ranges.
-- Heavy‑tailed numerics (Duration/Bytes/Packets) are log‑scaled to stabilize splits and reduce false positives over long capture windows.
+- Heavy‑tailed numerics are currently kept linear (Duration/Bytes/Packets) to preserve separation for extreme cases; Segment Interarrival and Packet Rate capture timing behaviour.
 - All features are sanitized; any NaN/Inf becomes 0.0.
 
 ## Training Data Pipeline
 
 - Sliding window buffer: `recent_data` (default capacity: 300 samples).
 - Deduplication: before training, duplicate feature vectors are removed.
-- Downsampling per UID: repeated snapshots of the same flow are downsampled (default: keep 1 out of 5).
+- Downsampling per flow-signature (5‑tuple): repeated snapshots of the same `(protocol, src_ip, src_port, dst_ip, dst_port)` are downsampled (default: keep 1 out of 5). The first snapshot is always kept.
 - Exclusions: sessions already tagged as `blacklist:*` or `anomaly:suspicious|abnormal` are excluded from training to avoid contaminating the baseline.
 - Sanitization: all inputs are validated prior to insertion.
 
@@ -41,7 +43,7 @@ Notes:
 - Trees: 10 (n<10), 15 (n<50), else 25.
 - Sample size: min(128, n) with a lower bound of 1.
 - Max tree depth: 6 (cap to keep trees shallow and fast).
-- Extension level: `NUM_FEATURES - 1` (full extended iForest in 10D).
+- Extension level: `NUM_FEATURES - 1` (full extended iForest in 12D).
 
 Training is performed on a blocking thread (spawn_blocking) and the result is integrated atomically when ready.
 
@@ -81,13 +83,14 @@ During warm‑up, sessions are marked with `anomaly:normal/warming_up` (non‑de
 
 - We compute simple per‑feature statistics (mean/std‑dev) from `recent_data`.
 - For numeric features with variance, we compute a z‑score; values with |z| ≥ 2.5 are marked `UnusuallyHigh` or `UnusuallyLow`.
+- `SegmentInterarrival` uses a more sensitive threshold (1.5) to catch timing anomalies such as periodic beacons.
 - For numeric features with ≈0 variance, any different value is marked `DeviatesFromNorm`.
-- For categorical features, we avoid z‑scores on hashes. We only flag `Unusual` if the training set shows ≈0 variance and the current value differs.
+- For categorical‑encoded features (hashes), we avoid z‑scores. If the training set shows ≈0 variance and the current value differs, it is marked `Unusual`.
 - If no specific features stand out but the overall score is high, we return `OverallScoreHigh`.
 
 Examples:
 - `anomaly:abnormal/Duration:UnusuallyHigh/Bytes:UnusuallyHigh`
-- `anomaly:suspicious/DestService:Unusual`
+- `anomaly:suspicious/SegmentInterarrival:UnusuallyHigh/PacketRate:UnusuallyHigh`
 
 ## Analysis Loop and Throttling
 
@@ -109,7 +112,7 @@ Examples:
 
 ## Configuration and Testing Hooks
 
-- `downsample_factor`: per‑UID sampling of training vectors (default 5).
+- `downsample_factor`: per‑flow sampling of training vectors (default 5).
 - Warm‑up and retrain intervals are constants to keep code simple and safe; can be tuned if needed.
 - Test helpers exist to disable warm‑up and set custom thresholds.
 
@@ -119,4 +122,4 @@ Examples:
 - Log‑scaling heavy‑tailed features stabilizes the model across long runs.
 - Excluding blacklisted/anomalous flows from training keeps the baseline clean.
 - Using the same scoring API for both thresholding and classification eliminates inconsistent scaling.
-- Per‑UID downsampling reduces duplicate snapshots from long‑lived connections.
+- Per‑flow downsampling reduces duplicate snapshots from long‑lived connections.
