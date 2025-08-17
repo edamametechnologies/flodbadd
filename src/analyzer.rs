@@ -111,9 +111,9 @@ struct IsolationForestModel {
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
-    /// Per-UID sampling counters used to downsample repeated snapshots from the same flow
-    per_uid_downsample: CustomDashMap<String, u32>,
-    /// Only 1 out of `downsample_factor` snapshots per UID will be kept in `recent_data`
+    /// Per-flow sampling counters used to downsample repeated snapshots from the same flow signature
+    per_flow_downsample: CustomDashMap<u64, u32>,
+    /// Only 1 out of `downsample_factor` snapshots per flow signature will be kept in `recent_data`
     downsample_factor: u32,
     /// Indicates if a training task is currently running. Prevents spawning overlapping CPU heavy jobs.
     training_in_progress: Arc<AtomicBool>,
@@ -142,7 +142,7 @@ impl IsolationForestModel {
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             session_cache: CustomDashMap::new("session_cache"),
-            per_uid_downsample: CustomDashMap::new("per_uid_downsample"),
+            per_flow_downsample: CustomDashMap::new("per_flow_downsample"),
             downsample_factor: 5,
             training_in_progress: Arc::new(AtomicBool::new(false)),
             training_handle: None,
@@ -170,16 +170,27 @@ impl IsolationForestModel {
             return;
         }
 
-        // Downsample repeated snapshots from the same UID (keep only 1 in `downsample_factor`)
+        // Downsample repeated snapshots from the same flow signature (keep only 1 in `downsample_factor`)
+        let flow_sig = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            // Stable signature: src_ip, src_port, dst_ip, dst_port, protocol
+            session.session.protocol.hash(&mut hasher);
+            session.session.src_ip.hash(&mut hasher);
+            session.session.src_port.hash(&mut hasher);
+            session.session.dst_ip.hash(&mut hasher);
+            session.session.dst_port.hash(&mut hasher);
+            hasher.finish()
+        };
         let next_count = self
-            .per_uid_downsample
-            .get(&session.uid)
+            .per_flow_downsample
+            .get(&flow_sig)
             .map(|e| *e.value())
             .unwrap_or(0)
             .saturating_add(1);
-        self.per_uid_downsample
-            .insert(session.uid.clone(), next_count);
-        if self.downsample_factor > 1 && next_count % self.downsample_factor != 0 {
+        self.per_flow_downsample.insert(flow_sig, next_count);
+        // Accept the first snapshot for each flow signature, then every Nth thereafter
+        if self.downsample_factor > 1 && (next_count % self.downsample_factor) != 1 {
             trace!(
                 "add_session_data: Downsampling UID {} (count={}, factor={})",
                 session.uid,
@@ -421,7 +432,10 @@ impl IsolationForestModel {
         ];
 
         let mut diagnostics = Vec::new();
-        let z_score_threshold = 2.5; // Threshold for considering a feature unusual
+        // Base z-score threshold for considering a feature unusual. Some features use a
+        // slightly more sensitive threshold to improve detection of specific behaviours
+        // (e.g., periodic beacons via SegmentInterarrival).
+        let base_z_score_threshold = 2.5;
 
         for i in 0..NUM_FEATURES {
             let feature_start = std::time::Instant::now();
@@ -474,11 +488,18 @@ impl IsolationForestModel {
                         let z_score = (features[i] - mean) / std_dev;
                         debug!("Numerical feature {} z-score: {}", feature_name, z_score);
 
-                        if z_score >= z_score_threshold {
+                        // Feature-specific z-score thresholds to improve sensitivity where needed
+                        let feature_z_threshold = match feature_name {
+                            // Lower threshold improves detection of periodic short-interval beacons
+                            "SegmentInterarrival" => 1.5,
+                            _ => base_z_score_threshold,
+                        };
+
+                        if z_score >= feature_z_threshold {
                             // Use more descriptive term for high values
                             diagnostics.push(format!("{}:UnusuallyHigh", feature_name));
                             debug!("Added unusually high feature: {}", feature_name);
-                        } else if z_score <= -z_score_threshold {
+                        } else if z_score <= -feature_z_threshold {
                             // Use more descriptive term for low values
                             diagnostics.push(format!("{}:UnusuallyLow", feature_name));
                             debug!("Added unusually low feature: {}", feature_name);
@@ -767,7 +788,7 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
         None => 0.0,
     };
 
-    // 2. Duration (log-scaled)
+    // 2. Duration (keep linear scale for sensitivity)
     let duration_raw = match session.stats.end_time {
         Some(end_time) => {
             sanitize((end_time - session.stats.start_time).num_milliseconds() as f64 / 1000.0)
@@ -777,15 +798,13 @@ fn compute_features(session: &SessionInfo) -> [f64; 10] {
                 / 1000.0,
         ),
     };
-    let duration = sanitize((duration_raw + 1.0).ln());
+    let duration = duration_raw;
 
-    // 3. Total bytes (log-scaled)
-    let bytes_raw = sanitize((session.stats.inbound_bytes + session.stats.outbound_bytes) as f64);
-    let bytes = sanitize((bytes_raw + 1.0).ln());
+    // 3. Total bytes (linear scale to preserve separation for very large transfers)
+    let bytes = sanitize((session.stats.inbound_bytes + session.stats.outbound_bytes) as f64);
 
-    // 4. Total packets (log-scaled)
-    let packets_raw = sanitize((session.stats.orig_pkts + session.stats.resp_pkts) as f64);
-    let packets = sanitize((packets_raw + 1.0).ln());
+    // 4. Total packets (keep linear scale for sensitivity)
+    let packets = sanitize((session.stats.orig_pkts + session.stats.resp_pkts) as f64);
 
     // 5. Segment interarrival
     let segment_interarrival = sanitize(session.stats.segment_interarrival);
@@ -1931,6 +1950,31 @@ impl SessionAnalyzer {
                         .training_in_progress
                         .store(false, Ordering::Release);
                 }
+            }
+        }
+    }
+
+    /// Force a training run on the current recent_data and immediately integrate the model.
+    /// Testing helper to avoid waiting for scheduled training.
+    pub async fn force_train_for_testing(&self) {
+        let model_option_guard = self.model.read().await;
+        if let Some(model_rw) = &*model_option_guard {
+            let mut model_write = model_rw.write().await;
+            model_write.train_model(true).await;
+            if let Some(handle) = &mut model_write.training_handle {
+                match handle.await {
+                    Ok(Ok(forest)) => {
+                        model_write.forest = Some(forest);
+                        model_write.last_training_time = Utc::now();
+                    }
+                    _ => {
+                        // leave forest as-is on error
+                    }
+                }
+                model_write.training_handle = None;
+                model_write
+                    .training_in_progress
+                    .store(false, Ordering::Release);
             }
         }
     }

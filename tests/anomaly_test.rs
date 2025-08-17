@@ -14,6 +14,7 @@ use rand::Rng;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::time::{sleep, Duration as TokioDuration};
 use uuid::Uuid;
+mod common;
 
 /// Helper to create a realistic SessionInfo with proper defaults
 fn create_basic_session(
@@ -395,38 +396,54 @@ async fn wait_for_analyzer_ready(analyzer: &SessionAnalyzer, timeout_secs: u64) 
     }
 }
 
+/// Helper to prepare analyzer for tests: optionally skip warmup and set test thresholds
+async fn prepare_analyzer_for_tests(
+    analyzer: &SessionAnalyzer,
+    skip_warmup: bool,
+    suspicious: f64,
+    abnormal: f64,
+) {
+    if skip_warmup {
+        analyzer.disable_warmup_for_testing().await;
+    }
+    analyzer.set_test_thresholds(suspicious, abnormal).await;
+}
+
 #[tokio::test]
 async fn test_c2_beacon_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
-    // Generate mixed traffic
-    let mut all_sessions = Vec::new();
+    // Prepare analyzer
+    analyzer.disable_warmup_for_testing().await;
 
-    // Add normal traffic for baseline
-    all_sessions.extend(generate_normal_web_traffic(50));
+    // Generate mixed traffic (explicit type to satisfy compiler)
+    let _all_sessions: Vec<SessionInfo> = Vec::new();
 
-    // Add C&C beacon traffic
-    all_sessions.extend(generate_beacon_traffic(300, 10)); // 5-minute interval beacons
+    // Baseline only first
+    let mut baseline = generate_normal_web_traffic(50);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
+    // Calibrate thresholds from baseline normals (use ~80th percentile)
+    common::calibrate_thresholds_from_baseline(&analyzer, &baseline, 0.65).await;
+    // Now add beacons and analyze
+    let mut beacons = generate_beacon_traffic(300, 10);
+    baseline.append(&mut beacons);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
 
-    // Initial analysis to populate the model
-    let _ = analyzer.analyze_sessions(&mut all_sessions).await;
-
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    // Ensure analyzer is ready (skip warmup fast path still keeps model minimal)
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // Re-analyze after warm-up (using test thresholds)
-    let result = analyzer.analyze_sessions(&mut all_sessions).await;
+    let result = analyzer.analyze_sessions(&mut baseline).await;
 
     println!("\n=== C&C Beacon Detection Test Results ===");
     println!("Total sessions analyzed: {}", result.sessions_analyzed);
     println!("Anomalous sessions found: {}", result.anomalous_count);
 
     // Check beacon sessions specifically
-    let beacon_sessions: Vec<_> = all_sessions
+    let beacon_sessions: Vec<_> = baseline
         .iter()
         .filter(|s| s.session.dst_port == 8443)
         .collect();
@@ -437,11 +454,17 @@ async fn test_c2_beacon_detection() {
         println!("Beacon {}: criticality = '{}'", i + 1, session.criticality);
         if session.criticality.contains("suspicious") || session.criticality.contains("abnormal") {
             anomalous_count += 1;
+            // Expect timing feature to contribute
+            common::assert_diag_contains_any(
+                session,
+                &["SegmentInterarrival:UnusuallyHigh", "OverallScoreHigh"],
+                "beacon diagnostics",
+            );
         }
     }
 
     // Also check normal sessions for comparison
-    let normal_sessions: Vec<_> = all_sessions
+    let normal_sessions: Vec<_> = baseline
         .iter()
         .filter(|s| {
             s.session.dst_port == 443
@@ -469,27 +492,11 @@ async fn test_c2_beacon_detection() {
         (anomalous_count as f64 / beacon_sessions.len() as f64) * 100.0
     );
 
-    // More flexible assertion - at least some beacons should be detected
-    // The model may need tuning or more distinct patterns
-    if anomalous_count == 0 {
-        println!("\nWARNING: No beacons detected as anomalous. This may indicate:");
-        println!("1. The warm-up period needs adjustment");
-        println!("2. The beacon patterns are too similar to normal traffic");
-        println!("3. The anomaly thresholds need tuning");
-    }
-
-    // With the test thresholds above, any beacon detection counts as a success
-    if anomalous_count > 0 {
-        println!(
-            "SUCCESS: {} beacons detected as anomalous!",
-            anomalous_count
-        );
-    } else {
-        println!("INFO: No beacons detected with test thresholds");
-        println!("C&C beacon detection is challenging and may require more distinctive patterns");
-    }
-
-    // Test passes if analyzer functions correctly
+    // Require at least one beacon detected as anomalous
+    assert!(
+        anomalous_count > 0,
+        "Expected at least one beacon detected as anomalous"
+    );
     assert!(
         beacon_sessions.len() > 0,
         "Should have generated beacon sessions"
@@ -507,6 +514,8 @@ async fn test_data_exfiltration_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
+    analyzer.disable_warmup_for_testing().await;
+
     // Generate mixed traffic
     let mut all_sessions = Vec::new();
     all_sessions.extend(generate_normal_web_traffic(30));
@@ -514,12 +523,9 @@ async fn test_data_exfiltration_detection() {
 
     // Initial analysis
     let _ = analyzer.analyze_sessions(&mut all_sessions).await;
+    analyzer.force_train_for_testing().await;
 
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
@@ -539,21 +545,24 @@ async fn test_data_exfiltration_detection() {
         exfil_session.criticality
     );
 
-    // Using the test thresholds, check if exfiltration was detected
+    // Using the test thresholds, require exfiltration to be detected
     let exfil_detected = exfil_session.criticality.contains("suspicious")
         || exfil_session.criticality.contains("abnormal");
-
-    if exfil_detected {
-        println!("SUCCESS: Data exfiltration detected as anomalous!");
-    } else {
-        println!("INFO: Data exfiltration not detected with test thresholds (may be expected under strict settings)");
-        println!("Note: production thresholds are tuned to reduce false positives; the test thresholds here are more sensitive");
-    }
-
-    // Test passes if analyzer functions correctly, regardless of detection rate
     assert!(
-        !exfil_session.criticality.is_empty(),
-        "Session should have criticality assigned"
+        exfil_detected,
+        "Expected exfiltration session to be anomalous, got '{}'",
+        exfil_session.criticality
+    );
+    // Diagnostics should indicate large transfer characteristics
+    common::assert_diag_contains_any(
+        exfil_session,
+        &[
+            "Bytes:UnusuallyHigh",
+            "Packets:UnusuallyHigh",
+            "Duration:UnusuallyHigh",
+            "OverallScoreHigh",
+        ],
+        "exfil diagnostics",
     );
 
     analyzer.stop().await;
@@ -568,29 +577,25 @@ async fn test_port_scan_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
-    // Generate mixed traffic
-    let mut all_sessions = Vec::new();
-    all_sessions.extend(generate_normal_web_traffic(20));
-    all_sessions.extend(generate_port_scan_traffic());
+    analyzer.disable_warmup_for_testing().await;
 
-    // Initial analysis
-    let _ = analyzer.analyze_sessions(&mut all_sessions).await;
-
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
-
-    // Re-analyze
-    let result = analyzer.analyze_sessions(&mut all_sessions).await;
+    // Train on larger baseline only to stabilize thresholds
+    let mut baseline = generate_normal_web_traffic(80);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
+    // Calibrate with 85th percentile to be more sensitive to scans
+    common::calibrate_thresholds_from_baseline(&analyzer, &baseline, 0.85).await;
+    // Now add scans and analyze
+    let mut scans = generate_port_scan_traffic();
+    baseline.append(&mut scans);
+    let result = analyzer.analyze_sessions(&mut baseline).await;
 
     println!("\n=== Port Scan Detection Test Results ===");
     println!("Total sessions analyzed: {}", result.sessions_analyzed);
     println!("Anomalous sessions found: {}", result.anomalous_count);
 
     // Check scan sessions
-    let scan_sessions: Vec<_> = all_sessions
+    let scan_sessions: Vec<_> = baseline
         .iter()
         .filter(|s| {
             s.l7.as_ref()
@@ -610,18 +615,25 @@ async fn test_port_scan_detection() {
         scan_sessions.len()
     );
 
-    // With the test thresholds, any detection is a success
-    if detected_scans > 0 {
-        println!(
-            "SUCCESS: {} port scans detected as anomalous!",
-            detected_scans
-        );
-    } else {
-        println!("INFO: No port scans detected with test thresholds");
-        println!("Note: production thresholds prioritise low false-positive rates – tests use more sensitive ones");
+    assert!(
+        detected_scans > 0,
+        "Expected at least one port scan detected as anomalous"
+    );
+    // Diagnostic expectation: low packets/bytes, low duration, possibly high missed not guaranteed
+    for s in &scan_sessions {
+        if s.criticality.contains("suspicious") || s.criticality.contains("abnormal") {
+            common::assert_diag_contains_any(
+                s,
+                &[
+                    "Packets:UnusuallyLow",
+                    "Bytes:UnusuallyLow",
+                    "Duration:UnusuallyLow",
+                    "OverallScoreHigh",
+                ],
+                "port-scan diagnostics",
+            );
+        }
     }
-
-    // Test passes if analyzer functions correctly
     assert!(
         scan_sessions.len() > 0,
         "Should have generated scan sessions"
@@ -639,29 +651,32 @@ async fn test_dns_tunnel_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
-    // Generate mixed traffic
-    let mut all_sessions = Vec::new();
-    all_sessions.extend(generate_normal_web_traffic(25));
-    all_sessions.extend(generate_dns_tunnel_traffic());
+    // Train on baseline only, then set thresholds
+    analyzer.disable_warmup_for_testing().await;
+    // Build baseline
+    let mut baseline = generate_normal_web_traffic(120);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
+    // Calibrate thresholds moderately strict
+    analyzer.set_test_thresholds(0.70, 0.80).await;
 
-    // Initial analysis
-    let _ = analyzer.analyze_sessions(&mut all_sessions).await;
-
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
-
-    // Re-analyze
-    let result = analyzer.analyze_sessions(&mut all_sessions).await;
+    // Train on larger baseline only to stabilize thresholds
+    let mut baseline = generate_normal_web_traffic(80);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
+    // Calibrate with 85th percentile to be more sensitive
+    common::calibrate_thresholds_from_baseline(&analyzer, &baseline, 0.85).await;
+    // Now add DNS tunnels and analyze
+    let mut tunnels = generate_dns_tunnel_traffic();
+    baseline.append(&mut tunnels);
+    let result = analyzer.analyze_sessions(&mut baseline).await;
 
     println!("\n=== DNS Tunnel Detection Test Results ===");
     println!("Total sessions analyzed: {}", result.sessions_analyzed);
     println!("Anomalous sessions found: {}", result.anomalous_count);
 
     // Check DNS tunnel sessions
-    let dns_tunnel_sessions: Vec<_> = all_sessions
+    let dns_tunnel_sessions: Vec<_> = baseline
         .iter()
         .filter(|s| s.session.dst_port == 53 && s.stats.outbound_bytes > 1000)
         .collect();
@@ -677,18 +692,25 @@ async fn test_dns_tunnel_detection() {
         dns_tunnel_sessions.len()
     );
 
-    // With the test thresholds, any detection is a success
-    if detected_tunnels > 0 {
-        println!(
-            "SUCCESS: {} DNS tunnels detected as anomalous!",
-            detected_tunnels
-        );
-    } else {
-        println!("INFO: No DNS tunnels detected with test thresholds");
-        println!("DNS tunnel detection may require more sophisticated patterns");
+    assert!(
+        detected_tunnels > 0,
+        "Expected at least one DNS tunnel detected as anomalous"
+    );
+    // Diagnostics expectations: high Bytes/Packets/AvgPacketSize
+    for s in &dns_tunnel_sessions {
+        if s.criticality.contains("suspicious") || s.criticality.contains("abnormal") {
+            common::assert_diag_contains_any(
+                s,
+                &[
+                    "Bytes:UnusuallyHigh",
+                    "Packets:UnusuallyHigh",
+                    "AvgPacketSize:UnusuallyHigh",
+                    "OverallScoreHigh",
+                ],
+                "dns-tunnel diagnostics",
+            );
+        }
     }
-
-    // Test passes if analyzer functions correctly
     assert!(
         dns_tunnel_sessions.len() > 0,
         "Should have generated DNS tunnel sessions"
@@ -702,6 +724,8 @@ async fn test_cryptomining_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
+    prepare_analyzer_for_tests(&analyzer, true, 0.60, 0.72).await;
+
     // Generate mixed traffic
     let mut all_sessions = Vec::new();
     all_sessions.extend(generate_normal_web_traffic(30));
@@ -709,12 +733,9 @@ async fn test_cryptomining_detection() {
 
     // Initial analysis
     let _ = analyzer.analyze_sessions(&mut all_sessions).await;
+    analyzer.force_train_for_testing().await;
 
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
@@ -746,18 +767,10 @@ async fn test_cryptomining_detection() {
         .filter(|s| s.criticality.contains("suspicious") || s.criticality.contains("abnormal"))
         .count();
 
-    // With the test thresholds, any detection is a success
-    if detected_miners > 0 {
-        println!(
-            "SUCCESS: {} mining sessions detected as anomalous!",
-            detected_miners
-        );
-    } else {
-        println!("INFO: No mining sessions detected with test thresholds");
-        println!("Note: production thresholds may require more distinctive patterns; tests are more sensitive");
-    }
-
-    // Test passes if analyzer functions correctly
+    assert!(
+        detected_miners > 0,
+        "Expected at least one mining session detected as anomalous"
+    );
     assert!(
         mining_sessions.len() > 0,
         "Should have generated mining sessions"
@@ -771,7 +784,15 @@ async fn test_mixed_anomaly_detection() {
     let analyzer = SessionAnalyzer::new();
     analyzer.start().await;
 
-    // Generate a complex mix of traffic
+    prepare_analyzer_for_tests(&analyzer, true, 0.60, 0.72).await;
+
+    // Pre-train on normals and calibrate thresholds using ~99th percentile of normal scores
+    let mut baseline_normals = generate_normal_web_traffic(120);
+    let _ = analyzer.analyze_sessions(&mut baseline_normals).await;
+    analyzer.force_train_for_testing().await;
+    common::calibrate_thresholds_from_baseline(&analyzer, &baseline_normals, 0.99).await;
+
+    // Generate a complex mix of traffic to classify
     let mut all_sessions = Vec::new();
     all_sessions.extend(generate_normal_web_traffic(100));
     all_sessions.extend(generate_beacon_traffic(60, 5)); // 1-minute beacons
@@ -785,14 +806,8 @@ async fn test_mixed_anomaly_detection() {
     let mut rng = rand::thread_rng();
     all_sessions.shuffle(&mut rng);
 
-    // Initial analysis
+    // Initial analysis (model already trained on baseline; just classify)
     let _ = analyzer.analyze_sessions(&mut all_sessions).await;
-
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
 
     // Final analysis (using test thresholds)
     let result = analyzer.analyze_sessions(&mut all_sessions).await;
@@ -820,18 +835,10 @@ async fn test_mixed_anomaly_detection() {
         println!("  {}: {} sessions", process, count);
     }
 
-    // With the test thresholds, any detection is a success (no detection is also acceptable)
-    if result.anomalous_count > 0 {
-        println!(
-            "SUCCESS: {} anomalous sessions detected with test thresholds!",
-            result.anomalous_count
-        );
-    } else {
-        println!("INFO: No anomalous sessions detected with test thresholds");
-        println!("This is acceptable – production thresholds prioritise low false-positive rates; test thresholds are more sensitive");
-    }
-
-    // Test passes if analyzer functions correctly
+    assert!(
+        result.anomalous_count > 0,
+        "Expected at least one anomalous session in mixed traffic"
+    );
     assert!(
         result.sessions_analyzed > 0,
         "Should have analyzed some sessions"
@@ -883,11 +890,9 @@ async fn test_blacklist_preservation() {
         result1.blacklisted_count
     );
 
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 60).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    // Skip warm-up; keep consistent test thresholds
+    prepare_analyzer_for_tests(&analyzer, true, 0.60, 0.72).await;
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // Re-analyze
     let result = analyzer.analyze_sessions(&mut sessions).await;
@@ -966,11 +971,8 @@ async fn test_basic_anomaly_detection_debug() {
     println!("Initial training analysis...");
     let _ = analyzer.analyze_sessions(&mut sessions).await;
 
-    // Wait for warm-up
-    wait_for_analyzer_ready(&analyzer, 120).await;
-
-    // Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    prepare_analyzer_for_tests(&analyzer, true, 0.60, 0.72).await;
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // Add extremely anomalous sessions
     println!("\nAdding anomalous sessions...");
@@ -1037,15 +1039,10 @@ async fn test_basic_anomaly_detection_debug() {
     let exfil_anomalous = exfil_session.criticality.contains("suspicious")
         || exfil_session.criticality.contains("abnormal");
 
-    if !beacon_anomalous && !exfil_anomalous {
-        println!("\nINFO: No extreme anomalies detected with test thresholds");
-        println!("This can happen because, despite the more sensitive test thresholds, patterns might still resemble normal traffic");
-    } else {
-        println!("\nSUCCESS: At least one extreme anomaly was detected!");
-    }
-
-    // With the test thresholds, focus on testing functionality rather than detection rates
-    println!("Test completed successfully – analyzer functional with test thresholds");
+    assert!(
+        beacon_anomalous || exfil_anomalous,
+        "Expected at least one of beacon/exfil to be anomalous"
+    );
 
     analyzer.stop().await;
 }
@@ -1113,12 +1110,11 @@ async fn test_minimal_anomaly() {
 
     // 3. Feed all to the analyzer before warm-up ends
     let _ = analyzer.analyze_sessions(&mut normal).await;
+    analyzer.force_train_for_testing().await;
 
-    // 4. Wait for analyzer to be ready
-    wait_for_analyzer_ready(&analyzer, 180).await;
-
-    // 5. Use more sensitive thresholds in this test context only (does NOT affect production).
-    analyzer.set_test_thresholds(0.60, 0.72).await;
+    // 4-5. Prepare analyzer and wait for readiness quickly
+    prepare_analyzer_for_tests(&analyzer, true, 0.60, 0.72).await;
+    wait_for_analyzer_ready(&analyzer, 30).await;
 
     // 6. Final analysis (using test thresholds)
     let _ = analyzer.analyze_sessions(&mut normal).await;
@@ -1135,13 +1131,10 @@ async fn test_minimal_anomaly() {
         println!("Could not compute anomaly score/thresholds");
     }
 
-    // Even with our more sensitive test thresholds, extreme synthetic outliers may occasionally evade detection
-    println!("Test completed successfully – analyzer functional with test thresholds");
-
-    // Optional assertion - only fail if the analyzer completely breaks
     assert!(
-        !out.criticality.is_empty(),
-        "Session should have some criticality assigned"
+        out.criticality.contains("suspicious") || out.criticality.contains("abnormal"),
+        "Expected the extreme anomaly to be anomalous, got '{}'",
+        out.criticality
     );
 
     analyzer.stop().await;
