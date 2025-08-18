@@ -26,7 +26,7 @@ Flodbadd transforms raw network packets into enriched, security-aware sessions a
 ### Security Analysis
 - **Whitelist engine** - Rule-based traffic validation with inheritance and complex matching
 - **Blacklist engine** - IP-based threat feeds with CIDR support and cryptographic signatures
-- **Anomaly detection** - On-device ML using Extended Isolation Forest with 10-dimensional feature vectors
+- **Anomaly detection** - On-device ML using Extended Isolation Forest with 12-dimensional feature vectors
 - **ASN intelligence** - IPv4/IPv6 autonomous system number lookups
 - **Vulnerability correlation** - Port and vendor vulnerability databases
 
@@ -77,7 +77,7 @@ Flodbadd transforms raw network packets into enriched, security-aware sessions a
 Flodbadd implements sophisticated on-device anomaly detection using an Extended Isolation Forest model. For a deep dive into the design, feature engineering, training pipeline, thresholds, diagnostics, and operational cadence, see [ANALYZER.md](./ANALYZER.md).
 
 ### Feature Engineering
-Each network session is converted to a 10-dimensional feature vector:
+Each network session is converted to a 12-dimensional feature vector:
 
 | Feature | Type | Description |
 |---------|------|-------------|
@@ -88,9 +88,11 @@ Each network session is converted to a 10-dimensional feature vector:
 | Segment Interarrival | Numeric | Average time between segments |
 | Inbound/Outbound Ratio | Numeric | Traffic directionality measure |
 | Average Packet Size | Numeric | Mean packet size |
-| Destination Service | Categorical | Hash of destination service type |
-| Self Destination | Binary | Internal traffic indicator |
+| Interarrival Regularity | Numeric | 0..1 proximity to uniform interarrival |
+| Packet Rate | Numeric | Packets per second |
 | Missed Bytes | Numeric | Packet loss/retransmission indicator |
+| Segments | Numeric | Number of segments observed |
+| Destination Port | Categorical | Destination port (bounded/hash-coded) |
 
 ### Operational Model
 - **Warm-up period** - Initial training on baseline traffic (configurable, default 2 minutes)
