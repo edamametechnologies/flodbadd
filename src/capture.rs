@@ -560,6 +560,24 @@ impl FlodbaddCapture {
         // No extra reset/update needed here – already done above
     }
 
+    /// Create a empty whitelist
+    ///
+    /// # Arguments
+    /// * `self` - Reference to the FlodbaddCapture instance
+    ///
+    /// # Returns
+    /// * `Result<String>` - Returns an empty whitelist string
+    pub fn create_empty_whitelists(&self) -> Result<String> {
+        let whitelist_json = WhitelistsJSON::create_empty_whitelist();
+        match serde_json::to_string_pretty(&whitelist_json) {
+            Ok(json) => Ok(json),
+            Err(e) => {
+                error!("Error creating custom whitelists: {}", e);
+                return Err(anyhow!("Error creating custom whitelists: {}", e));
+            }
+        }
+    }
+
     pub async fn create_custom_whitelists(&self) -> Result<String> {
         // First update all sessions
         self.update_sessions().await;
