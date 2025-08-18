@@ -120,6 +120,14 @@ impl WhitelistsJSON {
             (different as f64 / total as f64) * 100.0
         }
     }
+
+    pub fn create_empty_whitelist() -> WhitelistsJSON {
+        WhitelistsJSON {
+            date: chrono::Local::now().format("%B %dth %Y").to_string(),
+            signature: None,
+            whitelists: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
