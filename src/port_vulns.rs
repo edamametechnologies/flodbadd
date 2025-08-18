@@ -2,6 +2,7 @@ use crate::port_info::*;
 use crate::port_vulns_db::*;
 use crate::vulnerability_info::*;
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,11 @@ impl VulnerabilityPortInfoList {
             https_ports.len()
         );
 
+        // Atomically publish the new maps so readers bypass the RwLock entirely
+        PORT_VULNS_PTR.store(port_vulns.clone());
+        HTTP_PORTS_PTR.store(http_ports.clone());
+        HTTPS_PORTS_PTR.store(https_ports.clone());
+
         VulnerabilityPortInfoList {
             date: vuln_info.date,
             signature: vuln_info.signature,
@@ -161,6 +167,17 @@ lazy_static! {
 
     // Cache for device criticality computations – key is a comma-separated sorted list of ports
     static ref CRITICALITY_CACHE: CustomDashMap<String, String> = CustomDashMap::new("Port Vulns Criticality Cache");
+
+    // Lock-free pointers to current maps for hot-path readers
+    static ref PORT_VULNS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("Port Vulns (init)"));
+    static ref HTTP_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("HTTP Ports (init)"));
+    static ref HTTPS_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("HTTPS Ports (init)"));
+}
+
+#[inline]
+fn ensure_port_vulns_initialized() {
+    // Ensure the CloudModel is initialized so ArcSwap pointers are populated
+    lazy_static::initialize(&VULNS);
 }
 
 // Clear all caches
@@ -184,8 +201,9 @@ async fn clear_caches() {
 }
 
 pub async fn get_ports() -> Vec<u16> {
-    // Clone the Arc to the DashMap so we don't need to hold the lock during iteration
-    let ports_map = VULNS.data.read().await.port_vulns.clone();
+    ensure_port_vulns_initialized();
+    // Load the current map without touching the model lock
+    let ports_map = PORT_VULNS_PTR.load();
     ports_map.iter().map(|entry| *entry.key()).collect()
 }
 
@@ -194,13 +212,14 @@ pub fn get_deep_ports() -> Vec<u16> {
 }
 
 pub async fn get_description_from_port(port: u16) -> String {
+    ensure_port_vulns_initialized();
     // Try cache first
     if let Some(cached) = PORT_DESCRIPTIONS_CACHE.get(&port) {
         return cached.clone();
     }
 
-    // If not in cache, get from the data
-    let port_vulns = VULNS.data.read().await.port_vulns.clone();
+    // If not in cache, read from the lock-free pointer
+    let port_vulns = PORT_VULNS_PTR.load();
     if let Some(port_info) = port_vulns.get(&port) {
         let description = port_info.description.clone();
         PORT_DESCRIPTIONS_CACHE.insert(port, description.clone());
@@ -211,13 +230,14 @@ pub async fn get_description_from_port(port: u16) -> String {
 }
 
 pub async fn get_name_from_port(port: u16) -> String {
+    ensure_port_vulns_initialized();
     // Try cache first
     if let Some(cached) = PORT_NAMES_CACHE.get(&port) {
         return cached.clone();
     }
 
-    // If not in cache, get from the data
-    let port_vulns = VULNS.data.read().await.port_vulns.clone();
+    // If not in cache, read from the lock-free pointer
+    let port_vulns = PORT_VULNS_PTR.load();
     if let Some(port_info) = port_vulns.get(&port) {
         let name = port_info.name.clone();
         PORT_NAMES_CACHE.insert(port, name.clone());
@@ -228,6 +248,7 @@ pub async fn get_name_from_port(port: u16) -> String {
 }
 
 pub async fn get_http_ports() -> Vec<u16> {
+    ensure_port_vulns_initialized();
     // Try cache first
     {
         let cached = HTTP_PORT_LIST_CACHE.read().await;
@@ -236,8 +257,8 @@ pub async fn get_http_ports() -> Vec<u16> {
         }
     } // Release the read lock
 
-    // If not in cache, generate and cache it
-    let http_ports = VULNS.data.read().await.http_ports.clone();
+    // If not in cache, generate and cache it from the lock-free pointer
+    let http_ports = HTTP_PORTS_PTR.load();
     let mut http_vec: Vec<u16> = http_ports.iter().map(|entry| *entry.key()).collect();
     http_vec.sort_unstable();
 
@@ -251,6 +272,7 @@ pub async fn get_http_ports() -> Vec<u16> {
 }
 
 pub async fn get_https_ports() -> Vec<u16> {
+    ensure_port_vulns_initialized();
     // Try cache first
     {
         let cached = HTTPS_PORT_LIST_CACHE.read().await;
@@ -259,8 +281,8 @@ pub async fn get_https_ports() -> Vec<u16> {
         }
     } // Release the read lock
 
-    // If not in cache, generate and cache it
-    let https_ports = VULNS.data.read().await.https_ports.clone();
+    // If not in cache, generate and cache it from the lock-free pointer
+    let https_ports = HTTPS_PORTS_PTR.load();
     let mut https_vec: Vec<u16> = https_ports.iter().map(|entry| *entry.key()).collect();
     https_vec.sort_unstable();
 
@@ -274,6 +296,7 @@ pub async fn get_https_ports() -> Vec<u16> {
 }
 
 pub async fn get_vulns_of_port(port: u16) -> Vec<VulnerabilityInfo> {
+    ensure_port_vulns_initialized();
     // Try cache first
     if let Some(cached) = PORT_VULN_LISTS_CACHE.get(&port) {
         let mut vulns = cached.as_ref().clone();
@@ -281,8 +304,8 @@ pub async fn get_vulns_of_port(port: u16) -> Vec<VulnerabilityInfo> {
         return vulns;
     }
 
-    // If not in cache, get from the data
-    let port_vulns = VULNS.data.read().await.port_vulns.clone();
+    // If not in cache, read from the lock-free pointer
+    let port_vulns = PORT_VULNS_PTR.load();
     if let Some(port_info) = port_vulns.get(&port) {
         let mut vulns = port_info.vulnerabilities.clone();
         vulns.sort_by(|a, b| b.name.cmp(&a.name));
@@ -302,6 +325,7 @@ pub async fn get_vulns_names_of_port(port: u16) -> Vec<String> {
 }
 
 pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
+    ensure_port_vulns_initialized();
     // Build a deterministic key – sorted list of ports
     let mut ports: Vec<u16> = port_info_list.iter().map(|p| p.port).collect();
     ports.sort_unstable();
@@ -316,8 +340,8 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
         return entry.clone();
     }
 
-    // Get port_vulns outside the fold closure to avoid await inside non-async closure
-    let port_vulns = VULNS.data.read().await.port_vulns.clone();
+    // Get current map through lock-free pointer
+    let port_vulns = PORT_VULNS_PTR.load();
 
     // Compute sum of counts
     let count_sum = ports.iter().fold(0, |acc, port| {

@@ -51,6 +51,7 @@ parking_lot = "0.12.3"
 futures-util = "0.3.30"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6.0.1"
+arc-swap = "1.6"
 
 # Time
 chrono = { version = "0.4.38", features = ["serde"] }
