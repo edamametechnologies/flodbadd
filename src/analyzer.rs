@@ -1225,14 +1225,17 @@ impl SessionAnalyzer {
             }
         }
 
-        // Add all new session data to the model's recent_data buffer
+        // Add all new session data to the model's recent_data buffer (as before)
         let sessions_len = sessions.len();
         let mut initial_batch_analyzed_post_warmup = false; // Flag to analyze current batch if warm-up just ended
 
         {
             let mut model_guard = model_rwlock.write().await;
-            // info! used here as it's a key data ingestion point.
-            info!("Analyzer: Adding {} new sessions to model data buffer (current size before add: {})", sessions_len, model_guard.recent_data.len());
+            info!(
+                "Analyzer: Adding {} new sessions to model data buffer (current size before add: {})",
+                sessions_len,
+                model_guard.recent_data.len()
+            );
             let add_data_start = std::time::Instant::now();
             for session in sessions.iter() {
                 model_guard.add_session_data(session);
@@ -1511,7 +1514,15 @@ impl SessionAnalyzer {
 
                     let analyze_start_time = std::time::Instant::now();
                     let feature_stats = model_guard.compute_feature_stats_bulk();
-                    drop(model_guard);
+                    // Snapshot model/threshold change times to decide if re-analysis is required
+                    let model_last_training_time = model_guard.last_training_time;
+                    let thresholds_last_recalc_time = {
+                        // Safe to briefly drop and reacquire different lock type
+                        drop(model_guard);
+                        let t = *self.last_threshold_recalc_time.read().await;
+                        t
+                    };
+                    // Ensure we hold no extra locks from the above snapshot
 
                     let mut anom_count = 0;
                     let mut bl_count = 0;
@@ -1568,8 +1579,15 @@ impl SessionAnalyzer {
                         //   - analysed recently (too_soon_since_last)
                         //   - timestamp unchanged
                         //   - criticality string unchanged
+                        let model_or_thresholds_changed_since_last = last_analysis_opt
+                            .map(|t| {
+                                (model_last_training_time > t) || (thresholds_last_recalc_time > t)
+                            })
+                            .unwrap_or(false);
+
                         let needs_analysis =
-                            !(too_soon_since_last && !modified_timestamp && criticality_unchanged);
+                            !(too_soon_since_last && !modified_timestamp && criticality_unchanged)
+                                || model_or_thresholds_changed_since_last;
 
                         if needs_analysis {
                             model_write_guard.analyze_session(session, &feature_stats);
@@ -1578,6 +1596,46 @@ impl SessionAnalyzer {
                             self.last_analysis_times.insert(session.uid.clone(), now);
                         } else {
                             skip_count += 1;
+                            // Preserve previously-determined anomaly tags only when skipping re-analysis,
+                            // but allow blacklist updates from the incoming session to pass through.
+                            if !Self::is_anomalous(&session.criticality) {
+                                // Find a stored criticality to extract anomaly tags from, preferring
+                                // the anomalous cache, then blacklist cache, then all_sessions.
+                                let stored_crit_opt = if let Some(entry) =
+                                    self.anomalous_sessions.get(&session.uid)
+                                {
+                                    Some(entry.value().criticality.clone())
+                                } else if let Some(entry) =
+                                    self.blacklisted_sessions.get(&session.uid)
+                                {
+                                    Some(entry.value().criticality.clone())
+                                } else if let Some(entry) = self.all_sessions.get(&session.uid) {
+                                    Some(entry.value().criticality.clone())
+                                } else {
+                                    None
+                                };
+
+                                if let Some(stored_crit) = stored_crit_opt {
+                                    let add_tag = if stored_crit.contains("anomaly:abnormal") {
+                                        Some("anomaly:abnormal")
+                                    } else if stored_crit.contains("anomaly:suspicious") {
+                                        Some("anomaly:suspicious")
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(tag) = add_tag {
+                                        if !session.criticality.contains(tag) {
+                                            if session.criticality.is_empty() {
+                                                session.criticality = tag.to_string();
+                                            } else {
+                                                session.criticality.push('/');
+                                                session.criticality.push_str(tag);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Store all sessions regardless of classification
@@ -1606,6 +1664,7 @@ impl SessionAnalyzer {
                             // Remove from collection if session is no longer blacklisted
                             self.blacklisted_sessions.remove(&session.uid);
                         }
+                        // Do not feed here; we already pushed raw inputs up-front.
                         if (idx + 1) % 500 == 0 {
                             debug!(
                                 "Analyzer ({}): Analyzed {}, {} skipped, {} anomalous, {} blacklisted, {} total.",
