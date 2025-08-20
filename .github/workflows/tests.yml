@@ -41,7 +41,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
             protobuf_install: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
           - os: macos
-            runs-on: macos-latest
+            # We can't use macos-latest here because of permissions issues in the network tests
+            runs-on: macos-14
             platform: macos
             arch: x86_64
             target: x86_64-apple-darwin
