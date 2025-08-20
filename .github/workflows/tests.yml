@@ -373,7 +373,8 @@ jobs:
             target: x86_64-unknown-linux-musl
             platform: linux
           - os: ubuntu
-            runs-on: ubuntu-24.04-arm
+            # We can't use ubuntu-24.04-arm here because of setup-alpine incompatibility
+            runs-on: ubuntu-latest
             arch: aarch64
             target: aarch64-unknown-linux-musl
             platform: linux
@@ -394,7 +395,7 @@ jobs:
       EDAMAME_LOG_LEVEL: debug
 
     steps:
-
+    
       # Setup Alpine Linux
       - name: Setup Alpine Linux
         uses: jirutka/setup-alpine@v1
