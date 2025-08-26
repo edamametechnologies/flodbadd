@@ -204,14 +204,6 @@ impl FlodbaddCapture {
         }
 
         info!("Starting capture");
-        println!(
-            "[debug] flodbadd::start: starting capture on interfaces: {:?}",
-            interfaces
-                .interfaces
-                .iter()
-                .map(|i| i.name.clone())
-                .collect::<Vec<_>>()
-        );
 
         // Reset fetch timestamps to ensure incremental fetching works correctly after restart
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
@@ -278,8 +270,8 @@ impl FlodbaddCapture {
         let start_time = Instant::now();
         self.start_capture_tasks().await;
         let elapsed_ms = start_time.elapsed().as_millis();
-        println!(
-            "[debug] flodbadd::start: after start_capture_tasks: handles={}",
+        debug!(
+            "after start_capture_tasks: handles={}",
             self.capture_task_handles.len()
         );
 
@@ -290,8 +282,8 @@ impl FlodbaddCapture {
                 elapsed_ms,
                 self.capture_task_handles.len()
             );
-            println!(
-                "[debug] flodbadd::start: success after {}ms (tasks={})",
+            debug!(
+                "success after {}ms (tasks={})",
                 elapsed_ms,
                 self.capture_task_handles.len()
             );
@@ -303,15 +295,11 @@ impl FlodbaddCapture {
                 self.capture_task_handles.len()
             );
             error!("{}", error_message);
-            println!("[debug] flodbadd::start: {}", error_message);
             if let Ok(devices) = pcap::Device::list() {
                 let names: Vec<String> = devices.into_iter().map(|d| d.name).collect();
-                println!(
-                    "[debug] flodbadd::start: available pcap devices: {:?}",
-                    names
-                );
+                debug!("available pcap devices: {:?}", names);
             } else {
-                println!("[debug] flodbadd::start: failed to list pcap devices");
+                warn!("failed to list pcap devices");
             }
             return Err(anyhow!("{}", error_message));
         }
@@ -937,11 +925,6 @@ impl FlodbaddCapture {
                             "Failed to get device from interface {}: {}",
                             interface.name, e
                         );
-                        println!(
-                            "[debug] start_capture_tasks: failed to map interface {} to pcap device: {}",
-                            interface.name,
-                            e
-                        );
                         continue;
                     }
                 };
@@ -955,7 +938,6 @@ impl FlodbaddCapture {
                 "Passed interfaces {:?} did not return any capture devices",
                 interfaces
             );
-            println!("[debug] start_capture_tasks: no interfaces provided");
             false
         };
 
@@ -969,7 +951,6 @@ impl FlodbaddCapture {
             // Fallback – let libpcap decide via Device::lookup()
             if default_interface_opt.is_none() {
                 warn!("Falling back to pcap::Device::lookup() for a usable device");
-                println!("[debug] start_capture_tasks: attempting fallback device lookup");
                 match Self::get_default_device().await {
                     Ok(device) => {
                         // Try to map the device back to a FlodbaddInterface for consistency
@@ -985,10 +966,6 @@ impl FlodbaddCapture {
                     }
                     Err(e) => {
                         error!("Final fallback failed to get default device: {}", e);
-                        println!(
-                            "[debug] start_capture_tasks: final fallback failed to get device: {}",
-                            e
-                        );
                     }
                 }
             }
@@ -997,9 +974,6 @@ impl FlodbaddCapture {
                 Some(iface) => iface,
                 None => {
                     error!("No suitable network interface found, aborting capture");
-                    println!(
-                        "[debug] start_capture_tasks: no suitable network interface found, aborting capture"
-                    );
                     return;
                 }
             };
@@ -1011,10 +985,6 @@ impl FlodbaddCapture {
                         "Failed to get device from default interface, using pcap devicelookup: {}",
                         e
                     );
-                    println!(
-                        "[debug] start_capture_tasks: failed to get device from default interface: {}",
-                        e
-                    );
                     match Self::get_default_device().await {
                         Ok(device) => {
                             // Update default_interface name from the resolved device.
@@ -1023,10 +993,6 @@ impl FlodbaddCapture {
                         }
                         Err(e) => {
                             error!("Failed to get default device: {}", e);
-                            println!(
-                                "[debug] start_capture_tasks: failed to get default device: {}",
-                                e
-                            );
                             return;
                         }
                     }
@@ -1038,10 +1004,6 @@ impl FlodbaddCapture {
                 Ok(interface) => interface,
                 Err(e) => {
                     error!("Failed to get interface from name: {}", e);
-                    println!(
-                        "[debug] start_capture_tasks: failed to convert device to interface: {}",
-                        e
-                    );
                     return;
                 }
             };
@@ -1098,10 +1060,6 @@ impl FlodbaddCapture {
                 Ok(cap) => cap,
                 Err(e) => {
                     error!("Failed to create capture on device: {}", e);
-                    println!(
-                        "[debug] start_capture_task_for_device: failed to create capture on {}: {}",
-                        interface_name_clone, e
-                    );
                     return;
                 }
             };
@@ -1116,10 +1074,6 @@ impl FlodbaddCapture {
                 Ok(cap) => cap,
                 Err(e) => {
                     error!("Failed to open pcap capture: {}", e);
-                    println!(
-                        "[debug] start_capture_task_for_device: failed to open pcap on {}: {}",
-                        interface_name_clone, e
-                    );
                     return;
                 }
             };
