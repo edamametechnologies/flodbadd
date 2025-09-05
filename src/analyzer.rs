@@ -68,9 +68,10 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
-// Define default values for warm-up settings
-pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.93; // 93rd percentile
-pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.95; // 95th percentile
+// Define percentile thresholds used to compute dynamic thresholds
+pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.97;
+pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.98;
+// Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
 pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 6; // 6 hours
@@ -100,6 +101,44 @@ impl fmt::Display for SessionCriticality {
             SessionCriticality::Abnormal => "abnormal",
         };
         write!(f, "{}", s)
+    }
+}
+
+/// Lightweight session cache to reduce memory usage
+#[derive(Debug, Clone)]
+struct SessionCache {
+    /// Full session data (cloned only when needed)
+    full_session: Option<Arc<SessionInfo>>,
+    /// Essential fields for fast lookups (always available)
+    uid: String,
+    criticality: String,
+    last_modified: DateTime<Utc>,
+}
+
+impl SessionCache {
+    fn with_full_session(session: &SessionInfo) -> Self {
+        Self {
+            full_session: Some(Arc::new(session.clone())),
+            uid: session.uid.clone(),
+            criticality: session.criticality.clone(),
+            last_modified: session.last_modified,
+        }
+    }
+
+    fn get_full_session(&mut self, source_session: Option<&SessionInfo>) -> Option<SessionInfo> {
+        if let Some(ref full) = self.full_session {
+            Some((**full).clone())
+        } else if let Some(source) = source_session {
+            // If we have a source session and it's the same UID, use it to populate
+            if source.uid == self.uid {
+                self.full_session = Some(Arc::new(source.clone()));
+                Some(source.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -1069,9 +1108,9 @@ pub struct AnalysisResult {
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
 pub struct SessionAnalyzer {
     model: CustomRwLock<Option<CustomRwLock<IsolationForestModel>>>,
-    anomalous_sessions: CustomDashMap<String, SessionInfo>,
-    blacklisted_sessions: CustomDashMap<String, SessionInfo>,
-    all_sessions: CustomDashMap<String, SessionInfo>, // Store all processed sessions
+    anomalous_sessions: CustomDashMap<String, SessionCache>,
+    blacklisted_sessions: CustomDashMap<String, SessionCache>,
+    all_sessions: CustomDashMap<String, SessionCache>, // Store all processed sessions
     /// Track the wall-clock time when we last ran a **real** analysis for every UID.
     /// This lets us enforce the `ANALYSIS_DELAY` guard without touching the core caches.
     last_analysis_times: CustomDashMap<String, DateTime<Utc>>, // uid -> last analysis timestamp
@@ -1129,28 +1168,38 @@ impl SessionAnalyzer {
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
     pub async fn analyze_sessions(&self, sessions: &mut [SessionInfo]) -> AnalysisResult {
+        // Proactively prune any expired tracked sessions to limit retention
+        // of cloned `SessionInfo` in internal caches before doing any new work.
+        self.cleanup_tracked_sessions();
+
         // Clean up expired session_cache entries before analysis
         self.cleanup_session_cache().await;
 
         // Reject sessions that are too old (can happen after a restart of capture)
         let cutoff = Utc::now() - CONNECTION_RETENTION_TIMEOUT;
-        let mut filtered_sessions = Vec::with_capacity(sessions.len());
-        for s in sessions.iter() {
+        let mut filtered_indices = Vec::new();
+        for (i, s) in sessions.iter().enumerate() {
             if s.last_modified > cutoff {
-                filtered_sessions.push(s.clone());
+                filtered_indices.push(i);
             }
         }
-        if sessions.len() != filtered_sessions.len() {
+        if filtered_indices.len() != sessions.len() {
             warn!(
                 "Analyzer: Filtered {} sessions out of {} due to age",
-                sessions.len() - filtered_sessions.len(),
+                sessions.len() - filtered_indices.len(),
                 sessions.len()
             );
         }
-        // Overwrite the original slice with the filtered sessions
-        let len = filtered_sessions.len().min(sessions.len());
-        sessions[..len].clone_from_slice(&filtered_sessions[..len]);
-        let sessions = &mut sessions[..len];
+
+        // Reorder sessions in-place to keep only the valid ones
+        let mut write_idx = 0;
+        for &read_idx in &filtered_indices {
+            if write_idx != read_idx {
+                sessions.swap(write_idx, read_idx);
+            }
+            write_idx += 1;
+        }
+        let sessions = &mut sessions[..filtered_indices.len()];
 
         let sessions_len = sessions.len();
 
@@ -1376,17 +1425,21 @@ impl SessionAnalyzer {
                         session.criticality = "anomaly:normal/warming_up".to_string(); // More specific tag
                         session.last_modified = now;
                     }
-                    // Store all sessions even during warmup
-                    self.all_sessions
-                        .insert(session.uid.clone(), session.clone());
+                    // Store all sessions even during warmup (using lightweight cache)
+                    self.all_sessions.insert(
+                        session.uid.clone(),
+                        SessionCache::with_full_session(session),
+                    );
 
                     // Even during warmup, check if sessions are already marked as anomalous or blacklisted
                     // and add them to the appropriate collections. This is used for testing purposes.
 
                     // Populate the anomalous sessions (sessions already marked as anomalous)
                     if Self::is_anomalous(&session.criticality) {
-                        self.anomalous_sessions
-                            .insert(session.uid.clone(), session.clone());
+                        self.anomalous_sessions.insert(
+                            session.uid.clone(),
+                            SessionCache::with_full_session(session),
+                        );
                     } else {
                         // Remove from collection if session is no longer anomalous
                         self.anomalous_sessions.remove(&session.uid);
@@ -1394,8 +1447,10 @@ impl SessionAnalyzer {
 
                     // Populate the blacklisted sessions
                     if Self::is_blacklisted(&session.criticality) {
-                        self.blacklisted_sessions
-                            .insert(session.uid.clone(), session.clone());
+                        self.blacklisted_sessions.insert(
+                            session.uid.clone(),
+                            SessionCache::with_full_session(session),
+                        );
                     } else {
                         // Remove from collection if session is no longer blacklisted
                         self.blacklisted_sessions.remove(&session.uid);
@@ -1638,16 +1693,20 @@ impl SessionAnalyzer {
                             }
                         }
 
-                        // Store all sessions regardless of classification
-                        self.all_sessions
-                            .insert(session.uid.clone(), session.clone());
+                        // Store all sessions regardless of classification (using lightweight cache)
+                        self.all_sessions.insert(
+                            session.uid.clone(),
+                            SessionCache::with_full_session(session),
+                        );
 
                         if Self::is_anomalous(&session.criticality) {
                             if !self.anomalous_sessions.contains_key(&session.uid) {
                                 found_new_anomalous = true;
                             }
-                            self.anomalous_sessions
-                                .insert(session.uid.clone(), session.clone());
+                            self.anomalous_sessions.insert(
+                                session.uid.clone(),
+                                SessionCache::with_full_session(session),
+                            );
                             anom_count += 1;
                         } else {
                             // Remove from collection if session is no longer anomalous
@@ -1657,8 +1716,10 @@ impl SessionAnalyzer {
                             if !self.blacklisted_sessions.contains_key(&session.uid) {
                                 found_new_blacklisted = true;
                             }
-                            self.blacklisted_sessions
-                                .insert(session.uid.clone(), session.clone());
+                            self.blacklisted_sessions.insert(
+                                session.uid.clone(),
+                                SessionCache::with_full_session(session),
+                            );
                             bl_count += 1;
                         } else {
                             // Remove from collection if session is no longer blacklisted
@@ -1698,9 +1759,11 @@ impl SessionAnalyzer {
                             session.last_modified = now;
                         }
 
-                        // Store all sessions even when no model is available
-                        self.all_sessions
-                            .insert(session.uid.clone(), session.clone());
+                        // Store all sessions even when no model is available (using lightweight cache)
+                        self.all_sessions.insert(
+                            session.uid.clone(),
+                            SessionCache::with_full_session(session),
+                        );
 
                         // Count sessions after any updates
                         if Self::is_anomalous(&session.criticality) {
@@ -1742,16 +1805,16 @@ impl SessionAnalyzer {
     /// Prioritizes anomalous and blacklisted versions to preserve historical criticality
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
         // Check blacklisted sessions first (highest priority for criticality preservation)
-        if let Some(entry) = self.blacklisted_sessions.get(uid) {
-            return Some(entry.value().clone());
+        if let Some(mut entry) = self.blacklisted_sessions.get_mut(uid) {
+            return entry.value_mut().get_full_session(None);
         }
         // Then check anomalous sessions
-        if let Some(entry) = self.anomalous_sessions.get(uid) {
-            return Some(entry.value().clone());
+        if let Some(mut entry) = self.anomalous_sessions.get_mut(uid) {
+            return entry.value_mut().get_full_session(None);
         }
         // Finally fallback to all sessions (may have different criticality state)
-        if let Some(entry) = self.all_sessions.get(uid) {
-            return Some(entry.value().clone());
+        if let Some(mut entry) = self.all_sessions.get_mut(uid) {
+            return entry.value_mut().get_full_session(None);
         }
         // If not found in any, return None
         None
@@ -1783,7 +1846,10 @@ impl SessionAnalyzer {
         self.cleanup_tracked_sessions();
         self.anomalous_sessions
             .iter()
-            .map(|entry| entry.value().clone())
+            .filter_map(|entry| {
+                let mut cache = entry.value().clone();
+                cache.get_full_session(None)
+            })
             .collect()
     }
 
@@ -1814,19 +1880,22 @@ impl SessionAnalyzer {
         // Opportunistically add any newly-blacklisted sessions that are not yet
         // present in the dedicated cache.
         for entry in self.all_sessions.iter() {
-            let session = entry.value();
-            if Self::is_blacklisted(&session.criticality)
-                && !self.blacklisted_sessions.contains_key(&session.uid)
+            let cache = entry.value();
+            if Self::is_blacklisted(&cache.criticality)
+                && !self.blacklisted_sessions.contains_key(&cache.uid)
             {
-                // Insert a fresh clone so the cache is immediately consistent.
+                // Insert a fresh cache entry so the cache is immediately consistent.
                 self.blacklisted_sessions
-                    .insert(session.uid.clone(), session.clone());
+                    .insert(cache.uid.clone(), cache.clone());
             }
         }
 
         self.blacklisted_sessions
             .iter()
-            .map(|entry| entry.value().clone())
+            .filter_map(|entry| {
+                let mut cache = entry.value().clone();
+                cache.get_full_session(None)
+            })
             .collect()
     }
 
@@ -1839,7 +1908,10 @@ impl SessionAnalyzer {
         let mut sessions: Vec<SessionInfo> = self
             .all_sessions
             .iter()
-            .map(|entry| entry.value().clone())
+            .filter_map(|entry| {
+                let mut cache = entry.value().clone();
+                cache.get_full_session(None)
+            })
             .collect();
 
         // Newest first ensures callers see the most up-to-date copy when duplicates exist.
@@ -1857,13 +1929,16 @@ impl SessionAnalyzer {
         let mut current_sessions: Vec<SessionInfo> = self
             .all_sessions
             .iter()
-            .filter(|entry| {
-                now.signed_duration_since(entry.value().last_modified) < current_session_timeout
+            .filter_map(|entry| {
+                let mut cache = entry.value().clone();
+                cache.get_full_session(None)
             })
-            .map(|entry| entry.value().clone())
+            .filter(|session| {
+                now.signed_duration_since(session.stats.last_activity) < current_session_timeout
+            })
             .collect();
 
-        current_sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        current_sessions.sort_by(|a, b| b.stats.last_activity.cmp(&a.stats.last_activity));
         current_sessions
     }
 
@@ -2148,12 +2223,14 @@ pub(crate) mod tests {
         };
 
         // Manually add security findings (simulating what analyze_sessions would do)
-        analyzer
-            .anomalous_sessions
-            .insert(anomalous_session.uid.clone(), anomalous_session.clone());
-        analyzer
-            .blacklisted_sessions
-            .insert(blacklisted_session.uid.clone(), blacklisted_session.clone());
+        analyzer.anomalous_sessions.insert(
+            anomalous_session.uid.clone(),
+            SessionCache::with_full_session(&anomalous_session),
+        );
+        analyzer.blacklisted_sessions.insert(
+            blacklisted_session.uid.clone(),
+            SessionCache::with_full_session(&blacklisted_session),
+        );
 
         // Verify security findings exist before stop
         assert_eq!(

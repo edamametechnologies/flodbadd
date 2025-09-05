@@ -186,7 +186,7 @@ pub enum WhitelistState {
     Unknown,
 }
 
-pub fn sanitized_backend_session_info(session_info: SessionInfo) -> SessionInfoBackend {
+pub fn sanitized_session_info_backend(session_info: SessionInfo) -> SessionInfoBackend {
     // Helper function to check if a username belongs to a system account
     fn is_system_account(username: &str) -> bool {
         // Normalize the username by removing quotes, special characters and whitespace
@@ -1191,7 +1191,7 @@ mod tests {
             };
 
             // Convert to backend format
-            let backend = sanitized_backend_session_info(session_info);
+            let backend = sanitized_session_info_backend(session_info);
 
             // Print debugging information for failed cases
             if backend.l7_process_path != Some(expected_path.to_string()) {
@@ -1387,7 +1387,7 @@ mod tests {
             };
 
             // Convert to backend format
-            let backend = sanitized_backend_session_info(session_info);
+            let backend = sanitized_session_info_backend(session_info);
 
             // Correct the expected username logic:
             // System accounts should keep their original name, non-system should become "user".

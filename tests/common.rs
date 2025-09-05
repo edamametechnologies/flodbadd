@@ -21,7 +21,9 @@ pub async fn calibrate_thresholds_from_baseline(
         return;
     }
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((scores.len() as f64 * percentile).ceil() as usize).saturating_sub(1);
+    let idx = ((scores.len() as f64 * percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(scores.len() - 1);
     let p = scores[idx];
     analyzer.set_test_thresholds(p + 1e-6, p + 0.05).await;
 }
@@ -43,8 +45,12 @@ pub async fn assert_score_outside_band(
     }
     assert!(!scores.is_empty(), "{}: normal scores are empty", context);
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let low_idx = ((scores.len() as f64 * low_percentile).ceil() as usize).saturating_sub(1);
-    let high_idx = ((scores.len() as f64 * high_percentile).ceil() as usize).saturating_sub(1);
+    let low_idx = ((scores.len() as f64 * low_percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(scores.len() - 1);
+    let high_idx = ((scores.len() as f64 * high_percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(scores.len() - 1);
     let band_low = scores[low_idx];
     let band_high = scores[high_idx];
 

@@ -71,6 +71,12 @@ pub struct DeviceInfo {
     // Flag to track devices seen by direct scanning
     #[serde(skip)]
     pub is_local: bool,
+    // Timestamp observed from community peers
+    #[serde(skip)]
+    pub last_seen_community: Option<DateTime<Utc>>,
+    // Active flag observed from community peers
+    #[serde(skip)]
+    pub community_active: bool,
 }
 
 impl DeviceInfo {
@@ -108,6 +114,8 @@ impl DeviceInfo {
             // Initialize the times to UNIX_EPOCH
             first_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
             last_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
+            last_seen_community: None,
+            community_active: false,
             // Origin tracking for community sharing
             origin_ip: "".to_string(), // IP of the device that first discovered this device
             origin_network: "".to_string(), // Network identifier of where the device was first discovered
@@ -166,6 +174,25 @@ impl DeviceInfo {
         self.ip_addresses_v6.dedup();
     }
 
+    // Effective last seen across local and community sources
+    pub fn effective_last_seen(&self) -> DateTime<Utc> {
+        match self.last_seen_community {
+            Some(ts) => {
+                if ts > self.last_seen {
+                    ts
+                } else {
+                    self.last_seen
+                }
+            }
+            None => self.last_seen,
+        }
+    }
+
+    // Effective active across local and community sources
+    pub fn effective_active(&self) -> bool {
+        self.active || self.community_active
+    }
+
     pub fn get_mac_address(&self) -> Option<MacAddr6> {
         self.mac_address
     }
@@ -184,9 +211,11 @@ impl DeviceInfo {
     }
 
     // Used before any query to AI assistance
-    pub async fn sanitized_backend_device_info(device: &DeviceInfo) -> DeviceInfoBackend {
+    // Sort the fields to make sure they are always in the same order to have prompt consistency
+    pub async fn sanitized_device_info_backend(device: &DeviceInfo) -> DeviceInfoBackend {
         // Include the vulnerabilities
         let vulnerabilities: Vec<VulnerabilityInfoBackend> =
+            // Sorted
             get_vulns_of_vendor(&device.device_vendor)
                 .await
                 .iter()
@@ -195,6 +224,7 @@ impl DeviceInfo {
         let mut open_ports: Vec<PortInfoBackend> = Vec::new();
         for port in device.open_ports.iter() {
             let mut port_info: PortInfoBackend = port.clone().into();
+            // Sorted
             port_info.vulnerabilities = get_vulns_of_port(port.port)
                 .await
                 .iter()
@@ -213,20 +243,17 @@ impl DeviceInfo {
             let sanitized = re.replace(mdns_service, "$1").to_string();
             mdns_services.push(sanitized);
         }
-        let mut device_backend = DeviceInfoBackend {
+        // Sort and deduplicate mDNS services
+        mdns_services.sort();
+        mdns_services.dedup();
+        // Sort open ports
+        open_ports.sort_by(|a, b| a.port.cmp(&b.port));
+        let device_backend = DeviceInfoBackend {
             mdns_services,
             device_vendor: device.device_vendor.clone(),
             vulnerabilities,
             open_ports,
         };
-
-        // Sort the entries to make sure they are always in the same order to have prompt consistency
-        device_backend.mdns_services.sort();
-        // The sanitization can create duplicates
-        device_backend.mdns_services.dedup();
-        device_backend
-            .open_ports
-            .sort_by(|a, b| a.port.cmp(&b.port));
         device_backend
     }
 
@@ -484,8 +511,12 @@ impl DeviceInfo {
         device.mdns_services = mdns_services_cleaned;
 
         // Update the flags
-        // Or
-        device.active = device.active || new_device.active;
+        // Only local updates affect local active; community updates affect community_active
+        if new_device.is_local {
+            device.active = device.active || new_device.active;
+        } else {
+            device.community_active = device.community_active || new_device.active;
+        }
         device.non_std_ports = device.non_std_ports || new_device.non_std_ports;
         device.added = device.added || new_device.added;
         device.activated = device.activated || new_device.activated;
@@ -535,6 +566,20 @@ impl DeviceInfo {
                 new_device.is_local
             );
             device.last_seen = new_device.last_seen;
+        } else if !new_device.is_local
+            && new_device.last_seen
+                > device
+                    .last_seen_community
+                    .unwrap_or(DateTime::<Utc>::from(std::time::UNIX_EPOCH))
+        {
+            // For community updates, record into last_seen_community only
+            debug!(
+                "[merge] Updating last_seen_community for {:?} from {:?} to {:?}",
+                device.get_ip_address(),
+                device.last_seen_community,
+                new_device.last_seen
+            );
+            device.last_seen_community = Some(new_device.last_seen);
         }
 
         // Handle origin information

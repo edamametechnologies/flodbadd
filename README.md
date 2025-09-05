@@ -96,7 +96,7 @@ Each network session is converted to a 12-dimensional feature vector:
 
 ### Operational Model
 - **Warm-up period** - Initial training on baseline traffic (configurable, default 2 minutes)
-- **Dynamic thresholds** - Percentile-based thresholds (93rd for suspicious, 95th for abnormal)
+- **Dynamic thresholds** - Percentile-based thresholds (for suspicious and for abnormal)
 - **Continuous learning** - Model retraining with sliding window (300 samples default)
 - **Dynamic anomaly detection** - Sessions are continuously re-evaluated based on current model predictions
 - **Non-destructive analysis** - Preserves existing security tags while adding anomaly classifications

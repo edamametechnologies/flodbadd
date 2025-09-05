@@ -1,6 +1,6 @@
 [package]
 name = "flodbadd"
-version = "0.9.62"
+version = "0.9.63"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
 description = "Network scanning and session monitoring library"
@@ -21,6 +21,8 @@ examples = ["clap", "tracing-subscriber"]
 
 [dependencies]
 # Core dependencies
+# Local copy in order to allow rapid development/debug
+#edamame_backend = { path = "../edamame_backend" }
 edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backend.git", branch = "main" }
 # Local copy in order to allow rapid development/debug
 #undeadlock = { path = "../undeadlock" }
