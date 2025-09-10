@@ -104,8 +104,8 @@ Each network session is converted to a 12-dimensional feature vector:
 ### Criticality Tagging
 Sessions receive comma-separated criticality tags:
 - `anomaly:normal` - Normal behavior according to current model
-- `anomaly:suspicious` - 93rd+ percentile anomaly score
-- `anomaly:abnormal` - 95th+ percentile anomaly score
+- `anomaly:suspicious` - 97th+ percentile anomaly score
+- `anomaly:abnormal` - 98th+ percentile anomaly score
 - `blacklist:<list_name>` - Matches IP blacklist
 - Multiple tags can coexist (e.g., `anomaly:suspicious,blacklist:malware_c2`)
 

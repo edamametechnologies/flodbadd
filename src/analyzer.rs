@@ -74,9 +74,12 @@ pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.98;
 // Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
-pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 6; // 6 hours
+pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 3; // 3 hours
 pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest training
 pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
+
+// Minimum unique samples required (after deduplication) before finishing warm-up
+pub const WARMUP_MIN_UNIQUE_SAMPLES: usize = 200;
 
 // Define the number of features to use by default
 const NUM_FEATURES: usize = 12;
@@ -176,7 +179,7 @@ impl IsolationForestModel {
         IsolationForestModel {
             forest: None,
             recent_data: Vec::new(),
-            max_samples: 300,
+            max_samples: 800,
             // Will be overridden by the first training and its percentile based thresholds computed from the training data.
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
@@ -1065,8 +1068,8 @@ fn compute_dynamic_thresholds(
     let new_suspicious_threshold = scores[suspicious_idx];
     let new_abnormal_threshold = scores[abnormal_idx];
 
-    // Add a small epsilon to avoid classifying the percentile boundary itself
-    let epsilon = 1e-6;
+    // Include the percentile boundary itself to ensure anomalies are detected in small samples
+    let epsilon = 0.0;
     let final_suspicious_threshold = new_suspicious_threshold + epsilon;
     let final_abnormal_threshold = new_abnormal_threshold + epsilon;
 
@@ -1127,10 +1130,27 @@ pub struct SessionAnalyzer {
 }
 
 impl SessionAnalyzer {
+    /// Count unique recent samples in the model's buffer (deduplicated by bitwise value)
+    async fn unique_recent_sample_count(&self) -> usize {
+        let model_option_guard = self.model.read().await;
+        if let Some(inner_lock) = &*model_option_guard {
+            let model_guard = inner_lock.read().await;
+            let mut seen: HashSet<[u64; NUM_FEATURES]> =
+                HashSet::with_capacity(model_guard.recent_data.len());
+            for feats in &model_guard.recent_data {
+                let bits: [u64; NUM_FEATURES] =
+                    std::array::from_fn(|i| feats[i].to_bits());
+                seen.insert(bits);
+            }
+            seen.len()
+        } else {
+            0
+        }
+    }
     /// Create a new analyzer with default settings
     pub fn new() -> Self {
         info!(
-            "Creating new SessionAnalyzer: Using {}D feature analysis with 300 max samples",
+            "Creating new SessionAnalyzer: Using {}D feature analysis with 800 max samples",
             NUM_FEATURES
         );
         Self {
@@ -1143,8 +1163,8 @@ impl SessionAnalyzer {
             warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
             warm_up_start_time: AtomicU64::new(0),
-            // Use a shorter warm-up during tests
-            warm_up_duration: Duration::seconds(if cfg!(test) { 15 } else { 120 }),
+            // Use a shorter warm-up during tests; otherwise target ~3 minutes
+            warm_up_duration: Duration::seconds(if cfg!(test) { 15 } else { 180 }),
             suspicious_threshold_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             abnormal_threshold_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             last_threshold_recalc_time: Arc::new(CustomRwLock::new(Utc::now())),
@@ -1324,7 +1344,20 @@ impl SessionAnalyzer {
             );
 
             let should_attempt_finalize = elapsed_seconds >= WARMUP_DELAY
-                && elapsed_seconds >= self.warm_up_duration.num_seconds();
+                && elapsed_seconds >= self.warm_up_duration.num_seconds()
+                && {
+                    let unique_count = self.unique_recent_sample_count().await;
+                    if unique_count < WARMUP_MIN_UNIQUE_SAMPLES {
+                        debug!(
+                            "Warm-up finalize gate: only {} unique samples (need >= {})",
+                            unique_count,
+                            WARMUP_MIN_UNIQUE_SAMPLES
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                };
 
             if should_attempt_finalize {
                 info!("Analyzer: Warm-up duration met (elapsed: {}s). Attempting to finalize and compute thresholds.", elapsed_seconds);
@@ -1585,7 +1618,28 @@ impl SessionAnalyzer {
                     let mut found_new_anomalous = false;
                     let mut found_new_blacklisted = false;
 
-                    let model_write_guard = model_rwlock.write().await;
+                    let mut model_write_guard = model_rwlock.write().await;
+
+                    // If we have a freshly (re)started model that trained but still uses
+                    // default thresholds, compute dynamic thresholds immediately to avoid
+                    // overly sensitive classification on restart.
+                    if model_write_guard.suspicious_threshold == DEFAULT_SUSPICIOUS_THRESHOLD
+                        && model_write_guard.abnormal_threshold == DEFAULT_ABNORMAL_THRESHOLD
+                        && model_write_guard.forest.is_some()
+                        && !model_write_guard.recent_data.is_empty()
+                    {
+                        info!(
+                            "Analyzer ({}): Default thresholds detected after (re)start; computing dynamic thresholds immediately.",
+                            operation_type
+                        );
+                        compute_dynamic_thresholds(
+                            &mut *model_write_guard,
+                            self.suspicious_threshold_percentile,
+                            self.abnormal_threshold_percentile,
+                        );
+                        let mut last_recalc_lock = self.last_threshold_recalc_time.write().await;
+                        *last_recalc_lock = now;
+                    }
 
                     for (idx, session) in sessions.iter_mut().enumerate() {
                         // ---------------------------------------------------------------------
@@ -1936,7 +1990,8 @@ impl SessionAnalyzer {
             .filter(|session| {
                 // Use the most recent activity timestamp available. During warmup or tests,
                 // sessions may have default stats; rely on last_modified as a fallback.
-                let effective_last_activity = if session.last_modified > session.stats.last_activity {
+                let effective_last_activity = if session.last_modified > session.stats.last_activity
+                {
                     session.last_modified
                 } else {
                     session.stats.last_activity
@@ -1992,9 +2047,14 @@ impl SessionAnalyzer {
             info!("Analyzer started");
         }
 
-        // Instantiate the IsolationForestModel
+        // Instantiate the IsolationForestModel if missing; otherwise reuse existing
         let mut model_guard = self.model.write().await;
-        *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
+        if model_guard.is_none() {
+            *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
+            debug!("Analyzer start: created new model");
+        } else {
+            debug!("Analyzer start: reusing existing model and thresholds");
+        }
     }
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
@@ -2030,27 +2090,8 @@ impl SessionAnalyzer {
             info!("Successfully aborted training task");
         }
 
-        // Clear temporary analysis data but preserve security findings
-        let mut model_guard = self.model.write().await;
-        if let Some(model) = &*model_guard {
-            let mut model_write = model.write().await;
-
-            // Clear temporary data
-            model_write.recent_data.clear();
-            model_write.session_cache.clear();
-
-            // Reset training state
-            model_write.forest = None;
-            model_write.training_handle = None;
-            model_write
-                .training_in_progress
-                .store(false, Ordering::Release);
-
-            debug!("Cleared temporary analysis data while preserving security findings");
-        }
-
-        // Drop the model but keep security findings
-        *model_guard = None;
+        // Preserve model and thresholds; avoid cold-start false positives on next start
+        debug!("Preserving model and thresholds on stop; background training aborted");
 
         // Clean up old security findings but keep recent ones
         self.cleanup_tracked_sessions();
