@@ -69,8 +69,8 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define percentile thresholds used to compute dynamic thresholds
-pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.97;
-pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.98;
+pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.98;
+pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.99;
 // Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
