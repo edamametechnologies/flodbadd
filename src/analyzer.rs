@@ -1138,8 +1138,7 @@ impl SessionAnalyzer {
             let mut seen: HashSet<[u64; NUM_FEATURES]> =
                 HashSet::with_capacity(model_guard.recent_data.len());
             for feats in &model_guard.recent_data {
-                let bits: [u64; NUM_FEATURES] =
-                    std::array::from_fn(|i| feats[i].to_bits());
+                let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
                 seen.insert(bits);
             }
             seen.len()
@@ -1350,8 +1349,7 @@ impl SessionAnalyzer {
                     if unique_count < WARMUP_MIN_UNIQUE_SAMPLES {
                         debug!(
                             "Warm-up finalize gate: only {} unique samples (need >= {})",
-                            unique_count,
-                            WARMUP_MIN_UNIQUE_SAMPLES
+                            unique_count, WARMUP_MIN_UNIQUE_SAMPLES
                         );
                         false
                     } else {

@@ -1757,7 +1757,7 @@ mod ebpf_tests {
             println!("Skipping test_ebpf_l7_resolution: eBPF helper not available");
             return;
         }
-        let port: u16 = rand::thread_rng().gen_range(20000..40000);
+        let port: u16 = rand::rng().random_range(20000..40000);
         let mut server_process = match start_nc_server(port) {
             Ok(child) => child,
             Err(NcError::NotFound) => {
@@ -1823,7 +1823,7 @@ mod ebpf_tests {
             );
             return;
         }
-        let port: u16 = rand::thread_rng().gen_range(20000..40000);
+        let port: u16 = rand::rng().random_range(20000..40000);
         let mut server_process = match start_nc_server(port) {
             Ok(child) => child,
             Err(NcError::NotFound) => {
@@ -1909,7 +1909,7 @@ mod ebpf_tests {
             println!("Skipping test_ebpf_l7_integration_with_capture: eBPF helper not available");
             return;
         }
-        let port: u16 = rand::thread_rng().gen_range(20000..40000);
+        let port: u16 = rand::rng().random_range(20000..40000);
         println!("Starting netcat server on port {}", port);
         let mut server_process = match start_nc_server(port) {
             Ok(child) => child,

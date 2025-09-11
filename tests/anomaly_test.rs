@@ -516,7 +516,14 @@ async fn test_data_exfiltration_detection() {
 
     analyzer.disable_warmup_for_testing().await;
 
-    // Generate mixed traffic
+    // Train on baseline first to establish thresholds
+    let mut baseline = generate_normal_web_traffic(50);
+    let _ = analyzer.analyze_sessions(&mut baseline).await;
+    analyzer.force_train_for_testing().await;
+    // Calibrate thresholds from baseline normals (use ~85th percentile for sensitivity)
+    common::calibrate_thresholds_from_baseline(&analyzer, &baseline, 0.85).await;
+
+    // Generate mixed traffic including exfiltration
     let mut all_sessions = Vec::new();
     all_sessions.extend(generate_normal_web_traffic(30));
     all_sessions.extend(generate_exfiltration_traffic());
@@ -803,7 +810,7 @@ async fn test_mixed_anomaly_detection() {
 
     // Shuffle to mix anomalies with normal traffic
     use rand::seq::SliceRandom;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     all_sessions.shuffle(&mut rng);
 
     // Initial analysis (model already trained on baseline; just classify)
@@ -1077,7 +1084,7 @@ async fn test_minimal_anomaly() {
     println!("\n=== Minimal Anomaly Test ===");
 
     // 1. Generate 100 realistic, variable normal sessions
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut normal = Vec::new();
     for i in 0..100 {
         let mut s = create_basic_session(
@@ -1094,13 +1101,13 @@ async fn test_minimal_anomaly() {
             username: format!("user_{}", i % 5),
         });
         s.dst_service = Some(format!("svc_{}", i % 5));
-        s.stats.outbound_bytes = 1000 + rng.gen_range(0..500);
-        s.stats.inbound_bytes = 5000 + rng.gen_range(0..2000);
-        s.stats.orig_pkts = 10 + rng.gen_range(0..10);
-        s.stats.resp_pkts = 20 + rng.gen_range(0..10);
-        s.stats.segment_interarrival = rng.gen_range(0.1..2.0);
-        s.stats.average_packet_size = 200.0 + rng.gen_range(0.0..100.0);
-        s.stats.missed_bytes = rng.gen_range(0..10);
+        s.stats.outbound_bytes = 1000 + rng.random_range(0..500);
+        s.stats.inbound_bytes = 5000 + rng.random_range(0..2000);
+        s.stats.orig_pkts = 10 + rng.random_range(0..10);
+        s.stats.resp_pkts = 20 + rng.random_range(0..10);
+        s.stats.segment_interarrival = rng.random_range(0.1..2.0);
+        s.stats.average_packet_size = 200.0 + rng.random_range(0.0..100.0);
+        s.stats.missed_bytes = rng.random_range(0..10);
         finalize_session_stats(&mut s);
         normal.push(s);
     }
