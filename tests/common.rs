@@ -16,8 +16,13 @@ pub async fn calibrate_thresholds_from_baseline(
         }
     }
     if scores.is_empty() {
-        // Fallback to conservative defaults
-        analyzer.set_test_thresholds(0.8, 0.9).await;
+        // Fallback to defaults
+        analyzer
+            .set_test_thresholds(
+                flodbadd::analyzer::DEFAULT_SUSPICIOUS_THRESHOLD,
+                flodbadd::analyzer::DEFAULT_ABNORMAL_THRESHOLD,
+            )
+            .await;
         return;
     }
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap());

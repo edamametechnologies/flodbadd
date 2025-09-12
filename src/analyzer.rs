@@ -72,8 +72,9 @@ static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as 
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.98;
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.99;
 // Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
-pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.75;
-pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.80;
+pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.85;
+pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.90;
+pub const MIN_REASONABLE_THRESHOLD: f64 = 0.5;
 pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 3; // 3 hours
 pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest training
 pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
@@ -1057,6 +1058,21 @@ fn compute_dynamic_thresholds(
     scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = scores.len();
+
+    // Add detailed score distribution analysis
+    info!(
+        "Score distribution analysis: min={:.4}, 25th={:.4}, 50th={:.4}, 75th={:.4}, 90th={:.4}, 95th={:.4}, 98th={:.4}, 99th={:.4}, max={:.4}",
+        scores[0],
+        scores[n/4],
+        scores[n/2],
+        scores[3*n/4],
+        scores[9*n/10],
+        scores[95*n/100],
+        scores[98*n/100],
+        scores[99*n/100],
+        scores[n-1]
+    );
+
     let suspicious_idx = ((n as f64 * suspicious_percentile).ceil() as usize).saturating_sub(1);
     let abnormal_idx = ((n as f64 * abnormal_percentile).ceil() as usize).saturating_sub(1);
 
@@ -1068,28 +1084,33 @@ fn compute_dynamic_thresholds(
     let new_suspicious_threshold = scores[suspicious_idx];
     let new_abnormal_threshold = scores[abnormal_idx];
 
+    info!(
+        "compute_dynamic_thresholds: Percentile-based thresholds - Suspicious: {:.4} ({}th percentile), Abnormal: {:.4} ({}th percentile)",
+        new_suspicious_threshold, suspicious_percentile * 100.0,
+        new_abnormal_threshold, abnormal_percentile * 100.0
+    );
+
     // Include the percentile boundary itself to ensure anomalies are detected in small samples
     let epsilon = 0.0;
     let final_suspicious_threshold = new_suspicious_threshold + epsilon;
     let final_abnormal_threshold = new_abnormal_threshold + epsilon;
 
-    // Use default thresholds suitable for 10D
-    let default_suspicious = DEFAULT_SUSPICIOUS_THRESHOLD;
-    let default_abnormal = DEFAULT_ABNORMAL_THRESHOLD;
-
     // Store the old thresholds for logging
     let old_suspicious = model.suspicious_threshold;
     let old_abnormal = model.abnormal_threshold;
 
-    model.suspicious_threshold = final_suspicious_threshold.max(default_suspicious);
+    // Only enforce minimum reasonable thresholds, not the high defaults
+    let min_reasonable_threshold = MIN_REASONABLE_THRESHOLD; // Reasonable minimum to avoid too many false positives
+    model.suspicious_threshold = final_suspicious_threshold.max(min_reasonable_threshold);
     // Ensure abnormal is strictly greater than suspicious
     model.abnormal_threshold = final_abnormal_threshold
         .max(model.suspicious_threshold + epsilon)
-        .max(default_abnormal);
+        .max(min_reasonable_threshold);
 
     info!(
-        "Computed dynamic thresholds: Suspicious >= {:.4} (was {:.4}), Abnormal >= {:.4} (was {:.4}) (based on {} scores, took {:?})",
-        model.suspicious_threshold, old_suspicious, model.abnormal_threshold, old_abnormal, n, start_time.elapsed()
+        "Computed dynamic thresholds: Suspicious >= {:.4} (was {:.4}, percentile: {:.4}), Abnormal >= {:.4} (was {:.4}, percentile: {:.4}) (based on {} scores, took {:?})",
+        model.suspicious_threshold, old_suspicious, new_suspicious_threshold,
+        model.abnormal_threshold, old_abnormal, new_abnormal_threshold, n, start_time.elapsed()
     );
 }
 
