@@ -69,14 +69,16 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define percentile thresholds used to compute dynamic thresholds
-pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.98;
-pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.99;
+pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.99;
+pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.995;
 // Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.85;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.90;
 pub const MIN_REASONABLE_THRESHOLD: f64 = 0.5;
-pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 3; // 3 hours
-pub const WARMUP_DELAY: i64 = 30; // Minimum warm-up duration to ensure forest training
+pub const DEFAULT_THRESHOLD_RECALC_TIMEOUT: i64 = 1; // 1 hour
+pub const WARMUP_DELAY: i64 = 60; // Minimum warm-up duration to ensure forest training
+pub const WARMUP_DURATION_TEST: i64 = 15; // 15 seconds in tests
+pub const WARMUP_DURATION_DEFAULT: i64 = 180; // 3 minutes in production
 pub const ANALYSIS_DELAY: i64 = 60; // Minimum delay between analysis of a session
 
 // Minimum unique samples required (after deduplication) before finishing warm-up
@@ -1184,7 +1186,11 @@ impl SessionAnalyzer {
             // Initialize with 0 (will be set on first analyze_sessions call)
             warm_up_start_time: AtomicU64::new(0),
             // Use a shorter warm-up during tests; otherwise target ~3 minutes
-            warm_up_duration: Duration::seconds(if cfg!(test) { 15 } else { 180 }),
+            warm_up_duration: Duration::seconds(if cfg!(test) {
+                WARMUP_DURATION_TEST
+            } else {
+                WARMUP_DURATION_DEFAULT
+            }),
             suspicious_threshold_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             abnormal_threshold_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             last_threshold_recalc_time: Arc::new(CustomRwLock::new(Utc::now())),

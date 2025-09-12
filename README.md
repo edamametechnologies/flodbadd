@@ -95,17 +95,17 @@ Each network session is converted to a 12-dimensional feature vector:
 | Destination Port | Categorical | Destination port (bounded/hash-coded) |
 
 ### Operational Model
-- **Warm-up period** - Initial training on baseline traffic (configurable, default 2 minutes)
-- **Dynamic thresholds** - Percentile-based thresholds (for suspicious and for abnormal)
-- **Continuous learning** - Model retraining with sliding window (300 samples default)
+- **Warm-up period** - Initial training on baseline traffic (60 second minimum, 3 minute target)
+- **Dynamic thresholds** - Percentile-based thresholds (99th percentile for suspicious, 99.5th for abnormal)
+- **Continuous learning** - Model retraining with sliding window (800 samples default)
 - **Dynamic anomaly detection** - Sessions are continuously re-evaluated based on current model predictions
 - **Non-destructive analysis** - Preserves existing security tags while adding anomaly classifications
 
 ### Criticality Tagging
 Sessions receive comma-separated criticality tags:
 - `anomaly:normal` - Normal behavior according to current model
-- `anomaly:suspicious` - 97th+ percentile anomaly score
-- `anomaly:abnormal` - 98th+ percentile anomaly score
+- `anomaly:suspicious` - 99th+ percentile anomaly score (top 1%)
+- `anomaly:abnormal` - 99.5th+ percentile anomaly score (top 0.5%)
 - `blacklist:<list_name>` - Matches IP blacklist
 - Multiple tags can coexist (e.g., `anomaly:suspicious,blacklist:malware_c2`)
 

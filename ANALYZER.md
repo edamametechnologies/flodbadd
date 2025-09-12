@@ -32,7 +32,7 @@ Notes:
 
 ## Training Data Pipeline
 
-- Sliding window buffer: `recent_data` (default capacity: 300 samples).
+- Sliding window buffer: `recent_data` (default capacity: 800 samples).
 - Deduplication: before training, duplicate feature vectors are removed.
 - Downsampling per flow-signature (5‑tuple): repeated snapshots of the same `(protocol, src_ip, src_port, dst_ip, dst_port)` are downsampled (default: keep 1 out of 5). The first snapshot is always kept.
 - Exclusions: sessions already tagged as `blacklist:*` or `anomaly:suspicious|abnormal` are excluded from training to avoid contaminating the baseline.
@@ -56,11 +56,11 @@ Training is performed on a blocking thread (spawn_blocking) and the result is in
 ## Thresholds and Criticality
 
 - Percentile thresholds computed from `recent_data` scores:
-  - Suspicious: 97th percentile
-  - Abnormal: 98th percentile
+  - Suspicious: 99th percentile (configurable, default 0.99)
+  - Abnormal: 99.5th percentile (configurable, default 0.995)
 - Consistency: we compute thresholds using the same API as classification (`score_with_recursion_cap(..., 12)`).
-- Safety floors: thresholds are bounded by defaults to avoid unrealistic minima.
-- Recalculation cadence: at the end of warm‑up and every 6 hours thereafter.
+- Safety floors: thresholds are bounded by reasonable minimums (0.5) to prevent over-sensitivity, with fallback defaults (0.85 suspicious, 0.90 abnormal) when percentile computation fails.
+- Recalculation cadence: at the end of warm‑up and every 1 hour thereafter.
 
 Criticality levels:
 - `anomaly:normal`
@@ -73,7 +73,7 @@ If the threshold boundary is crossed, we attach a diagnostic (see below). Existi
 
 - Purpose: accumulate baseline samples and fit an initial model/thresholds.
 - Behavior:
-  - Enforce a minimum warm‑up delay and target duration.
+  - Enforce a minimum warm‑up delay (60 seconds) and target duration (3 minutes).
   - Ensure any pending training completes.
   - Compute dynamic thresholds, then disable warm‑up.
 
@@ -107,7 +107,7 @@ Examples:
 ## Cadence and Adaptation
 
 - Training throttling: minimum 6 hours between regular trainings (forced training can occur at warm‑up end and scheduled recalculations).
-- Threshold recalculation: every 6 hours.
+- Threshold recalculation: every 1 hour.
 - These cadences mitigate data drift over day‑long operations without excessive CPU usage.
 
 ## Configuration and Testing Hooks
