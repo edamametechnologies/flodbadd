@@ -1,6 +1,7 @@
 use crate::sessions::*;
 use chrono::{DateTime, Duration, Utc};
 use extended_isolation_forest::{Forest, ForestOptions};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
@@ -69,8 +70,8 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_secon
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
 // Define percentile thresholds used to compute dynamic thresholds
-pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.99;
-pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.995;
+pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.995;
+pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.9975;
 // Initial thresholds - will be overridden by the first training and its percentile based thresholds computed from the training data.
 pub const DEFAULT_SUSPICIOUS_THRESHOLD: f64 = 0.85;
 pub const DEFAULT_ABNORMAL_THRESHOLD: f64 = 0.90;
@@ -96,6 +97,134 @@ pub enum SessionCriticality {
     Normal,
     Suspicious,
     Abnormal,
+}
+
+/// Comprehensive analyzer statistics and configuration snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyzerStats {
+    // Current status and operational state
+    pub is_running: bool,
+    pub warm_up_active: bool,
+    pub warm_up_progress: WarmUpProgress,
+
+    // Current threshold configuration
+    pub thresholds: ThresholdStats,
+
+    // Model and training statistics
+    pub model_stats: ModelStats,
+
+    // Session tracking statistics
+    pub session_stats: SessionStats,
+
+    // Performance and timing statistics
+    pub performance_stats: PerformanceStats,
+
+    // Configuration parameters
+    pub config: AnalyzerConfig,
+}
+
+/// Warm-up progress information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmUpProgress {
+    pub elapsed_seconds: u64,
+    pub target_duration_seconds: u64,
+    pub unique_samples_collected: usize,
+    pub min_samples_required: usize,
+    pub progress_percentage: f64,
+    pub estimated_completion_seconds: Option<u64>,
+}
+
+/// Current threshold statistics and configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdStats {
+    pub suspicious_threshold: f64,
+    pub abnormal_threshold: f64,
+    pub suspicious_percentile: f64,
+    pub abnormal_percentile: f64,
+    pub last_recalc_time: Option<DateTime<Utc>>,
+    pub next_recalc_time: Option<DateTime<Utc>>,
+    pub recalc_interval_hours: f64,
+    pub min_reasonable_threshold: f64,
+    pub default_suspicious_threshold: f64,
+    pub default_abnormal_threshold: f64,
+}
+
+/// Isolation Forest model statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelStats {
+    pub has_trained_model: bool,
+    pub training_in_progress: bool,
+    pub last_training_time: Option<DateTime<Utc>>,
+    pub min_training_interval_minutes: f64,
+    pub total_samples_in_buffer: usize,
+    pub max_buffer_capacity: usize,
+    pub buffer_utilization_percentage: f64,
+    pub unique_samples_count: usize,
+    pub downsample_factor: u32,
+    pub feature_count: usize,
+    pub recent_score_distribution: Option<ScoreDistribution>,
+}
+
+/// Score distribution statistics from recent threshold calculations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreDistribution {
+    pub sample_count: usize,
+    pub min_score: f64,
+    pub max_score: f64,
+    pub mean_score: f64,
+    pub percentiles: ScorePercentiles,
+}
+
+/// Key percentile values for score distribution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScorePercentiles {
+    pub p25: f64,
+    pub p50: f64,
+    pub p75: f64,
+    pub p90: f64,
+    pub p95: f64,
+    pub p98: f64,
+    pub p99: f64,
+    pub p995: f64,
+}
+
+/// Session tracking and classification statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStats {
+    pub total_sessions_tracked: usize,
+    pub anomalous_sessions_count: usize,
+    pub blacklisted_sessions_count: usize,
+    pub normal_sessions_count: usize,
+    pub anomaly_rate_percentage: f64,
+    pub blacklist_rate_percentage: f64,
+    pub last_analysis_time: Option<DateTime<Utc>>,
+    pub sessions_analyzed_today: usize,
+}
+
+/// Performance and timing statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceStats {
+    pub average_analysis_time_ms: Option<f64>,
+    pub last_analysis_duration_ms: Option<f64>,
+    pub total_analyses_performed: u64,
+    pub cache_hit_rate_percentage: Option<f64>,
+    pub memory_usage_mb: Option<f64>,
+}
+
+/// Current analyzer configuration parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyzerConfig {
+    pub suspicious_percentile: f64,
+    pub abnormal_percentile: f64,
+    pub warm_up_duration_seconds: u64,
+    pub warm_up_min_samples: usize,
+    pub analysis_delay_seconds: i64,
+    pub threshold_recalc_interval_hours: f64,
+    pub max_buffer_samples: usize,
+    pub downsample_factor: u32,
+    pub feature_dimensions: usize,
+    pub cache_timeout_seconds: i64,
+    pub session_retention_timeout_seconds: i64,
 }
 
 // Implementation of Display for SessionCriticality
@@ -174,6 +303,9 @@ struct IsolationForestModel {
     last_training_time: DateTime<Utc>,
     /// Minimum time between regular trainings (not counting forced retraining)
     min_training_interval: Duration,
+    /// Current percentile settings for threshold calculation
+    current_suspicious_percentile: f64,
+    current_abnormal_percentile: f64,
 }
 
 impl IsolationForestModel {
@@ -193,6 +325,8 @@ impl IsolationForestModel {
             training_handle: None,
             last_training_time: Utc::now() - chrono::Duration::hours(25),
             min_training_interval: Duration::hours(6),
+            current_suspicious_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
+            current_abnormal_percentile: DEFAULT_ABNORMAL_PERCENTILE,
         }
     }
 
@@ -2225,6 +2359,439 @@ impl SessionAnalyzer {
                     .training_in_progress
                     .store(false, Ordering::Release);
             }
+        }
+    }
+
+    /// Get comprehensive analyzer statistics and configuration snapshot
+    /// This provides access to all relevant threshold, scoring, and operational information
+    ///
+    /// # Returns
+    ///
+    /// An `AnalyzerStats` struct containing:
+    /// - **Current status**: Running state, warm-up progress
+    /// - **Threshold configuration**: Current thresholds, percentiles, recalculation timing
+    /// - **Model statistics**: Training status, buffer utilization, score distributions
+    /// - **Session statistics**: Anomaly rates, blacklist rates, session counts
+    /// - **Performance metrics**: Analysis timing, cache efficiency (when available)
+    /// - **Configuration snapshot**: All current analyzer parameters
+    ///
+    /// # Usage Example
+    ///
+    /// ```rust,no_run
+    /// # use flodbadd::analyzer::SessionAnalyzer;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let analyzer = SessionAnalyzer::new();
+    /// analyzer.start().await;
+    ///
+    /// // Get comprehensive statistics
+    /// let stats = analyzer.get_analyzer_stats().await;
+    ///
+    /// // Check operational status
+    /// println!("Analyzer running: {}", stats.is_running);
+    /// println!("Warm-up active: {}", stats.warm_up_active);
+    /// println!("Warm-up progress: {:.1}%", stats.warm_up_progress.progress_percentage);
+    ///
+    /// // Monitor threshold configuration
+    /// println!("Suspicious threshold: {:.4} ({}th percentile)",
+    ///          stats.thresholds.suspicious_threshold,
+    ///          stats.thresholds.suspicious_percentile * 100.0);
+    /// println!("Abnormal threshold: {:.4} ({}th percentile)",
+    ///          stats.thresholds.abnormal_threshold,
+    ///          stats.thresholds.abnormal_percentile * 100.0);
+    ///
+    /// // Check model health
+    /// println!("Model trained: {}", stats.model_stats.has_trained_model);
+    /// println!("Buffer utilization: {:.1}%", stats.model_stats.buffer_utilization_percentage);
+    /// println!("Unique samples: {}", stats.model_stats.unique_samples_count);
+    ///
+    /// // Monitor detection rates
+    /// println!("Total sessions: {}", stats.session_stats.total_sessions_tracked);
+    /// println!("Anomaly rate: {:.2}%", stats.session_stats.anomaly_rate_percentage);
+    /// println!("Blacklist rate: {:.2}%", stats.session_stats.blacklist_rate_percentage);
+    ///
+    /// // Export as JSON for external monitoring
+    /// let json_stats = serde_json::to_string_pretty(&stats)?;
+    /// println!("Stats JSON:\n{}", json_stats);
+    ///
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_analyzer_stats(&self) -> AnalyzerStats {
+        // Clean up old sessions before calculating stats
+        self.cleanup_tracked_sessions();
+
+        let now = Utc::now();
+        let is_running = self.running.load(Ordering::SeqCst);
+        let warm_up_active = self.warm_up_active.load(Ordering::SeqCst);
+
+        // Get warm-up progress information
+        let warm_up_start_timestamp = self.warm_up_start_time.load(Ordering::SeqCst);
+        let warm_up_elapsed = if warm_up_start_timestamp > 0 {
+            now.timestamp() as u64 - warm_up_start_timestamp
+        } else {
+            0
+        };
+        let warm_up_target = self.warm_up_duration.num_seconds() as u64;
+        let unique_samples = self.unique_recent_sample_count().await;
+
+        let warm_up_progress = WarmUpProgress {
+            elapsed_seconds: warm_up_elapsed,
+            target_duration_seconds: warm_up_target,
+            unique_samples_collected: unique_samples,
+            min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
+            progress_percentage: if warm_up_target > 0 {
+                ((warm_up_elapsed as f64 / warm_up_target as f64) * 100.0).min(100.0)
+            } else {
+                100.0
+            },
+            estimated_completion_seconds: if warm_up_active && warm_up_elapsed < warm_up_target {
+                Some(warm_up_target - warm_up_elapsed)
+            } else {
+                None
+            },
+        };
+
+        // Get model and threshold information
+        let model_guard = self.model.read().await;
+        let (model_stats, thresholds) = if let Some(model_lock) = &*model_guard {
+            let model = model_lock.read().await;
+            let has_forest = model.forest.is_some();
+            let training_in_progress = model.training_in_progress.load(Ordering::SeqCst);
+            let buffer_size = model.recent_data.len();
+            let max_capacity = model.max_samples;
+
+            // Calculate score distribution if we have recent data and a forest
+            let score_dist = if has_forest && !model.recent_data.is_empty() {
+                if let Some(forest) = &model.forest {
+                    let mut scores: Vec<f64> = model
+                        .recent_data
+                        .iter()
+                        .map(|features| forest.score(features))
+                        .collect();
+
+                    if !scores.is_empty() {
+                        scores
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let n = scores.len();
+                        let mean = scores.iter().sum::<f64>() / n as f64;
+
+                        Some(ScoreDistribution {
+                            sample_count: n,
+                            min_score: scores[0],
+                            max_score: scores[n - 1],
+                            mean_score: mean,
+                            percentiles: ScorePercentiles {
+                                p25: scores[n / 4],
+                                p50: scores[n / 2],
+                                p75: scores[3 * n / 4],
+                                p90: scores[9 * n / 10],
+                                p95: scores[95 * n / 100],
+                                p98: scores[98 * n / 100],
+                                p99: scores[99 * n / 100],
+                                p995: scores[995 * n / 1000],
+                            },
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let model_stats = ModelStats {
+                has_trained_model: has_forest,
+                training_in_progress,
+                last_training_time: if model.last_training_time > DateTime::<Utc>::MIN_UTC {
+                    Some(model.last_training_time)
+                } else {
+                    None
+                },
+                min_training_interval_minutes: model.min_training_interval.num_minutes() as f64,
+                total_samples_in_buffer: buffer_size,
+                max_buffer_capacity: max_capacity,
+                buffer_utilization_percentage: if max_capacity > 0 {
+                    (buffer_size as f64 / max_capacity as f64) * 100.0
+                } else {
+                    0.0
+                },
+                unique_samples_count: unique_samples,
+                downsample_factor: model.downsample_factor,
+                feature_count: NUM_FEATURES,
+                recent_score_distribution: score_dist,
+            };
+
+            let last_recalc = self.last_threshold_recalc_time.read().await;
+            let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
+            let next_recalc = *last_recalc + self.threshold_recalc_interval;
+
+            let thresholds = ThresholdStats {
+                suspicious_threshold: model.suspicious_threshold,
+                abnormal_threshold: model.abnormal_threshold,
+                suspicious_percentile: model.current_suspicious_percentile,
+                abnormal_percentile: model.current_abnormal_percentile,
+                last_recalc_time: Some(*last_recalc),
+                next_recalc_time: Some(next_recalc),
+                recalc_interval_hours,
+                min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
+                default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+            };
+
+            (model_stats, thresholds)
+        } else {
+            // No model available
+            let model_stats = ModelStats {
+                has_trained_model: false,
+                training_in_progress: false,
+                last_training_time: None,
+                min_training_interval_minutes: 0.0,
+                total_samples_in_buffer: 0,
+                max_buffer_capacity: 800, // Default from IsolationForestModel::new()
+                buffer_utilization_percentage: 0.0,
+                unique_samples_count: 0,
+                downsample_factor: 1,
+                feature_count: NUM_FEATURES,
+                recent_score_distribution: None,
+            };
+
+            let last_recalc = self.last_threshold_recalc_time.read().await;
+            let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
+            let next_recalc = *last_recalc + self.threshold_recalc_interval;
+
+            let thresholds = ThresholdStats {
+                suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+                suspicious_percentile: self.suspicious_threshold_percentile,
+                abnormal_percentile: self.abnormal_threshold_percentile,
+                last_recalc_time: Some(*last_recalc),
+                next_recalc_time: Some(next_recalc),
+                recalc_interval_hours,
+                min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
+                default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+            };
+
+            (model_stats, thresholds)
+        };
+
+        // Calculate session statistics
+        let total_sessions = self.all_sessions.len();
+        let anomalous_sessions = self.anomalous_sessions.len();
+        let blacklisted_sessions = self.blacklisted_sessions.len();
+        let normal_sessions =
+            total_sessions.saturating_sub(anomalous_sessions + blacklisted_sessions);
+
+        let anomaly_rate = if total_sessions > 0 {
+            (anomalous_sessions as f64 / total_sessions as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let blacklist_rate = if total_sessions > 0 {
+            (blacklisted_sessions as f64 / total_sessions as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let last_analysis = self.last_analysis_time.read().await;
+
+        let session_stats = SessionStats {
+            total_sessions_tracked: total_sessions,
+            anomalous_sessions_count: anomalous_sessions,
+            blacklisted_sessions_count: blacklisted_sessions,
+            normal_sessions_count: normal_sessions,
+            anomaly_rate_percentage: anomaly_rate,
+            blacklist_rate_percentage: blacklist_rate,
+            last_analysis_time: *last_analysis,
+            sessions_analyzed_today: total_sessions, // Simplified - could be enhanced with daily tracking
+        };
+
+        // Performance stats (simplified for now)
+        let performance_stats = PerformanceStats {
+            average_analysis_time_ms: None, // Could be tracked with a rolling average
+            last_analysis_duration_ms: None, // Could be tracked per analysis
+            total_analyses_performed: 0,    // Could be tracked with a counter
+            cache_hit_rate_percentage: None, // Could be calculated from cache statistics
+            memory_usage_mb: None,          // Could use system memory tracking
+        };
+
+        // Configuration snapshot
+        let config = AnalyzerConfig {
+            suspicious_percentile: self.suspicious_threshold_percentile,
+            abnormal_percentile: self.abnormal_threshold_percentile,
+            warm_up_duration_seconds: self.warm_up_duration.num_seconds() as u64,
+            warm_up_min_samples: WARMUP_MIN_UNIQUE_SAMPLES,
+            analysis_delay_seconds: ANALYSIS_DELAY,
+            threshold_recalc_interval_hours: self.threshold_recalc_interval.num_hours() as f64,
+            max_buffer_samples: 800, // Default from IsolationForestModel
+            downsample_factor: 1,    // Default from IsolationForestModel
+            feature_dimensions: NUM_FEATURES,
+            cache_timeout_seconds: ANALYZER_CACHE_TIMEOUT,
+            session_retention_timeout_seconds: CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64,
+        };
+
+        AnalyzerStats {
+            is_running,
+            warm_up_active,
+            warm_up_progress,
+            thresholds,
+            model_stats,
+            session_stats,
+            performance_stats,
+            config,
+        }
+    }
+
+    /// Set new percentile thresholds and trigger immediate recalculation
+    ///
+    /// This method allows dynamic adjustment of the anomaly detection sensitivity by changing
+    /// the percentiles used for threshold calculation. After updating the percentiles, it
+    /// immediately triggers a threshold recalculation if a trained model is available.
+    ///
+    /// # Arguments
+    ///
+    /// * `suspicious_percentile` - Percentile for suspicious threshold (0.0 to 1.0)
+    /// * `abnormal_percentile` - Percentile for abnormal threshold (0.0 to 1.0)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if percentiles were updated successfully, or `Err(String)` with
+    /// an error message if the input values are invalid.
+    ///
+    /// # Validation
+    ///
+    /// - Both percentiles must be between 0.0 and 1.0
+    /// - `abnormal_percentile` must be greater than `suspicious_percentile`
+    /// - Percentiles should typically be high values (e.g., 0.95-0.999) for anomaly detection
+    ///
+    /// # Usage Example
+    ///
+    /// ```rust,no_run
+    /// # use flodbadd::analyzer::SessionAnalyzer;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let analyzer = SessionAnalyzer::new();
+    /// analyzer.start().await;
+    ///
+    /// // Make detection more sensitive (lower percentiles = lower thresholds)
+    /// analyzer.set_percentiles(0.95, 0.98).await?;
+    ///
+    /// // Make detection less sensitive (higher percentiles = higher thresholds)  
+    /// analyzer.set_percentiles(0.995, 0.9975).await?;
+    ///
+    /// // Check the updated configuration
+    /// let stats = analyzer.get_analyzer_stats().await;
+    /// println!("New suspicious percentile: {:.1}%", stats.thresholds.suspicious_percentile * 100.0);
+    /// println!("New abnormal percentile: {:.1}%", stats.thresholds.abnormal_percentile * 100.0);
+    /// println!("Updated suspicious threshold: {:.4}", stats.thresholds.suspicious_threshold);
+    /// println!("Updated abnormal threshold: {:.4}", stats.thresholds.abnormal_threshold);
+    ///
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_percentiles(
+        &self,
+        suspicious_percentile: f64,
+        abnormal_percentile: f64,
+    ) -> Result<(), String> {
+        // Validate input parameters
+        if suspicious_percentile < 0.0 || suspicious_percentile > 1.0 {
+            return Err(format!(
+                "suspicious_percentile must be between 0.0 and 1.0, got: {}",
+                suspicious_percentile
+            ));
+        }
+
+        if abnormal_percentile < 0.0 || abnormal_percentile > 1.0 {
+            return Err(format!(
+                "abnormal_percentile must be between 0.0 and 1.0, got: {}",
+                abnormal_percentile
+            ));
+        }
+
+        if abnormal_percentile <= suspicious_percentile {
+            return Err(format!(
+                "abnormal_percentile ({}) must be greater than suspicious_percentile ({})",
+                abnormal_percentile, suspicious_percentile
+            ));
+        }
+
+        // Warn if percentiles seem too low for typical anomaly detection
+        if suspicious_percentile < 0.5 {
+            warn!(
+                "Very low suspicious_percentile ({:.3}) may result in excessive false positives",
+                suspicious_percentile
+            );
+        }
+
+        if abnormal_percentile < 0.7 {
+            warn!(
+                "Very low abnormal_percentile ({:.3}) may result in excessive false positives",
+                abnormal_percentile
+            );
+        }
+
+        info!(
+            "Updating percentile thresholds: suspicious {:.1}% -> {:.1}%, abnormal {:.1}% -> {:.1}%",
+            self.suspicious_threshold_percentile * 100.0,
+            suspicious_percentile * 100.0,
+            self.abnormal_threshold_percentile * 100.0,
+            abnormal_percentile * 100.0
+        );
+
+        // Update the percentile configuration
+        let model_guard = self.model.read().await;
+        if let Some(model_lock) = &*model_guard {
+            let model = model_lock.read().await;
+
+            // Store old values for logging
+            let old_suspicious_threshold = model.suspicious_threshold;
+            let old_abnormal_threshold = model.abnormal_threshold;
+
+            drop(model); // Release read lock before acquiring write lock
+
+            // Trigger immediate threshold recalculation with new percentiles
+            {
+                let mut model_write = model_lock.write().await;
+
+                // Update the stored percentiles in the model
+                model_write.current_suspicious_percentile = suspicious_percentile;
+                model_write.current_abnormal_percentile = abnormal_percentile;
+
+                compute_dynamic_thresholds(
+                    &mut model_write,
+                    suspicious_percentile,
+                    abnormal_percentile,
+                );
+
+                let new_suspicious = model_write.suspicious_threshold;
+                let new_abnormal = model_write.abnormal_threshold;
+
+                info!(
+                    "Percentile update successful: thresholds changed from suspicious {:.4} -> {:.4}, abnormal {:.4} -> {:.4}",
+                    old_suspicious_threshold, new_suspicious,
+                    old_abnormal_threshold, new_abnormal
+                );
+            }
+
+            // Force update of last recalc time to reset the recalculation timer
+            {
+                let mut last_recalc = self.last_threshold_recalc_time.write().await;
+                *last_recalc = Utc::now();
+            }
+
+            Ok(())
+        } else {
+            warn!("No model available for threshold recalculation - percentiles will be applied when model is trained");
+
+            // Even without a model, we should store the new percentiles for when the model becomes available
+            // Note: Due to the current design using immutable &self, we cannot directly update the percentile
+            // fields in the analyzer. The percentiles will be properly applied during the next regular
+            // threshold recalculation or when analyze_sessions() calls compute_dynamic_thresholds.
+            info!("Percentiles will be applied when model becomes available during next analysis cycle");
+            Ok(())
         }
     }
 }

@@ -56,8 +56,8 @@ Training is performed on a blocking thread (spawn_blocking) and the result is in
 ## Thresholds and Criticality
 
 - Percentile thresholds computed from `recent_data` scores:
-  - Suspicious: 99th percentile (configurable, default 0.99)
-  - Abnormal: 99.5th percentile (configurable, default 0.995)
+  - Suspicious: 99th percentile (configurable, default 0.995)
+  - Abnormal: 99.5th percentile (configurable, default 0.9975)
 - Consistency: we compute thresholds using the same API as classification (`score_with_recursion_cap(..., 12)`).
 - Safety floors: thresholds are bounded by reasonable minimums (0.5) to prevent over-sensitivity, with fallback defaults (0.85 suspicious, 0.90 abnormal) when percentile computation fails.
 - Recalculation cadence: at the end of warm‑up and every 1 hour thereafter.
