@@ -1282,7 +1282,7 @@ impl FlodbaddL7 {
 #[cfg(windows)]
 fn get_windows_username_by_uid(uid: &Uid) -> Option<String> {
     use std::ffi::c_void;
-    use windows::core::{Error, PCWSTR};
+    use windows::core::PCWSTR;
 
     // The Uid is typically a SID in string form on Windows
     let uid_str = uid.to_string();
@@ -1312,9 +1312,8 @@ fn get_windows_username_by_uid(uid: &Uid) -> Option<String> {
                 let _ = NetApiBufferFree(Some(buffer as *const c_void));
             }
             debug!(
-                "Failed to get Windows username for UID {}: {:?}",
-                uid_str,
-                Error::from_win32()
+                "Failed to get Windows username for UID {}: code {}",
+                uid_str, result
             );
             return None;
         }
