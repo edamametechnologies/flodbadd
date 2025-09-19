@@ -413,7 +413,7 @@ impl Signature for FlodbaddInterfaces {
 }
 
 // Exclusions and filtering
-const EXCLUDED_IFACE_NAMES_PREFIXES: [&str; 23] = [
+const EXCLUDED_IFACE_NAMES_PREFIXES: [&str; 25] = [
     "feth",
     "zt",
     "utun",
@@ -437,6 +437,8 @@ const EXCLUDED_IFACE_NAMES_PREFIXES: [&str; 23] = [
     "virbr",
     "vEthernet",
     "ZeroTier",
+    "Tailscale",
+    "wt",
 ];
 
 const EXCLUDED_IFACE_NAMES_CONTAINS: [&str; 2] = ["vpn", "virtual"];
@@ -842,6 +844,26 @@ mod tests {
             ipv4: Some(FlodbaddInterfaceAddrV4 {
                 ip: Ipv4Addr::new(10, 0, 0, 2),
                 prefix: 8,
+            }),
+            ipv6: vec![],
+        });
+
+        // Tailscale
+        test_set.interfaces.push(FlodbaddInterface {
+            name: "Tailscale".to_string(),
+            ipv4: Some(FlodbaddInterfaceAddrV4 {
+                ip: Ipv4Addr::new(100, 85, 103, 53),
+                prefix: 32,
+            }),
+            ipv6: vec![],
+        });
+
+        // Netbird
+        test_set.interfaces.push(FlodbaddInterface {
+            name: "wt0".to_string(),
+            ipv4: Some(FlodbaddInterfaceAddrV4 {
+                ip: Ipv4Addr::new(100, 96, 0, 0),
+                prefix: 16,
             }),
             ipv6: vec![],
         });
