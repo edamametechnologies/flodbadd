@@ -432,8 +432,15 @@ impl FlodbaddCapture {
         // otherwise there is nothing to do.
         let is_capturing = self.is_capturing().await;
 
+        // Ignore restart if not capturing
         if !is_capturing {
             warn!("Restart skipped – not capturing");
+            return Ok(());
+        }
+
+        // Ignore restart if the interfaces list is empty (indicative of a transient situation like network roaming)
+        if interfaces.interfaces.is_empty() {
+            warn!("Restart skipped – interfaces list is empty");
             return Ok(());
         }
 
@@ -451,13 +458,13 @@ impl FlodbaddCapture {
                 .all(|(a, b)| a.name == b.name);
 
         if names_equal_and_non_empty {
-            warn!("Attempting to restart capture but interface names are the same, skipping...");
+            warn!("Restart skipped – interface names are the same");
             return Ok(());
         }
 
         info!(
-            "Restarting capture (capturing={}, interfaces_changed={:?}) on {:?}",
-            is_capturing, !names_equal_and_non_empty, interfaces
+            "Restarting capture with new interfaces: {:?}",
+            interfaces
         );
 
         // Stop existing capture tasks if any are running.
