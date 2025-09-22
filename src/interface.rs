@@ -445,7 +445,7 @@ const EXCLUDED_IFACE_NAMES_CONTAINS: [&str; 2] = ["vpn", "virtual"];
 
 pub fn validate_interfaces(interfaces: FlodbaddInterfaces) -> FlodbaddInterfaces {
     // Filter out undesired interfaces, then collect into FlodbaddInterfaces
-    interfaces
+    let mut interfaces: FlodbaddInterfaces = interfaces
         .into_iter()
         .filter(|iface| {
             // Exclude if interface name starts with a known pattern
@@ -465,7 +465,7 @@ pub fn validate_interfaces(interfaces: FlodbaddInterfaces) -> FlodbaddInterfaces
                 return false;
             }
 
-            // Exclude None, loopback, local, and unspecified addresses for IPv4
+            // Exclude None, loopback, local, and interfaces with unspecified IPv4 addresses
             if iface.ipv4.is_none()
                 || iface.ipv4.as_ref().map_or(false, |addr| {
                     let [a, b, c, d] = addr.ip.octets();
@@ -476,7 +476,28 @@ pub fn validate_interfaces(interfaces: FlodbaddInterfaces) -> FlodbaddInterfaces
             }
             true
         })
-        .collect()
+        .collect();
+    // Also populate missing prefixes with IPv6 addresses (happens on Windows)
+    for iface in interfaces.interfaces.iter_mut() {
+        for ipv6_type in iface.ipv6.iter_mut() {
+            match ipv6_type {
+                FlodbaddInterfaceAddrTypeV6::Temporary(v)
+                | FlodbaddInterfaceAddrTypeV6::Secured(v)
+                | FlodbaddInterfaceAddrTypeV6::LinkLocal(v)
+                | FlodbaddInterfaceAddrTypeV6::Local(v)
+                | FlodbaddInterfaceAddrTypeV6::Unspecified(v) => {
+                    if v.prefix == 0 {
+                        // Default IPv6 prefix when OS does not provide one
+                        v.prefix = 64;
+                    }
+                }
+            }
+        }
+        // Keep IPv6 addresses ordering deterministic after potential updates
+        iface.sort();
+    }
+
+    interfaces
 }
 
 // Helper to classify IPv6 addresses

@@ -437,27 +437,28 @@ impl FlodbaddCapture {
             return Ok(());
         }
 
-        // Ignore if the interfaces names are not empty and the same (capture is not influenced by the interfaces IP changes)
+        // Ignore restart if both current and new interface name lists are non-empty and identical
         let existing_interfaces = self.interfaces.read().await.clone();
-        if !existing_interfaces.interfaces.is_empty() {
-            let mut interfaces_changed = false;
-            for (i, iface) in existing_interfaces.interfaces.iter().enumerate() {
-                if iface.name != interfaces.interfaces[i].name {
-                    interfaces_changed = true;
-                    break;
-                }
-            }
-            if !interfaces_changed {
-                warn!(
-                    "Attempting to restart capture but interface names are the same, skipping..."
-                );
-                return Ok(());
-            }
-            info!(
-                "Restarting capture (capturing={}, interfaces_changed={:?}) on {:?}",
-                is_capturing, interfaces_changed, interfaces
-            );
+        let existing = &existing_interfaces.interfaces;
+        let new = &interfaces.interfaces;
+
+        let names_equal_and_non_empty = !existing.is_empty()
+            && !new.is_empty()
+            && existing.len() == new.len()
+            && existing
+                .iter()
+                .zip(new.iter())
+                .all(|(a, b)| a.name == b.name);
+
+        if names_equal_and_non_empty {
+            warn!("Attempting to restart capture but interface names are the same, skipping...");
+            return Ok(());
         }
+
+        info!(
+            "Restarting capture (capturing={}, interfaces_changed={:?}) on {:?}",
+            is_capturing, !names_equal_and_non_empty, interfaces
+        );
 
         // Stop existing capture tasks if any are running.
         if is_capturing {
