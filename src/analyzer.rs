@@ -1376,7 +1376,7 @@ impl SessionAnalyzer {
             return result;
         }
 
-        // Auto-start if model isn't initialized
+        // Auto-start if model isn't initialized - do this BEFORE acquiring the long-held read lock
         let model_initialized = {
             let model_guard = self.model.read().await;
             model_guard.is_some()
@@ -1421,14 +1421,21 @@ impl SessionAnalyzer {
             {
                 info!("Analyzer: Found completed training task at start of analyze_sessions, processing result");
                 if let Some(handle) = &mut model_guard.training_handle {
-                    match handle.await {
-                        Ok(Ok(forest)) => {
+                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
+                        Ok(Ok(Ok(forest))) => {
                             info!("Analyzer: Background training task completed successfully (processed at analyze_sessions start)");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
                         },
-                        Ok(Err(e)) => warn!("Analyzer: Background training task failed (processed at analyze_sessions start): {:?}", e),
-                        Err(e) => error!("Analyzer: Background training task panicked (processed at analyze_sessions start): {:?}", e),
+                        Ok(Ok(Err(e))) => warn!("Analyzer: Background training task failed (processed at analyze_sessions start): {:?}", e),
+                        Ok(Err(e)) => error!("Analyzer: Background training task panicked (processed at analyze_sessions start): {:?}", e),
+                        Err(_) => {
+                            error!("Analyzer: Background training task timed out after 120s - possible EIF hang");
+                            // Abort the hung task and clear state
+                            model_guard.training_handle = None;
+                            model_guard.training_in_progress.store(false, Ordering::Release);
+                            return result; // Exit early to prevent further hangs
+                        }
                     }
                     model_guard.training_handle = None;
                     model_guard
@@ -1521,27 +1528,44 @@ impl SessionAnalyzer {
                     if let Some(handle) = &mut model_guard.training_handle {
                         if !handle.is_finished() {
                             info!("Analyzer (Finalize Warmup): Waiting for ongoing training task to complete...");
-                            match handle.await {
-                                Ok(Ok(forest)) => {
+                            match tokio::time::timeout(
+                                tokio::time::Duration::from_secs(120),
+                                handle,
+                            )
+                            .await
+                            {
+                                Ok(Ok(Ok(forest))) => {
                                     info!("Analyzer (Finalize Warmup): Training task completed successfully.");
                                     model_guard.forest = Some(forest);
                                     model_guard.last_training_time = Utc::now();
                                 }
-                                Ok(Err(e)) => warn!(
+                                Ok(Ok(Err(e))) => warn!(
                                     "Analyzer (Finalize Warmup): Training task failed: {:?}",
                                     e
                                 ),
-                                Err(e) => error!(
+                                Ok(Err(e)) => error!(
                                     "Analyzer (Finalize Warmup): Training task panicked: {:?}",
                                     e
                                 ),
+                                Err(_) => {
+                                    error!("Analyzer (Finalize Warmup): Training task timed out after 120s - possible EIF hang");
+                                    model_guard.training_handle = None;
+                                    model_guard
+                                        .training_in_progress
+                                        .store(false, Ordering::Release);
+                                }
                             }
                         } else {
-                            // Already finished, try to process
-                            match handle.await {
-                                Ok(Ok(forest)) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); },
-                                Ok(Err(e)) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
-                                Err(e) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
+                            // Already finished, try to process with timeout (should be fast)
+                            match tokio::time::timeout(tokio::time::Duration::from_secs(10), handle).await {
+                                Ok(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); },
+                                Ok(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
+                                Ok(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
+                                Err(_) => {
+                                    error!("Analyzer (Finalize Warmup): Finished training task timed out - possible EIF issue");
+                                    model_guard.training_handle = None;
+                                    model_guard.training_in_progress.store(false, Ordering::Release);
+                                }
                             }
                         }
                         model_guard.training_handle = None;
@@ -1556,14 +1580,17 @@ impl SessionAnalyzer {
                     model_guard.train_model(true).await;
                     if let Some(handle) = &mut model_guard.training_handle {
                         info!("Analyzer (Finalize Warmup): Waiting for final forced training task to complete...");
-                        match handle.await {
-                            Ok(Ok(forest)) => {
+                        match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
+                            Ok(Ok(Ok(forest))) => {
                                 info!("Analyzer (Finalize Warmup): Final forced training task completed successfully.");
                                 model_guard.forest = Some(forest);
                                 model_guard.last_training_time = Utc::now();
                             },
-                            Ok(Err(e)) => warn!("Analyzer (Finalize Warmup): Final forced training task failed: {:?}", e),
-                            Err(e) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
+                            Ok(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Final forced training task failed: {:?}", e),
+                            Ok(Err(e)) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
+                            Err(_) => {
+                                error!("Analyzer (Finalize Warmup): Final forced training task timed out after 120s - possible EIF hang");
+                            }
                         }
                         model_guard.training_handle = None;
                         model_guard
@@ -1683,19 +1710,27 @@ impl SessionAnalyzer {
 
                 if let Some(handle) = &mut model_guard.training_handle {
                     info!("Analyzer (Scheduled Recalc): Waiting for training task to complete...");
-                    match handle.await {
-                        Ok(Ok(forest)) => {
+                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await
+                    {
+                        Ok(Ok(Ok(forest))) => {
                             info!("Analyzer (Scheduled Recalc): Training task completed successfully.");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
                         }
-                        Ok(Err(e)) => {
+                        Ok(Ok(Err(e))) => {
                             warn!("Analyzer (Scheduled Recalc): Training task failed: {:?}", e)
                         }
-                        Err(e) => error!(
+                        Ok(Err(e)) => error!(
                             "Analyzer (Scheduled Recalc): Training task panicked: {:?}",
                             e
                         ),
+                        Err(_) => {
+                            error!("Analyzer (Scheduled Recalc): Training task timed out after 120s - possible EIF hang");
+                            model_guard.training_handle = None;
+                            model_guard
+                                .training_in_progress
+                                .store(false, Ordering::Release);
+                        }
                     }
                     model_guard.training_handle = None;
                     model_guard
@@ -2201,10 +2236,20 @@ impl SessionAnalyzer {
         }
 
         // Instantiate the IsolationForestModel if missing; otherwise reuse existing
-        let mut model_guard = self.model.write().await;
-        if model_guard.is_none() {
-            *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
-            debug!("Analyzer start: created new model");
+        // First check with a read lock to avoid blocking writers when already initialized
+        let already_initialized = {
+            let model_read = self.model.read().await;
+            model_read.is_some()
+        };
+
+        if !already_initialized {
+            let mut model_guard = self.model.write().await;
+            if model_guard.is_none() {
+                *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
+                debug!("Analyzer start: created new model");
+            } else {
+                debug!("Analyzer start: model became available before write; reusing existing model and thresholds");
+            }
         } else {
             debug!("Analyzer start: reusing existing model and thresholds");
         }
