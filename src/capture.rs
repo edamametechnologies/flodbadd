@@ -462,10 +462,7 @@ impl FlodbaddCapture {
             return Ok(());
         }
 
-        info!(
-            "Restarting capture with new interfaces: {:?}",
-            interfaces
-        );
+        info!("Restarting capture with new interfaces: {:?}", interfaces);
 
         // Stop existing capture tasks if any are running.
         if is_capturing {

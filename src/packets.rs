@@ -150,22 +150,38 @@ pub async fn process_parsed_packet(
     filter: &Arc<CustomRwLock<SessionFilter>>,
     l7: Option<&Arc<FlodbaddL7>>,
 ) {
-    // --- Increment Counters ---
+    // --- Increment Counters (both windowed and cumulative) ---
     PACKET_STATS.total_processed.fetch_add(1, Ordering::Relaxed);
+    PACKET_STATS
+        .total_processed_cumulative
+        .fetch_add(1, Ordering::Relaxed);
+
     match parsed_packet.session.protocol {
         Protocol::TCP => {
             PACKET_STATS.tcp_processed.fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .tcp_processed_cumulative
+                .fetch_add(1, Ordering::Relaxed);
         }
         Protocol::UDP => {
             PACKET_STATS.udp_processed.fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .udp_processed_cumulative
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     match parsed_packet.session.src_ip {
         IpAddr::V4(_) => {
             PACKET_STATS.ipv4_processed.fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .ipv4_processed_cumulative
+                .fetch_add(1, Ordering::Relaxed);
         }
         IpAddr::V6(_) => {
             PACKET_STATS.ipv6_processed.fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .ipv6_processed_cumulative
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     // --- End Increment Counters ---
@@ -274,6 +290,9 @@ pub async fn process_parsed_packet(
         PACKET_STATS
             .updated_sessions
             .fetch_add(1, Ordering::Relaxed);
+        PACKET_STATS
+            .updated_sessions_cumulative
+            .fetch_add(1, Ordering::Relaxed);
         update_session_stats(&mut entry.stats, &parsed_packet, now, is_originator);
         entry.last_modified = now;
         return;
@@ -283,9 +302,12 @@ pub async fn process_parsed_packet(
     let entry = sessions.entry(key.clone());
     match entry {
         Entry::Occupied(mut occ) => {
-            // --- Increment Update Counter ---
+            // --- Increment Update Counter (both windowed and cumulative) ---
             PACKET_STATS
                 .updated_sessions
+                .fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .updated_sessions_cumulative
                 .fetch_add(1, Ordering::Relaxed);
             // --- End Increment Update Counter ---
 
@@ -295,8 +317,11 @@ pub async fn process_parsed_packet(
             info.last_modified = now;
         }
         Entry::Vacant(vacant) => {
-            // --- Increment New Session Counter ---
+            // --- Increment New Session Counter (both windowed and cumulative) ---
             PACKET_STATS.new_sessions.fetch_add(1, Ordering::Relaxed);
+            PACKET_STATS
+                .new_sessions_cumulative
+                .fetch_add(1, Ordering::Relaxed);
             // --- End Increment New Session Counter ---
 
             // New session

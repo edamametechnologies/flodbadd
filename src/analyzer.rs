@@ -1287,22 +1287,6 @@ pub struct SessionAnalyzer {
 }
 
 impl SessionAnalyzer {
-    /// Count unique recent samples in the model's buffer (deduplicated by bitwise value)
-    async fn unique_recent_sample_count(&self) -> usize {
-        let model_option_guard = self.model.read().await;
-        if let Some(inner_lock) = &*model_option_guard {
-            let model_guard = inner_lock.read().await;
-            let mut seen: HashSet<[u64; NUM_FEATURES]> =
-                HashSet::with_capacity(model_guard.recent_data.len());
-            for feats in &model_guard.recent_data {
-                let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
-                seen.insert(bits);
-            }
-            seen.len()
-        } else {
-            0
-        }
-    }
     /// Create a new analyzer with default settings
     pub fn new() -> Self {
         info!(
@@ -1506,7 +1490,17 @@ impl SessionAnalyzer {
             let should_attempt_finalize = elapsed_seconds >= WARMUP_DELAY
                 && elapsed_seconds >= self.warm_up_duration.num_seconds()
                 && {
-                    let unique_count = self.unique_recent_sample_count().await;
+                    let unique_count = {
+                        let model_guard = model_rwlock.read().await;
+                        let mut seen: HashSet<[u64; NUM_FEATURES]> =
+                            HashSet::with_capacity(model_guard.recent_data.len());
+                        for feats in &model_guard.recent_data {
+                            let bits: [u64; NUM_FEATURES] =
+                                std::array::from_fn(|i| feats[i].to_bits());
+                            seen.insert(bits);
+                        }
+                        seen.len()
+                    };
                     if unique_count < WARMUP_MIN_UNIQUE_SAMPLES {
                         debug!(
                             "Warm-up finalize gate: only {} unique samples (need >= {})",
@@ -2432,29 +2426,22 @@ impl SessionAnalyzer {
             0
         };
         let warm_up_target = self.warm_up_duration.num_seconds() as u64;
-        let unique_samples = self.unique_recent_sample_count().await;
-
-        let warm_up_progress = WarmUpProgress {
-            elapsed_seconds: warm_up_elapsed,
-            target_duration_seconds: warm_up_target,
-            unique_samples_collected: unique_samples,
-            min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
-            progress_percentage: if warm_up_target > 0 {
-                ((warm_up_elapsed as f64 / warm_up_target as f64) * 100.0).min(100.0)
-            } else {
-                100.0
-            },
-            estimated_completion_seconds: if warm_up_active && warm_up_elapsed < warm_up_target {
-                Some(warm_up_target - warm_up_elapsed)
-            } else {
-                None
-            },
-        };
 
         // Get model and threshold information
         let model_guard = self.model.read().await;
-        let (model_stats, thresholds) = if let Some(model_lock) = &*model_guard {
+        let (model_stats, thresholds, unique_samples) = if let Some(model_lock) = &*model_guard {
             let model = model_lock.read().await;
+
+            // Calculate unique samples while we have the model lock
+            let unique_samples = {
+                let mut seen: HashSet<[u64; NUM_FEATURES]> =
+                    HashSet::with_capacity(model.recent_data.len());
+                for feats in &model.recent_data {
+                    let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
+                    seen.insert(bits);
+                }
+                seen.len()
+            };
             let has_forest = model.forest.is_some();
             let training_in_progress = model.training_in_progress.load(Ordering::SeqCst);
             let buffer_size = model.recent_data.len();
@@ -2540,7 +2527,7 @@ impl SessionAnalyzer {
                 default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             };
 
-            (model_stats, thresholds)
+            (model_stats, thresholds, unique_samples)
         } else {
             // No model available
             let model_stats = ModelStats {
@@ -2574,7 +2561,25 @@ impl SessionAnalyzer {
                 default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             };
 
-            (model_stats, thresholds)
+            (model_stats, thresholds, 0)
+        };
+
+        // Create warm_up_progress now that we have unique_samples
+        let warm_up_progress = WarmUpProgress {
+            elapsed_seconds: warm_up_elapsed,
+            target_duration_seconds: warm_up_target,
+            unique_samples_collected: unique_samples,
+            min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
+            progress_percentage: if warm_up_target > 0 {
+                ((warm_up_elapsed as f64 / warm_up_target as f64) * 100.0).min(100.0)
+            } else {
+                100.0
+            },
+            estimated_completion_seconds: if warm_up_active && warm_up_elapsed < warm_up_target {
+                Some(warm_up_target - warm_up_elapsed)
+            } else {
+                None
+            },
         };
 
         // Calculate session statistics

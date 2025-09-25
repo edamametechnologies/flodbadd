@@ -9,6 +9,7 @@ lazy_static! {
 }
 
 pub struct PacketStatsInternal {
+    // Windowed counters (reset every 30s for logging)
     pub total_processed: AtomicU64,
     pub tcp_processed: AtomicU64,
     pub udp_processed: AtomicU64,
@@ -17,10 +18,20 @@ pub struct PacketStatsInternal {
     pub new_sessions: AtomicU64,
     pub updated_sessions: AtomicU64,
     pub last_log_time: AtomicU64,
+
+    // Cumulative counters (never reset)
+    pub total_processed_cumulative: AtomicU64,
+    pub tcp_processed_cumulative: AtomicU64,
+    pub udp_processed_cumulative: AtomicU64,
+    pub ipv4_processed_cumulative: AtomicU64,
+    pub ipv6_processed_cumulative: AtomicU64,
+    pub new_sessions_cumulative: AtomicU64,
+    pub updated_sessions_cumulative: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketStats {
+    // Windowed stats (last 30s activity)
     pub total_processed: u64,
     pub tcp_processed: u64,
     pub udp_processed: u64,
@@ -29,6 +40,15 @@ pub struct PacketStats {
     pub new_sessions: u64,
     pub updated_sessions: u64,
     pub last_log_time: DateTime<Utc>,
+
+    // Cumulative stats (since process start)
+    pub total_processed_cumulative: u64,
+    pub tcp_processed_cumulative: u64,
+    pub udp_processed_cumulative: u64,
+    pub ipv4_processed_cumulative: u64,
+    pub ipv6_processed_cumulative: u64,
+    pub new_sessions_cumulative: u64,
+    pub updated_sessions_cumulative: u64,
 }
 
 impl Default for PacketStats {
@@ -42,6 +62,13 @@ impl Default for PacketStats {
             new_sessions: 0,
             updated_sessions: 0,
             last_log_time: Utc::now(),
+            total_processed_cumulative: 0,
+            tcp_processed_cumulative: 0,
+            udp_processed_cumulative: 0,
+            ipv4_processed_cumulative: 0,
+            ipv6_processed_cumulative: 0,
+            new_sessions_cumulative: 0,
+            updated_sessions_cumulative: 0,
         }
     }
 }
@@ -57,6 +84,13 @@ impl PacketStatsInternal {
             new_sessions: AtomicU64::new(0),
             updated_sessions: AtomicU64::new(0),
             last_log_time: AtomicU64::new(0),
+            total_processed_cumulative: AtomicU64::new(0),
+            tcp_processed_cumulative: AtomicU64::new(0),
+            udp_processed_cumulative: AtomicU64::new(0),
+            ipv4_processed_cumulative: AtomicU64::new(0),
+            ipv6_processed_cumulative: AtomicU64::new(0),
+            new_sessions_cumulative: AtomicU64::new(0),
+            updated_sessions_cumulative: AtomicU64::new(0),
         }
     }
 
@@ -95,6 +129,7 @@ pub fn get_packet_stats() -> PacketStats {
         DateTime::<Utc>::from_timestamp_millis(last_log_time as i64).unwrap_or_else(Utc::now);
 
     PacketStats {
+        // Windowed stats (last 30s)
         total_processed: PACKET_STATS.total_processed.load(Ordering::Relaxed),
         tcp_processed: PACKET_STATS.tcp_processed.load(Ordering::Relaxed),
         udp_processed: PACKET_STATS.udp_processed.load(Ordering::Relaxed),
@@ -103,5 +138,26 @@ pub fn get_packet_stats() -> PacketStats {
         new_sessions: PACKET_STATS.new_sessions.load(Ordering::Relaxed),
         updated_sessions: PACKET_STATS.updated_sessions.load(Ordering::Relaxed),
         last_log_time,
+
+        // Cumulative stats (since process start)
+        total_processed_cumulative: PACKET_STATS
+            .total_processed_cumulative
+            .load(Ordering::Relaxed),
+        tcp_processed_cumulative: PACKET_STATS
+            .tcp_processed_cumulative
+            .load(Ordering::Relaxed),
+        udp_processed_cumulative: PACKET_STATS
+            .udp_processed_cumulative
+            .load(Ordering::Relaxed),
+        ipv4_processed_cumulative: PACKET_STATS
+            .ipv4_processed_cumulative
+            .load(Ordering::Relaxed),
+        ipv6_processed_cumulative: PACKET_STATS
+            .ipv6_processed_cumulative
+            .load(Ordering::Relaxed),
+        new_sessions_cumulative: PACKET_STATS.new_sessions_cumulative.load(Ordering::Relaxed),
+        updated_sessions_cumulative: PACKET_STATS
+            .updated_sessions_cumulative
+            .load(Ordering::Relaxed),
     }
 }
