@@ -420,21 +420,25 @@ impl IsolationForestModel {
             if handle.is_finished() {
                 // The blocking thread has finished – gather the result and update state
                 debug!("train_model: Previous task finished, getting result");
-                match handle.await {
-                    Ok(Ok(forest)) => {
+                match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
+                    Ok(Ok(Ok(forest))) => {
                         info!("train_model: Background training completed successfully");
                         self.forest = Some(forest);
                         self.last_training_time = Utc::now(); // Update last successful training time
                     }
-                    Ok(Err(e)) => {
+                    Ok(Ok(Err(e))) => {
                         warn!("train_model: Background training returned error: {:?}", e);
                         self.forest = None;
                     }
-                    Err(join_error) => {
+                    Ok(Err(join_error)) => {
                         error!(
                             "train_model: Background training panicked: {:?}",
                             join_error
                         );
+                        self.forest = None;
+                    }
+                    Err(_) => {
+                        error!("train_model: Background training timed out after 120s - possible EIF hang");
                         self.forest = None;
                     }
                 }
@@ -2350,19 +2354,25 @@ impl SessionAnalyzer {
                     model_write.recent_data.push([0.0; NUM_FEATURES]);
                 }
                 model_write.train_model(true).await;
-                // Wait for training to complete
+                // Wait for training to complete with timeout
                 if let Some(handle) = &mut model_write.training_handle {
-                    match handle.await {
-                        Ok(Ok(forest)) => {
+                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await
+                    {
+                        Ok(Ok(Ok(forest))) => {
                             model_write.forest = Some(forest);
                             model_write.last_training_time = Utc::now();
                         }
-                        Ok(Err(_)) => {
+                        Ok(Ok(Err(_))) => {
                             // If training fails, just set default thresholds
                             model_write.suspicious_threshold = 0.1;
                             model_write.abnormal_threshold = 0.2;
                         }
+                        Ok(Err(_)) => {
+                            model_write.suspicious_threshold = 0.1;
+                            model_write.abnormal_threshold = 0.2;
+                        }
                         Err(_) => {
+                            error!("Test training task timed out after 120s - possible EIF hang");
                             model_write.suspicious_threshold = 0.1;
                             model_write.abnormal_threshold = 0.2;
                         }
@@ -2384,13 +2394,22 @@ impl SessionAnalyzer {
             let mut model_write = model_rw.write().await;
             model_write.train_model(true).await;
             if let Some(handle) = &mut model_write.training_handle {
-                match handle.await {
-                    Ok(Ok(forest)) => {
+                match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
+                    Ok(Ok(Ok(forest))) => {
                         model_write.forest = Some(forest);
                         model_write.last_training_time = Utc::now();
                     }
-                    _ => {
+                    Ok(Ok(Err(e))) => {
+                        warn!("Force training task failed: {:?}", e);
                         // leave forest as-is on error
+                    }
+                    Ok(Err(e)) => {
+                        error!("Force training task panicked: {:?}", e);
+                        // leave forest as-is on error
+                    }
+                    Err(_) => {
+                        error!("Force training task timed out after 120s - possible EIF hang");
+                        // leave forest as-is on timeout
                     }
                 }
                 model_write.training_handle = None;
