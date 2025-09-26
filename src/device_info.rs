@@ -8,6 +8,7 @@ use edamame_backend::lanscan_vulnerability_info_backend::VulnerabilityInfoBacken
 use macaddr::MacAddr6;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, warn};
 
@@ -145,8 +146,25 @@ impl DeviceInfo {
         if ip_address.is_unspecified() {
             return;
         }
-        // Add the IP address
+
+        // First, preserve the current primary IP address by adding it to the appropriate list
         match self.ip_address {
+            IpAddr::V4(ip) if !ip.is_unspecified() => {
+                self.ip_addresses_v4.push(ip);
+            }
+            IpAddr::V6(ip) if !ip.is_unspecified() => {
+                self.ip_addresses_v6.push(ip);
+            }
+            _ => {
+                // Current IP is unspecified, nothing to preserve
+            }
+        }
+
+        // Now set the new primary IP address
+        self.ip_address = ip_address;
+
+        // Add the new IP address to the appropriate list as well
+        match ip_address {
             IpAddr::V4(ip) => {
                 self.ip_addresses_v4.push(ip);
             }
@@ -154,6 +172,8 @@ impl DeviceInfo {
                 self.ip_addresses_v6.push(ip);
             }
         }
+
+        // Add any additional IP addresses provided
         self.add_ip_addresses(ip_addresses_v4, ip_addresses_v6);
     }
 
@@ -270,31 +290,43 @@ impl DeviceInfo {
                 let device1 = &mut left[i]; // Mutable reference to device1 from left side
                 let device2 = &mut right[0]; // Mutable reference to device2 from right side
 
-                let same_hostname = !device1.hostname.is_empty()
-                    && !device2.hostname.is_empty()
-                    && device1.hostname == device2.hostname;
+                // Primary IP address match
+                let primary_ip_match = device1.ip_address == device2.ip_address;
 
-                let same_ip = (matches!(device1.ip_address, IpAddr::V4(_))
-                    && matches!(device2.ip_address, IpAddr::V4(_))
-                    && device1.ip_address == device2.ip_address)
-                    || (matches!(device1.ip_address, IpAddr::V6(_))
-                        && matches!(device2.ip_address, IpAddr::V6(_))
-                        && device1.ip_address == device2.ip_address);
-
-                let overlaping_ips = (!device1.ip_addresses_v4.is_empty()
+                // Overlapping IP addresses in the lists
+                let ipv4_overlap = !device1.ip_addresses_v4.is_empty()
                     && !device2.ip_addresses_v4.is_empty()
                     && device1
                         .ip_addresses_v4
                         .iter()
-                        .any(|ip| device2.ip_addresses_v4.contains(ip)))
-                    || (!device1.ip_addresses_v6.is_empty()
-                        && !device2.ip_addresses_v6.is_empty()
-                        && device1
-                            .ip_addresses_v6
-                            .iter()
-                            .any(|ip| device2.ip_addresses_v6.contains(ip)));
+                        .any(|ip| device2.ip_addresses_v4.contains(ip));
 
-                let is_duplicate = same_hostname || same_ip || overlaping_ips;
+                let ipv6_overlap = !device1.ip_addresses_v6.is_empty()
+                    && !device2.ip_addresses_v6.is_empty()
+                    && device1
+                        .ip_addresses_v6
+                        .iter()
+                        .any(|ip| device2.ip_addresses_v6.contains(ip));
+
+                // Hostname matching
+                let hostname_match = !device1.hostname.is_empty()
+                    && !device2.hostname.is_empty()
+                    && device1.hostname == device2.hostname;
+
+                // Check for conflicts
+                let has_conflicting_characteristics =
+                    Self::has_conflicting_characteristics(device1, device2);
+
+                // Decide whether to merge
+                let is_duplicate = if primary_ip_match || ipv4_overlap || ipv6_overlap {
+                    // Strong IP evidence - merge unless there are major conflicts
+                    !has_conflicting_characteristics
+                } else if hostname_match {
+                    // Hostname match - be more careful
+                    Self::is_safe_hostname_merge(device1, device2)
+                } else {
+                    false
+                };
 
                 if is_duplicate {
                     // Merge device2 into device1
@@ -326,32 +358,55 @@ impl DeviceInfo {
             let mut found = false;
 
             for device in devices.iter_mut() {
-                // If the hostname matches => device has been seen before and possibly has different IPs
-                // If one IP v4 matches => device has been seen before
-                // If one IP v6 matches => device has been seen before
-                // Note that devices can have multiple IP addresses and one unique hostname
-                if (!new_device.hostname.is_empty()
+                // Primary IP address match
+                let primary_ip_match = new_device.ip_address == device.ip_address;
+
+                // Overlapping IP addresses in the lists
+                let ipv4_overlap = !new_device.ip_addresses_v4.is_empty()
+                    && !device.ip_addresses_v4.is_empty()
+                    && new_device
+                        .ip_addresses_v4
+                        .iter()
+                        .any(|ip| device.ip_addresses_v4.contains(ip));
+
+                let ipv6_overlap = !new_device.ip_addresses_v6.is_empty()
+                    && !device.ip_addresses_v6.is_empty()
+                    && new_device
+                        .ip_addresses_v6
+                        .iter()
+                        .any(|ip| device.ip_addresses_v6.contains(ip));
+
+                // Hostname matching (for multi-interface devices)
+                let hostname_match = !new_device.hostname.is_empty()
                     && !device.hostname.is_empty()
-                    && device.hostname == new_device.hostname)
-                    || (matches!(new_device.ip_address, IpAddr::V4(_))
-                        && matches!(device.ip_address, IpAddr::V4(_))
-                        && new_device.ip_address == device.ip_address)
-                    || (!new_device.ip_addresses_v4.is_empty()
-                        && !device.ip_addresses_v4.is_empty()
-                        && new_device
-                            .ip_addresses_v4
-                            .iter()
-                            .any(|ip| device.ip_addresses_v4.contains(ip)))
-                    || (matches!(new_device.ip_address, IpAddr::V6(_))
-                        && matches!(device.ip_address, IpAddr::V6(_))
-                        && new_device.ip_address == device.ip_address)
-                    || (!new_device.ip_addresses_v6.is_empty()
-                        && !device.ip_addresses_v6.is_empty()
-                        && new_device
-                            .ip_addresses_v6
-                            .iter()
-                            .any(|ip| device.ip_addresses_v6.contains(ip)))
-                {
+                    && device.hostname == new_device.hostname;
+
+                // Check for potential problematic merges
+                let has_conflicting_characteristics =
+                    Self::has_conflicting_characteristics(device, &new_device);
+
+                // Decide whether to merge
+                let should_merge = if primary_ip_match || ipv4_overlap || ipv6_overlap {
+                    // Strong IP evidence - merge unless there are major conflicts
+                    !has_conflicting_characteristics
+                } else if hostname_match {
+                    // Hostname match - be more careful
+                    Self::is_safe_hostname_merge(device, &new_device)
+                } else {
+                    false
+                };
+
+                if should_merge {
+                    debug!(
+                        "[merge_vec] Merging devices: existing={:?} (MAC: {:?}), new={:?} (MAC: {:?}), reason: IP={}, hostname={}",
+                        device.get_ip_address(),
+                        device.get_mac_address(),
+                        new_device.get_ip_address(),
+                        new_device.get_mac_address(),
+                        primary_ip_match || ipv4_overlap || ipv6_overlap,
+                        hostname_match
+                    );
+
                     // Merge the devices
                     DeviceInfo::merge(device, &new_device);
                     debug!(
@@ -374,6 +429,108 @@ impl DeviceInfo {
         }
 
         debug!("Total devices after merge: {}", devices.len());
+    }
+
+    // Check if two devices have characteristics that suggest they shouldn't be merged
+    fn has_conflicting_characteristics(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
+        // Check for conflicting device vendors (but allow empty ones)
+        if !device1.device_vendor.is_empty()
+            && !device2.device_vendor.is_empty()
+            && device1.device_vendor != device2.device_vendor
+        {
+            warn!(
+                "Conflicting vendors: '{}' vs '{}' - aborting merge",
+                device1.device_vendor, device2.device_vendor
+            );
+            return true;
+        }
+
+        // Check for drastically different port sets (could indicate different device types)
+        if !device1.open_ports.is_empty() && !device2.open_ports.is_empty() {
+            let ports1: HashSet<u16> = device1.open_ports.iter().map(|p| p.port).collect();
+            let ports2: HashSet<u16> = device2.open_ports.iter().map(|p| p.port).collect();
+
+            let intersection_size = ports1.intersection(&ports2).count();
+            let union_size = ports1.union(&ports2).count();
+
+            // If less than 20% overlap in ports, they might be different devices
+            if union_size > 5 && (intersection_size as f64 / union_size as f64) < 0.2 {
+                warn!(
+                    "Low port overlap: {}/{} ({:.1}%) - aborting merge",
+                    intersection_size,
+                    union_size,
+                    (intersection_size as f64 / union_size as f64) * 100.0
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // Check if a hostname-based merge is safe
+    fn is_safe_hostname_merge(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
+        let _ = device2;
+        // Allow hostname merge if:
+        // 1. the hostname is very specific (not a generic one)
+
+        let specific_hostname = Self::is_specific_hostname(&device1.hostname);
+        if specific_hostname {
+            debug!(
+                "Safe hostname merge: specific hostname ({})",
+                device1.hostname
+            );
+            true
+        } else {
+            warn!(
+                "Unsafe hostname merge: generic hostname ({}) - aborting merge",
+                device1.hostname
+            );
+            false
+        }
+    }
+
+    // Check if a hostname is specific enough to be a reliable identifier
+    fn is_specific_hostname(hostname: &str) -> bool {
+        let hostname_lower = hostname.to_lowercase();
+
+        // Exact generic hostnames that shouldn't be trusted for merging
+        let exact_generic_hostnames = [
+            "localhost",
+            "router",
+            "gateway",
+            "modem",
+            "printer",
+            "scanner",
+            "camera",
+            "device",
+            "unknown",
+            "android",
+            "iphone",
+            "ipad",
+            "macbook",
+            "imac",
+            "windows",
+            "linux",
+            "ubuntu",
+            "debian",
+        ];
+
+        // If it's exactly a generic hostname, it's not specific
+        if exact_generic_hostnames
+            .iter()
+            .any(|&generic| hostname_lower == generic)
+        {
+            return false;
+        }
+
+        // If it has a domain suffix (.local, .lan, etc.) and is reasonably long, it's likely specific
+        if hostname.contains('.') && hostname.len() > 8 {
+            return true;
+        }
+
+        // If it's a long hostname without being exactly generic, it's probably specific
+        hostname.len() > 10
     }
 
     pub fn merge(device: &mut DeviceInfo, new_device: &DeviceInfo) {
@@ -1579,6 +1736,767 @@ mod tests {
         assert!(
             devices[0].is_local,
             "is_local should be true after merging vectors"
+        );
+    }
+
+    #[test]
+    fn test_set_ip_address_bug_fix() {
+        // Test that set_ip_address actually updates the primary IP address
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert_eq!(
+            device.get_ip_address(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))
+        );
+
+        // Set a new IP address
+        let new_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        device.set_ip_address(new_ip, vec![], vec![]);
+
+        // Verify the primary IP was actually updated
+        assert_eq!(
+            device.get_ip_address(),
+            new_ip,
+            "Primary IP address should be updated"
+        );
+
+        // Verify both old and new IPs are in the lists
+        assert!(
+            device
+                .ip_addresses_v4
+                .contains(&Ipv4Addr::new(192, 168, 1, 10)),
+            "Old IP should be preserved in list"
+        );
+        assert!(
+            device
+                .ip_addresses_v4
+                .contains(&Ipv4Addr::new(192, 168, 1, 20)),
+            "New IP should be added to list"
+        );
+    }
+
+    #[test]
+    fn test_set_ip_address_with_additional_ips() {
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+
+        let new_primary = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let additional_v4 = vec![Ipv4Addr::new(172, 16, 0, 1), Ipv4Addr::new(172, 16, 0, 2)];
+        let additional_v6 = vec![Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)];
+
+        device.set_ip_address(new_primary, additional_v4.clone(), additional_v6.clone());
+
+        // Verify primary IP is updated
+        assert_eq!(device.get_ip_address(), new_primary);
+
+        // Verify all IPs are in the appropriate lists
+        assert!(device.ip_addresses_v4.contains(&Ipv4Addr::new(10, 0, 0, 1))); // Original
+        assert!(device
+            .ip_addresses_v4
+            .contains(&Ipv4Addr::new(192, 168, 1, 100))); // New primary
+        assert!(device
+            .ip_addresses_v4
+            .contains(&Ipv4Addr::new(172, 16, 0, 1))); // Additional
+        assert!(device
+            .ip_addresses_v4
+            .contains(&Ipv4Addr::new(172, 16, 0, 2))); // Additional
+        assert!(device
+            .ip_addresses_v6
+            .contains(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))); // Additional IPv6
+    }
+
+    #[test]
+    fn test_merge_vec_conflicting_vendors() {
+        // Test that devices with conflicting vendors are not merged
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "test-device.local".to_string(); // Specific hostname
+            d.device_vendor = "Apple Inc.".to_string();
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 2)]; // Add shared IP
+            d.open_ports = vec![
+                PortInfo {
+                    port: 22,
+                    protocol: "tcp".to_string(),
+                    service: "ssh".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.hostname = "test-device.local".to_string(); // Same specific hostname
+            d.device_vendor = "Samsung Electronics".to_string(); // Different vendor
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 2)]; // Same shared IP
+            d.open_ports = vec![
+                PortInfo {
+                    port: 443,
+                    protocol: "tcp".to_string(),
+                    service: "https".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 8080,
+                    protocol: "tcp".to_string(),
+                    service: "http-alt".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should NOT merge due to conflicting vendors, even with same hostname
+        assert_eq!(
+            devices.len(),
+            2,
+            "Devices with conflicting vendors should not merge"
+        );
+        assert_eq!(devices[0].device_vendor, "Apple Inc.");
+        assert_eq!(devices[1].device_vendor, "Samsung Electronics");
+    }
+
+    #[test]
+    fn test_merge_vec_low_port_overlap() {
+        // Test that devices with very different port sets are not merged
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "test-device.local".to_string(); // Specific hostname
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 1)]; // Add shared IP
+                                                                                                   // Web server ports
+            d.open_ports = vec![
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 443,
+                    protocol: "tcp".to_string(),
+                    service: "https".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 8080,
+                    protocol: "tcp".to_string(),
+                    service: "http-alt".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.hostname = "test-device.local".to_string(); // Same specific hostname
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 1)]; // Same shared IP
+                                                                                                   // Database/SSH server ports (completely different)
+            d.open_ports = vec![
+                PortInfo {
+                    port: 22,
+                    protocol: "tcp".to_string(),
+                    service: "ssh".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 3306,
+                    protocol: "tcp".to_string(),
+                    service: "mysql".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 5432,
+                    protocol: "tcp".to_string(),
+                    service: "postgresql".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 27017,
+                    protocol: "tcp".to_string(),
+                    service: "mongodb".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 6379,
+                    protocol: "tcp".to_string(),
+                    service: "redis".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 9200,
+                    protocol: "tcp".to_string(),
+                    service: "elasticsearch".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should NOT merge due to low port overlap (0%), even with IP overlap
+        assert_eq!(
+            devices.len(),
+            2,
+            "Devices with very different port sets should not merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_generic_hostname_blocked() {
+        // Test that generic hostnames are blocked from merging
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "router".to_string(); // Generic hostname
+            d.device_vendor = "Netgear".to_string();
+            d.open_ports = vec![PortInfo {
+                port: 80,
+                protocol: "tcp".to_string(),
+                service: "http".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.hostname = "router".to_string(); // Same generic hostname
+            d.device_vendor = "Linksys".to_string(); // Different vendor
+            d.open_ports = vec![PortInfo {
+                port: 443,
+                protocol: "tcp".to_string(),
+                service: "https".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should NOT merge due to generic hostname
+        assert_eq!(
+            devices.len(),
+            2,
+            "Devices with generic hostnames should not merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_specific_hostname_allowed() {
+        // Test that specific hostnames allow merging (multi-interface scenario)
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "john-macbook-pro.local".to_string(); // Very specific hostname
+            d.device_vendor = "Apple Inc.".to_string();
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 5)]; // Add shared IP
+            d.open_ports = vec![PortInfo {
+                port: 22,
+                protocol: "tcp".to_string(),
+                service: "ssh".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.hostname = "john-macbook-pro.local".to_string(); // Same specific hostname
+            d.device_vendor = "Apple Inc.".to_string(); // Same vendor
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 5)]; // Same shared IP
+            d.open_ports = vec![PortInfo {
+                port: 80,
+                protocol: "tcp".to_string(),
+                service: "http".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should merge due to IP overlap and compatible characteristics
+        assert_eq!(
+            devices.len(),
+            1,
+            "Devices with IP overlap and compatible characteristics should merge"
+        );
+        assert_eq!(devices[0].open_ports.len(), 2, "Ports should be merged");
+    }
+
+    #[test]
+    fn test_merge_vec_privacy_extension_scenario() {
+        // Test privacy extension scenario: same device, same IP with different MACs, specific hostname
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "sarah-iphone-13.local".to_string(); // Specific hostname
+            d.mac_address = Some(MacAddr6::new(0xB8, 0x27, 0xEB, 0x41, 0x90, 0xA4)); // Real MAC
+            d.device_vendor = "Apple Inc.".to_string();
+            d.open_ports = vec![PortInfo {
+                port: 62078,
+                protocol: "tcp".to_string(),
+                service: "iphone-sync".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)))); // Same IP
+            d.hostname = "sarah-iphone-13.local".to_string(); // Same specific hostname
+            d.mac_address = Some(MacAddr6::new(0x02, 0x12, 0x34, 0x56, 0x78, 0x9A)); // Privacy MAC (locally administered)
+            d.device_vendor = "".to_string(); // No vendor from privacy MAC
+            d.open_ports = vec![PortInfo {
+                port: 5353,
+                protocol: "udp".to_string(),
+                service: "mdns".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should merge due to same IP (privacy extension scenario)
+        assert_eq!(
+            devices.len(),
+            1,
+            "Privacy extension scenario should allow merge with same IP"
+        );
+        assert_eq!(devices[0].open_ports.len(), 2, "Ports should be merged");
+        // The real MAC should be preserved (from the fresher device logic)
+        assert!(
+            devices[0].mac_address.is_some(),
+            "MAC address should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_ip_overlap_with_conflicts() {
+        // Test that IP overlap with conflicting characteristics is blocked
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 1)]; // Shared IP
+            d.device_vendor = "Raspberry Pi Foundation".to_string();
+            d.open_ports = vec![PortInfo {
+                port: 22,
+                protocol: "tcp".to_string(),
+                service: "ssh".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 1)]; // Same shared IP
+            d.device_vendor = "Freebox SAS".to_string(); // Conflicting vendor
+            d.open_ports = vec![PortInfo {
+                port: 80,
+                protocol: "tcp".to_string(),
+                service: "http".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should NOT merge due to conflicting vendors, even with IP overlap
+        assert_eq!(
+            devices.len(),
+            2,
+            "IP overlap with conflicting vendors should not merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_ip_overlap_without_conflicts() {
+        // Test that IP overlap without conflicts allows merging
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 1)]; // Shared IP
+            d.device_vendor = "Apple Inc.".to_string();
+            d.open_ports = vec![
+                PortInfo {
+                    port: 22,
+                    protocol: "tcp".to_string(),
+                    service: "ssh".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 1)]; // Same shared IP
+            d.device_vendor = "Apple Inc.".to_string(); // Same vendor
+            d.open_ports = vec![
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 443,
+                    protocol: "tcp".to_string(),
+                    service: "https".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should merge due to IP overlap and compatible characteristics
+        assert_eq!(
+            devices.len(),
+            1,
+            "IP overlap without conflicts should allow merge"
+        );
+        assert_eq!(
+            devices[0].open_ports.len(),
+            3,
+            "Ports should be merged (22, 80, 443)"
+        );
+    }
+
+    #[test]
+    fn test_is_specific_hostname() {
+        // Test the hostname specificity detection
+
+        // Generic hostnames should be rejected
+        assert!(
+            !DeviceInfo::is_specific_hostname("router"),
+            "router should be generic"
+        );
+        assert!(
+            !DeviceInfo::is_specific_hostname("gateway"),
+            "gateway should be generic"
+        );
+        assert!(
+            !DeviceInfo::is_specific_hostname("device"),
+            "device should be generic"
+        );
+        assert!(
+            !DeviceInfo::is_specific_hostname("iphone"),
+            "iphone should be generic"
+        );
+        assert!(
+            !DeviceInfo::is_specific_hostname("macbook"),
+            "macbook should be generic"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("android-phone"),
+            "android-phone should be specific (compound name)"
+        );
+
+        // Specific hostnames should be accepted
+        assert!(
+            DeviceInfo::is_specific_hostname("john-macbook-pro.local"),
+            "john-macbook-pro.local should be specific"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("sarah-iphone-13.local"),
+            "sarah-iphone-13.local should be specific"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("freebox.local"),
+            "freebox.local should be specific"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("raspberry-pi-kitchen.lan"),
+            "raspberry-pi-kitchen.lan should be specific"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("very-long-hostname-that-is-specific"),
+            "Long hostnames should be specific"
+        );
+
+        // Edge cases
+        assert!(
+            !DeviceInfo::is_specific_hostname("short"),
+            "Short hostnames should be generic"
+        );
+        assert!(
+            !DeviceInfo::is_specific_hostname(""),
+            "Empty hostname should be generic"
+        );
+        assert!(
+            DeviceInfo::is_specific_hostname("specific.domain.com"),
+            "FQDN should be specific"
+        );
+    }
+
+    #[test]
+    fn test_dedup_vec_with_smart_logic() {
+        // Test that dedup_vec uses the same smart logic as merge_vec
+        let mut devices = vec![
+            {
+                let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+                d.hostname = "john-macbook.local".to_string(); // Specific
+                d.device_vendor = "Apple Inc.".to_string();
+                d.ip_addresses_v4 = vec![
+                    Ipv4Addr::new(192, 168, 1, 100),
+                    Ipv4Addr::new(169, 254, 0, 1),
+                ]; // Add shared IP
+                d.open_ports = vec![PortInfo {
+                    port: 22,
+                    protocol: "tcp".to_string(),
+                    service: "ssh".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                }];
+                d
+            },
+            {
+                let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+                d.hostname = "john-macbook.local".to_string(); // Same specific hostname
+                d.device_vendor = "Apple Inc.".to_string(); // Same vendor
+                d.ip_addresses_v4 = vec![
+                    Ipv4Addr::new(192, 168, 1, 101),
+                    Ipv4Addr::new(169, 254, 0, 1),
+                ]; // Same shared IP
+                d.open_ports = vec![PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                }];
+                d
+            },
+            {
+                let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 102))));
+                d.hostname = "router".to_string(); // Generic hostname
+                d.device_vendor = "Netgear".to_string();
+                d
+            },
+            {
+                let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 103))));
+                d.hostname = "router".to_string(); // Same generic hostname
+                d.device_vendor = "Linksys".to_string(); // Different vendor
+                d
+            },
+        ];
+
+        DeviceInfo::dedup_vec(&mut devices);
+
+        // With smart logic, MacBooks should merge (IP overlap + compatible) but routers should not (generic hostname)
+        assert_eq!(
+            devices.len(),
+            3,
+            "Should merge compatible devices with IP overlap but not generic hostnames"
+        );
+
+        // Should still have both routers
+        let routers: Vec<_> = devices.iter().filter(|d| d.hostname == "router").collect();
+        assert_eq!(
+            routers.len(),
+            2,
+            "Generic hostname devices should not merge"
+        );
+
+        // Should have one merged MacBook
+        let macbooks: Vec<_> = devices
+            .iter()
+            .filter(|d| d.hostname == "john-macbook.local")
+            .collect();
+        assert_eq!(
+            macbooks.len(),
+            1,
+            "MacBooks with IP overlap should merge in dedup_vec"
+        );
+        assert_eq!(
+            macbooks[0].open_ports.len(),
+            2,
+            "MacBook should have merged ports"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_hostname_only_specific() {
+        // Test that specific hostnames allow merging even without IP overlap (multi-interface scenario)
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+            d.hostname = "johns-very-specific-macbook-pro.local".to_string(); // Very specific hostname
+            d.device_vendor = "Apple Inc.".to_string();
+            d.open_ports = vec![PortInfo {
+                port: 22,
+                protocol: "tcp".to_string(),
+                service: "ssh".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 50)))); // Different IP, no overlap
+            d.hostname = "johns-very-specific-macbook-pro.local".to_string(); // Same specific hostname
+            d.device_vendor = "Apple Inc.".to_string(); // Same vendor (no conflict)
+            d.open_ports = vec![PortInfo {
+                port: 80,
+                protocol: "tcp".to_string(),
+                service: "http".to_string(),
+                banner: "".to_string(),
+                dismissed: false,
+            }];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should merge due to specific hostname and no conflicts
+        assert_eq!(
+            devices.len(),
+            1,
+            "Devices with specific hostnames and no conflicts should merge"
+        );
+        assert_eq!(devices[0].open_ports.len(), 2, "Ports should be merged");
+    }
+
+    #[test]
+    fn test_original_bug_scenario() {
+        // Test the original bug scenario: Freebox and Raspberry Pi with similar hostnames
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(82, 64, 124, 164))));
+            d.hostname = "freebox.local".to_string(); // Specific hostname
+            d.device_vendor = "Freebox SAS".to_string();
+            d.mac_address = Some(MacAddr6::new(0x38, 0x07, 0x16, 0x19, 0xD6, 0x2E));
+            d.open_ports = vec![
+                PortInfo {
+                    port: 53,
+                    protocol: "tcp".to_string(),
+                    service: "dns".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "nginx".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 443,
+                    protocol: "tcp".to_string(),
+                    service: "https".to_string(),
+                    banner: "nginx".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 109))));
+            d.hostname = "raspberrypi.local".to_string(); // Different specific hostname
+            d.device_vendor = "Raspberry Pi Foundation".to_string(); // Different vendor
+            d.mac_address = Some(MacAddr6::new(0xB8, 0x27, 0xEB, 0x41, 0x90, 0xA4)); // Different MAC
+            d.open_ports = vec![
+                PortInfo {
+                    port: 22,
+                    protocol: "tcp".to_string(),
+                    service: "ssh".to_string(),
+                    banner: "OpenSSH".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 80,
+                    protocol: "tcp".to_string(),
+                    service: "http".to_string(),
+                    banner: "lighttpd".to_string(),
+                    dismissed: false,
+                },
+                PortInfo {
+                    port: 111,
+                    protocol: "tcp".to_string(),
+                    service: "sunrpc".to_string(),
+                    banner: "".to_string(),
+                    dismissed: false,
+                },
+            ];
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        // Should NOT merge - different hostnames, different vendors, different MACs, different IPs
+        assert_eq!(
+            devices.len(),
+            2,
+            "Freebox and Raspberry Pi should remain separate devices"
+        );
+
+        // Verify each device kept its own ports
+        let freebox = devices
+            .iter()
+            .find(|d| d.hostname == "freebox.local")
+            .unwrap();
+        assert_eq!(
+            freebox.open_ports.len(),
+            3,
+            "Freebox should keep its own ports"
+        );
+        assert!(
+            freebox.open_ports.iter().any(|p| p.port == 53),
+            "Freebox should have DNS port"
+        );
+
+        let rpi = devices
+            .iter()
+            .find(|d| d.hostname == "raspberrypi.local")
+            .unwrap();
+        assert_eq!(
+            rpi.open_ports.len(),
+            3,
+            "Raspberry Pi should keep its own ports"
+        );
+        assert!(
+            rpi.open_ports.iter().any(|p| p.port == 111),
+            "Raspberry Pi should have sunrpc port"
         );
     }
 }
