@@ -8,7 +8,6 @@ use edamame_backend::lanscan_vulnerability_info_backend::VulnerabilityInfoBacken
 use macaddr::MacAddr6;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, warn};
 
@@ -320,7 +319,15 @@ impl DeviceInfo {
                 // Decide whether to merge
                 let is_duplicate = if primary_ip_match || ipv4_overlap || ipv6_overlap {
                     // Strong IP evidence - merge unless there are major conflicts
-                    !has_conflicting_characteristics
+                    if !has_conflicting_characteristics {
+                        true
+                    } else {
+                        warn!(
+                            "Conflicting device characteristics - aborting merge of {:?} and {:?}",
+                            device1, device2
+                        );
+                        false
+                    }
                 } else if hostname_match {
                     // Hostname match - be more careful
                     Self::is_safe_hostname_merge(device1, device2)
@@ -434,38 +441,9 @@ impl DeviceInfo {
     // Check if two devices have characteristics that suggest they shouldn't be merged
     fn has_conflicting_characteristics(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
         // Check for conflicting device vendors (but allow empty ones)
-        if !device1.device_vendor.is_empty()
+        !device1.device_vendor.is_empty()
             && !device2.device_vendor.is_empty()
             && device1.device_vendor != device2.device_vendor
-        {
-            warn!(
-                "Conflicting vendors: '{}' vs '{}' - aborting merge",
-                device1.device_vendor, device2.device_vendor
-            );
-            return true;
-        }
-
-        // Check for drastically different port sets (could indicate different device types)
-        if !device1.open_ports.is_empty() && !device2.open_ports.is_empty() {
-            let ports1: HashSet<u16> = device1.open_ports.iter().map(|p| p.port).collect();
-            let ports2: HashSet<u16> = device2.open_ports.iter().map(|p| p.port).collect();
-
-            let intersection_size = ports1.intersection(&ports2).count();
-            let union_size = ports1.union(&ports2).count();
-
-            // If less than 20% overlap in ports, they might be different devices
-            if union_size > 5 && (intersection_size as f64 / union_size as f64) < 0.2 {
-                warn!(
-                    "Low port overlap: {}/{} ({:.1}%) - aborting merge",
-                    intersection_size,
-                    union_size,
-                    (intersection_size as f64 / union_size as f64) * 100.0
-                );
-                return true;
-            }
-        }
-
-        false
     }
 
     // Check if a hostname-based merge is safe
@@ -483,8 +461,8 @@ impl DeviceInfo {
             true
         } else {
             warn!(
-                "Unsafe hostname merge: generic hostname ({}) - aborting merge",
-                device1.hostname
+                "Unsafe hostname merge: generic hostname ({}) - aborting merge of {:?} and {:?}",
+                device1.hostname, device1, device2
             );
             false
         }
@@ -538,8 +516,8 @@ impl DeviceInfo {
         // Check if there is a valid IPv4 or IPv6 address
         if new_device.ip_address.is_unspecified() {
             warn!(
-                "No valid IPv4 or IPv6 address found, ignoring new device: {:?}",
-                new_device
+                "No valid IPv4 or IPv6 address found - aborting merge of {:?} and {:?}",
+                device, new_device
             );
             return;
         }

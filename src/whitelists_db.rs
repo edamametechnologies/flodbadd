@@ -453,7 +453,7 @@ pub static WHITELISTS: &str = r#"{
       "extends": [
         "github"
       ],
-      "name": "github_linux"
+      "name": "github_ubuntu"
     },
     {
       "endpoints": [],

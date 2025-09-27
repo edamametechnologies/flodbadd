@@ -10,6 +10,21 @@ use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*;
 
+// Await a JoinHandle with a timeout. Aborts the task on timeout and returns None.
+async fn await_join_with_timeout<T>(
+    mut handle: tokio::task::JoinHandle<T>,
+    duration: std::time::Duration,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    tokio::select! {
+        res = &mut handle => Some(res),
+        _ = tokio::time::sleep(duration) => {
+            error!("Background training timed out after {:?} - aborting task", duration);
+            handle.abort();
+            None
+        }
+    }
+}
+
 /// # Analyzer Module
 ///
 /// This module provides network session anomaly detection using the Isolation Forest algorithm.
@@ -209,6 +224,8 @@ pub struct PerformanceStats {
     pub total_analyses_performed: u64,
     pub cache_hit_rate_percentage: Option<f64>,
     pub memory_usage_mb: Option<f64>,
+    pub training_timeouts_total: u64,
+    pub analysis_timeouts_total: u64,
 }
 
 /// Current analyzer configuration parameters
@@ -306,6 +323,12 @@ struct IsolationForestModel {
     /// Current percentile settings for threshold calculation
     current_suspicious_percentile: f64,
     current_abnormal_percentile: f64,
+    /// Number of times a background training task timed out
+    training_timeouts_count: u64,
+    /// Cache hits for session scoring
+    cache_hits: std::sync::atomic::AtomicU64,
+    /// Cache misses for session scoring
+    cache_misses: std::sync::atomic::AtomicU64,
 }
 
 impl IsolationForestModel {
@@ -327,6 +350,9 @@ impl IsolationForestModel {
             min_training_interval: Duration::hours(6),
             current_suspicious_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             current_abnormal_percentile: DEFAULT_ABNORMAL_PERCENTILE,
+            training_timeouts_count: 0,
+            cache_hits: std::sync::atomic::AtomicU64::new(0),
+            cache_misses: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -412,33 +438,36 @@ impl IsolationForestModel {
         // -------------------------------------------------------------
         // Phase 1 – Check if a previous training task is still running
         // -------------------------------------------------------------
-        if let Some(handle) = &mut self.training_handle {
+        if let Some(handle_ref) = self.training_handle.as_ref() {
             debug!(
                 "train_model: Found existing handle - is_finished={}",
-                handle.is_finished()
+                handle_ref.is_finished()
             );
-            if handle.is_finished() {
+            if handle_ref.is_finished() {
                 // The blocking thread has finished – gather the result and update state
                 debug!("train_model: Previous task finished, getting result");
-                match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
-                    Ok(Ok(Ok(forest))) => {
+                let handle = self.training_handle.take().unwrap();
+                match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
+                    Some(Ok(Ok(forest))) => {
                         info!("train_model: Background training completed successfully");
                         self.forest = Some(forest);
                         self.last_training_time = Utc::now(); // Update last successful training time
                     }
-                    Ok(Ok(Err(e))) => {
+                    Some(Ok(Err(e))) => {
                         warn!("train_model: Background training returned error: {:?}", e);
                         self.forest = None;
                     }
-                    Ok(Err(join_error)) => {
+                    Some(Err(join_error)) => {
                         error!(
                             "train_model: Background training panicked: {:?}",
                             join_error
                         );
                         self.forest = None;
                     }
-                    Err(_) => {
-                        error!("train_model: Background training timed out after 120s - possible EIF hang");
+                    None => {
+                        // Timed out; task aborted in helper
+                        self.training_timeouts_count =
+                            self.training_timeouts_count.saturating_add(1);
                         self.forest = None;
                     }
                 }
@@ -745,6 +774,7 @@ impl IsolationForestModel {
             // Only check modification time, since expiration is handled in batch cleanup
             if &session.last_modified <= last_modified {
                 trace!("Using cached score for session {}", session_uid);
+                self.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Some((*score, *cached_features)); // Return cached score and features
             } else {
                 trace!(
@@ -756,6 +786,7 @@ impl IsolationForestModel {
         }
 
         // Compute features if not cached or outdated
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
         let features = compute_features(session); // Compute and use all 10 features
 
         // Score using the model
@@ -1288,6 +1319,14 @@ pub struct SessionAnalyzer {
     threshold_recalc_interval: Duration,
     pub(crate) running: Arc<AtomicBool>,
     last_analysis_time: Arc<CustomRwLock<Option<DateTime<Utc>>>>,
+    /// Cached analyzer statistics snapshot to minimize model locking in getters
+    analyzer_stats: Arc<CustomRwLock<Option<AnalyzerStats>>>,
+    /// Number of times a simple analysis timed out (soft per-batch timeout)
+    analysis_timeouts_count: Arc<AtomicU64>,
+    /// Rolling counters for performance metrics
+    analyses_count: Arc<AtomicU64>,
+    analysis_total_duration_ms: Arc<AtomicU64>,
+    last_analysis_duration_ms: Arc<AtomicU64>,
 }
 
 impl SessionAnalyzer {
@@ -1319,6 +1358,11 @@ impl SessionAnalyzer {
             threshold_recalc_interval: Duration::hours(DEFAULT_THRESHOLD_RECALC_TIMEOUT),
             running: Arc::new(AtomicBool::new(false)),
             last_analysis_time: Arc::new(CustomRwLock::new(None)),
+            analyzer_stats: Arc::new(CustomRwLock::new(None)),
+            analysis_timeouts_count: Arc::new(AtomicU64::new(0)),
+            analyses_count: Arc::new(AtomicU64::new(0)),
+            analysis_total_duration_ms: Arc::new(AtomicU64::new(0)),
+            last_analysis_duration_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1424,18 +1468,17 @@ impl SessionAnalyzer {
                     .map_or(false, |h| h.is_finished())
             {
                 info!("Analyzer: Found completed training task at start of analyze_sessions, processing result");
-                if let Some(handle) = &mut model_guard.training_handle {
-                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
-                        Ok(Ok(Ok(forest))) => {
+                if let Some(handle) = model_guard.training_handle.take() {
+                    match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
+                        Some(Ok(Ok(forest))) => {
                             info!("Analyzer: Background training task completed successfully (processed at analyze_sessions start)");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
                         },
-                        Ok(Ok(Err(e))) => warn!("Analyzer: Background training task failed (processed at analyze_sessions start): {:?}", e),
-                        Ok(Err(e)) => error!("Analyzer: Background training task panicked (processed at analyze_sessions start): {:?}", e),
-                        Err(_) => {
+                        Some(Ok(Err(e))) => warn!("Analyzer: Background training task failed (processed at analyze_sessions start): {:?}", e),
+                        Some(Err(e)) => error!("Analyzer: Background training task panicked (processed at analyze_sessions start): {:?}", e),
+                        None => {
                             error!("Analyzer: Background training task timed out after 120s - possible EIF hang");
-                            // Abort the hung task and clear state
                             model_guard.training_handle = None;
                             model_guard.training_in_progress.store(false, Ordering::Release);
                             return result; // Exit early to prevent further hangs
@@ -1529,30 +1572,33 @@ impl SessionAnalyzer {
 
                 // Ensure any ongoing training is completed
                 if model_guard.training_in_progress.load(Ordering::Relaxed) {
-                    if let Some(handle) = &mut model_guard.training_handle {
-                        if !handle.is_finished() {
+                    if let Some(handle_ref) = model_guard.training_handle.as_ref() {
+                        if !handle_ref.is_finished() {
                             info!("Analyzer (Finalize Warmup): Waiting for ongoing training task to complete...");
-                            match tokio::time::timeout(
-                                tokio::time::Duration::from_secs(120),
+                            let handle = model_guard.training_handle.take().unwrap();
+                            match await_join_with_timeout(
                                 handle,
+                                std::time::Duration::from_secs(120),
                             )
                             .await
                             {
-                                Ok(Ok(Ok(forest))) => {
+                                Some(Ok(Ok(forest))) => {
                                     info!("Analyzer (Finalize Warmup): Training task completed successfully.");
                                     model_guard.forest = Some(forest);
                                     model_guard.last_training_time = Utc::now();
                                 }
-                                Ok(Ok(Err(e))) => warn!(
+                                Some(Ok(Err(e))) => warn!(
                                     "Analyzer (Finalize Warmup): Training task failed: {:?}",
                                     e
                                 ),
-                                Ok(Err(e)) => error!(
+                                Some(Err(e)) => error!(
                                     "Analyzer (Finalize Warmup): Training task panicked: {:?}",
                                     e
                                 ),
-                                Err(_) => {
+                                None => {
                                     error!("Analyzer (Finalize Warmup): Training task timed out after 120s - possible EIF hang");
+                                    model_guard.training_timeouts_count =
+                                        model_guard.training_timeouts_count.saturating_add(1);
                                     model_guard.training_handle = None;
                                     model_guard
                                         .training_in_progress
@@ -1561,12 +1607,14 @@ impl SessionAnalyzer {
                             }
                         } else {
                             // Already finished, try to process with timeout (should be fast)
-                            match tokio::time::timeout(tokio::time::Duration::from_secs(10), handle).await {
-                                Ok(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); },
-                                Ok(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
-                                Ok(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
-                                Err(_) => {
+                            let handle = model_guard.training_handle.take().unwrap();
+                            match await_join_with_timeout(handle, std::time::Duration::from_secs(10)).await {
+                                Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); },
+                                Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
+                                Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
+                                None => {
                                     error!("Analyzer (Finalize Warmup): Finished training task timed out - possible EIF issue");
+                                    model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
                                     model_guard.training_handle = None;
                                     model_guard.training_in_progress.store(false, Ordering::Release);
                                 }
@@ -1582,18 +1630,19 @@ impl SessionAnalyzer {
                 if model_guard.forest.is_none() {
                     info!("Analyzer (Finalize Warmup): No forest model. Forcing one final training attempt.");
                     model_guard.train_model(true).await;
-                    if let Some(handle) = &mut model_guard.training_handle {
+                    if let Some(handle) = model_guard.training_handle.take() {
                         info!("Analyzer (Finalize Warmup): Waiting for final forced training task to complete...");
-                        match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
-                            Ok(Ok(Ok(forest))) => {
+                        match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
+                            Some(Ok(Ok(forest))) => {
                                 info!("Analyzer (Finalize Warmup): Final forced training task completed successfully.");
                                 model_guard.forest = Some(forest);
                                 model_guard.last_training_time = Utc::now();
                             },
-                            Ok(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Final forced training task failed: {:?}", e),
-                            Ok(Err(e)) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
-                            Err(_) => {
+                            Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Final forced training task failed: {:?}", e),
+                            Some(Err(e)) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
+                            None => {
                                 error!("Analyzer (Finalize Warmup): Final forced training task timed out after 120s - possible EIF hang");
+                                model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
                             }
                         }
                         model_guard.training_handle = None;
@@ -1712,24 +1761,26 @@ impl SessionAnalyzer {
                 let mut model_guard = model_rwlock.write().await;
                 model_guard.train_model(true).await;
 
-                if let Some(handle) = &mut model_guard.training_handle {
+                if let Some(handle) = model_guard.training_handle.take() {
                     info!("Analyzer (Scheduled Recalc): Waiting for training task to complete...");
-                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await
+                    match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await
                     {
-                        Ok(Ok(Ok(forest))) => {
+                        Some(Ok(Ok(forest))) => {
                             info!("Analyzer (Scheduled Recalc): Training task completed successfully.");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
                         }
-                        Ok(Ok(Err(e))) => {
+                        Some(Ok(Err(e))) => {
                             warn!("Analyzer (Scheduled Recalc): Training task failed: {:?}", e)
                         }
-                        Ok(Err(e)) => error!(
+                        Some(Err(e)) => error!(
                             "Analyzer (Scheduled Recalc): Training task panicked: {:?}",
                             e
                         ),
-                        Err(_) => {
+                        None => {
                             error!("Analyzer (Scheduled Recalc): Training task timed out after 120s - possible EIF hang");
+                            model_guard.training_timeouts_count =
+                                model_guard.training_timeouts_count.saturating_add(1);
                             model_guard.training_handle = None;
                             model_guard
                                 .training_in_progress
@@ -1778,8 +1829,9 @@ impl SessionAnalyzer {
                 }
             }
 
-            // Analyze all sessions and update criticality
+            // Analyze all sessions and update criticality (soft 60s batch timeout)
             {
+                let batch_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 let model_guard = model_rwlock.read().await;
                 if model_guard.forest.is_some() {
                     let operation_type = if initial_batch_analyzed_post_warmup {
@@ -1834,6 +1886,12 @@ impl SessionAnalyzer {
                     }
 
                     for (idx, session) in sessions.iter_mut().enumerate() {
+                        if std::time::Instant::now() >= batch_deadline {
+                            warn!("Analyzer: Simple analysis batch timed out after 60s; remaining sessions skipped this round");
+                            // Increment analysis timeout counter
+                            self.analysis_timeouts_count.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
                         // ---------------------------------------------------------------------
                         // Decide whether we really need to (re)analyse this session:
                         //  * Always analyse if it changed (timestamp **or** criticality) since
@@ -1984,8 +2042,15 @@ impl SessionAnalyzer {
                             );
                         }
                     }
+                    let elapsed = analyze_start_time.elapsed();
+                    let elapsed_ms = elapsed.as_millis() as u64;
+                    self.last_analysis_duration_ms
+                        .store(elapsed_ms, Ordering::Relaxed);
+                    self.analyses_count.fetch_add(1, Ordering::Relaxed);
+                    self.analysis_total_duration_ms
+                        .fetch_add(elapsed_ms, Ordering::Relaxed);
                     info!("Analyzer ({}): Analysis of {} sessions completed in {:?}. Found: {} anomalous, {} blacklisted.",
-                          operation_type, sessions_len, analyze_start_time.elapsed(), anom_count, bl_count);
+                          operation_type, sessions_len, elapsed, anom_count, bl_count);
 
                     // Update result with findings
                     result.new_anomalous_found = found_new_anomalous;
@@ -2042,6 +2107,285 @@ impl SessionAnalyzer {
         {
             let mut guard = self.last_analysis_time.write().await;
             *guard = Some(now);
+        }
+
+        // Build and cache an AnalyzerStats snapshot for fast retrieval by get_analyzer_stats()
+        {
+            let is_running = self.running.load(Ordering::SeqCst);
+            let warm_up_active = self.warm_up_active.load(Ordering::SeqCst);
+
+            // Warm-up progress snapshot
+            let warm_up_start_timestamp = self.warm_up_start_time.load(Ordering::SeqCst);
+            let warm_up_elapsed = if warm_up_start_timestamp > 0 {
+                now.timestamp() as u64 - warm_up_start_timestamp
+            } else {
+                0
+            };
+            let warm_up_target = self.warm_up_duration.num_seconds() as u64;
+
+            // Snapshot model/threshold info with minimal locking: read model lock once
+            let model_guard = self.model.read().await;
+            let (model_stats, thresholds, unique_samples) = if let Some(model_lock) = &*model_guard
+            {
+                let model = model_lock.read().await;
+
+                let unique_samples = {
+                    let mut seen: HashSet<[u64; NUM_FEATURES]> =
+                        HashSet::with_capacity(model.recent_data.len());
+                    for feats in &model.recent_data {
+                        let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
+                        seen.insert(bits);
+                    }
+                    seen.len()
+                };
+                let has_forest = model.forest.is_some();
+                let training_in_progress = model.training_in_progress.load(Ordering::SeqCst);
+                let buffer_size = model.recent_data.len();
+                let max_capacity = model.max_samples;
+
+                let score_dist = if has_forest && !model.recent_data.is_empty() {
+                    if let Some(forest) = &model.forest {
+                        let mut scores: Vec<f64> = model
+                            .recent_data
+                            .iter()
+                            .map(|features| forest.score(features))
+                            .collect();
+                        if !scores.is_empty() {
+                            scores.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let n = scores.len();
+                            let mean = scores.iter().sum::<f64>() / n as f64;
+                            Some(ScoreDistribution {
+                                sample_count: n,
+                                min_score: scores[0],
+                                max_score: scores[n - 1],
+                                mean_score: mean,
+                                percentiles: ScorePercentiles {
+                                    p25: scores[n / 4],
+                                    p50: scores[n / 2],
+                                    p75: scores[3 * n / 4],
+                                    p90: scores[9 * n / 10],
+                                    p95: scores[95 * n / 100],
+                                    p98: scores[98 * n / 100],
+                                    p99: scores[99 * n / 100],
+                                    p995: scores[995 * n / 1000],
+                                },
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let model_stats = ModelStats {
+                    has_trained_model: has_forest,
+                    training_in_progress,
+                    last_training_time: if model.last_training_time > DateTime::<Utc>::MIN_UTC {
+                        Some(model.last_training_time)
+                    } else {
+                        None
+                    },
+                    min_training_interval_minutes: model.min_training_interval.num_minutes() as f64,
+                    total_samples_in_buffer: buffer_size,
+                    max_buffer_capacity: max_capacity,
+                    buffer_utilization_percentage: if max_capacity > 0 {
+                        (buffer_size as f64 / max_capacity as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    unique_samples_count: unique_samples,
+                    downsample_factor: model.downsample_factor,
+                    feature_count: NUM_FEATURES,
+                    recent_score_distribution: score_dist,
+                };
+
+                let last_recalc = self.last_threshold_recalc_time.read().await;
+                let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
+                let next_recalc = *last_recalc + self.threshold_recalc_interval;
+
+                let thresholds = ThresholdStats {
+                    suspicious_threshold: model.suspicious_threshold,
+                    abnormal_threshold: model.abnormal_threshold,
+                    suspicious_percentile: model.current_suspicious_percentile,
+                    abnormal_percentile: model.current_abnormal_percentile,
+                    last_recalc_time: Some(*last_recalc),
+                    next_recalc_time: Some(next_recalc),
+                    recalc_interval_hours,
+                    min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
+                    default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                    default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+                };
+
+                (model_stats, thresholds, unique_samples)
+            } else {
+                let model_stats = ModelStats {
+                    has_trained_model: false,
+                    training_in_progress: false,
+                    last_training_time: None,
+                    min_training_interval_minutes: 0.0,
+                    total_samples_in_buffer: 0,
+                    max_buffer_capacity: 800,
+                    buffer_utilization_percentage: 0.0,
+                    unique_samples_count: 0,
+                    downsample_factor: 1,
+                    feature_count: NUM_FEATURES,
+                    recent_score_distribution: None,
+                };
+
+                let last_recalc = self.last_threshold_recalc_time.read().await;
+                let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
+                let next_recalc = *last_recalc + self.threshold_recalc_interval;
+
+                let thresholds = ThresholdStats {
+                    suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                    abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+                    suspicious_percentile: self.suspicious_threshold_percentile,
+                    abnormal_percentile: self.abnormal_threshold_percentile,
+                    last_recalc_time: Some(*last_recalc),
+                    next_recalc_time: Some(next_recalc),
+                    recalc_interval_hours,
+                    min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
+                    default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                    default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+                };
+
+                (model_stats, thresholds, 0)
+            };
+
+            let warm_up_progress = WarmUpProgress {
+                elapsed_seconds: warm_up_elapsed,
+                target_duration_seconds: warm_up_target,
+                unique_samples_collected: unique_samples,
+                min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
+                progress_percentage: if warm_up_target > 0 {
+                    ((warm_up_elapsed as f64 / warm_up_target as f64) * 100.0).min(100.0)
+                } else {
+                    100.0
+                },
+                estimated_completion_seconds: if warm_up_active && warm_up_elapsed < warm_up_target
+                {
+                    Some(warm_up_target - warm_up_elapsed)
+                } else {
+                    None
+                },
+            };
+
+            // Session stats from current caches
+            let total_sessions = self.all_sessions.len();
+            let anomalous_sessions = self.anomalous_sessions.len();
+            let blacklisted_sessions = self.blacklisted_sessions.len();
+            let normal_sessions =
+                total_sessions.saturating_sub(anomalous_sessions + blacklisted_sessions);
+            let anomaly_rate = if total_sessions > 0 {
+                (anomalous_sessions as f64 / total_sessions as f64) * 100.0
+            } else {
+                0.0
+            };
+            let blacklist_rate = if total_sessions > 0 {
+                (blacklisted_sessions as f64 / total_sessions as f64) * 100.0
+            } else {
+                0.0
+            };
+            let last_analysis = self.last_analysis_time.read().await;
+
+            let session_stats = SessionStats {
+                total_sessions_tracked: total_sessions,
+                anomalous_sessions_count: anomalous_sessions,
+                blacklisted_sessions_count: blacklisted_sessions,
+                normal_sessions_count: normal_sessions,
+                anomaly_rate_percentage: anomaly_rate,
+                blacklist_rate_percentage: blacklist_rate,
+                last_analysis_time: *last_analysis,
+                sessions_analyzed_today: total_sessions,
+            };
+
+            let training_timeouts_total = {
+                let model_guard = self.model.read().await;
+                if let Some(model_lock) = &*model_guard {
+                    let model = model_lock.read().await;
+                    model.training_timeouts_count
+                } else {
+                    0
+                }
+            };
+            let analysis_timeouts_total = self.analysis_timeouts_count.load(Ordering::Relaxed);
+            // Compute rolling averages and cache hit rate
+            let total_analyses = self.analyses_count.load(Ordering::Relaxed);
+            let total_duration_ms = self.analysis_total_duration_ms.load(Ordering::Relaxed);
+            let last_duration_ms = self.last_analysis_duration_ms.load(Ordering::Relaxed);
+            let (cache_hits, cache_misses) = {
+                let model_guard = self.model.read().await;
+                if let Some(model_lock) = &*model_guard {
+                    let model = model_lock.read().await;
+                    (
+                        model.cache_hits.load(Ordering::Relaxed),
+                        model.cache_misses.load(Ordering::Relaxed),
+                    )
+                } else {
+                    (0, 0)
+                }
+            };
+            let cache_total = cache_hits + cache_misses;
+            let cache_hit_rate_percentage = if cache_total > 0 {
+                Some((cache_hits as f64 / cache_total as f64) * 100.0)
+            } else {
+                None
+            };
+
+            // Process memory (approximate, Linux/Unix via procfs/macOS via task info would be better; using Rust's allocator not ideal)
+            let memory_usage_mb = None;
+
+            let performance_stats = PerformanceStats {
+                average_analysis_time_ms: if total_analyses > 0 {
+                    Some(total_duration_ms as f64 / total_analyses as f64)
+                } else {
+                    None
+                },
+                last_analysis_duration_ms: if total_analyses > 0 {
+                    Some(last_duration_ms as f64)
+                } else {
+                    None
+                },
+                total_analyses_performed: total_analyses,
+                cache_hit_rate_percentage,
+                memory_usage_mb,
+                training_timeouts_total,
+                analysis_timeouts_total,
+            };
+
+            let config = AnalyzerConfig {
+                suspicious_percentile: self.suspicious_threshold_percentile,
+                abnormal_percentile: self.abnormal_threshold_percentile,
+                warm_up_duration_seconds: self.warm_up_duration.num_seconds() as u64,
+                warm_up_min_samples: WARMUP_MIN_UNIQUE_SAMPLES,
+                analysis_delay_seconds: ANALYSIS_DELAY,
+                threshold_recalc_interval_hours: self.threshold_recalc_interval.num_hours() as f64,
+                max_buffer_samples: 800,
+                downsample_factor: 1,
+                feature_dimensions: NUM_FEATURES,
+                cache_timeout_seconds: ANALYZER_CACHE_TIMEOUT,
+                session_retention_timeout_seconds: CONNECTION_RETENTION_TIMEOUT.num_seconds()
+                    as i64,
+            };
+
+            let stats = AnalyzerStats {
+                is_running,
+                warm_up_active,
+                warm_up_progress,
+                thresholds,
+                model_stats,
+                session_stats,
+                performance_stats,
+                config,
+            };
+
+            let mut stats_lock = self.analyzer_stats.write().await;
+            *stats_lock = Some(stats);
         }
 
         result
@@ -2355,23 +2699,19 @@ impl SessionAnalyzer {
                 }
                 model_write.train_model(true).await;
                 // Wait for training to complete with timeout
-                if let Some(handle) = &mut model_write.training_handle {
-                    match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await
+                if let Some(handle) = model_write.training_handle.take() {
+                    match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await
                     {
-                        Ok(Ok(Ok(forest))) => {
+                        Some(Ok(Ok(forest))) => {
                             model_write.forest = Some(forest);
                             model_write.last_training_time = Utc::now();
                         }
-                        Ok(Ok(Err(_))) => {
-                            // If training fails, just set default thresholds
+                        Some(Ok(Err(_))) | Some(Err(_)) => {
+                            // If training fails or panics, just set default thresholds
                             model_write.suspicious_threshold = 0.1;
                             model_write.abnormal_threshold = 0.2;
                         }
-                        Ok(Err(_)) => {
-                            model_write.suspicious_threshold = 0.1;
-                            model_write.abnormal_threshold = 0.2;
-                        }
-                        Err(_) => {
+                        None => {
                             error!("Test training task timed out after 120s - possible EIF hang");
                             model_write.suspicious_threshold = 0.1;
                             model_write.abnormal_threshold = 0.2;
@@ -2393,21 +2733,21 @@ impl SessionAnalyzer {
         if let Some(model_rw) = &*model_option_guard {
             let mut model_write = model_rw.write().await;
             model_write.train_model(true).await;
-            if let Some(handle) = &mut model_write.training_handle {
-                match tokio::time::timeout(tokio::time::Duration::from_secs(120), handle).await {
-                    Ok(Ok(Ok(forest))) => {
+            if let Some(handle) = model_write.training_handle.take() {
+                match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
+                    Some(Ok(Ok(forest))) => {
                         model_write.forest = Some(forest);
                         model_write.last_training_time = Utc::now();
                     }
-                    Ok(Ok(Err(e))) => {
+                    Some(Ok(Err(e))) => {
                         warn!("Force training task failed: {:?}", e);
                         // leave forest as-is on error
                     }
-                    Ok(Err(e)) => {
+                    Some(Err(e)) => {
                         error!("Force training task panicked: {:?}", e);
                         // leave forest as-is on error
                     }
-                    Err(_) => {
+                    None => {
                         error!("Force training task timed out after 120s - possible EIF hang");
                         // leave forest as-is on timeout
                     }
@@ -2475,242 +2815,83 @@ impl SessionAnalyzer {
     /// # }
     /// ```
     pub async fn get_analyzer_stats(&self) -> AnalyzerStats {
-        // Clean up old sessions before calculating stats
+        // Return the latest snapshot built during analyze_sessions(), with minimal locking.
         self.cleanup_tracked_sessions();
-
-        let now = Utc::now();
-        let is_running = self.running.load(Ordering::SeqCst);
-        let warm_up_active = self.warm_up_active.load(Ordering::SeqCst);
-
-        // Get warm-up progress information
-        let warm_up_start_timestamp = self.warm_up_start_time.load(Ordering::SeqCst);
-        let warm_up_elapsed = if warm_up_start_timestamp > 0 {
-            now.timestamp() as u64 - warm_up_start_timestamp
+        if let Some(stats) = self.analyzer_stats.read().await.clone() {
+            stats
         } else {
-            0
-        };
-        let warm_up_target = self.warm_up_duration.num_seconds() as u64;
-
-        // Get model and threshold information
-        let model_guard = self.model.read().await;
-        let (model_stats, thresholds, unique_samples) = if let Some(model_lock) = &*model_guard {
-            let model = model_lock.read().await;
-
-            // Calculate unique samples while we have the model lock
-            let unique_samples = {
-                let mut seen: HashSet<[u64; NUM_FEATURES]> =
-                    HashSet::with_capacity(model.recent_data.len());
-                for feats in &model.recent_data {
-                    let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
-                    seen.insert(bits);
-                }
-                seen.len()
-            };
-            let has_forest = model.forest.is_some();
-            let training_in_progress = model.training_in_progress.load(Ordering::SeqCst);
-            let buffer_size = model.recent_data.len();
-            let max_capacity = model.max_samples;
-
-            // Calculate score distribution if we have recent data and a forest
-            let score_dist = if has_forest && !model.recent_data.is_empty() {
-                if let Some(forest) = &model.forest {
-                    let mut scores: Vec<f64> = model
-                        .recent_data
-                        .iter()
-                        .map(|features| forest.score(features))
-                        .collect();
-
-                    if !scores.is_empty() {
-                        scores
-                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let n = scores.len();
-                        let mean = scores.iter().sum::<f64>() / n as f64;
-
-                        Some(ScoreDistribution {
-                            sample_count: n,
-                            min_score: scores[0],
-                            max_score: scores[n - 1],
-                            mean_score: mean,
-                            percentiles: ScorePercentiles {
-                                p25: scores[n / 4],
-                                p50: scores[n / 2],
-                                p75: scores[3 * n / 4],
-                                p90: scores[9 * n / 10],
-                                p95: scores[95 * n / 100],
-                                p98: scores[98 * n / 100],
-                                p99: scores[99 * n / 100],
-                                p995: scores[995 * n / 1000],
-                            },
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let model_stats = ModelStats {
-                has_trained_model: has_forest,
-                training_in_progress,
-                last_training_time: if model.last_training_time > DateTime::<Utc>::MIN_UTC {
-                    Some(model.last_training_time)
-                } else {
-                    None
+            // Fallback: build a minimal default snapshot if analyze hasn't run yet
+            AnalyzerStats {
+                is_running: self.running.load(Ordering::SeqCst),
+                warm_up_active: self.warm_up_active.load(Ordering::SeqCst),
+                warm_up_progress: WarmUpProgress {
+                    elapsed_seconds: 0,
+                    target_duration_seconds: self.warm_up_duration.num_seconds() as u64,
+                    unique_samples_collected: 0,
+                    min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
+                    progress_percentage: 0.0,
+                    estimated_completion_seconds: None,
                 },
-                min_training_interval_minutes: model.min_training_interval.num_minutes() as f64,
-                total_samples_in_buffer: buffer_size,
-                max_buffer_capacity: max_capacity,
-                buffer_utilization_percentage: if max_capacity > 0 {
-                    (buffer_size as f64 / max_capacity as f64) * 100.0
-                } else {
-                    0.0
+                thresholds: ThresholdStats {
+                    suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                    abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
+                    suspicious_percentile: self.suspicious_threshold_percentile,
+                    abnormal_percentile: self.abnormal_threshold_percentile,
+                    last_recalc_time: None,
+                    next_recalc_time: None,
+                    recalc_interval_hours: self.threshold_recalc_interval.num_hours() as f64,
+                    min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
+                    default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
+                    default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
                 },
-                unique_samples_count: unique_samples,
-                downsample_factor: model.downsample_factor,
-                feature_count: NUM_FEATURES,
-                recent_score_distribution: score_dist,
-            };
-
-            let last_recalc = self.last_threshold_recalc_time.read().await;
-            let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
-            let next_recalc = *last_recalc + self.threshold_recalc_interval;
-
-            let thresholds = ThresholdStats {
-                suspicious_threshold: model.suspicious_threshold,
-                abnormal_threshold: model.abnormal_threshold,
-                suspicious_percentile: model.current_suspicious_percentile,
-                abnormal_percentile: model.current_abnormal_percentile,
-                last_recalc_time: Some(*last_recalc),
-                next_recalc_time: Some(next_recalc),
-                recalc_interval_hours,
-                min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
-                default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
-                default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
-            };
-
-            (model_stats, thresholds, unique_samples)
-        } else {
-            // No model available
-            let model_stats = ModelStats {
-                has_trained_model: false,
-                training_in_progress: false,
-                last_training_time: None,
-                min_training_interval_minutes: 0.0,
-                total_samples_in_buffer: 0,
-                max_buffer_capacity: 800, // Default from IsolationForestModel::new()
-                buffer_utilization_percentage: 0.0,
-                unique_samples_count: 0,
-                downsample_factor: 1,
-                feature_count: NUM_FEATURES,
-                recent_score_distribution: None,
-            };
-
-            let last_recalc = self.last_threshold_recalc_time.read().await;
-            let recalc_interval_hours = self.threshold_recalc_interval.num_hours() as f64;
-            let next_recalc = *last_recalc + self.threshold_recalc_interval;
-
-            let thresholds = ThresholdStats {
-                suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
-                abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
-                suspicious_percentile: self.suspicious_threshold_percentile,
-                abnormal_percentile: self.abnormal_threshold_percentile,
-                last_recalc_time: Some(*last_recalc),
-                next_recalc_time: Some(next_recalc),
-                recalc_interval_hours,
-                min_reasonable_threshold: MIN_REASONABLE_THRESHOLD,
-                default_suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
-                default_abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
-            };
-
-            (model_stats, thresholds, 0)
-        };
-
-        // Create warm_up_progress now that we have unique_samples
-        let warm_up_progress = WarmUpProgress {
-            elapsed_seconds: warm_up_elapsed,
-            target_duration_seconds: warm_up_target,
-            unique_samples_collected: unique_samples,
-            min_samples_required: WARMUP_MIN_UNIQUE_SAMPLES,
-            progress_percentage: if warm_up_target > 0 {
-                ((warm_up_elapsed as f64 / warm_up_target as f64) * 100.0).min(100.0)
-            } else {
-                100.0
-            },
-            estimated_completion_seconds: if warm_up_active && warm_up_elapsed < warm_up_target {
-                Some(warm_up_target - warm_up_elapsed)
-            } else {
-                None
-            },
-        };
-
-        // Calculate session statistics
-        let total_sessions = self.all_sessions.len();
-        let anomalous_sessions = self.anomalous_sessions.len();
-        let blacklisted_sessions = self.blacklisted_sessions.len();
-        let normal_sessions =
-            total_sessions.saturating_sub(anomalous_sessions + blacklisted_sessions);
-
-        let anomaly_rate = if total_sessions > 0 {
-            (anomalous_sessions as f64 / total_sessions as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let blacklist_rate = if total_sessions > 0 {
-            (blacklisted_sessions as f64 / total_sessions as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let last_analysis = self.last_analysis_time.read().await;
-
-        let session_stats = SessionStats {
-            total_sessions_tracked: total_sessions,
-            anomalous_sessions_count: anomalous_sessions,
-            blacklisted_sessions_count: blacklisted_sessions,
-            normal_sessions_count: normal_sessions,
-            anomaly_rate_percentage: anomaly_rate,
-            blacklist_rate_percentage: blacklist_rate,
-            last_analysis_time: *last_analysis,
-            sessions_analyzed_today: total_sessions, // Simplified - could be enhanced with daily tracking
-        };
-
-        // Performance stats (simplified for now)
-        let performance_stats = PerformanceStats {
-            average_analysis_time_ms: None, // Could be tracked with a rolling average
-            last_analysis_duration_ms: None, // Could be tracked per analysis
-            total_analyses_performed: 0,    // Could be tracked with a counter
-            cache_hit_rate_percentage: None, // Could be calculated from cache statistics
-            memory_usage_mb: None,          // Could use system memory tracking
-        };
-
-        // Configuration snapshot
-        let config = AnalyzerConfig {
-            suspicious_percentile: self.suspicious_threshold_percentile,
-            abnormal_percentile: self.abnormal_threshold_percentile,
-            warm_up_duration_seconds: self.warm_up_duration.num_seconds() as u64,
-            warm_up_min_samples: WARMUP_MIN_UNIQUE_SAMPLES,
-            analysis_delay_seconds: ANALYSIS_DELAY,
-            threshold_recalc_interval_hours: self.threshold_recalc_interval.num_hours() as f64,
-            max_buffer_samples: 800, // Default from IsolationForestModel
-            downsample_factor: 1,    // Default from IsolationForestModel
-            feature_dimensions: NUM_FEATURES,
-            cache_timeout_seconds: ANALYZER_CACHE_TIMEOUT,
-            session_retention_timeout_seconds: CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64,
-        };
-
-        AnalyzerStats {
-            is_running,
-            warm_up_active,
-            warm_up_progress,
-            thresholds,
-            model_stats,
-            session_stats,
-            performance_stats,
-            config,
+                model_stats: ModelStats {
+                    has_trained_model: false,
+                    training_in_progress: false,
+                    last_training_time: None,
+                    min_training_interval_minutes: 0.0,
+                    total_samples_in_buffer: 0,
+                    max_buffer_capacity: 800,
+                    buffer_utilization_percentage: 0.0,
+                    unique_samples_count: 0,
+                    downsample_factor: 1,
+                    feature_count: NUM_FEATURES,
+                    recent_score_distribution: None,
+                },
+                session_stats: SessionStats {
+                    total_sessions_tracked: self.all_sessions.len(),
+                    anomalous_sessions_count: self.anomalous_sessions.len(),
+                    blacklisted_sessions_count: self.blacklisted_sessions.len(),
+                    normal_sessions_count: 0,
+                    anomaly_rate_percentage: 0.0,
+                    blacklist_rate_percentage: 0.0,
+                    last_analysis_time: *self.last_analysis_time.read().await,
+                    sessions_analyzed_today: 0,
+                },
+                performance_stats: PerformanceStats {
+                    average_analysis_time_ms: None,
+                    last_analysis_duration_ms: None,
+                    total_analyses_performed: 0,
+                    cache_hit_rate_percentage: None,
+                    memory_usage_mb: None,
+                    training_timeouts_total: 0,
+                    analysis_timeouts_total: 0,
+                },
+                config: AnalyzerConfig {
+                    suspicious_percentile: self.suspicious_threshold_percentile,
+                    abnormal_percentile: self.abnormal_threshold_percentile,
+                    warm_up_duration_seconds: self.warm_up_duration.num_seconds() as u64,
+                    warm_up_min_samples: WARMUP_MIN_UNIQUE_SAMPLES,
+                    analysis_delay_seconds: ANALYSIS_DELAY,
+                    threshold_recalc_interval_hours: self.threshold_recalc_interval.num_hours()
+                        as f64,
+                    max_buffer_samples: 800,
+                    downsample_factor: 1,
+                    feature_dimensions: NUM_FEATURES,
+                    cache_timeout_seconds: ANALYZER_CACHE_TIMEOUT,
+                    session_retention_timeout_seconds: CONNECTION_RETENTION_TIMEOUT.num_seconds()
+                        as i64,
+                },
+            }
         }
     }
 
