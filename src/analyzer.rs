@@ -2524,31 +2524,11 @@ impl SessionAnalyzer {
                 cache.get_full_session(None)
             })
             .filter(|session| {
-                // Use the most recent activity timestamp available. During warmup or tests,
-                // sessions may have default stats; rely on last_modified as a fallback.
-                let effective_last_activity = if session.last_modified > session.stats.last_activity
-                {
-                    session.last_modified
-                } else {
-                    session.stats.last_activity
-                };
-                now.signed_duration_since(effective_last_activity) < current_session_timeout
+                now.signed_duration_since(session.stats.last_activity) < current_session_timeout
             })
             .collect();
 
-        current_sessions.sort_by(|a, b| {
-            let a_eff = if a.last_modified > a.stats.last_activity {
-                a.last_modified
-            } else {
-                a.stats.last_activity
-            };
-            let b_eff = if b.last_modified > b.stats.last_activity {
-                b.last_modified
-            } else {
-                b.stats.last_activity
-            };
-            b_eff.cmp(&a_eff)
-        });
+        current_sessions.sort_by(|a, b| b.stats.last_activity.cmp(&a.stats.last_activity));
         current_sessions
     }
 
@@ -3076,7 +3056,7 @@ pub(crate) mod tests {
                 dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 dst_port: 443,
             },
-            stats: SessionStats::default(),
+            stats: SessionStats::new(Utc::now()),
             status: SessionStatus::default(),
             is_local_src: false,
             is_local_dst: false,
@@ -3104,7 +3084,7 @@ pub(crate) mod tests {
                 dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 dst_port: 80,
             },
-            stats: SessionStats::default(),
+            stats: SessionStats::new(Utc::now()),
             status: SessionStatus::default(),
             is_local_src: false,
             is_local_dst: false,
@@ -3261,7 +3241,7 @@ pub(crate) mod tests {
                     dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                     dst_port: 443,
                 },
-                stats: SessionStats::default(),
+                stats: SessionStats::new(Utc::now()),
                 status: SessionStatus::default(),
                 is_local_src: false,
                 is_local_dst: false,
@@ -3288,7 +3268,7 @@ pub(crate) mod tests {
                     dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
                     dst_port: 53,
                 },
-                stats: SessionStats::default(),
+                stats: SessionStats::new(Utc::now()),
                 status: SessionStatus::default(),
                 is_local_src: false,
                 is_local_dst: false,
@@ -3398,7 +3378,7 @@ pub(crate) mod tests {
                 dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 dst_port: 443,
             },
-            stats: SessionStats::default(),
+            stats: SessionStats::new(Utc::now()),
             status: SessionStatus::default(),
             is_local_src: false,
             is_local_dst: false,

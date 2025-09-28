@@ -5150,7 +5150,7 @@ mod tests {
 
         let test_session_info = SessionInfo {
             session: test_session.clone(),
-            stats: SessionStats::default(),
+            stats: SessionStats::new(Utc::now()),
             status: SessionStatus::default(),
             is_local_src: false,
             is_local_dst: false,
