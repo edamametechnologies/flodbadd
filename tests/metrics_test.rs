@@ -18,6 +18,7 @@ use std::time::Duration as StdDuration;
 use tokio::time::sleep;
 use undeadlock::{CustomDashMap, CustomRwLock};
 mod common;
+use chrono::Utc;
 
 /// Helper that quickly creates a PacketData instance
 fn pkt(
@@ -39,6 +40,7 @@ fn pkt(
         packet_length: len,
         ip_packet_length: len + 20, // assume fixed IP hdr for simplicity
         flags: Some(flags),
+        timestamp: Utc::now(),
     }
 }
 

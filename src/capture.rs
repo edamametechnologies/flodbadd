@@ -1093,8 +1093,13 @@ impl FlodbaddCapture {
                     interface_name_clone
                 );
 
-                // Channel to send packet data to the processing task
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1000); // Buffer size 1000
+                // Channel to send packet data with timestamp to the processing task
+                #[derive(Clone)]
+                struct SyncPacket {
+                    data: Vec<u8>,
+                    ts: chrono::DateTime<chrono::Utc>,
+                }
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<SyncPacket>(1000); // Buffer size 1000
 
                 // --- Packet Processing Task ---
                 let sessions_clone = sessions.clone();
@@ -1115,8 +1120,8 @@ impl FlodbaddCapture {
                                 break;
                             }
                             maybe_data = rx.recv() => {
-                                if let Some(data) = maybe_data {
-                                    if let Some(parsed_packet) = parse_packet_pcap(&data) {
+                                if let Some(sp) = maybe_data {
+                                    if let Some(parsed_packet) = parse_packet_pcap(&sp.data, sp.ts) {
                                         match parsed_packet {
                                             ParsedPacket::SessionPacket(cp) => {
                                                 // Call the original async processing function
@@ -1169,8 +1174,22 @@ impl FlodbaddCapture {
                         match cap.next_packet() {
                             Ok(packet) => {
                                 total_packets += 1;
+                                // Build timestamp from packet header
+                                let secs = packet.header.ts.tv_sec as i64;
+                                let usecs = packet.header.ts.tv_usec as u32;
+                                let ts_utc = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                    secs,
+                                    usecs * 1000,
+                                )
+                                .unwrap_or_else(|| {
+                                    chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
+                                });
+
                                 // Send data to the processor task, handle potential channel closure/fullness
-                                match tx.try_send(packet.data.to_vec()) {
+                                match tx.try_send(SyncPacket {
+                                    data: packet.data.to_vec(),
+                                    ts: ts_utc,
+                                }) {
                                     // Use try_send
                                     Ok(_) => { /* Packet sent successfully */ }
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1249,14 +1268,24 @@ impl FlodbaddCapture {
                 pub struct OwnedCodec;
                 pub struct PacketOwned {
                     pub data: Box<[u8]>,
+                    pub ts: chrono::DateTime<chrono::Utc>,
                 }
 
                 impl PacketCodec for OwnedCodec {
                     type Item = PacketOwned;
 
                     fn decode(&mut self, pkt: Packet) -> Self::Item {
+                        // Translate pcap timeval to chrono DateTime<Utc>
+                        let secs = pkt.header.ts.tv_sec as i64;
+                        let usecs = pkt.header.ts.tv_usec as u32;
+                        let ts_utc =
+                            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, usecs * 1000)
+                                .unwrap_or_else(|| {
+                                    chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
+                                });
                         PacketOwned {
                             data: pkt.data.into(),
+                            ts: ts_utc,
                         }
                     }
                 }
@@ -1302,7 +1331,7 @@ impl FlodbaddCapture {
                             match packet_owned {
                                 Some(Ok(packet_owned)) => {
                                     total_packets += 1;
-                                    match parse_packet_pcap(&packet_owned.data) {
+                                    match parse_packet_pcap(&packet_owned.data, packet_owned.ts) {
                                         Some(ParsedPacket::SessionPacket(cp)) => {
                                             let l7_opt = {
                                                 let l7_guard = l7.read().await;
@@ -2174,6 +2203,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Use imported TcpFlags
+            timestamp: chrono::Utc::now(),
         }
     }
 
@@ -2200,6 +2230,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: chrono::Utc::now(),
         };
 
         // Second packet: server SYN+ACK to client
@@ -2214,6 +2245,7 @@ mod tests {
             packet_length: 150,
             ip_packet_length: 170,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK),
+            timestamp: chrono::Utc::now(),
         };
 
         // Third packet: client ACK to server
@@ -2228,6 +2260,7 @@ mod tests {
             packet_length: 90,
             ip_packet_length: 110,
             flags: Some(TcpFlags::ACK),
+            timestamp: chrono::Utc::now(),
         };
 
         let own_ips_vec = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
@@ -2352,6 +2385,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: chrono::Utc::now(),
         };
 
         // Get self IPs (your local IP)
@@ -3654,6 +3688,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: chrono::Utc::now(),
         };
 
         let own_ips_vec = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
@@ -4110,6 +4145,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: chrono::Utc::now(),
         };
 
         let google_dns_packet = SessionPacketData {
@@ -4123,6 +4159,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: None,
+            timestamp: chrono::Utc::now(),
         };
 
         // Process packets with custom whitelist

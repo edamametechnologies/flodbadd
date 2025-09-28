@@ -5,7 +5,7 @@ use crate::packetstats::PACKET_STATS;
 use crate::port_vulns::get_name_from_port;
 use crate::sessions::session_macros::*;
 use crate::sessions::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::mapref::entry::Entry;
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
@@ -37,6 +37,7 @@ pub struct SessionPacketData {
     pub packet_length: usize,
     pub ip_packet_length: usize,
     pub flags: Option<u8>,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -186,7 +187,7 @@ pub async fn process_parsed_packet(
     }
     // --- End Increment Counters ---
 
-    let now = Utc::now();
+    let now = parsed_packet.timestamp;
 
     // Check if the ports are known service ports
     let src_service_name = get_name_from_port(parsed_packet.session.src_port).await;
@@ -578,7 +579,7 @@ fn map_tcp_flags(flags: u8, packet_length: usize, is_originator: bool) -> char {
     }
 }
 
-pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
+pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option<ParsedPacket> {
     let ethernet = match EthernetPacket::new(packet_data) {
         Some(packet) => packet,
         None => {
@@ -640,6 +641,7 @@ pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
                         packet_length,
                         ip_packet_length,
                         flags: Some(flags),
+                        timestamp,
                     }))
                 }
                 IpNextHeaderProtocols::Udp => {
@@ -676,6 +678,7 @@ pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
                         packet_length,
                         ip_packet_length,
                         flags: None,
+                        timestamp,
                     }))
                 }
                 _ => None,
@@ -734,6 +737,7 @@ pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
                         packet_length,
                         ip_packet_length,
                         flags: Some(flags),
+                        timestamp,
                     }))
                 }
                 IpNextHeaderProtocols::Udp => {
@@ -770,6 +774,7 @@ pub fn parse_packet_pcap(packet_data: &[u8]) -> Option<ParsedPacket> {
                         packet_length,
                         ip_packet_length,
                         flags: None,
+                        timestamp,
                     }))
                 }
                 _ => None,
@@ -805,6 +810,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Server response
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -863,6 +869,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -923,6 +930,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating with SYN
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -980,6 +988,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Response with SYN+ACK
+            timestamp: Utc::now(),
         };
 
         // Process the packet
@@ -1039,6 +1048,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet1,
@@ -1083,6 +1093,7 @@ mod tests {
             packet_length: 200,
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
 
         // Debug check direction swapping logic
@@ -1173,6 +1184,7 @@ mod tests {
             packet_length: 300,
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK | TCP_PSH),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet3,
@@ -1214,6 +1226,7 @@ mod tests {
             packet_length: 150,
             ip_packet_length: 170,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet4,
@@ -1247,6 +1260,7 @@ mod tests {
             packet_length: 250,
             ip_packet_length: 270,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet5,
@@ -1286,6 +1300,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: None, // UDP has no flags
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             udp_packet1,
@@ -1349,6 +1364,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -1405,6 +1421,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -1462,6 +1479,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating with SYN
+            timestamp: Utc::now(),
         };
 
         // Create necessary objects for the test
@@ -1526,6 +1544,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Server responding with SYN+ACK
+            timestamp: Utc::now(),
         };
 
         // Process the SYN+ACK packet
@@ -1587,6 +1606,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet1,
@@ -1607,6 +1627,7 @@ mod tests {
             packet_length: 200,
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK | TCP_PSH),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet2,
@@ -1638,6 +1659,7 @@ mod tests {
             packet_length: 150,
             ip_packet_length: 170,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet3,
@@ -1655,6 +1677,7 @@ mod tests {
             packet_length: 250,
             ip_packet_length: 270,
             flags: Some(TcpFlags::ACK | TCP_PSH),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet4,
@@ -1690,6 +1713,7 @@ mod tests {
             packet_length: 300,
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet5,
@@ -1715,6 +1739,7 @@ mod tests {
             packet_length: 350,
             ip_packet_length: 370,
             flags: Some(TcpFlags::ACK | TCP_PSH),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet6,
@@ -1772,6 +1797,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: None, // UDP has no flags
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             udp_packet1,
@@ -1811,6 +1837,7 @@ mod tests {
             packet_length: 200,
             ip_packet_length: 220,
             flags: None,
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             udp_packet2,
@@ -1846,6 +1873,7 @@ mod tests {
                 packet_length: 100 + i * 20,
                 ip_packet_length: 120 + i * 20,
                 flags: None,
+                timestamp: Utc::now(),
             };
             process_parsed_packet(
                 udp_packet_n,
@@ -1903,6 +1931,7 @@ mod tests {
             packet_length: 100,
             ip_packet_length: 120,
             flags: Some(TcpFlags::FIN | TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet_fin,
@@ -1920,6 +1949,7 @@ mod tests {
             packet_length: 150,
             ip_packet_length: 170,
             flags: Some(TcpFlags::SYN),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet_syn,
@@ -1998,6 +2028,7 @@ mod tests {
             packet_length: 200,
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK | TCP_PSH),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet_psh,
@@ -2015,6 +2046,7 @@ mod tests {
             packet_length: 300,
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK),
+            timestamp: Utc::now(),
         };
         process_parsed_packet(
             packet_ack,
