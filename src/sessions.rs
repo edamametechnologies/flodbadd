@@ -11,8 +11,8 @@ use uuid::Uuid;
 pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
 // A session is considered current if it has been active in the last 180 seconds
 pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
-// Keep 24 hours of history
-pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(86400);
+// Keep 8 hours of history
+pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(28800);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd)]
 pub enum Protocol {

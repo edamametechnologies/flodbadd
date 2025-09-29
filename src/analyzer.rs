@@ -75,11 +75,11 @@ async fn await_join_with_timeout<T>(
 // Define a timeout for cache entries (in seconds)
 static ANALYZER_CACHE_TIMEOUT: i64 = 3600;
 
-// Define a timeout for anomalous session tracking (in seconds)
-static ANOMALOUS_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
+// Define a timeout for anomalous session tracking (in seconds): 24h
+static ANOMALOUS_SESSION_TIMEOUT: i64 = 86400;
 
-// Define a timeout for blacklisted session tracking (in seconds)
-static BLACKLISTED_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
+// Define a timeout for blacklisted session tracking (in seconds): 24h
+static BLACKLISTED_SESSION_TIMEOUT: i64 = 86400;
 
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
@@ -2630,6 +2630,47 @@ impl SessionAnalyzer {
             "Analyzer stopped - sessions preserved: {} anomalous, {} blacklisted, {} total",
             anomalous_count, blacklisted_count, all_sessions_count
         );
+    }
+
+    /// Fully reset the analyzer state: stop, clear caches and model, and reset counters.
+    /// After this call, `start()` will create a fresh model and warm-up from scratch.
+    pub async fn reset(&self) {
+        // Ensure we are not running
+        self.stop().await;
+
+        // Clear all tracked session caches
+        self.anomalous_sessions.clear();
+        self.blacklisted_sessions.clear();
+        self.all_sessions.clear();
+        self.last_analysis_times.clear();
+
+        // Reset model to uninitialized so start() creates a new one
+        {
+            let mut model_guard = self.model.write().await;
+            *model_guard = None;
+        }
+
+        // Reset warm-up and threshold bookkeeping
+        self.warm_up_active.store(true, Ordering::SeqCst);
+        self.warm_up_start_time.store(0, Ordering::SeqCst);
+        {
+            let mut last_recalc = self.last_threshold_recalc_time.write().await;
+            *last_recalc = Utc::now();
+        }
+
+        // Reset stats and counters
+        {
+            let mut last_time = self.last_analysis_time.write().await;
+            *last_time = None;
+        }
+        self.analysis_timeouts_count.store(0, Ordering::SeqCst);
+        self.analyses_count.store(0, Ordering::SeqCst);
+        self.analysis_total_duration_ms.store(0, Ordering::SeqCst);
+        self.last_analysis_duration_ms.store(0, Ordering::SeqCst);
+        {
+            let mut stats = self.analyzer_stats.write().await;
+            *stats = None;
+        }
     }
 
     /// Debug method to get anomaly score and thresholds for a session (testing purposes only)
