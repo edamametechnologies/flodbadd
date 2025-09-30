@@ -51,7 +51,7 @@ async fn test_statistics_pipeline() {
 
     println!("test_statistics_pipeline");
     let sessions: Arc<CustomDashMap<Session, flodbadd::sessions::SessionInfo>> =
-        Arc::new(CustomDashMap::new("Sessions"));
+        Arc::new(CustomDashMap::new("sessions"));
     let current_sessions: Arc<CustomRwLock<Vec<Session>>> = Arc::new(CustomRwLock::new(Vec::new()));
     let filter: Arc<CustomRwLock<SessionFilter>> = Arc::new(CustomRwLock::new(SessionFilter::All));
 
@@ -192,7 +192,7 @@ async fn test_statistics_pipeline() {
 async fn test_analyzer_bytes_scaling_detection() {
     // Build many normal flows for baseline, then add a very large (exfil-like) flow
     let sessions: Arc<CustomDashMap<Session, flodbadd::sessions::SessionInfo>> =
-        Arc::new(CustomDashMap::new("SessionsBytes"));
+        Arc::new(CustomDashMap::new("sessions_bytes"));
     let current_sessions: Arc<CustomRwLock<Vec<Session>>> = Arc::new(CustomRwLock::new(Vec::new()));
     let filter: Arc<CustomRwLock<SessionFilter>> = Arc::new(CustomRwLock::new(SessionFilter::All));
 
@@ -388,7 +388,7 @@ async fn test_analyzer_bytes_scaling_detection() {
 async fn test_analyzer_duration_sensitivity() {
     // Build two flows with similar bytes but very different durations
     let sessions: Arc<CustomDashMap<Session, flodbadd::sessions::SessionInfo>> =
-        Arc::new(CustomDashMap::new("SessionsDuration"));
+        Arc::new(CustomDashMap::new("sessions_duration"));
     let current_sessions: Arc<CustomRwLock<Vec<Session>>> = Arc::new(CustomRwLock::new(Vec::new()));
     let filter: Arc<CustomRwLock<SessionFilter>> = Arc::new(CustomRwLock::new(SessionFilter::All));
 

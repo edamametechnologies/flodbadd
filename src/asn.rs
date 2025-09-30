@@ -25,7 +25,7 @@ lazy_static! {
 
     // Global cache for IP ASN lookups.
     // The key is the IpAddr and the value is the (possibly missing) Record.
-    static ref ASN_CACHE: CustomDashMap<IpAddr, Option<Record>> = CustomDashMap::new("ASN Cache");
+    static ref ASN_CACHE: CustomDashMap<IpAddr, Option<Record>> = CustomDashMap::new("asn_cache");
 }
 
 // Private helper that performs the direct database lookup (without caching).

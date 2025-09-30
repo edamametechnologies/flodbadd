@@ -52,9 +52,9 @@ impl VulnerabilityPortInfoList {
     pub fn new_from_json(vuln_info: VulnerabilityPortInfoListJSON) -> Self {
         info!("Loading port info list from JSON");
 
-        let port_vulns = Arc::new(CustomDashMap::new("Port Vulns"));
-        let http_ports = Arc::new(CustomDashMap::new("HTTP Ports"));
-        let https_ports = Arc::new(CustomDashMap::new("HTTPS Ports"));
+        let port_vulns = Arc::new(CustomDashMap::new("port_vulns"));
+        let http_ports = Arc::new(CustomDashMap::new("http_ports"));
+        let https_ports = Arc::new(CustomDashMap::new("https_ports"));
 
         let mut http_vec: Vec<u16> = Vec::new();
         let mut https_vec: Vec<u16> = Vec::new();
@@ -114,7 +114,7 @@ pub struct ServicePortsMap {
 impl Default for ServicePortsMap {
     fn default() -> Self {
         Self {
-            port_map: Arc::new(CustomDashMap::new("Port Map")),
+            port_map: Arc::new(CustomDashMap::new("port_map")),
             signature: "test_signature".to_string(),
         }
     }
@@ -148,16 +148,16 @@ lazy_static! {
     };
 
     // Cache for port names by port
-    static ref PORT_NAMES_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("Port Names Cache");
+    static ref PORT_NAMES_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("port_names_cache");
 
     // Cache for port descriptions by port
-    static ref PORT_DESCRIPTIONS_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("Port Descriptions Cache");
+    static ref PORT_DESCRIPTIONS_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("port_descriptions_cache");
 
     // Cache for port vulnerability lists by port
-    static ref PORT_VULN_LISTS_CACHE: CustomDashMap<u16, Arc<Vec<VulnerabilityInfo>>> = CustomDashMap::new("Port Vulnerability Lists Cache");
+    static ref PORT_VULN_LISTS_CACHE: CustomDashMap<u16, Arc<Vec<VulnerabilityInfo>>> = CustomDashMap::new("port_vulnerability_lists_cache");
 
     // Cache for port counts by port
-    static ref PORT_COUNTS_CACHE: CustomDashMap<u16, u32> = CustomDashMap::new("Port Counts Cache");
+    static ref PORT_COUNTS_CACHE: CustomDashMap<u16, u32> = CustomDashMap::new("port_counts_cache");
 
     // Cache for HTTP port lists
     static ref HTTP_PORT_LIST_CACHE: Arc<CustomRwLock<Vec<u16>>> = Arc::new(CustomRwLock::new(Vec::new()));
@@ -166,12 +166,12 @@ lazy_static! {
     static ref HTTPS_PORT_LIST_CACHE: Arc<CustomRwLock<Vec<u16>>> = Arc::new(CustomRwLock::new(Vec::new()));
 
     // Cache for device criticality computations – key is a comma-separated sorted list of ports
-    static ref CRITICALITY_CACHE: CustomDashMap<String, String> = CustomDashMap::new("Port Vulns Criticality Cache");
+    static ref CRITICALITY_CACHE_PTR: ArcSwap<CustomDashMap<String, String>> = ArcSwap::from_pointee(CustomDashMap::new("port_vulns_criticality_cache"));
 
     // Lock-free pointers to current maps for hot-path readers
-    static ref PORT_VULNS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("Port Vulns (init)"));
-    static ref HTTP_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("HTTP Ports (init)"));
-    static ref HTTPS_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("HTTPS Ports (init)"));
+    static ref PORT_VULNS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("port_vulns_init"));
+    static ref HTTP_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("http_ports_init"));
+    static ref HTTPS_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("https_ports_init"));
 }
 
 #[inline]
@@ -197,7 +197,8 @@ async fn clear_caches() {
     https_list.clear();
     drop(https_list); // Explicitly release the lock
 
-    CRITICALITY_CACHE.clear();
+    // Swap-on-clear to avoid per-shard stalls on DashMap::clear
+    CRITICALITY_CACHE_PTR.store(Arc::new(CustomDashMap::new("port_vulns_criticality_cache")));
 }
 
 pub async fn get_ports() -> Vec<u16> {
@@ -335,8 +336,9 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
         .collect::<Vec<String>>()
         .join(",");
 
-    // Check cache first
-    if let Some(entry) = CRITICALITY_CACHE.get(&key) {
+    // Check cache first via ArcSwap-loaded pointer
+    let criticality_cache = CRITICALITY_CACHE_PTR.load();
+    if let Some(entry) = criticality_cache.get(&key) {
         return entry.clone();
     }
 
@@ -367,7 +369,9 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
         "Low".to_string()
     };
 
-    CRITICALITY_CACHE.insert(key, criticality.clone());
+    // Insert into the current cache instance; a concurrent swap will just mean we seed the new map on-demand later
+    let criticality_cache = CRITICALITY_CACHE_PTR.load();
+    criticality_cache.insert(key, criticality.clone());
     criticality
 }
 

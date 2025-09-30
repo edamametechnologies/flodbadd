@@ -814,7 +814,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -873,7 +873,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -934,7 +934,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))]; // Neither IP is ours
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -974,7 +974,7 @@ mod tests {
         );
 
         // Now test with a SYN+ACK packet - should swap direction
-        let sessions2 = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions2 = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions2 = Arc::new(CustomRwLock::new(Vec::new()));
 
         let session_data2 = SessionPacketData {
@@ -1029,7 +1029,7 @@ mod tests {
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
 
         // Set up session storage
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
 
@@ -1368,7 +1368,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -1425,7 +1425,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -1483,7 +1483,7 @@ mod tests {
         };
 
         // Create necessary objects for the test
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -1526,7 +1526,7 @@ mod tests {
         // Expected: direction flipped to make the originator the source
 
         // Create the first session
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let own_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
@@ -1587,7 +1587,7 @@ mod tests {
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
 
         // Set up session storage
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
 
@@ -1778,7 +1778,7 @@ mod tests {
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
 
         // Set up session storage
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
 
@@ -1911,7 +1911,7 @@ mod tests {
         let own_ips_set: HashSet<IpAddr> = own_ips.into_iter().collect();
 
         // Set up session storage
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
         let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
 

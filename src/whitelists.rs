@@ -165,7 +165,7 @@ impl Whitelists {
     pub fn new_from_json(whitelist_info: WhitelistsJSON) -> Self {
         info!("Loading whitelists from JSON");
 
-        let whitelists = Arc::new(CustomDashMap::new("Whitelists"));
+        let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
         for info in whitelist_info.whitelists {
             whitelists.insert(info.name.clone(), info);
@@ -182,7 +182,7 @@ impl Whitelists {
 
     // Create a whitelist from a list of sessions
     pub fn new_from_sessions(sessions: &Vec<SessionInfo>) -> Self {
-        let whitelists = Arc::new(CustomDashMap::new("Whitelists"));
+        let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
         // Create a whitelist with the current sessions
         let mut endpoints = Vec::new();
@@ -656,7 +656,7 @@ lazy_static! {
     };
 
     // Cache aggregated endpoints per whitelist per signature
-    static ref ENDPOINT_CACHE: CustomDashMap<String, Arc<Vec<WhitelistEndpoint>>> = CustomDashMap::new("Whitelist Endpoint Cache");
+    static ref ENDPOINT_CACHE: CustomDashMap<String, Arc<Vec<WhitelistEndpoint>>> = CustomDashMap::new("whitelist_endpoint_cache");
 
     // Tracks whitelists currently being flattened so that concurrent callers
     // can wait instead of spawning duplicate expensive work ("single-flight").
@@ -1751,7 +1751,7 @@ mod tests {
                 ips: None,
             }],
         };
-        let map = CustomDashMap::new("Whitelists");
+        let map = CustomDashMap::new("whitelists");
         map.insert("egress_test".into(), wl_info);
         let model = Whitelists {
             date: "June 18th 2025".into(),
@@ -1761,7 +1761,7 @@ mod tests {
         overwrite_with_test_data(model).await;
 
         // Build sessions: one ingress (local dst) and one egress non-matching
-        let sessions = Arc::new(CustomDashMap::new("Sessions"));
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
         let ingress_key = Session {
             protocol: crate::sessions::Protocol::UDP,
             src_ip: IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),

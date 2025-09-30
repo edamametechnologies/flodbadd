@@ -22,8 +22,8 @@ pub struct DnsPacketProcessor {
 impl DnsPacketProcessor {
     pub fn new() -> Self {
         Self {
-            pending_dns_queries: Arc::new(CustomDashMap::new("Pending DNS Queries")),
-            dns_resolutions: Arc::new(CustomDashMap::new("DNS Resolutions")),
+            pending_dns_queries: Arc::new(CustomDashMap::new("pending_dns_queries")),
+            dns_resolutions: Arc::new(CustomDashMap::new("dns_resolutions")),
             dns_query_cleanup_handle: None,
         }
     }

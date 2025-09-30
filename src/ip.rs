@@ -10,12 +10,12 @@ use undeadlock::*;
 lazy_static! {
     /// A concurrent cache of IP addresses that are known to be local.
     /// Limited to MAX_CACHE_SIZE entries
-    static ref KNOWN_LOCAL_IP_CACHE: CustomDashMap<IpAddr, std::time::Instant> = CustomDashMap::new("Known Local IP Cache");
+    static ref KNOWN_LOCAL_IP_CACHE: CustomDashMap<IpAddr, std::time::Instant> = CustomDashMap::new("known_local_ip_cache");
 
     /// A cache for LAN IPv6 network ranges.
     /// The key is the IPv6 prefix (u8) and the value is a set of network addresses (stored as a u128)
     /// computed by applying that prefix to each LAN IPv6 interface.
-    static ref LAN_IPV6_LOCAL_NETS: CustomDashMap<u8, HashSet<u128>> = CustomDashMap::new("LAN IPv6 Local Nets");
+    static ref LAN_IPV6_LOCAL_NETS: CustomDashMap<u8, HashSet<u128>> = CustomDashMap::new("lan_ipv6_local_nets");
 
     /// Flag indicating if the local cache was initialized.
     static ref CACHE_INITIALIZED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));

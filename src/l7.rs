@@ -147,14 +147,14 @@ pub struct FlodbaddL7 {
 impl FlodbaddL7 {
     pub fn new() -> Self {
         Self {
-            l7_map: Arc::new(CustomDashMap::new("L7 Map")),
-            resolver_queue: Arc::new(CustomDashMap::new("Resolver Queue")),
+            l7_map: Arc::new(CustomDashMap::new("l7_map")),
+            resolver_queue: Arc::new(CustomDashMap::new("resolver_queue")),
             resolver_handle: None,
             system: Arc::new(CustomRwLock::new(System::new_all())),
             users: Arc::new(CustomRwLock::new(Users::new())),
-            port_process_cache: Arc::new(CustomDashMap::new("Port Process Cache")),
+            port_process_cache: Arc::new(CustomDashMap::new("port_process_cache")),
             cache_cleanup_handle: None,
-            host_service_cache: Arc::new(CustomDashMap::new("Host Service Cache")),
+            host_service_cache: Arc::new(CustomDashMap::new("host_service_cache")),
         }
     }
 
@@ -869,7 +869,7 @@ impl FlodbaddL7 {
 
         // Keep track of terminated PIDs we've seen recently
         static TERMINATED_PIDS: Lazy<CustomDashMap<u32, Instant>> =
-            Lazy::new(|| CustomDashMap::new("Terminated PIDs"));
+            Lazy::new(|| CustomDashMap::new("terminated_pids"));
 
         if let Some(localhost_services) = host_service_cache.get("localhost") {
             for (service_port, service_protocol, l7_data) in localhost_services.value() {

@@ -44,7 +44,7 @@ impl VulnerabilityInfoList {
     pub fn new_from_json(vuln_info: &VulnerabilityVendorInfoListJSON) -> Self {
         info!("Loading vendor info list from JSON");
 
-        let vendor_vulns = Arc::new(CustomDashMap::new("Vendor Vulns"));
+        let vendor_vulns = Arc::new(CustomDashMap::new("vendor_vulns"));
         let mut vendor_vec: Vec<String> = Vec::new();
 
         for vendor_info in &vuln_info.vulnerabilities {
@@ -92,10 +92,10 @@ lazy_static! {
     static ref VENDOR_LIST_CACHE: Arc<CustomRwLock<Vec<String>>> = Arc::new(CustomRwLock::new(Vec::new()));
 
     // Cache for vulnerabilities by vendor
-    static ref VULN_LISTS_CACHE: CustomDashMap<String, Arc<Vec<VulnerabilityInfo>>> = CustomDashMap::new("Vendor Vulnerability Lists Cache");
+    static ref VULN_LISTS_CACHE: CustomDashMap<String, Arc<Vec<VulnerabilityInfo>>> = CustomDashMap::new("vendor_vulnerability_lists_cache");
 
     // Cache for vulnerability names by vendor
-    static ref VULN_NAME_LISTS_CACHE: CustomDashMap<String, Arc<Vec<String>>> = CustomDashMap::new("Vendor Vulnerability Names Cache");
+    static ref VULN_NAME_LISTS_CACHE: CustomDashMap<String, Arc<Vec<String>>> = CustomDashMap::new("vendor_vulnerability_names_cache");
 }
 
 // Clear all caches

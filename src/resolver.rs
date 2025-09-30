@@ -26,7 +26,7 @@ impl FlodbaddResolver {
     pub fn new() -> Self {
         Self {
             resolvers: Arc::new(CustomRwLock::new(Vec::new())),
-            reverse_dns: Arc::new(CustomDashMap::new("Reverse DNS")),
+            reverse_dns: Arc::new(CustomDashMap::new("reverse_dns")),
             resolver_queue: Arc::new(CustomRwLock::new(VecDeque::new())),
             resolver_handle: Arc::new(CustomRwLock::new(None)),
         }
@@ -477,7 +477,7 @@ mod tests {
         assert!(reverse_domain.contains("dns"));
 
         // Now simulate a forward DNS resolution from captured DNS packets
-        let dns_resolutions = CustomDashMap::new("DNS Resolutions");
+        let dns_resolutions = CustomDashMap::new("dns_resolutions");
         let forward_domain = "forward-dns-resolution.example.com";
         dns_resolutions.insert(ip_addr, forward_domain.to_string());
 

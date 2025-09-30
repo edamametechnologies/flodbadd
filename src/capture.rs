@@ -102,8 +102,8 @@ impl FlodbaddCapture {
     pub fn new() -> Self {
         Self {
             interfaces: Arc::new(CustomRwLock::new(FlodbaddInterfaces::new())),
-            capture_task_handles: Arc::new(CustomDashMap::new("Capture Task Handles")),
-            sessions: Arc::new(CustomDashMap::new("Sessions")),
+            capture_task_handles: Arc::new(CustomDashMap::new("capture_task_handles")),
+            sessions: Arc::new(CustomDashMap::new("sessions")),
             current_sessions: Arc::new(CustomRwLock::new(Vec::new())),
             resolver: Arc::new(CustomRwLock::new(None)),
             l7: Arc::new(CustomRwLock::new(None)),
@@ -676,7 +676,7 @@ impl FlodbaddCapture {
             date: Local::now().format("%B %dth %Y").to_string(),
             signature: None,
             whitelists: {
-                let map = CustomDashMap::new("Whitelists");
+                let map = CustomDashMap::new("whitelists");
                 map.insert("custom_whitelist".to_string(), whitelist_info);
                 std::sync::Arc::new(map)
             },
