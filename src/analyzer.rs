@@ -325,6 +325,8 @@ struct IsolationForestModel {
     current_abnormal_percentile: f64,
     /// Number of times a background training task timed out
     training_timeouts_count: u64,
+    /// Cooperative cancellation flag for the training thread
+    training_cancel: Arc<AtomicBool>,
     /// Cache hits for session scoring
     cache_hits: std::sync::atomic::AtomicU64,
     /// Cache misses for session scoring
@@ -351,6 +353,7 @@ impl IsolationForestModel {
             current_suspicious_percentile: DEFAULT_SUSPICIOUS_PERCENTILE,
             current_abnormal_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             training_timeouts_count: 0,
+            training_cancel: Arc::new(AtomicBool::new(false)),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cache_misses: std::sync::atomic::AtomicU64::new(0),
         }
@@ -508,6 +511,9 @@ impl IsolationForestModel {
 
         // Spawn the heavy work on a dedicated blocking thread.  The closure will perform all
         // preprocessing (deduplication, option calculation) and return a Forest or an Error.
+        // Reset cancel flag for this run and capture it in the blocking thread
+        self.training_cancel.store(false, Ordering::Release);
+        let cancel_flag = self.training_cancel.clone();
         let handle = tokio::task::spawn_blocking(move || {
             debug!(
                 "train_model: TRAINING THREAD STARTED with {} samples",
@@ -559,8 +565,12 @@ impl IsolationForestModel {
 
             // Actual training --------------------------------------------------------------
             let start_time = std::time::Instant::now();
-            debug!("train_model: TRAINING THREAD - Calling Forest::from_slice");
-            let result = Forest::from_slice(&unique_data, &options);
+            debug!("train_model: TRAINING THREAD - Calling Forest::from_slice_with_cancel");
+            let result = extended_isolation_forest::Forest::from_slice_with_cancel(
+                &unique_data,
+                &options,
+                || cancel_flag.load(Ordering::Relaxed),
+            );
             debug!(
                 "train_model: TRAINING THREAD - Forest::from_slice completed in {:?}, success={}",
                 start_time.elapsed(),
@@ -1597,6 +1607,7 @@ impl SessionAnalyzer {
                                 ),
                                 None => {
                                     error!("Analyzer (Finalize Warmup): Training task timed out after 120s - possible EIF hang");
+                                    model_guard.training_cancel.store(true, Ordering::Release);
                                     model_guard.training_timeouts_count =
                                         model_guard.training_timeouts_count.saturating_add(1);
                                     model_guard.training_handle = None;
@@ -1614,6 +1625,7 @@ impl SessionAnalyzer {
                                 Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
                                 None => {
                                     error!("Analyzer (Finalize Warmup): Finished training task timed out - possible EIF issue");
+                                    model_guard.training_cancel.store(true, Ordering::Release);
                                     model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
                                     model_guard.training_handle = None;
                                     model_guard.training_in_progress.store(false, Ordering::Release);
@@ -1642,6 +1654,7 @@ impl SessionAnalyzer {
                             Some(Err(e)) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
                             None => {
                                 error!("Analyzer (Finalize Warmup): Final forced training task timed out after 120s - possible EIF hang");
+                                model_guard.training_cancel.store(true, Ordering::Release);
                                 model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
                             }
                         }
@@ -1779,6 +1792,7 @@ impl SessionAnalyzer {
                         ),
                         None => {
                             error!("Analyzer (Scheduled Recalc): Training task timed out after 120s - possible EIF hang");
+                            model_guard.training_cancel.store(true, Ordering::Release);
                             model_guard.training_timeouts_count =
                                 model_guard.training_timeouts_count.saturating_add(1);
                             model_guard.training_handle = None;
@@ -1949,9 +1963,33 @@ impl SessionAnalyzer {
                                 || model_or_thresholds_changed_since_last;
 
                         if needs_analysis {
-                            model_write_guard.analyze_session(session, &feature_stats);
+                            // If we're too close to the deadline, avoid expensive diagnostics.
+                            let remaining =
+                                batch_deadline.saturating_duration_since(std::time::Instant::now());
+                            if remaining < std::time::Duration::from_millis(10) {
+                                warn!(
+                                    "Analyzer: Skipping detailed analysis for {} due to imminent batch timeout (remaining {:?})",
+                                    session.uid,
+                                    remaining
+                                );
+                                // Preserve non-anomaly tags and mark analysis timeout explicitly
+                                let mut final_tags: Vec<String> = session
+                                    .criticality
+                                    .split(',')
+                                    .filter(|s| {
+                                        !s.trim().is_empty() && !s.trim().starts_with("anomaly:")
+                                    })
+                                    .map(|s| s.trim().to_string())
+                                    .collect();
+                                final_tags.push("anomaly:normal/analysis_timeout".to_string());
+                                final_tags.sort_unstable();
+                                final_tags.dedup();
+                                session.criticality = final_tags.join(",");
+                            } else {
+                                model_write_guard.analyze_session(session, &feature_stats);
+                            }
 
-                            // Record that we just performed a real analysis for this UID.
+                            // Record that we just performed a real analysis (or timeout marking) for this UID.
                             self.last_analysis_times.insert(session.uid.clone(), now);
                         } else {
                             skip_count += 1;
