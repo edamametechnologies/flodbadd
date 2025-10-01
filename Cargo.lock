@@ -1093,6 +1093,7 @@ dependencies = [
 [[package]]
 name = "extended-isolation-forest"
 version = "0.2.3"
+source = "git+https://github.com/edamametechnologies/extended-isolation-forest?branch=main#b373e9dd5681447d5fff50c106a73ec2ee0f4377"
 dependencies = [
  "num-traits",
  "rand 0.8.5",

@@ -59,9 +59,10 @@ arc-swap = "1.7"
 chrono = { version = "0.4.42", features = ["serde"] }
 
 # Machine Learning
-# Use local fork to pick up cancellation API
 # extended-isolation-forest = "0.2.3"
-extended-isolation-forest = { path = "../extended-isolation-forest" }
+# Local copy in order to allow rapid development/debug
+#extended-isolation-forest = { path = "../extended-isolation-forest" }
+extended-isolation-forest  = { git = "https://github.com/edamametechnologies/extended-isolation-forest", branch = "main" }
 
 # Network utils
 socket2 = "0.6.0"
