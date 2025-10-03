@@ -359,6 +359,33 @@ impl IsolationForestModel {
         }
     }
 
+    /// Roughly estimate the heap memory used by the model's internal buffers and caches.
+    /// This excludes the isolation forest trees which are opaque here.
+    pub fn estimate_memory_usage_bytes(&self) -> u64 {
+        let mut bytes: u64 = 0;
+        // recent_data buffer: use capacity to reflect reserved space
+        bytes = bytes.saturating_add(
+            (self.recent_data.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<[f64; NUM_FEATURES]>() as u64),
+        );
+        // session_cache: key String capacity + value tuple sizes
+        for entry in self.session_cache.iter() {
+            let (uid, (score, features, ts)) = entry.pair();
+            bytes = bytes.saturating_add(uid.capacity() as u64);
+            bytes = bytes
+                .saturating_add(std::mem::size_of_val(score) as u64)
+                .saturating_add(std::mem::size_of_val(features) as u64)
+                .saturating_add(std::mem::size_of_val(ts) as u64);
+        }
+        // per_flow_downsample: approximate per entry
+        for _entry in self.per_flow_downsample.iter() {
+            bytes = bytes
+                .saturating_add(std::mem::size_of::<u64>() as u64)
+                .saturating_add(std::mem::size_of::<u32>() as u64);
+        }
+        bytes
+    }
+
     /// Add new session data to the analyzer's memory.
     /// If the buffer is full, remove the oldest entry.
     fn add_session_data(&mut self, session: &SessionInfo) {
@@ -2375,8 +2402,24 @@ impl SessionAnalyzer {
                 None
             };
 
-            // Process memory (approximate, Linux/Unix via procfs/macOS via task info would be better; using Rust's allocator not ideal)
-            let memory_usage_mb = None;
+            // Estimate analyzer memory footprint by summing key buffers/caches
+            let memory_usage_mb = {
+                let model_guard = self.model.read().await;
+                if let Some(model_lock) = &*model_guard {
+                    let model = model_lock.read().await;
+                    let bytes = model
+                        .estimate_memory_usage_bytes()
+                        // Also account for tracked session maps (approximate)
+                        .saturating_add((self.anomalous_sessions.len() as u64).saturating_mul(256))
+                        .saturating_add(
+                            (self.blacklisted_sessions.len() as u64).saturating_mul(256),
+                        )
+                        .saturating_add((self.all_sessions.len() as u64).saturating_mul(256));
+                    Some((bytes as f64) / (1024.0 * 1024.0))
+                } else {
+                    None
+                }
+            };
 
             let performance_stats = PerformanceStats {
                 average_analysis_time_ms: if total_analyses > 0 {

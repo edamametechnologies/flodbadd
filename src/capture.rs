@@ -1064,7 +1064,31 @@ impl FlodbaddCapture {
             let mut cap = match Capture::from_device(device_clone.clone()) {
                 Ok(cap) => cap,
                 Err(e) => {
-                    error!("Failed to create capture on device: {}", e);
+                    // Gather diagnostics about the selected device and environment
+                    let device_name = device_clone.name.clone();
+                    let addr_list: Vec<String> = device_clone
+                        .addresses
+                        .iter()
+                        .map(|a| a.addr.to_string())
+                        .collect();
+                    let available_devices = match pcap::Device::list() {
+                        Ok(list) => list.into_iter().map(|d| d.name).collect::<Vec<_>>(),
+                        Err(le) => {
+                            warn!("Failed to list pcap devices for diagnostics: {}", le);
+                            Vec::new()
+                        }
+                    };
+
+                    error!(
+                        "Failed to create capture on device: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, planned_settings={{immediate_mode=true, promisc=false, timeout_ms=100}}, available_devices={:?}",
+                        e,
+                        e,
+                        device_name,
+                        interface_name_clone,
+                        addr_list,
+                        available_devices
+                    );
+
                     return;
                 }
             };
@@ -1078,7 +1102,31 @@ impl FlodbaddCapture {
                 // Reduced timeout to 100ms
                 Ok(cap) => cap,
                 Err(e) => {
-                    error!("Failed to open pcap capture: {}", e);
+                    // Gather diagnostics to help understand why opening failed
+                    let device_name = device_clone.name.clone();
+                    let addr_list: Vec<String> = device_clone
+                        .addresses
+                        .iter()
+                        .map(|a| a.addr.to_string())
+                        .collect();
+                    let available_devices = match pcap::Device::list() {
+                        Ok(list) => list.into_iter().map(|d| d.name).collect::<Vec<_>>(),
+                        Err(le) => {
+                            warn!("Failed to list pcap devices for diagnostics: {}", le);
+                            Vec::new()
+                        }
+                    };
+
+                    error!(
+                        "Failed to open pcap capture: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, settings={{immediate_mode=true, promisc=false, timeout_ms=100}}, available_devices={:?}",
+                        e,
+                        e,
+                        device_name,
+                        interface_name_clone,
+                        addr_list,
+                        available_devices
+                    );
+
                     return;
                 }
             };
