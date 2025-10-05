@@ -378,6 +378,9 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     info!("Starting port vulns update from backend");
 
+    // Clear caches before update to remove stale entries
+    clear_caches().await;
+
     let status = VULNS
         .update(branch, force, |data| {
             let vuln_info_json: VulnerabilityPortInfoListJSON =
@@ -385,9 +388,6 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
             Ok(VulnerabilityPortInfoList::new_from_json(vuln_info_json))
         })
         .await?;
-
-    // Clear caches on update
-    clear_caches().await;
 
     match status {
         UpdateStatus::Updated => info!("Port vulns were successfully updated."),
