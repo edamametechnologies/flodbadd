@@ -13,11 +13,11 @@ fn main() {
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
     {
-        // Warn if Npcap runtime is not detected (non-fatal)
+        // Check Npcap runtime installation status
         check_npcap_runtime();
 
+        // Install Npcap SDK if it is not detected
         println!("cargo:rerun-if-env-changed=NPCAP_SDK_PATH");
-
         if let Ok(npcap_path) = env::var("NPCAP_SDK_PATH") {
             println!("cargo:rustc-link-search=native={}/Lib/x64", npcap_path);
             println!("cargo:rustc-link-lib=dylib=Packet");
@@ -105,14 +105,111 @@ fn check_npcap_runtime() {
         );
     } else {
         println!(
-            "cargo:warning=Npcap runtime not found at {}",
+            "cargo:warning=Npcap runtime not found at {} - attempting auto-install",
             npcap_dir.display()
         );
+
+        // Attempt auto-installation
+        match auto_install_npcap() {
+            Ok(_) => {
+                println!("cargo:warning=Npcap installed successfully");
+            }
+            Err(e) => {
+                println!("cargo:warning=Failed to auto-install Npcap: {}", e);
+                println!("cargo:warning=The build will succeed, but packet capture will not work at runtime.");
+                println!("cargo:warning=Install Npcap from https://npcap.com to enable packet capture functionality.");
+                println!("cargo:warning=The application will detect Npcap at startup and run in limited mode if not found.");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let system_root = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let npcap_dir = Path::new(&system_root).join("System32").join("Npcap");
+    let dll_to_check = npcap_dir.join("wpcap.dll");
+
+    // Check if already installed
+    if dll_to_check.exists() {
+        println!("Npcap already detected at {}", npcap_dir.display());
+        return Ok(());
+    }
+
+    println!(
+        "Npcap not found at {} — attempting silent install",
+        npcap_dir.display()
+    );
+
+    // Determine download location
+    let temp_dir = std::env::temp_dir();
+    let installer_path = temp_dir.join("npcap-installer.exe");
+
+    // Use archived version for reliability
+    let url = env::var("NPCAP_INSTALLER_URL").unwrap_or_else(|_| {
+        "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
+            .to_string()
+    });
+
+    println!("Downloading Npcap installer from: {}", url);
+
+    // Download installer
+    let response = reqwest::blocking::get(&url)?;
+    let bytes = response.bytes()?;
+
+    // Write to temp file
+    let mut file = std::fs::File::create(&installer_path)?;
+    file.write_all(&bytes)?;
+
+    println!("Downloaded Npcap installer to {}", installer_path.display());
+
+    // Try msiexec silent install first
+    println!("Attempting installation via msiexec...");
+    let msiexec_status = Command::new("msiexec")
+        .args([
+            "/i",
+            installer_path.to_str().unwrap_or_default(),
+            "/quiet",
+            "/norestart",
+        ])
+        .status();
+
+    let mut installed = dll_to_check.exists();
+
+    // If msiexec failed, try direct EXE execution
+    if msiexec_status.map(|s| !s.success()).unwrap_or(true) && !installed {
+        println!("msiexec install did not succeed, trying direct EXE execution");
+
+        let exe_status = Command::new(&installer_path)
+            .args(["/S"]) // Silent install flag for NSIS installer
+            .status();
+
+        if let Err(e) = exe_status {
+            eprintln!("Failed to execute installer: {}", e);
+        }
+
+        // Wait a bit for installation to complete
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        installed = dll_to_check.exists();
+    }
+
+    // Clean up installer
+    let _ = std::fs::remove_file(&installer_path);
+
+    if installed {
         println!(
-            "cargo:warning=The build will succeed, but packet capture will not work at runtime."
+            "Npcap installation detected after install attempt at {}",
+            npcap_dir.display()
         );
-        println!("cargo:warning=Install Npcap from https://npcap.com to enable packet capture functionality.");
-        println!("cargo:warning=The application will detect Npcap at startup and run in limited mode if not found.");
+        Ok(())
+    } else {
+        Err(format!(
+            "Npcap installation failed. Manual installation may be required.\n\
+             Please install Npcap manually with administrator privileges from https://npcap.com"
+        )
+        .into())
     }
 }
 
