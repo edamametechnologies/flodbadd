@@ -149,24 +149,33 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use archived version for reliability
     let url = env::var("NPCAP_INSTALLER_URL").unwrap_or_else(|_| {
-        "https://web.archive.org/web/20250516060534/https://npcap.com/dist/npcap-0.96.exe"
+        "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
             .to_string()
     });
 
-    println!("Downloading Npcap installer from: {}", url);
+    println!("cargo:warning=[Npcap] Downloading installer from: {}", url);
 
     // Download installer
     let response = reqwest::blocking::get(&url)?;
+    println!("cargo:warning=[Npcap] Received HTTP response, reading bytes...");
     let bytes = response.bytes()?;
+    println!(
+        "cargo:warning=[Npcap] Downloaded {} bytes ({:.2} MB)",
+        bytes.len(),
+        bytes.len() as f64 / 1024.0 / 1024.0
+    );
 
     // Write to temp file
     let mut file = std::fs::File::create(&installer_path)?;
     file.write_all(&bytes)?;
 
-    println!("Downloaded Npcap installer to {}", installer_path.display());
+    println!(
+        "cargo:warning=[Npcap] Installer saved to: {}",
+        installer_path.display()
+    );
 
     // Try msiexec silent install first
-    println!("Attempting installation via msiexec...");
+    println!("cargo:warning=[Npcap] Attempting installation via msiexec...");
     let msiexec_status = Command::new("msiexec")
         .args([
             "/i",
@@ -178,16 +187,22 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut installed = dll_to_check.exists();
 
+    if msiexec_status.as_ref().map(|s| s.success()).unwrap_or(false) {
+        println!("cargo:warning=[Npcap] msiexec installation completed");
+    }
+
     // If msiexec failed, try direct EXE execution
     if msiexec_status.map(|s| !s.success()).unwrap_or(true) && !installed {
-        println!("msiexec install did not succeed, trying direct EXE execution");
+        println!("cargo:warning=[Npcap] msiexec install did not succeed, trying direct EXE execution");
 
         let exe_status = Command::new(&installer_path)
             .args(["/S"]) // Silent install flag for NSIS installer
             .status();
 
         if let Err(e) = exe_status {
-            eprintln!("Failed to execute installer: {}", e);
+            println!("cargo:warning=[Npcap] Failed to execute installer: {}", e);
+        } else {
+            println!("cargo:warning=[Npcap] Installer executed, waiting for installation to complete...");
         }
 
         // Wait a bit for installation to complete
@@ -196,15 +211,18 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean up installer
-    let _ = std::fs::remove_file(&installer_path);
+    if let Ok(_) = std::fs::remove_file(&installer_path) {
+        println!("cargo:warning=[Npcap] Cleaned up installer file");
+    }
 
     if installed {
         println!(
-            "Npcap installation detected after install attempt at {}",
+            "cargo:warning=[Npcap] ✓ Installation successful - runtime detected at {}",
             npcap_dir.display()
         );
         Ok(())
     } else {
+        println!("cargo:warning=[Npcap] ✗ Installation failed - DLL not found at {}", dll_to_check.display());
         Err(format!(
             "Npcap installation failed. Manual installation may be required.\n\
              Please install Npcap manually with administrator privileges from https://npcap.com"
@@ -226,26 +244,46 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     });
     let zip_path = npcap_dir.with_extension("zip");
 
-    println!("Downloading Npcap SDK from: {}", url);
+    println!("cargo:warning=[Npcap SDK] Downloading from: {}", url);
 
     // Download the zip file
     let response = reqwest::blocking::get(url)?;
+    println!("cargo:warning=[Npcap SDK] Received HTTP response, reading bytes...");
     let bytes = response.bytes()?;
+    println!(
+        "cargo:warning=[Npcap SDK] Downloaded {} bytes ({:.2} MB)",
+        bytes.len(),
+        bytes.len() as f64 / 1024.0 / 1024.0
+    );
 
     // Create output directory
     if let Some(parent) = zip_path.parent() {
         std::fs::create_dir_all(parent)?;
+        println!(
+            "cargo:warning=[Npcap SDK] Created directory: {}",
+            parent.display()
+        );
     }
 
     // Write zip file
     let mut file = std::fs::File::create(&zip_path)?;
     file.write_all(&bytes)?;
 
-    println!("Downloaded {} bytes to {}", bytes.len(), zip_path.display());
+    println!(
+        "cargo:warning=[Npcap SDK] Saved zip file to: {}",
+        zip_path.display()
+    );
 
     // Extract the zip file
     let file = std::fs::File::open(&zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    let total_files = archive.len();
+    
+    println!(
+        "cargo:warning=[Npcap SDK] Extracting {} files to {}",
+        total_files,
+        npcap_dir.display()
+    );
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -264,10 +302,16 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
-    println!("Extracted Npcap SDK to {}", npcap_dir.display());
+    println!(
+        "cargo:warning=[Npcap SDK] ✓ Extracted {} files to {}",
+        total_files,
+        npcap_dir.display()
+    );
 
     // Clean up zip file
-    let _ = std::fs::remove_file(&zip_path);
+    if let Ok(_) = std::fs::remove_file(&zip_path) {
+        println!("cargo:warning=[Npcap SDK] Cleaned up zip file");
+    }
 
     Ok(())
 }
