@@ -54,3 +54,31 @@ pub mod vendor_vulns_db;
 pub mod vulnerability_info;
 pub mod whitelists;
 pub mod whitelists_db;
+
+// Npcap utilities module - shared across build, runtime, and tests
+#[cfg(target_os = "windows")]
+pub mod npcap_utils;
+
+// Automatic initialization for Windows tests - adds Npcap DLL directory to PATH
+#[cfg(all(test, target_os = "windows"))]
+mod test_init {
+    use crate::npcap_utils;
+
+    #[ctor::ctor]
+    fn init_npcap_path() {
+        // Use shared utility to configure Npcap runtime
+        match npcap_utils::configure_npcap_runtime() {
+            Ok(_) => {
+                let npcap_dir = npcap_utils::get_npcap_dir();
+                println!(
+                    "[Test Init] ✓ Npcap DLL path configured: {}",
+                    npcap_dir.display()
+                );
+            }
+            Err(e) => {
+                println!("[Test Init] ⚠ Warning: Failed to configure Npcap: {}", e);
+                println!("[Test Init] Tests may fail with STATUS_DLL_NOT_FOUND");
+            }
+        }
+    }
+}

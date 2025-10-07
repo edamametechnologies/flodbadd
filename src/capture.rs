@@ -120,13 +120,11 @@ impl FlodbaddCapture {
     /// ```
     #[cfg(target_os = "windows")]
     pub fn auto_install_npcap(installer_url: Option<String>) -> Result<()> {
+        use crate::npcap_utils;
         use std::io::Write;
         use std::process::Command;
 
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let npcap_dir = std::path::Path::new(&system_root)
-            .join("System32")
-            .join("Npcap");
+        let npcap_dir = npcap_utils::get_npcap_dir();
         let dll_to_check = npcap_dir.join("wpcap.dll");
 
         // Check if already installed
@@ -144,11 +142,8 @@ impl FlodbaddCapture {
         let temp_dir = std::env::temp_dir();
         let installer_path = temp_dir.join("npcap-installer.exe");
 
-        // Use provided URL or default to archived 0.96
-        let url = installer_url.unwrap_or_else(|| {
-            "https://web.archive.org/web/20250516060534/https://npcap.com/dist/npcap-0.96.exe"
-                .to_string()
-        });
+        // Use provided URL or default to archived 0.96 (reliable 2022 archive)
+        let url = installer_url.unwrap_or_else(|| npcap_utils::NPCAP_INSTALLER_URL.to_string());
 
         info!("Downloading Npcap installer from: {}", url);
 
@@ -234,13 +229,10 @@ impl FlodbaddCapture {
     pub fn check_pcap_installation() -> Result<String> {
         #[cfg(target_os = "windows")]
         {
-            use std::path::Path;
+            use crate::npcap_utils;
 
             // Check if Npcap runtime DLLs exist in system directory
-            let system_root =
-                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-            let npcap_dir = Path::new(&system_root).join("System32").join("Npcap");
-
+            let npcap_dir = npcap_utils::get_npcap_dir();
             let packet_dll = npcap_dir.join("Packet.dll");
             let wpcap_dll = npcap_dir.join("wpcap.dll");
 

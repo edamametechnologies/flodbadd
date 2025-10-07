@@ -31,7 +31,8 @@ android:
 
 
 windows_test:
-	PATH="/c/Windows/System32/Npcap:$$PATH" cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+	@echo "Running Windows tests (Npcap DLL path configured automatically)..."
+	cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
 unix_test:
 	cargo test -- --nocapture
