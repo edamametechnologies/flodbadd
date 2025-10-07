@@ -12,16 +12,34 @@ pub const NPCAP_INSTALLER_URL: &str =
 pub const NPCAP_SDK_URL: &str =
     "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-sdk-0.1.zip";
 
-/// Get the Npcap installation directory on Windows
-pub fn get_npcap_dir() -> PathBuf {
+/// Return the first directory that contains the required Npcap runtime DLLs.
+fn find_npcap_runtime_dir_internal() -> Option<PathBuf> {
     let system_root = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    Path::new(&system_root).join("System32").join("Npcap")
+
+    let candidates = [Path::new(&system_root).join("System32").join("Npcap")];
+
+    for dir in candidates.into_iter() {
+        let wpcap = dir.join("wpcap.dll");
+        let packet = dir.join("Packet.dll");
+        if wpcap.is_file() && packet.is_file() {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// Get the preferred Npcap installation directory on Windows
+pub fn get_npcap_dir() -> PathBuf {
+    find_npcap_runtime_dir_internal().unwrap_or_else(|| {
+        let system_root = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        Path::new(&system_root).join("System32").join("Npcap")
+    })
 }
 
 /// Check if Npcap is installed by looking for wpcap.dll
 #[allow(dead_code)]
 pub fn is_npcap_installed() -> bool {
-    get_npcap_dir().join("wpcap.dll").exists()
+    find_npcap_runtime_dir_internal().is_some()
 }
 
 /// Configure DLL directory for Windows process
@@ -67,14 +85,8 @@ pub fn add_npcap_to_path(npcap_dir: &Path) -> bool {
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn configure_npcap_runtime() -> Result<(), String> {
-    let npcap_dir = get_npcap_dir();
-
-    if !npcap_dir.exists() {
-        return Err(format!(
-            "Npcap directory not found at {}",
-            npcap_dir.display()
-        ));
-    }
+    let npcap_dir = find_npcap_runtime_dir_internal()
+        .ok_or_else(|| "Npcap directory not found in standard locations".to_string())?;
 
     // Configure DLL directory
     if !configure_dll_directory(&npcap_dir) {
