@@ -39,7 +39,7 @@ fn configure_dll_directory(npcap_dir: &Path) -> bool {
         use windows::core::PCWSTR;
         use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
 
-        SetDllDirectoryW(PCWSTR(npcap_path_wide.as_ptr())).as_bool()
+        SetDllDirectoryW(PCWSTR(npcap_path_wide.as_ptr())).is_ok()
     }
 }
 
