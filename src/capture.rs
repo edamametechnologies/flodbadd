@@ -92,6 +92,216 @@ pub struct FlodbaddCapture {
 }
 
 impl FlodbaddCapture {
+    /// Attempt to automatically download and install Npcap (Windows only)
+    ///
+    /// ⚠️ **WARNING**: This function attempts to silently install system software.
+    /// - Requires administrator privileges
+    /// - Downloads and installs Npcap 0.96 (older version)
+    /// - Users should generally install Npcap manually from https://npcap.com
+    /// - This is provided for specialized deployment scenarios only
+    ///
+    /// # Arguments
+    /// * `installer_url` - Optional custom URL to download Npcap installer from.
+    ///   If None, uses archived version 0.96
+    ///
+    /// # Returns
+    /// * `Ok(())` if installation succeeded or Npcap is already installed
+    /// * `Err(_)` if installation failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// use flodbadd::capture::FlodbaddCapture;
+    ///
+    /// // Attempt auto-installation (requires admin privileges)
+    /// match FlodbaddCapture::auto_install_npcap(None) {
+    ///     Ok(_) => println!("Npcap is now installed"),
+    ///     Err(e) => eprintln!("Installation failed: {}", e),
+    /// }
+    /// ```
+    #[cfg(target_os = "windows")]
+    pub fn auto_install_npcap(installer_url: Option<String>) -> Result<()> {
+        use std::io::Write;
+        use std::process::Command;
+
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let npcap_dir = std::path::Path::new(&system_root)
+            .join("System32")
+            .join("Npcap");
+        let dll_to_check = npcap_dir.join("wpcap.dll");
+
+        // Check if already installed
+        if dll_to_check.exists() {
+            info!("Npcap already detected at {}", npcap_dir.display());
+            return Ok(());
+        }
+
+        warn!(
+            "Npcap not found at {} — attempting silent install",
+            npcap_dir.display()
+        );
+
+        // Determine download location
+        let temp_dir = std::env::temp_dir();
+        let installer_path = temp_dir.join("npcap-installer.exe");
+
+        // Use provided URL or default to archived 0.96
+        let url = installer_url.unwrap_or_else(|| {
+            "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
+                .to_string()
+        });
+
+        info!("Downloading Npcap installer from: {}", url);
+
+        // Download installer
+        let response = reqwest::blocking::get(&url)
+            .map_err(|e| anyhow!("Failed to download Npcap installer: {}", e))?;
+        let bytes = response
+            .bytes()
+            .map_err(|e| anyhow!("Failed to read Npcap installer bytes: {}", e))?;
+
+        // Write to temp file
+        let mut file = std::fs::File::create(&installer_path)
+            .map_err(|e| anyhow!("Failed to create installer file: {}", e))?;
+        file.write_all(&bytes)
+            .map_err(|e| anyhow!("Failed to write installer file: {}", e))?;
+
+        info!("Downloaded Npcap installer to {}", installer_path.display());
+
+        // Try msiexec silent install first
+        info!("Attempting installation via msiexec...");
+        let msiexec_status = Command::new("msiexec")
+            .args([
+                "/i",
+                installer_path.to_str().unwrap_or_default(),
+                "/quiet",
+                "/norestart",
+            ])
+            .status();
+
+        let mut installed = dll_to_check.exists();
+
+        // If msiexec failed, try direct EXE execution
+        if msiexec_status.map(|s| !s.success()).unwrap_or(true) && !installed {
+            warn!("msiexec install did not succeed, trying direct EXE execution");
+
+            let exe_status = Command::new(&installer_path)
+                .args(["/S"]) // Silent install flag for NSIS installer
+                .status();
+
+            if let Err(e) = exe_status {
+                error!("Failed to execute installer: {}", e);
+            }
+
+            // Wait a bit for installation to complete
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            installed = dll_to_check.exists();
+        }
+
+        // Clean up installer
+        let _ = std::fs::remove_file(&installer_path);
+
+        if installed {
+            info!(
+                "Npcap installation detected after install attempt at {}",
+                npcap_dir.display()
+            );
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Npcap installation failed. Manual installation may be required.\n\
+                 Please install Npcap manually with administrator privileges from https://npcap.com"
+            ))
+        }
+    }
+
+    /// Non-Windows platforms: auto-install not supported
+    #[cfg(not(target_os = "windows"))]
+    pub fn auto_install_npcap(_installer_url: Option<String>) -> Result<()> {
+        Err(anyhow!(
+            "Automatic Npcap installation is only supported on Windows.\n\
+             On Linux, install libpcap: sudo apt install libpcap-dev\n\
+             On macOS, libpcap is built-in."
+        ))
+    }
+
+    /// Check if Npcap/libpcap is properly installed and functional
+    ///
+    /// Returns Ok(message) if installation is detected and functional,
+    /// Err(message) if not installed or not functional.
+    ///
+    /// This allows the application to run without packet capture if Npcap
+    /// is not installed, providing a clear error message to the user.
+    pub fn check_pcap_installation() -> Result<String> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::path::Path;
+
+            // Check if Npcap runtime DLLs exist in system directory
+            let system_root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let npcap_dir = Path::new(&system_root).join("System32").join("Npcap");
+
+            let packet_dll = npcap_dir.join("Packet.dll");
+            let wpcap_dll = npcap_dir.join("wpcap.dll");
+
+            if !packet_dll.exists() || !wpcap_dll.exists() {
+                return Err(anyhow!(
+                    "Npcap is not installed. Network capture will be disabled.\n\
+                     Please install Npcap from https://npcap.com to enable packet capture.\n\
+                     Expected location: {}",
+                    npcap_dir.display()
+                ));
+            }
+
+            info!(
+                "Npcap system installation detected at {}",
+                npcap_dir.display()
+            );
+        }
+
+        // Try to list devices as a functional check (works on all platforms)
+        match pcap::Device::list() {
+            Ok(devices) => {
+                if devices.is_empty() {
+                    warn!("Pcap library loaded but no devices found");
+                    Ok("Pcap is installed but no capture devices available.".to_string())
+                } else {
+                    let device_names: Vec<String> =
+                        devices.iter().map(|d| d.name.clone()).collect();
+                    info!(
+                        "Pcap functional with {} device(s): {:?}",
+                        devices.len(),
+                        device_names
+                    );
+                    Ok(format!(
+                        "Packet capture is available with {} device(s).",
+                        devices.len()
+                    ))
+                }
+            }
+            Err(e) => {
+                #[cfg(target_os = "windows")]
+                {
+                    Err(anyhow!(
+                        "Npcap libraries found but not functional: {}\n\
+                         This may indicate a corrupted or incomplete installation.\n\
+                         Try reinstalling Npcap from https://npcap.com",
+                        e
+                    ))
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(anyhow!(
+                        "Libpcap not functional: {}\n\
+                         On Linux, install libpcap-dev or equivalent.\n\
+                         On macOS, libpcap should be built-in.",
+                        e
+                    ))
+                }
+            }
+        }
+    }
+
     /// Return the list of available pcap device names (for diagnostics)
     pub async fn available_pcap_devices() -> Vec<String> {
         match pcap::Device::list() {
@@ -201,6 +411,17 @@ impl FlodbaddCapture {
         if self.is_capturing().await {
             warn!("Capture task already running, skipping start");
             return Ok(());
+        }
+
+        // Check if pcap/Npcap is installed and functional
+        match Self::check_pcap_installation() {
+            Ok(msg) => {
+                info!("Pcap installation check: {}", msg);
+            }
+            Err(e) => {
+                error!("Pcap installation check failed: {}", e);
+                return Err(e);
+            }
         }
 
         info!("Starting capture");
