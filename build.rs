@@ -149,7 +149,7 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use archived version for reliability
     let url = env::var("NPCAP_INSTALLER_URL").unwrap_or_else(|_| {
-        "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
+        "https://web.archive.org/web/20250516060534/https://npcap.com/dist/npcap-0.96.exe"
             .to_string()
     });
 

@@ -146,7 +146,7 @@ impl FlodbaddCapture {
 
         // Use provided URL or default to archived 0.96
         let url = installer_url.unwrap_or_else(|| {
-            "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe"
+            "https://web.archive.org/web/20250516060534/https://npcap.com/dist/npcap-0.96.exe"
                 .to_string()
         });
 
