@@ -166,13 +166,21 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Write to temp file
-    let mut file = std::fs::File::create(&installer_path)?;
-    file.write_all(&bytes)?;
+    {
+        let mut file = std::fs::File::create(&installer_path)?;
+        file.write_all(&bytes)?;
+        // Explicitly drop the file handle to ensure it's closed
+        drop(file);
+    }
 
     println!(
         "cargo:warning=[Npcap] Installer saved to: {}",
         installer_path.display()
     );
+
+    // Small delay to allow antivirus/security software to finish scanning the file
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    println!("cargo:warning=[Npcap] File handle closed, ready for installation");
 
     // Try msiexec silent install first
     println!("cargo:warning=[Npcap] Attempting installation via msiexec...");
