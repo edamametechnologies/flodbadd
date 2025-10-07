@@ -31,7 +31,6 @@ android:
 
 
 windows_test:
-	@echo "Running Windows tests (Npcap DLL path configured automatically)..."
 	cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
 unix_test:

@@ -19,6 +19,7 @@ pub fn get_npcap_dir() -> PathBuf {
 }
 
 /// Check if Npcap is installed by looking for wpcap.dll
+#[allow(dead_code)]
 pub fn is_npcap_installed() -> bool {
     get_npcap_dir().join("wpcap.dll").exists()
 }
@@ -64,6 +65,7 @@ pub fn add_npcap_to_path(npcap_dir: &Path) -> bool {
 /// Complete Npcap DLL path configuration
 /// Combines both SetDllDirectoryW and PATH update
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn configure_npcap_runtime() -> Result<(), String> {
     let npcap_dir = get_npcap_dir();
 
@@ -88,6 +90,7 @@ pub fn configure_npcap_runtime() -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub fn configure_npcap_runtime() -> Result<(), String> {
     Ok(()) // No-op on non-Windows platforms
 }

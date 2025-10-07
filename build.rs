@@ -2,6 +2,8 @@
 use reqwest;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::env;
+#[cfg(target_os = "windows")]
+use std::fs;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
@@ -9,53 +11,12 @@ use std::process::Command;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
-// Shared constants with src/npcap_utils.rs
-#[cfg(target_os = "windows")]
-const NPCAP_INSTALLER_URL: &str =
-    "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe";
+// Reuse shared Npcap helpers from src/npcap_utils.rs to avoid duplication
+// (scoped under a distinct module name to prevent symbol collisions)
+#[path = "src/npcap_utils.rs"]
+mod build_npcap_utils;
 
-#[cfg(target_os = "windows")]
-const NPCAP_SDK_URL: &str =
-    "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-sdk-0.1.zip";
-
-// Helper function to get Npcap directory
-#[cfg(target_os = "windows")]
-fn get_npcap_dir() -> PathBuf {
-    let system_root = env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    Path::new(&system_root).join("System32").join("Npcap")
-}
-
-// Helper function to configure DLL directory for Windows process
-#[cfg(target_os = "windows")]
-fn configure_dll_directory(npcap_dir: &Path) -> bool {
-    unsafe {
-        use std::os::windows::ffi::OsStrExt;
-
-        let npcap_path_wide: Vec<u16> = std::ffi::OsStr::new(npcap_dir.to_str().unwrap())
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-
-        use windows::core::PCWSTR;
-        use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
-
-        SetDllDirectoryW(PCWSTR(npcap_path_wide.as_ptr())).is_ok()
-    }
-}
-
-// Helper function to add Npcap to PATH
-#[cfg(target_os = "windows")]
-fn add_npcap_to_path(npcap_dir: &Path) -> bool {
-    if let Ok(current_path) = env::var("PATH") {
-        let npcap_path_str = npcap_dir.to_string_lossy();
-        if !current_path.contains(npcap_path_str.as_ref()) {
-            let new_path = format!("{};{}", npcap_path_str, current_path);
-            env::set_var("PATH", new_path);
-            return true;
-        }
-    }
-    false
-}
+// All Windows helpers/constants are sourced from build_npcap_utils
 
 fn main() {
     // Always execute the Npcap download logic on Windows
@@ -151,9 +112,16 @@ fn main() {
             if linked {
                 println!("cargo:rustc-link-lib=dylib=Packet");
                 println!("cargo:rustc-link-lib=dylib=wpcap");
+                // On MSVC, use delay-load so we can set DLL search path at runtime before first use
+                #[cfg(target_env = "msvc")]
+                {
+                    println!("cargo:rustc-link-arg=/DELAYLOAD:wpcap.dll");
+                    println!("cargo:rustc-link-arg=/DELAYLOAD:Packet.dll");
+                    println!("cargo:rustc-link-lib=dylib=delayimp");
+                }
 
                 // Add the Npcap runtime directory to the DLL search path
-                let npcap_runtime = get_npcap_dir();
+                let npcap_runtime = build_npcap_utils::get_npcap_dir();
                 if npcap_runtime.exists() {
                     // Add to link search path for runtime DLL resolution
                     println!("cargo:rustc-link-search=native={}", npcap_runtime.display());
@@ -162,6 +130,14 @@ fn main() {
                         "cargo:warning=[Npcap SDK] ✓ Runtime DLL path: {}",
                         npcap_runtime.display()
                     );
+
+                    // Best-effort: place DLLs next to produced binaries so the loader finds them without PATH edits
+                    if let Err(e) = copy_npcap_runtime_dlls(&npcap_runtime) {
+                        println!(
+                            "cargo:warning=[Npcap SDK] ⚠ Failed to copy runtime DLLs next to binaries: {}",
+                            e
+                        );
+                    }
                 } else {
                     println!(
                         "cargo:warning=[Npcap SDK] ⚠ Runtime DLLs not found at: {}",
@@ -186,8 +162,70 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+fn copy_npcap_runtime_dlls(npcap_runtime: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let target_dir = env::var("CARGO_TARGET_DIR")
+        .unwrap_or_else(|_| format!("{}{}target", manifest_dir, std::path::MAIN_SEPARATOR));
+
+    let profile_dir = Path::new(&target_dir).join(&profile);
+    let deps_dir = profile_dir.join("deps");
+
+    let wpcap = npcap_runtime.join("wpcap.dll");
+    let packet = npcap_runtime.join("Packet.dll");
+
+    // Only proceed if the source DLLs exist
+    if !wpcap.is_file() || !packet.is_file() {
+        return Err("Npcap runtime DLLs not found".into());
+    }
+
+    // Ensure target directories exist
+    fs::create_dir_all(&profile_dir)?;
+    fs::create_dir_all(&deps_dir)?;
+
+    let targets = [
+        profile_dir.join("wpcap.dll"),
+        profile_dir.join("Packet.dll"),
+        deps_dir.join("wpcap.dll"),
+        deps_dir.join("Packet.dll"),
+    ];
+
+    for dest in targets.iter() {
+        let src = if dest
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("wpcap.dll")
+        {
+            &wpcap
+        } else {
+            &packet
+        };
+
+        // Copy only if missing or source is newer
+        let do_copy = match (fs::metadata(dest), fs::metadata(src)) {
+            (Ok(dest_meta), Ok(src_meta)) => src_meta.modified().ok() > dest_meta.modified().ok(),
+            (Err(_), Ok(_)) => true,
+            _ => true,
+        };
+
+        if do_copy {
+            fs::copy(src, dest)?;
+        }
+    }
+
+    println!(
+        "cargo:warning=[Npcap SDK] ✓ Copied Npcap DLLs to {} and {}",
+        profile_dir.display(),
+        deps_dir.display()
+    );
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn check_npcap_runtime() {
-    let npcap_dir = get_npcap_dir();
+    let npcap_dir = build_npcap_utils::get_npcap_dir();
     let dll_to_check = npcap_dir.join("wpcap.dll");
 
     if dll_to_check.exists() {
@@ -224,7 +262,7 @@ fn check_npcap_runtime() {
 fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
 
-    let npcap_dir = get_npcap_dir();
+    let npcap_dir = build_npcap_utils::get_npcap_dir();
     let dll_to_check = npcap_dir.join("wpcap.dll");
 
     // Check if already installed
@@ -243,7 +281,8 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
     let installer_path = temp_dir.join("npcap-installer.exe");
 
     // Use archived version for reliability
-    let url = env::var("NPCAP_INSTALLER_URL").unwrap_or_else(|_| NPCAP_INSTALLER_URL.to_string());
+    let url = env::var("NPCAP_INSTALLER_URL")
+        .unwrap_or_else(|_| build_npcap_utils::NPCAP_INSTALLER_URL.to_string());
 
     println!("cargo:warning=[Npcap] Downloading installer from: {}", url);
 
@@ -330,14 +369,14 @@ fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // Configure DLL directory immediately for the build process
-        if configure_dll_directory(&npcap_dir) {
+        if build_npcap_utils::configure_dll_directory(&npcap_dir) {
             println!("cargo:warning=[Npcap] ✓ DLL directory configured for build process");
         } else {
             println!("cargo:warning=[Npcap] ⚠ Could not set DLL directory (non-critical)");
         }
 
         // Also update PATH environment variable for this build process
-        if add_npcap_to_path(&npcap_dir) {
+        if build_npcap_utils::add_npcap_to_path(&npcap_dir) {
             println!("cargo:warning=[Npcap] ✓ Added to PATH for build process");
         }
 
@@ -360,7 +399,8 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     use std::io::Write;
 
     // Allow overriding the SDK download URL via env var, default to archived link
-    let url = env::var("NPCAP_SDK_URL").unwrap_or_else(|_| NPCAP_SDK_URL.to_string());
+    let url =
+        env::var("NPCAP_SDK_URL").unwrap_or_else(|_| build_npcap_utils::NPCAP_SDK_URL.to_string());
     let zip_path = npcap_dir.with_extension("zip");
 
     println!("cargo:warning=[Npcap SDK] Downloading from: {}", url);

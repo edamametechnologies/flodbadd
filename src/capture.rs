@@ -231,12 +231,8 @@ impl FlodbaddCapture {
         {
             use crate::npcap_utils;
 
-            // Check if Npcap runtime DLLs exist in system directory
-            let npcap_dir = npcap_utils::get_npcap_dir();
-            let packet_dll = npcap_dir.join("Packet.dll");
-            let wpcap_dll = npcap_dir.join("wpcap.dll");
-
-            if !packet_dll.exists() || !wpcap_dll.exists() {
+            if !npcap_utils::is_npcap_installed() {
+                let npcap_dir = npcap_utils::get_npcap_dir();
                 return Err(anyhow!(
                     "Npcap is not installed. Network capture will be disabled.\n\
                      Please install Npcap from https://npcap.com to enable packet capture.\n\
@@ -245,10 +241,17 @@ impl FlodbaddCapture {
                 ));
             }
 
+            let npcap_dir = npcap_utils::get_npcap_dir();
             info!(
                 "Npcap system installation detected at {}",
                 npcap_dir.display()
             );
+
+            // Configure DLL search path inside the running process to avoid PATH edits
+            match npcap_utils::configure_npcap_runtime() {
+                Ok(_) => info!("Npcap runtime configured for current process"),
+                Err(e) => warn!("Failed to configure Npcap runtime (non-fatal): {}", e),
+            }
         }
 
         // Try to list devices as a functional check (works on all platforms)
