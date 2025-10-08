@@ -6,16 +6,18 @@ use std::env;
 use std::fs;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "windows")]
-use std::process::Command;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
 // Reuse shared Npcap helpers from src/npcap_utils.rs to avoid duplication
 // (scoped under a distinct module name to prevent symbol collisions)
 #[cfg(target_os = "windows")]
-#[path = "src/npcap_utils.rs"]
+#[path = "src/windows_npcap.rs"]
 mod build_npcap_utils;
+
+#[cfg(target_os = "windows")]
+#[path = "src/windows_npcap.rs"]
+mod build_npcap_install;
 
 // All Windows helpers/constants are sourced from build_npcap_utils
 
@@ -240,8 +242,8 @@ fn check_npcap_runtime() {
             npcap_dir.display()
         );
 
-        // Attempt auto-installation
-        match auto_install_npcap() {
+        // Attempt auto-installation (shared)
+        match auto_install_npcap_shared() {
             Ok(_) => {
                 println!("cargo:warning=[Npcap Runtime] ✓ Installation completed successfully");
                 println!("cargo:warning=[Npcap Runtime] Tests will automatically configure DLL path at runtime");
@@ -260,138 +262,12 @@ fn check_npcap_runtime() {
 }
 
 #[cfg(target_os = "windows")]
-fn auto_install_npcap() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
-
-    let npcap_dir = build_npcap_utils::get_npcap_dir();
-    let dll_to_check = npcap_dir.join("wpcap.dll");
-
-    // Check if already installed
-    if dll_to_check.exists() {
-        println!("Npcap already detected at {}", npcap_dir.display());
-        return Ok(());
-    }
-
-    println!(
-        "Npcap not found at {} — attempting silent install",
-        npcap_dir.display()
-    );
-
-    // Determine download location
-    let temp_dir = std::env::temp_dir();
-    let installer_path = temp_dir.join("npcap-installer.exe");
-
-    // Use archived version for reliability
-    let url = env::var("NPCAP_INSTALLER_URL")
-        .unwrap_or_else(|_| build_npcap_utils::NPCAP_INSTALLER_URL.to_string());
-
-    println!("cargo:warning=[Npcap] Downloading installer from: {}", url);
-
-    // Download installer
-    let response = reqwest::blocking::get(&url)?;
-    println!("cargo:warning=[Npcap] Received HTTP response, reading bytes...");
-    let bytes = response.bytes()?;
-    println!(
-        "cargo:warning=[Npcap] Downloaded {} bytes ({:.2} MB)",
-        bytes.len(),
-        bytes.len() as f64 / 1024.0 / 1024.0
-    );
-
-    // Write to temp file
-    {
-        let mut file = std::fs::File::create(&installer_path)?;
-        file.write_all(&bytes)?;
-        // Explicitly drop the file handle to ensure it's closed
-        drop(file);
-    }
-
-    println!(
-        "cargo:warning=[Npcap] Installer saved to: {}",
-        installer_path.display()
-    );
-
-    // Small delay to allow antivirus/security software to finish scanning the file
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    println!("cargo:warning=[Npcap] File handle closed, ready for installation");
-
-    // Try msiexec silent install first
-    println!("cargo:warning=[Npcap] Attempting installation via msiexec...");
-    let msiexec_status = Command::new("msiexec")
-        .args([
-            "/i",
-            installer_path.to_str().unwrap_or_default(),
-            "/quiet",
-            "/norestart",
-        ])
-        .status();
-
-    let mut installed = dll_to_check.exists();
-
-    if msiexec_status
-        .as_ref()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        println!("cargo:warning=[Npcap] msiexec installation completed");
-    }
-
-    // If msiexec failed, try direct EXE execution
-    if msiexec_status.map(|s| !s.success()).unwrap_or(true) && !installed {
-        println!(
-            "cargo:warning=[Npcap] msiexec install did not succeed, trying direct EXE execution"
-        );
-
-        let exe_status = Command::new(&installer_path)
-            .args(["/S"]) // Silent install flag for NSIS installer
-            .status();
-
-        if let Err(e) = exe_status {
-            println!("cargo:warning=[Npcap] Failed to execute installer: {}", e);
-        } else {
-            println!(
-                "cargo:warning=[Npcap] Installer executed, waiting for installation to complete..."
-            );
-        }
-
-        // Wait a bit for installation to complete
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        installed = dll_to_check.exists();
-    }
-
-    // Clean up installer
-    if let Ok(_) = std::fs::remove_file(&installer_path) {
-        println!("cargo:warning=[Npcap] Cleaned up installer file");
-    }
-
-    if installed {
-        println!(
-            "cargo:warning=[Npcap] ✓ Installation successful - runtime detected at {}",
-            npcap_dir.display()
-        );
-
-        // Configure DLL directory immediately for the build process
-        if build_npcap_utils::configure_dll_directory(&npcap_dir) {
-            println!("cargo:warning=[Npcap] ✓ DLL directory configured for build process");
-        } else {
-            println!("cargo:warning=[Npcap] ⚠ Could not set DLL directory (non-critical)");
-        }
-
-        // Also update PATH environment variable for this build process
-        if build_npcap_utils::add_npcap_to_path(&npcap_dir) {
-            println!("cargo:warning=[Npcap] ✓ Added to PATH for build process");
-        }
-
-        Ok(())
-    } else {
-        println!(
-            "cargo:warning=[Npcap] ✗ Installation failed - DLL not found at {}",
-            dll_to_check.display()
-        );
-        Err(format!(
-            "Npcap installation failed. Manual installation may be required.\n\
-             Please install Npcap manually with administrator privileges from https://npcap.com"
-        )
-        .into())
+#[cfg(target_os = "windows")]
+fn auto_install_npcap_shared() -> Result<(), Box<dyn std::error::Error>> {
+    // Reuse the shared installer; map string error to boxed error
+    match build_npcap_install::auto_install_npcap_silent(None) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 

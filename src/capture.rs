@@ -120,93 +120,9 @@ impl FlodbaddCapture {
     /// ```
     #[cfg(target_os = "windows")]
     pub fn auto_install_npcap(installer_url: Option<String>) -> Result<()> {
-        use crate::npcap_utils;
-        use std::io::Write;
-        use std::process::Command;
-
-        let npcap_dir = npcap_utils::get_npcap_dir();
-        let dll_to_check = npcap_dir.join("wpcap.dll");
-
-        // Check if already installed
-        if dll_to_check.exists() {
-            info!("Npcap already detected at {}", npcap_dir.display());
-            return Ok(());
-        }
-
-        warn!(
-            "Npcap not found at {} — attempting silent install",
-            npcap_dir.display()
-        );
-
-        // Determine download location
-        let temp_dir = std::env::temp_dir();
-        let installer_path = temp_dir.join("npcap-installer.exe");
-
-        // Use provided URL or default to archived 0.96 (reliable 2022 archive)
-        let url = installer_url.unwrap_or_else(|| npcap_utils::NPCAP_INSTALLER_URL.to_string());
-
-        info!("Downloading Npcap installer from: {}", url);
-
-        // Download installer
-        let response = reqwest::blocking::get(&url)
-            .map_err(|e| anyhow!("Failed to download Npcap installer: {}", e))?;
-        let bytes = response
-            .bytes()
-            .map_err(|e| anyhow!("Failed to read Npcap installer bytes: {}", e))?;
-
-        // Write to temp file
-        let mut file = std::fs::File::create(&installer_path)
-            .map_err(|e| anyhow!("Failed to create installer file: {}", e))?;
-        file.write_all(&bytes)
-            .map_err(|e| anyhow!("Failed to write installer file: {}", e))?;
-
-        info!("Downloaded Npcap installer to {}", installer_path.display());
-
-        // Try msiexec silent install first
-        info!("Attempting installation via msiexec...");
-        let msiexec_status = Command::new("msiexec")
-            .args([
-                "/i",
-                installer_path.to_str().unwrap_or_default(),
-                "/quiet",
-                "/norestart",
-            ])
-            .status();
-
-        let mut installed = dll_to_check.exists();
-
-        // If msiexec failed, try direct EXE execution
-        if msiexec_status.map(|s| !s.success()).unwrap_or(true) && !installed {
-            warn!("msiexec install did not succeed, trying direct EXE execution");
-
-            let exe_status = Command::new(&installer_path)
-                .args(["/S"]) // Silent install flag for NSIS installer
-                .status();
-
-            if let Err(e) = exe_status {
-                error!("Failed to execute installer: {}", e);
-            }
-
-            // Wait a bit for installation to complete
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            installed = dll_to_check.exists();
-        }
-
-        // Clean up installer
-        let _ = std::fs::remove_file(&installer_path);
-
-        if installed {
-            info!(
-                "Npcap installation detected after install attempt at {}",
-                npcap_dir.display()
-            );
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "Npcap installation failed. Manual installation may be required.\n\
-                 Please install Npcap manually with administrator privileges from https://npcap.com"
-            ))
-        }
+        // Reuse shared installer logic (merged into windows_npcap)
+        crate::windows_npcap::auto_install_npcap_silent(installer_url)
+            .map_err(|e| anyhow!(e))
     }
 
     /// Non-Windows platforms: auto-install not supported

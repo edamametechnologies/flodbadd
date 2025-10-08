@@ -30,7 +30,9 @@ pub mod mdns;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub mod neighbors;
 #[cfg(target_os = "windows")]
-pub mod npcap_utils;
+pub mod windows_npcap;
+#[cfg(target_os = "windows")]
+pub use windows_npcap as npcap_utils; // backward-compatible re-export
 pub mod oui;
 pub mod oui_db;
 #[cfg(all(
