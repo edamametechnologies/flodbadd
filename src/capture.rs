@@ -121,8 +121,7 @@ impl FlodbaddCapture {
     #[cfg(target_os = "windows")]
     pub fn auto_install_npcap(installer_url: Option<String>) -> Result<()> {
         // Reuse shared installer logic (merged into windows_npcap)
-        crate::windows_npcap::auto_install_npcap_silent(installer_url)
-            .map_err(|e| anyhow!(e))
+        crate::windows_npcap::auto_install_npcap_silent(installer_url).map_err(|e| anyhow!(e))
     }
 
     /// Non-Windows platforms: auto-install not supported
