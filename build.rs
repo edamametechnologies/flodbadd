@@ -13,6 +13,7 @@ use zip;
 
 // Reuse shared Npcap helpers from src/npcap_utils.rs to avoid duplication
 // (scoped under a distinct module name to prevent symbol collisions)
+#[cfg(target_os = "windows")]
 #[path = "src/npcap_utils.rs"]
 mod build_npcap_utils;
 

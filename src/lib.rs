@@ -54,8 +54,6 @@ pub mod vendor_vulns_db;
 pub mod vulnerability_info;
 pub mod whitelists;
 pub mod whitelists_db;
-
-// Npcap utilities module - shared across build, runtime, and tests
 #[cfg(target_os = "windows")]
 pub mod npcap_utils;
 
