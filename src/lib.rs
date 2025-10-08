@@ -29,6 +29,8 @@ pub mod l7_ebpf;
 pub mod mdns;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub mod neighbors;
+#[cfg(target_os = "windows")]
+pub mod npcap_utils;
 pub mod oui;
 pub mod oui_db;
 #[cfg(all(
@@ -54,8 +56,6 @@ pub mod vendor_vulns_db;
 pub mod vulnerability_info;
 pub mod whitelists;
 pub mod whitelists_db;
-#[cfg(target_os = "windows")]
-pub mod npcap_utils;
 
 // Automatic initialization for Windows tests - adds Npcap DLL directory to PATH
 #[cfg(all(test, target_os = "windows"))]
