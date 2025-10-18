@@ -84,6 +84,9 @@ static BLACKLISTED_SESSION_TIMEOUT: i64 = 86400;
 // Define a timeout for all session tracking (in seconds)
 static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as i64;
 
+// Cap size of per-flow downsample state to bound memory usage
+static PER_FLOW_DOWNSAMPLE_MAX_ENTRIES: usize = 200000;
+
 // Define percentile thresholds used to compute dynamic thresholds
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.995;
 pub const DEFAULT_ABNORMAL_PERCENTILE: f64 = 0.9975;
@@ -386,6 +389,15 @@ impl IsolationForestModel {
         bytes
     }
 
+    /// Ensure the per-flow downsample map stays within a bounded size.
+    /// This avoids unbounded growth when many distinct flow signatures are observed.
+    fn cap_per_flow_downsample(&self) {
+        if self.per_flow_downsample.len() > PER_FLOW_DOWNSAMPLE_MAX_ENTRIES {
+            // Reset counters; this only affects downsampling cadence, not correctness.
+            self.per_flow_downsample.clear();
+        }
+    }
+
     /// Add new session data to the analyzer's memory.
     /// If the buffer is full, remove the oldest entry.
     fn add_session_data(&mut self, session: &SessionInfo) {
@@ -424,6 +436,8 @@ impl IsolationForestModel {
             .unwrap_or(0)
             .saturating_add(1);
         self.per_flow_downsample.insert(flow_sig, next_count);
+        // Bound auxiliary state size to prevent unbounded memory growth
+        self.cap_per_flow_downsample();
         // Accept the first snapshot for each flow signature, then every Nth thereafter
         if self.downsample_factor > 1 && (next_count % self.downsample_factor) != 1 {
             trace!(
