@@ -10,7 +10,7 @@ use crate::sessions::session_macros::*;
 use crate::sessions::*;
 use crate::task::TaskHandle;
 use crate::whitelists::{self, is_valid_whitelist, Whitelists, WhitelistsJSON};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 #[cfg(all(
@@ -833,6 +833,29 @@ impl FlodbaddCapture {
         let merged_json_str =
             Whitelists::merge_custom_whitelists(whitelist1_json_str, whitelist2_json_str)?;
         Ok(merged_json_str)
+    }
+
+    /// Compare two custom whitelists and return the percentage difference
+    ///
+    /// # Arguments
+    /// * `whitelist1_json_str` - First whitelist JSON string (OLD whitelist - baseline)
+    /// * `whitelist2_json_str` - Second whitelist JSON string (NEW whitelist - to check for changes)
+    ///
+    /// # Returns
+    /// * `Result<f64>` - Percentage difference (0.0 - 100.0) - what % of endpoints in new are different from old
+    pub async fn compare_custom_whitelists(
+        whitelist1_json_str: &str,
+        whitelist2_json_str: &str,
+    ) -> Result<f64> {
+        // Parse both JSON strings
+        let old_whitelist: WhitelistsJSON = serde_json::from_str(whitelist1_json_str)
+            .context("Failed to parse first whitelist JSON")?;
+        let new_whitelist: WhitelistsJSON = serde_json::from_str(whitelist2_json_str)
+            .context("Failed to parse second whitelist JSON")?;
+
+        // Use the compare_whitelist method (new.compare_whitelist(old) returns % of new endpoints not in old)
+        let diff_percentage = new_whitelist.compare_whitelist(old_whitelist);
+        Ok(diff_percentage)
     }
 
     pub async fn get_filter(&self) -> SessionFilter {
