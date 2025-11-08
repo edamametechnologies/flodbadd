@@ -59,12 +59,16 @@ pub async fn assert_score_outside_band(
     let low_idx = if n == 0 {
         0
     } else {
-        ((n as f64 - 1.0) * low_percentile).max(0.0).min((n - 1) as f64) as usize
+        ((n as f64 - 1.0) * low_percentile)
+            .max(0.0)
+            .min((n - 1) as f64) as usize
     };
     let high_idx = if n == 0 {
         0
     } else {
-        ((n as f64 - 1.0) * high_percentile).max(0.0).min((n - 1) as f64) as usize
+        ((n as f64 - 1.0) * high_percentile)
+            .max(0.0)
+            .min((n - 1) as f64) as usize
     };
     let band_low = scores[low_idx];
     let band_high = scores[high_idx];

@@ -2,9 +2,9 @@ use crate::sessions::*;
 use chrono::{DateTime, Duration, Utc};
 use extended_isolation_forest::{Forest, ForestOptions};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fmt;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1284,7 +1284,7 @@ fn compute_dynamic_thresholds(
     scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = scores.len();
-    
+
     if n == 0 {
         warn!("compute_dynamic_thresholds: No scores available for percentile calculation");
         return;
@@ -1306,7 +1306,7 @@ fn compute_dynamic_thresholds(
     let p95_idx = percentile_index(n, 0.95);
     let p98_idx = percentile_index(n, 0.98);
     let p99_idx = percentile_index(n, 0.99);
-    
+
     info!(
         "Score distribution analysis: min={:.4}, 25th={:.4}, 50th={:.4}, 75th={:.4}, 90th={:.4}, 95th={:.4}, 98th={:.4}, 99th={:.4}, max={:.4}",
         scores[0],
