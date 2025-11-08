@@ -4,7 +4,8 @@ use extended_isolation_forest::{Forest, ForestOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
-use std::hash::{BuildHasher, Hasher};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
@@ -420,7 +421,7 @@ impl IsolationForestModel {
         // Downsample repeated snapshots from the same flow signature (keep only 1 in `downsample_factor`)
         let flow_sig = {
             use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            let mut hasher = DefaultHasher::new();
             // Stable signature: src_ip, src_port, dst_ip, dst_port, protocol
             session.session.protocol.hash(&mut hasher);
             session.session.src_ip.hash(&mut hasher);
@@ -1049,7 +1050,7 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
     // 1. Process name hashed to f64
     let process_hash = match &session.l7 {
         Some(l7) => {
-            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            let mut hasher = DefaultHasher::new();
             hasher.write(l7.process_name.as_bytes());
             let hash_val = hasher.finish();
             sanitize((hash_val % 1_000_000) as f64) // Scale down and sanitize
@@ -1069,11 +1070,14 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
     };
     let duration = duration_raw;
 
-    // 3. Total bytes (linear scale to preserve separation for very large transfers)
-    let bytes = sanitize((session.stats.inbound_bytes + session.stats.outbound_bytes) as f64);
+    // 3. Total bytes (log scale to reduce dominance of large transfers while preserving separation)
+    // Using ln_1p (ln(1+x)) to handle zero values gracefully
+    let total_bytes = (session.stats.inbound_bytes + session.stats.outbound_bytes) as f64;
+    let bytes = sanitize(total_bytes.ln_1p());
 
-    // 4. Total packets (keep linear scale for sensitivity)
-    let packets = sanitize((session.stats.orig_pkts + session.stats.resp_pkts) as f64);
+    // 4. Total packets (log scale to reduce dominance while preserving separation)
+    let total_packets = (session.stats.orig_pkts + session.stats.resp_pkts) as f64;
+    let packets = sanitize(total_packets.ln_1p());
 
     // 5. Segment interarrival
     let segment_interarrival = sanitize(session.stats.segment_interarrival);
@@ -1280,23 +1284,45 @@ fn compute_dynamic_thresholds(
     scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = scores.len();
+    
+    if n == 0 {
+        warn!("compute_dynamic_thresholds: No scores available for percentile calculation");
+        return;
+    }
 
-    // Add detailed score distribution analysis
+    // Helper function to safely compute percentile index
+    fn percentile_index(n: usize, p: f64) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        ((n as f64 - 1.0) * p).max(0.0).min((n - 1) as f64) as usize
+    }
+
+    // Add detailed score distribution analysis with bounds checking
+    let p25_idx = percentile_index(n, 0.25);
+    let p50_idx = percentile_index(n, 0.50);
+    let p75_idx = percentile_index(n, 0.75);
+    let p90_idx = percentile_index(n, 0.90);
+    let p95_idx = percentile_index(n, 0.95);
+    let p98_idx = percentile_index(n, 0.98);
+    let p99_idx = percentile_index(n, 0.99);
+    
     info!(
         "Score distribution analysis: min={:.4}, 25th={:.4}, 50th={:.4}, 75th={:.4}, 90th={:.4}, 95th={:.4}, 98th={:.4}, 99th={:.4}, max={:.4}",
         scores[0],
-        scores[n/4],
-        scores[n/2],
-        scores[3*n/4],
-        scores[9*n/10],
-        scores[95*n/100],
-        scores[98*n/100],
-        scores[99*n/100],
-        scores[n-1]
+        scores[p25_idx],
+        scores[p50_idx],
+        scores[p75_idx],
+        scores[p90_idx],
+        scores[p95_idx],
+        scores[p98_idx],
+        scores[p99_idx],
+        scores[n.saturating_sub(1)]
     );
 
-    let suspicious_idx = ((n as f64 * suspicious_percentile).ceil() as usize).saturating_sub(1);
-    let abnormal_idx = ((n as f64 * abnormal_percentile).ceil() as usize).saturating_sub(1);
+    // Use proper percentile calculation: (n-1) * percentile gives correct index
+    let suspicious_idx = percentile_index(n, suspicious_percentile);
+    let abnormal_idx = percentile_index(n, abnormal_percentile);
 
     info!(
         "compute_dynamic_thresholds: Using indices suspicious={}/{}, abnormal={}/{}",
@@ -2067,7 +2093,7 @@ impl SessionAnalyzer {
                                             if session.criticality.is_empty() {
                                                 session.criticality = tag.to_string();
                                             } else {
-                                                session.criticality.push('/');
+                                                session.criticality.push(',');
                                                 session.criticality.push_str(tag);
                                             }
                                         }

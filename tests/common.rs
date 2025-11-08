@@ -26,9 +26,13 @@ pub async fn calibrate_thresholds_from_baseline(
         return;
     }
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((scores.len() as f64 * percentile).ceil() as usize)
-        .saturating_sub(1)
-        .min(scores.len() - 1);
+    // Use proper percentile calculation: (n-1) * percentile
+    let n = scores.len();
+    let idx = if n == 0 {
+        0
+    } else {
+        ((n as f64 - 1.0) * percentile).max(0.0).min((n - 1) as f64) as usize
+    };
     let p = scores[idx];
     analyzer.set_test_thresholds(p + 1e-6, p + 0.05).await;
 }
@@ -50,12 +54,18 @@ pub async fn assert_score_outside_band(
     }
     assert!(!scores.is_empty(), "{}: normal scores are empty", context);
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let low_idx = ((scores.len() as f64 * low_percentile).ceil() as usize)
-        .saturating_sub(1)
-        .min(scores.len() - 1);
-    let high_idx = ((scores.len() as f64 * high_percentile).ceil() as usize)
-        .saturating_sub(1)
-        .min(scores.len() - 1);
+    // Use proper percentile calculation: (n-1) * percentile
+    let n = scores.len();
+    let low_idx = if n == 0 {
+        0
+    } else {
+        ((n as f64 - 1.0) * low_percentile).max(0.0).min((n - 1) as f64) as usize
+    };
+    let high_idx = if n == 0 {
+        0
+    } else {
+        ((n as f64 - 1.0) * high_percentile).max(0.0).min((n - 1) as f64) as usize
+    };
     let band_low = scores[low_idx];
     let band_high = scores[high_idx];
 
