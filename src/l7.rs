@@ -293,6 +293,9 @@ impl FlodbaddL7 {
                         .map(|user| (user.id(), user.name()))
                         .collect();
 
+                    // Drop users_read early since we have owned copies
+                    drop(users_read);
+
                     Self::update_host_service_cache(
                         &socket_info,
                         &pid_to_process,
@@ -317,6 +320,7 @@ impl FlodbaddL7 {
 
                     for connection in to_process_this_cycle {
                         // First, quick exact match via index
+                        // Note: pid_to_process borrows from system_read, so we need to be careful about lifetimes
                         if let Some((l7_fast, start_time_fast)) = Self::try_exact_match_from_index(
                             &connection,
                             &port_index,
@@ -351,30 +355,39 @@ impl FlodbaddL7 {
                             continue;
                         }
 
-                        let from_host_cache = Self::try_resolve_from_host_cache_custom(
-                            &connection,
-                            &host_service_cache,
-                            &*system_read,
-                        )
-                        .await;
+                        // Use a scope to ensure system_read is dropped after use
+                        let from_host_cache = {
+                            let from_cache = Self::try_resolve_from_host_cache_custom(
+                                &connection,
+                                &host_service_cache,
+                                &*system_read,
+                            )
+                            .await;
 
-                        if let Some(l7_data_tuple) = from_host_cache {
-                            let (session_l7_data, _source_from_host_cache) = l7_data_tuple; // Unpack the tuple
+                            // Check process status while system_read is still available
+                            if let Some(l7_data_tuple) = &from_cache {
+                                let (session_l7_data, _source_from_host_cache) = l7_data_tuple;
+                                let source = if system_read
+                                    .process(Pid::from_u32(session_l7_data.pid))
+                                    .is_some()
+                                {
+                                    L7ResolutionSource::HostCacheHitRunning
+                                } else {
+                                    L7ResolutionSource::HostCacheHitTerminated
+                                };
+                                // Return with source information
+                                from_cache.map(|(l7, _)| (l7, source))
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((session_l7_data, source)) = from_host_cache {
                             trace!(
                                 "Successfully L7 resolved connection {:?} from host cache: {:?}",
                                 connection,
-                                session_l7_data // Use unpacked data
+                                session_l7_data
                             );
-
-                            // Determine if the process is running to set the correct source
-                            let source = if system_read
-                                .process(Pid::from_u32(session_l7_data.pid))
-                                .is_some()
-                            {
-                                L7ResolutionSource::HostCacheHitRunning
-                            } else {
-                                L7ResolutionSource::HostCacheHitTerminated
-                            };
 
                             Self::update_port_process_cache(
                                 &connection,
@@ -398,37 +411,43 @@ impl FlodbaddL7 {
                             continue;
                         }
 
-                        let system_read_for_cache = system.read().await;
-                        let resolution_result = Self::resolve_l7_data(
-                            &connection,
-                            &socket_info,
-                            &pid_to_process,
-                            &uid_to_username,
-                        )
-                        .await;
+                        // Use a scope to ensure system_read_for_cache is dropped before immediate retry
+                        let (resolution_result, l7_data_and_time, cache_source) = {
+                            let system_read_for_cache = system.read().await;
+                            let result = Self::resolve_l7_data(
+                                &connection,
+                                &socket_info,
+                                &pid_to_process,
+                                &uid_to_username,
+                            )
+                            .await;
 
-                        // Fallback: try port_process_cache if direct match fails
-                        let mut l7_data_and_time = None;
-                        let mut cache_source = None;
-                        match resolution_result {
-                            Ok((l7_data, process_start_time)) => {
-                                l7_data_and_time = Some((l7_data, process_start_time));
-                            }
-                            Err(_) => {
-                                if let Some((l7_data, source)) = Self::try_resolve_from_cache(
-                                    &connection,
-                                    &port_process_cache,
-                                    &*system_read_for_cache,
-                                )
-                                .await
-                                {
-                                    l7_data_and_time = Some((l7_data, 0)); // Cache doesn't store start_time for host cache, so use 0
-                                    cache_source = Some(source);
-                                } else {
-                                    // No further immediate refreshes; rely on next batch refresh
+                            // Fallback: try port_process_cache if direct match fails
+                            let mut l7_data_and_time = None;
+                            let mut cache_source = None;
+                            match result {
+                                Ok((l7_data, process_start_time)) => {
+                                    l7_data_and_time = Some((l7_data, process_start_time));
+                                }
+                                Err(_) => {
+                                    if let Some((l7_data, source)) = Self::try_resolve_from_cache(
+                                        &connection,
+                                        &port_process_cache,
+                                        &*system_read_for_cache,
+                                    )
+                                    .await
+                                    {
+                                        l7_data_and_time = Some((l7_data, 0)); // Cache doesn't store start_time for host cache, so use 0
+                                        cache_source = Some(source);
+                                    } else {
+                                        // No further immediate refreshes; rely on next batch refresh
+                                    }
                                 }
                             }
-                        }
+                            // Return tuple - system_read_for_cache is dropped here
+                            (result, l7_data_and_time, cache_source)
+                        };
+
                         if let Some((l7_data, process_start_time)) = l7_data_and_time {
                             trace!(
                                 "Successfully L7 resolved connection {:?}: {:?}",
@@ -459,22 +478,15 @@ impl FlodbaddL7 {
                         if let Some(mut resolution_entry) = l7_map.get_mut(&connection) {
                             let current_retry_count = resolution_entry.retry_count;
 
-                            // Immediate retry for first-time failures: refresh and retry once before incrementing retry_count
+                            // Immediate retry for first-time failures: retry with fresh socket data (no system refresh to avoid deadlock)
+                            // The system refresh will happen in the next batch cycle
                             if current_retry_count == 0 {
                                 trace!(
-                                    "First-time resolution failure for {:?}, attempting immediate retry with fresh data",
+                                    "First-time resolution failure for {:?}, attempting immediate retry with fresh socket data",
                                     connection
                                 );
 
-                                // Refresh system state immediately
-                                {
-                                    let mut sys = system.write().await;
-                                    sys.refresh_specifics(refresh_kind);
-                                    let mut users_write = users.write().await;
-                                    users_write.refresh();
-                                }
-
-                                // Refresh socket info
+                                // Refresh socket info only (this doesn't require system lock)
                                 let fresh_socket_info = match tokio::task::spawn_blocking(
                                     move || {
                                         get_sockets_info(
@@ -496,37 +508,21 @@ impl FlodbaddL7 {
                                     }
                                 };
 
-                                // Refresh process/username maps
-                                let system_read_retry = system.read().await;
-                                let users_read_retry = users.read().await;
-
-                                let pid_to_process_retry: HashMap<u32, &Process> =
-                                    system_read_retry
-                                        .processes()
-                                        .iter()
-                                        .map(|(pid, process)| (pid.as_u32(), process))
-                                        .collect();
-
-                                let uid_to_username_retry: HashMap<&Uid, &str> = users_read_retry
-                                    .iter()
-                                    .map(|user| (user.id(), user.name()))
-                                    .collect();
-
-                                // Try resolution again with fresh data
+                                // Try resolution again with fresh socket data (reuse existing pid_to_process)
                                 let immediate_retry_result = Self::resolve_l7_data(
                                     &connection,
                                     &fresh_socket_info,
-                                    &pid_to_process_retry,
-                                    &uid_to_username_retry,
+                                    &pid_to_process,
+                                    &uid_to_username,
                                 )
                                 .await;
 
-                                // Also try cache with fresh system state
+                                // Also try cache with current system state
                                 let cache_retry_result = if immediate_retry_result.is_err() {
                                     Self::try_resolve_from_cache(
                                         &connection,
                                         &port_process_cache,
-                                        &*system_read_retry,
+                                        &*system_read,
                                     )
                                     .await
                                 } else {
