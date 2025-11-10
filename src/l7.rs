@@ -100,6 +100,9 @@ static EPHEMERAL_RETRY_MS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
 // Add a new constant for TTL of cached entries that come from high-range (likely client) ephemeral ports
 const EPHEMERAL_PORT_CACHE_TTL_SECS: u64 = 30; // Keep for 30 s only
 
+// Extended TTL for server ports (< 1024) which rarely change
+const SERVER_PORT_CACHE_TTL_SECS: u64 = 3600; // Keep for 1 hour
+
 // Maximum size of port→process cache
 const PORT_CACHE_MAX_ENTRIES: usize = 10_000;
 
@@ -454,6 +457,131 @@ impl FlodbaddL7 {
                         }
                         // All resolution attempts for 'connection' in this cycle failed.
                         if let Some(mut resolution_entry) = l7_map.get_mut(&connection) {
+                            let current_retry_count = resolution_entry.retry_count;
+
+                            // Immediate retry for first-time failures: refresh and retry once before incrementing retry_count
+                            if current_retry_count == 0 {
+                                trace!(
+                                    "First-time resolution failure for {:?}, attempting immediate retry with fresh data",
+                                    connection
+                                );
+
+                                // Refresh system state immediately
+                                {
+                                    let mut sys = system.write().await;
+                                    sys.refresh_specifics(refresh_kind);
+                                    let mut users_write = users.write().await;
+                                    users_write.refresh();
+                                }
+
+                                // Refresh socket info
+                                let fresh_socket_info = match tokio::task::spawn_blocking(
+                                    move || {
+                                        get_sockets_info(
+                                            AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
+                                            ProtocolFlags::TCP | ProtocolFlags::UDP,
+                                        )
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(Ok(info)) => info,
+                                    Ok(Err(e)) => {
+                                        error!("Failed to get fresh socket info for immediate retry: {:?}", e);
+                                        Vec::new()
+                                    }
+                                    Err(join_err) => {
+                                        error!("spawn_blocking join error during immediate retry: {:?}", join_err);
+                                        Vec::new()
+                                    }
+                                };
+
+                                // Refresh process/username maps
+                                let system_read_retry = system.read().await;
+                                let users_read_retry = users.read().await;
+
+                                let pid_to_process_retry: HashMap<u32, &Process> =
+                                    system_read_retry
+                                        .processes()
+                                        .iter()
+                                        .map(|(pid, process)| (pid.as_u32(), process))
+                                        .collect();
+
+                                let uid_to_username_retry: HashMap<&Uid, &str> = users_read_retry
+                                    .iter()
+                                    .map(|user| (user.id(), user.name()))
+                                    .collect();
+
+                                // Try resolution again with fresh data
+                                let immediate_retry_result = Self::resolve_l7_data(
+                                    &connection,
+                                    &fresh_socket_info,
+                                    &pid_to_process_retry,
+                                    &uid_to_username_retry,
+                                )
+                                .await;
+
+                                // Also try cache with fresh system state
+                                let cache_retry_result = if immediate_retry_result.is_err() {
+                                    Self::try_resolve_from_cache(
+                                        &connection,
+                                        &port_process_cache,
+                                        &*system_read_retry,
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                };
+
+                                // Check if immediate retry succeeded
+                                if let Ok((l7_data, process_start_time)) = immediate_retry_result {
+                                    trace!(
+                                        "Immediate retry succeeded for {:?}: {:?}",
+                                        connection,
+                                        l7_data
+                                    );
+                                    Self::update_port_process_cache(
+                                        &connection,
+                                        &l7_data,
+                                        process_start_time,
+                                        &port_process_cache,
+                                    )
+                                    .await;
+                                    resolution_entry.l7 = Some(l7_data);
+                                    resolution_entry.retry_count = 0;
+                                    resolution_entry.last_retry = None;
+                                    resolution_entry.source = L7ResolutionSource::ExactMatch;
+                                    successfully_resolved_count += 1;
+                                    continue; // Success, move to next connection
+                                } else if let Some((l7_data, source)) = cache_retry_result {
+                                    trace!(
+                                        "Immediate retry succeeded via cache for {:?}: {:?}",
+                                        connection,
+                                        l7_data
+                                    );
+                                    Self::update_port_process_cache(
+                                        &connection,
+                                        &l7_data,
+                                        0,
+                                        &port_process_cache,
+                                    )
+                                    .await;
+                                    resolution_entry.l7 = Some(l7_data);
+                                    resolution_entry.retry_count = 0;
+                                    resolution_entry.last_retry = None;
+                                    resolution_entry.source = source;
+                                    successfully_resolved_count += 1;
+                                    continue; // Success, move to next connection
+                                } else {
+                                    trace!(
+                                        "Immediate retry failed for {:?}, will increment retry_count",
+                                        connection
+                                    );
+                                    // Immediate retry failed, proceed with normal retry logic
+                                }
+                            }
+
+                            // Normal retry logic (increment retry_count and re-queue)
                             resolution_entry.retry_count += 1;
                             resolution_entry.last_retry = Some(Instant::now());
 
@@ -565,10 +693,13 @@ impl FlodbaddL7 {
                     let port = key.0;
                     let age = entry.last_seen.elapsed();
                     if port >= EPHEMERAL_PORT_THRESHOLD {
-                        // keep only if not expired
+                        // Ephemeral ports: keep only if not expired (short TTL)
                         age <= Duration::from_secs(EPHEMERAL_PORT_CACHE_TTL_SECS)
+                    } else if port < 1024 {
+                        // Server ports: extended TTL since they rarely change
+                        age <= Duration::from_secs(SERVER_PORT_CACHE_TTL_SECS)
                     } else {
-                        // keep entries unless they've aged out with low hit count
+                        // Regular ports: keep entries unless they've aged out with low hit count
                         !(age > Duration::from_secs(3600) && entry.hit_count < 10)
                     }
                 });
@@ -1070,10 +1201,14 @@ impl FlodbaddL7 {
                             && tcp_socket.remote_port == connection.src_port)
                 }
                 ProtocolSocketInfo::Udp(udp_socket) => {
-                    (udp_socket.local_addr == connection.src_ip
-                        && udp_socket.local_port == connection.src_port)
-                        || (udp_socket.local_addr == connection.dst_ip
-                            && udp_socket.local_port == connection.dst_port)
+                    // Enhanced UDP matching: UDP is bidirectional and sockets may not have remote addresses
+                    // Check if local_port matches either session port, and local_addr matches or is wildcard
+                    let port_matches = udp_socket.local_port == connection.src_port
+                        || udp_socket.local_port == connection.dst_port;
+                    let addr_matches = udp_socket.local_addr.is_unspecified()
+                        || udp_socket.local_addr == connection.src_ip
+                        || udp_socket.local_addr == connection.dst_ip;
+                    port_matches && addr_matches
                 }
             };
             if is_match {
@@ -1114,11 +1249,15 @@ impl FlodbaddL7 {
                     local_port_match && (local_addr_wildcard || local_addr_match)
                 }
                 ProtocolSocketInfo::Udp(udp_socket) => {
+                    // Enhanced UDP fuzzy matching: more aggressive matching for UDP
+                    // UDP sockets are bidirectional and may not have remote addresses set
                     let local_port_match = udp_socket.local_port == connection.src_port
                         || udp_socket.local_port == connection.dst_port;
                     let local_addr_wildcard = udp_socket.local_addr.is_unspecified();
                     let local_addr_match = udp_socket.local_addr == connection.src_ip
                         || udp_socket.local_addr == connection.dst_ip;
+                    // For UDP, accept if port matches and (addr is wildcard OR addr matches)
+                    // This is more permissive than TCP since UDP is stateless
                     local_port_match && (local_addr_wildcard || local_addr_match)
                 }
             };
@@ -1254,10 +1393,14 @@ impl FlodbaddL7 {
                                     && tcp_socket.remote_port == connection.src_port)
                         }
                         ProtocolSocketInfo::Udp(udp_socket) => {
-                            (udp_socket.local_addr == connection.src_ip
-                                && udp_socket.local_port == connection.src_port)
-                                || (udp_socket.local_addr == connection.dst_ip
-                                    && udp_socket.local_port == connection.dst_port)
+                            // Enhanced UDP matching: UDP is bidirectional and sockets may not have remote addresses
+                            // Check if local_port matches either session port, and local_addr matches or is wildcard
+                            let port_matches = udp_socket.local_port == connection.src_port
+                                || udp_socket.local_port == connection.dst_port;
+                            let addr_matches = udp_socket.local_addr.is_unspecified()
+                                || udp_socket.local_addr == connection.src_ip
+                                || udp_socket.local_addr == connection.dst_ip;
+                            port_matches && addr_matches
                         }
                     };
                     if is_match {

@@ -3525,10 +3525,6 @@ mod tests {
     }
 
     // Test uses get_admin_status
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "Skipped on Windows: default device/interface mapping differs with Npcap loopback"
-    )]
     #[tokio::test]
     #[serial] // Marked serial due to potential global state modification
     async fn test_default_device_has_interface() {

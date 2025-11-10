@@ -1453,6 +1453,33 @@ impl SessionAnalyzer {
         criticality.contains("blacklist:")
     }
 
+    /// Update specialized caches (anomalous_sessions, blacklisted_sessions) based on session criticality.
+    /// This ensures caches stay synchronized whenever a session is stored, regardless of where
+    /// the update comes from (analyze_sessions, capture layer, etc.).
+    ///
+    /// This eliminates the need for expensive scans in get_blacklisted_sessions() by maintaining
+    /// cache consistency at insertion time rather than at retrieval time.
+    fn update_session_caches(&self, session: &SessionInfo) {
+        let cache = SessionCache::with_full_session(session);
+
+        // Update anomalous sessions cache
+        if Self::is_anomalous(&session.criticality) {
+            self.anomalous_sessions
+                .insert(session.uid.clone(), cache.clone());
+        } else {
+            // Remove from collection if session is no longer anomalous
+            self.anomalous_sessions.remove(&session.uid);
+        }
+
+        // Update blacklisted sessions cache
+        if Self::is_blacklisted(&session.criticality) {
+            self.blacklisted_sessions.insert(session.uid.clone(), cache);
+        } else {
+            // Remove from collection if session is no longer blacklisted
+            self.blacklisted_sessions.remove(&session.uid);
+        }
+    }
+
     /// Analyze and update the criticality of a batch of sessions.
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
@@ -1777,30 +1804,8 @@ impl SessionAnalyzer {
                         SessionCache::with_full_session(session),
                     );
 
-                    // Even during warmup, check if sessions are already marked as anomalous or blacklisted
-                    // and add them to the appropriate collections. This is used for testing purposes.
-
-                    // Populate the anomalous sessions (sessions already marked as anomalous)
-                    if Self::is_anomalous(&session.criticality) {
-                        self.anomalous_sessions.insert(
-                            session.uid.clone(),
-                            SessionCache::with_full_session(session),
-                        );
-                    } else {
-                        // Remove from collection if session is no longer anomalous
-                        self.anomalous_sessions.remove(&session.uid);
-                    }
-
-                    // Populate the blacklisted sessions
-                    if Self::is_blacklisted(&session.criticality) {
-                        self.blacklisted_sessions.insert(
-                            session.uid.clone(),
-                            SessionCache::with_full_session(session),
-                        );
-                    } else {
-                        // Remove from collection if session is no longer blacklisted
-                        self.blacklisted_sessions.remove(&session.uid);
-                    }
+                    // Update specialized caches to keep them synchronized
+                    self.update_session_caches(session);
                 }
                 // If still in warm-up and not finalizing this call, return early.
                 // The current batch of sessions has been added to `recent_data` and training ensured.
@@ -2108,31 +2113,25 @@ impl SessionAnalyzer {
                             SessionCache::with_full_session(session),
                         );
 
+                        // Track if we found new anomalous/blacklisted sessions before updating caches
+                        let was_anomalous = self.anomalous_sessions.contains_key(&session.uid);
+                        let was_blacklisted = self.blacklisted_sessions.contains_key(&session.uid);
+
+                        // Update specialized caches to keep them synchronized
+                        self.update_session_caches(session);
+
+                        // Update counters and flags after cache update
                         if Self::is_anomalous(&session.criticality) {
-                            if !self.anomalous_sessions.contains_key(&session.uid) {
+                            if !was_anomalous {
                                 found_new_anomalous = true;
                             }
-                            self.anomalous_sessions.insert(
-                                session.uid.clone(),
-                                SessionCache::with_full_session(session),
-                            );
                             anom_count += 1;
-                        } else {
-                            // Remove from collection if session is no longer anomalous
-                            self.anomalous_sessions.remove(&session.uid);
                         }
                         if Self::is_blacklisted(&session.criticality) {
-                            if !self.blacklisted_sessions.contains_key(&session.uid) {
+                            if !was_blacklisted {
                                 found_new_blacklisted = true;
                             }
-                            self.blacklisted_sessions.insert(
-                                session.uid.clone(),
-                                SessionCache::with_full_session(session),
-                            );
                             bl_count += 1;
-                        } else {
-                            // Remove from collection if session is no longer blacklisted
-                            self.blacklisted_sessions.remove(&session.uid);
                         }
                         // Do not feed here; we already pushed raw inputs up-front.
                         if (idx + 1) % 500 == 0 {
@@ -2180,6 +2179,9 @@ impl SessionAnalyzer {
                             session.uid.clone(),
                             SessionCache::with_full_session(session),
                         );
+
+                        // Update specialized caches to keep them synchronized
+                        self.update_session_caches(session);
 
                         // Count sessions after any updates
                         if Self::is_anomalous(&session.criticality) {
@@ -2248,11 +2250,24 @@ impl SessionAnalyzer {
                 let buffer_size = model.recent_data.len();
                 let max_capacity = model.max_samples;
 
-                let score_dist = if has_forest && !model.recent_data.is_empty() {
+                // Only compute score distribution if we have a reasonable amount of data
+                // to avoid expensive allocations on every stats call
+                let score_dist = if has_forest && model.recent_data.len() >= 10 {
                     if let Some(forest) = &model.forest {
+                        // Limit computation to avoid excessive memory allocation
+                        // Sample up to 200 scores for distribution calculation
+                        let sample_size = model.recent_data.len().min(200);
+                        let step = if model.recent_data.len() > sample_size {
+                            model.recent_data.len() / sample_size
+                        } else {
+                            1
+                        };
+
                         let mut scores: Vec<f64> = model
                             .recent_data
                             .iter()
+                            .step_by(step)
+                            .take(sample_size)
                             .map(|features| forest.score(features))
                             .collect();
                         if !scores.is_empty() {
@@ -2532,11 +2547,15 @@ impl SessionAnalyzer {
     }
 
     /// Cleans up old entries from the anomalous, blacklisted, and all session maps.
+    /// Also cleans up expired entries from last_analysis_times to prevent unbounded growth.
     fn cleanup_tracked_sessions(&self) {
         let now = Utc::now();
         let anomalous_timeout = Duration::seconds(ANOMALOUS_SESSION_TIMEOUT);
         let blacklisted_timeout = Duration::seconds(BLACKLISTED_SESSION_TIMEOUT);
         let all_session_timeout = Duration::seconds(ALL_SESSION_TIMEOUT);
+        // Clean up last_analysis_times entries older than the analysis delay window
+        // This prevents unbounded growth while keeping recent analysis timestamps
+        let analysis_times_timeout = Duration::seconds(ANALYSIS_DELAY * 2);
 
         self.anomalous_sessions.retain(|_, session| {
             now.signed_duration_since(session.last_modified) < anomalous_timeout
@@ -2549,6 +2568,10 @@ impl SessionAnalyzer {
         self.all_sessions.retain(|_, session| {
             now.signed_duration_since(session.last_modified) < all_session_timeout
         });
+
+        // Clean up old analysis timestamps to prevent unbounded growth
+        self.last_analysis_times
+            .retain(|_, timestamp| now.signed_duration_since(*timestamp) < analysis_times_timeout);
     }
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.
@@ -2572,34 +2595,15 @@ impl SessionAnalyzer {
     }
 
     /// Retrieves a snapshot of currently tracked blacklisted sessions.
-    /// Also cleans up old entries and opportunistically refreshes the
-    /// `blacklisted_sessions` cache from `all_sessions`.
+    /// Also cleans up old entries.
     ///
-    /// Rationale: on some platforms the capture layer can update a session's
-    /// `criticality` field with a `blacklist:*` tag a few milliseconds before
-    /// the next scheduled `analyze_sessions()` run.  If a UI/API request is
-    /// made in that tiny window the session would be visible through
-    /// `get_sessions()` (which returns **all** sessions) but still missing from
-    /// `get_blacklisted_sessions()` because the dedicated blacklist cache has
-    /// not been refreshed yet.  By checking `all_sessions` on every call we
-    /// guarantee immediate consistency without waiting for the next analysis
-    /// cycle.
+    /// Note: Cache consistency is maintained by `update_session_caches()` which is called
+    /// whenever sessions are stored in `all_sessions`. This ensures that specialized caches
+    /// (anomalous_sessions, blacklisted_sessions) are always synchronized with `all_sessions`,
+    /// eliminating the need for expensive scans at retrieval time.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
         // Remove expired entries first.
         self.cleanup_tracked_sessions();
-
-        // Opportunistically add any newly-blacklisted sessions that are not yet
-        // present in the dedicated cache.
-        for entry in self.all_sessions.iter() {
-            let cache = entry.value();
-            if Self::is_blacklisted(&cache.criticality)
-                && !self.blacklisted_sessions.contains_key(&cache.uid)
-            {
-                // Insert a fresh cache entry so the cache is immediately consistent.
-                self.blacklisted_sessions
-                    .insert(cache.uid.clone(), cache.clone());
-            }
-        }
 
         self.blacklisted_sessions
             .iter()
