@@ -292,9 +292,9 @@ impl FlodbaddL7 {
                         .iter()
                         .map(|user| (user.id(), user.name()))
                         .collect();
-
-                    // Drop users_read early since we have owned copies
-                    drop(users_read);
+                    
+                    // Note: users_read is kept alive because uid_to_username borrows from it
+                    // It will be dropped when uid_to_username goes out of scope
 
                     Self::update_host_service_cache(
                         &socket_info,
@@ -412,7 +412,7 @@ impl FlodbaddL7 {
                         }
 
                         // Use a scope to ensure system_read_for_cache is dropped before immediate retry
-                        let (resolution_result, l7_data_and_time, cache_source) = {
+                        let (l7_data_and_time, cache_source) = {
                             let system_read_for_cache = system.read().await;
                             let result = Self::resolve_l7_data(
                                 &connection,
@@ -445,7 +445,7 @@ impl FlodbaddL7 {
                                 }
                             }
                             // Return tuple - system_read_for_cache is dropped here
-                            (result, l7_data_and_time, cache_source)
+                            (l7_data_and_time, cache_source)
                         };
 
                         if let Some((l7_data, process_start_time)) = l7_data_and_time {
