@@ -292,7 +292,7 @@ impl FlodbaddL7 {
                         .iter()
                         .map(|user| (user.id(), user.name()))
                         .collect();
-                    
+
                     // Note: users_read is kept alive because uid_to_username borrows from it
                     // It will be dropped when uid_to_username goes out of scope
 
