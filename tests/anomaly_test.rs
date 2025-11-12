@@ -136,6 +136,7 @@ fn generate_normal_web_traffic(count: usize) -> Vec<SessionInfo> {
             process_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
                 .to_string(),
             username: "user".to_string(),
+            ..SessionL7::default()
         });
 
         finalize_session_stats(&mut session);
@@ -185,6 +186,7 @@ fn generate_beacon_traffic(beacon_interval_seconds: i64, beacon_count: usize) ->
             process_name: "svchost.exe".to_string(),
             process_path: "C:\\Windows\\Temp\\svchost.exe".to_string(), // Wrong location!
             username: "SYSTEM".to_string(),
+            ..SessionL7::default()
         });
 
         finalize_session_stats(&mut session);
@@ -226,6 +228,7 @@ fn generate_exfiltration_traffic() -> Vec<SessionInfo> {
         process_name: "python3".to_string(),
         process_path: "/tmp/.hidden/exfil.py".to_string(), // Hidden directory!
         username: "www-data".to_string(), // Web server user using SSH is suspicious
+        ..SessionL7::default()
     });
 
     finalize_session_stats(&mut session);
@@ -269,6 +272,7 @@ fn generate_port_scan_traffic() -> Vec<SessionInfo> {
             process_name: "nmap".to_string(),
             process_path: "/usr/bin/nmap".to_string(),
             username: "root".to_string(),
+            ..SessionL7::default()
         });
 
         sessions.push(session);
@@ -307,6 +311,7 @@ fn generate_dns_tunnel_traffic() -> Vec<SessionInfo> {
             process_name: "iodine".to_string(), // DNS tunnel tool
             process_path: "/usr/local/bin/iodine".to_string(),
             username: "nobody".to_string(),
+            ..SessionL7::default()
         });
 
         sessions.push(session);
@@ -351,6 +356,7 @@ fn generate_cryptomining_traffic() -> Vec<SessionInfo> {
             process_name: "xmrig".to_string(), // Monero miner
             process_path: "/var/tmp/.xmr/xmrig".to_string(), // Hidden in temp
             username: "www-data".to_string(),  // Compromised web server
+            ..SessionL7::default()
         });
 
         sessions.push(session);
@@ -1099,6 +1105,7 @@ async fn test_minimal_anomaly() {
             process_name: format!("proc_{}", i % 10),
             process_path: format!("/usr/bin/proc_{}", i % 10),
             username: format!("user_{}", i % 5),
+            ..SessionL7::default()
         });
         s.dst_service = Some(format!("svc_{}", i % 5));
         s.stats.outbound_bytes = 1000 + rng.random_range(0..500);
@@ -1125,6 +1132,7 @@ async fn test_minimal_anomaly() {
         process_name: "evil".to_string(),
         process_path: "/tmp/evil".to_string(),
         username: "hacker".to_string(),
+        ..SessionL7::default()
     });
     anomaly.dst_service = Some("evil_svc".to_string());
     anomaly.stats.outbound_bytes = 100_000_000_000; // 100GB - massively large

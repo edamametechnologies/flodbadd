@@ -380,6 +380,7 @@ mod linux {
                         } else {
                             username
                         },
+                        ..SessionL7::default()
                     })
                 }
                 Err(e) => {

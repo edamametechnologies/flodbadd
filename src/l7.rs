@@ -1319,12 +1319,42 @@ impl FlodbaddL7 {
                     String::new()
                 };
                 let process_start_time = process.start_time();
+                let cmd = process
+                    .cmd()
+                    .iter()
+                    .map(|entry| entry.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                let cwd = process
+                    .cwd()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .filter(|p| !p.is_empty());
+                let memory = process.memory();
+                let run_time = process.run_time();
+                let cpu_usage = (process.cpu_usage() * 100.0).round() as u32;
+                let accumulated_cpu_time = process.accumulated_cpu_time();
+                let disk_stats = process.disk_usage();
+                let disk_usage = SessionProcessDiskUsage {
+                    total_written_bytes: disk_stats.total_written_bytes,
+                    written_bytes: disk_stats.written_bytes,
+                    total_read_bytes: disk_stats.total_read_bytes,
+                    read_bytes: disk_stats.read_bytes,
+                };
+                let open_files = process.open_files().map(|count| count as u64);
                 return Some((
                     SessionL7 {
                         pid: socket_pid,
                         process_name,
                         process_path,
                         username,
+                        cmd,
+                        cwd,
+                        memory,
+                        start_time: process_start_time,
+                        run_time,
+                        cpu_usage,
+                        accumulated_cpu_time,
+                        disk_usage,
+                        open_files,
                     },
                     process_start_time,
                 ));
@@ -1622,6 +1652,7 @@ mod tests {
             process_name: "test_process".to_string(),
             process_path: "/usr/bin/test_process".to_string(),
             username: "test_user".to_string(),
+            ..SessionL7::default()
         };
 
         let port_protocol = (8080, Protocol::TCP);

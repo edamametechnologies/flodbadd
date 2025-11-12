@@ -29,12 +29,29 @@ pub struct Session {
     pub dst_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
+pub struct SessionProcessDiskUsage {
+    pub total_written_bytes: u64,
+    pub written_bytes: u64,
+    pub total_read_bytes: u64,
+    pub read_bytes: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct SessionL7 {
     pub pid: u32,
     pub process_name: String,
     pub process_path: String,
     pub username: String,
+    pub cmd: Vec<String>,
+    pub cwd: Option<String>,
+    pub memory: u64,
+    pub start_time: u64,
+    pub run_time: u64,
+    pub cpu_usage: u32,
+    pub accumulated_cpu_time: u64,
+    pub disk_usage: SessionProcessDiskUsage,
+    pub open_files: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
@@ -322,6 +339,20 @@ pub fn sanitized_session_info_backend(session_info: SessionInfo) -> SessionInfoB
         }
 
         false
+    }
+
+    #[allow(dead_code)] // Sanitization logic preserved for reference; actual sanitization handled in edamame_core
+    fn sanitize_process_component(value: &str, username: &str) -> String {
+        if value.is_empty() {
+            return value.to_string();
+        }
+
+        let mut sanitized = value.replace(username, "user");
+        let unquoted = username.replace('"', "").replace('\'', "").replace('`', "");
+        if unquoted != username {
+            sanitized = sanitized.replace(&unquoted, "user");
+        }
+        sanitized
     }
 
     // Sanitize the username if it's not a system account
@@ -1179,6 +1210,7 @@ mod tests {
                     process_name: "test_process".to_string(),
                     process_path: input_path.to_string(),
                     username: input_username.to_string(),
+                    ..SessionL7::default()
                 }),
                 src_asn: None,
                 dst_asn: None,
@@ -1375,6 +1407,7 @@ mod tests {
                     process_name: "edge_test".to_string(),
                     process_path: path.to_string(),
                     username: username.to_string(),
+                    ..SessionL7::default()
                 }),
                 src_asn: None,
                 dst_asn: None,
@@ -1731,6 +1764,7 @@ mod tests {
                 process_name: "test_process".to_string(),
                 process_path: "/usr/bin/test_process".to_string(),
                 username: "test_user".to_string(),
+                ..SessionL7::default()
             }),
             src_asn: None,
             dst_asn: Some(Record {
