@@ -778,6 +778,11 @@ impl FlodbaddCapture {
             };
         }
 
+        // Process/user labels captured from sessions are not reliable for whitelists.
+        for endpoint in combined_endpoints.iter_mut() {
+            endpoint.process = None;
+        }
+
         // 3. De-duplicate endpoints (same logic as in Whitelists::new_from_sessions)
         let mut unique = std::collections::HashSet::new();
         combined_endpoints.retain(|ep| {
@@ -789,7 +794,6 @@ impl FlodbaddCapture {
                 ep.as_number,
                 ep.as_country.clone(),
                 ep.as_owner.clone(),
-                ep.process.clone(),
             );
             unique.insert(fingerprint)
         });

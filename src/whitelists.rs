@@ -210,8 +210,9 @@ impl Whitelists {
                 as_number: None, // Session doesn't have AS info
                 as_country: None,
                 as_owner: None,
-                // Include the process info if available
-                process: session.l7.as_ref().map(|l7| l7.process_name.clone()),
+                // Process/user info attached to sessions is highly volatile; omit it
+                // so that generated custom whitelists stay stable across runs.
+                process: None,
                 description: Some(format!(
                     "Auto-generated from session: {}:{} -> {}:{}",
                     session.session.src_ip,
@@ -233,7 +234,6 @@ impl Whitelists {
                 endpoint.as_number,
                 endpoint.as_country.clone(),
                 endpoint.as_owner.clone(),
-                endpoint.process.clone(),
             );
 
             // Only add the endpoint if we haven't seen this fingerprint before
