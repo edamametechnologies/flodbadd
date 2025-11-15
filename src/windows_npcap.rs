@@ -7,6 +7,30 @@ pub const NPCAP_INSTALLER_URL: &str =
 pub const NPCAP_SDK_URL: &str =
     "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-sdk-0.1.zip";
 
+pub fn ensure_wayback_raw(url: &str) -> String {
+    if !url.contains("web.archive.org/web/") || url.contains("id_/") {
+        return url.to_string();
+    }
+
+    const MARKER: &str = "/web/";
+    if let Some(idx) = url.find(MARKER) {
+        let prefix = &url[..idx + MARKER.len()];
+        let suffix = &url[idx + MARKER.len()..];
+        if let Some(pos) = suffix.find('/') {
+            let (timestamp, remainder) = suffix.split_at(pos);
+            if timestamp.ends_with("id_") {
+                return url.to_string();
+            }
+            if remainder.len() > 1 {
+                let remainder = &remainder[1..];
+                return format!("{prefix}{timestamp}id_/{remainder}");
+            }
+        }
+    }
+
+    url.to_string()
+}
+
 // --- Detection helpers ---
 
 fn find_npcap_runtime_dir_internal() -> Option<PathBuf> {
@@ -106,12 +130,16 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
 
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir.join("npcap-installer.exe");
-    let url = installer_url.unwrap_or_else(|| NPCAP_INSTALLER_URL.to_string());
+    let raw_url = installer_url.unwrap_or_else(|| NPCAP_INSTALLER_URL.to_string());
+    let url = ensure_wayback_raw(&raw_url);
 
     let response = reqwest::blocking::get(&url).map_err(|e| format!("download failed: {}", e))?;
     let bytes = response
         .bytes()
         .map_err(|e| format!("read failed: {}", e))?;
+    if !bytes.starts_with(b"MZ") {
+        return Err("downloaded installer is not a valid Windows executable (missing MZ header)".into());
+    }
 
     {
         let mut f =

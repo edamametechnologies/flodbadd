@@ -276,8 +276,9 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     use std::io::Write;
 
     // Allow overriding the SDK download URL via env var, default to archived link
-    let url =
+    let raw_url =
         env::var("NPCAP_SDK_URL").unwrap_or_else(|_| build_npcap_utils::NPCAP_SDK_URL.to_string());
+    let url = build_npcap_utils::ensure_wayback_raw(&raw_url);
     let zip_path = npcap_dir.with_extension("zip");
 
     println!("cargo:warning=[Npcap SDK] Downloading from: {}", url);
@@ -286,6 +287,13 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     let response = reqwest::blocking::get(url)?;
     println!("cargo:warning=[Npcap SDK] Received HTTP response, reading bytes...");
     let bytes = response.bytes()?;
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Downloaded SDK is not a valid zip (missing PK header); set NPCAP_SDK_URL to a direct zip payload",
+        )
+        .into());
+    }
     println!(
         "cargo:warning=[Npcap SDK] Downloaded {} bytes ({:.2} MB)",
         bytes.len(),
