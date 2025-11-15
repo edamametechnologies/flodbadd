@@ -21,6 +21,11 @@ mod build_npcap_install;
 
 // All Windows helpers/constants are sourced from build_npcap_utils
 
+#[cfg(target_os = "windows")]
+fn emit_npcap_metadata(key: &str, path: &Path) {
+    println!("cargo:{key}={}", path.display());
+}
+
 fn main() {
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
@@ -72,6 +77,7 @@ fn main() {
 
             // Try installed SDK first (Program Files), then fallback to downloaded one
             let mut linked = false;
+            let mut primary_lib_dir: Option<PathBuf> = None;
             println!("cargo:warning=[Npcap SDK] Searching for installed SDK in Program Files...");
             if let Some(installed_lib_dir) = find_installed_npcap_sdk_lib_dir(lib_subdir) {
                 println!(
@@ -82,6 +88,9 @@ fn main() {
                     "cargo:rustc-link-search=native={}",
                     installed_lib_dir.display()
                 );
+                if primary_lib_dir.is_none() {
+                    primary_lib_dir = Some(installed_lib_dir.clone());
+                }
                 linked = true;
             } else {
                 println!("cargo:warning=[Npcap SDK] No installed SDK found in Program Files");
@@ -95,6 +104,9 @@ fn main() {
                         lib_dir.display()
                     );
                     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+                    if primary_lib_dir.is_none() {
+                        primary_lib_dir = Some(lib_dir.clone());
+                    }
                     linked = true;
                 } else {
                     println!(
@@ -115,6 +127,9 @@ fn main() {
             if linked {
                 println!("cargo:rustc-link-lib=dylib=Packet");
                 println!("cargo:rustc-link-lib=dylib=wpcap");
+                if let Some(lib_dir) = primary_lib_dir.as_ref() {
+                    emit_npcap_metadata("npcap_lib_dir", lib_dir);
+                }
                 // On MSVC, use delay-load so we can set DLL search path at runtime before first use
                 #[cfg(target_env = "msvc")]
                 {
@@ -129,6 +144,7 @@ fn main() {
                     // Add to link search path for runtime DLL resolution
                     println!("cargo:rustc-link-search=native={}", npcap_runtime.display());
                     println!("cargo:rustc-env=NPCAP_DLL_PATH={}", npcap_runtime.display());
+                    emit_npcap_metadata("npcap_runtime_dir", &npcap_runtime);
                     println!(
                         "cargo:warning=[Npcap SDK] ✓ Runtime DLL path: {}",
                         npcap_runtime.display()

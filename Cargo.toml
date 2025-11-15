@@ -8,6 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/edamametechnologies/flodbadd"
 keywords = ["network", "scanning", "security", "monitoring", "lan"]
 categories = ["network-programming", "system-monitoring"]
+links = "flodbadd_npcap"
 
 [lints.rust]
 async_fn_in_trait = "allow"
