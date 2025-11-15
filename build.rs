@@ -36,9 +36,18 @@ fn main() {
         // Install Npcap SDK if it is not detected
         println!("cargo:rerun-if-env-changed=NPCAP_SDK_PATH");
         if let Ok(npcap_path) = env::var("NPCAP_SDK_PATH") {
-            println!("cargo:rustc-link-search=native={}/Lib/x64", npcap_path);
+            let npcap_lib = Path::new(&npcap_path).join("Lib").join("x64");
+            println!("cargo:rustc-link-search=native={}", npcap_lib.display());
             println!("cargo:rustc-link-lib=dylib=Packet");
             println!("cargo:rustc-link-lib=dylib=wpcap");
+            emit_npcap_metadata("npcap_lib_dir", &npcap_lib);
+
+            let runtime_dir = build_npcap_utils::get_npcap_dir();
+            if runtime_dir.exists() {
+                println!("cargo:rustc-link-search=native={}", runtime_dir.display());
+                println!("cargo:rustc-env=NPCAP_DLL_PATH={}", runtime_dir.display());
+                emit_npcap_metadata("npcap_runtime_dir", &runtime_dir);
+            }
             println!("Using user-provided Npcap SDK at: {}", npcap_path);
         } else {
             println!("cargo:warning=[Npcap SDK] NPCAP_SDK_PATH not set, attempting download");
@@ -117,6 +126,9 @@ fn main() {
                     let fallback = npcap_dir.join("Lib").join(lib_subdir);
                     if contains_wpcap_and_packet(&fallback) {
                         println!("cargo:rustc-link-search=native={}", fallback.display());
+                        if primary_lib_dir.is_none() {
+                            primary_lib_dir = Some(fallback.clone());
+                        }
                         linked = true;
                     } else {
                         println!("cargo:warning=No {} libraries found in downloaded SDK; set NPCAP_SDK_PATH to a matching SDK (e.g., C:\\Program Files\\Npcap\\SDK) or set NPCAP_SDK_URL to a zip that contains Lib\\{}", lib_subdir, lib_subdir);
