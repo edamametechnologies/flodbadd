@@ -296,19 +296,48 @@ fn contains_wpcap_and_packet(dir: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn locate_npcap_lib_dir(root: &Path, lib_subdir: &str) -> Option<PathBuf> {
+    let preferred = root.join("Lib").join(lib_subdir);
+    if contains_wpcap_and_packet(&preferred) {
+        return Some(preferred);
+    }
+
+    let target_lower = lib_subdir.to_ascii_lowercase();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.to_ascii_lowercase() == target_lower)
+            .unwrap_or(false)
+            && contains_wpcap_and_packet(&dir)
+        {
+            return Some(dir);
+        }
+
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
 fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
     let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {}", e))?;
     let sdk_root = Path::new(&out_dir).join("npcap-sdk");
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
-    let lib_subdir = if target_arch == "x86_64" {
-        "x64"
-    } else {
-        "x86"
-    };
-    let lib_dir = sdk_root.join("Lib").join(lib_subdir);
+    let lib_subdir = if target_arch == "x86_64" { "x64" } else { "x86" };
 
-    if contains_wpcap_and_packet(&lib_dir) {
-        return Ok(lib_dir);
+    if let Some(existing) = locate_npcap_lib_dir(&sdk_root, lib_subdir) {
+        return Ok(existing);
     }
 
     if sdk_root.exists() {
@@ -372,8 +401,8 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
     }
     let _ = std::fs::remove_file(&zip_path);
 
-    if contains_wpcap_and_packet(&lib_dir) {
-        Ok(lib_dir)
+    if let Some(found) = locate_npcap_lib_dir(&sdk_root, lib_subdir) {
+        Ok(found)
     } else {
         Err(format!(
             "Npcap SDK downloaded to {} but Lib/{} is missing wpcap.lib",
