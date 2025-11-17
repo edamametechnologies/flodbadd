@@ -127,6 +127,7 @@ windows = { version = "0.62.0", features = [
     "Win32_NetworkManagement_Ndis", 
     "Win32_NetworkManagement_NetManagement" 
 ] }
+zip = "5.1.0"
 
 # Linux eBPF
 [target.'cfg(target_os = "linux")'.dependencies]
