@@ -334,7 +334,11 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
     let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {}", e))?;
     let sdk_root = Path::new(&out_dir).join("npcap-sdk");
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
-    let lib_subdir = if target_arch == "x86_64" { "x64" } else { "x86" };
+    let lib_subdir = if target_arch == "x86_64" {
+        "x64"
+    } else {
+        "x86"
+    };
 
     if let Some(existing) = locate_npcap_lib_dir(&sdk_root, lib_subdir) {
         return Ok(existing);
