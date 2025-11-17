@@ -1,8 +1,8 @@
-use std::env;
 #[cfg(target_os = "windows")]
 use std::fs;
 #[cfg(target_os = "windows")]
-use std::io::{Read, Write};
+use std::io::Write;
+use std::env;
 use std::path::{Path, PathBuf};
 
 // Public constants (used by build.rs and callers)
@@ -291,6 +291,11 @@ pub fn configure_build_linking_from_metadata() {
 pub fn configure_build_linking_from_metadata() {}
 
 #[cfg(target_os = "windows")]
+fn contains_wpcap_and_packet(dir: &Path) -> bool {
+    dir.is_dir() && dir.join("wpcap.lib").is_file() && dir.join("Packet.lib").is_file()
+}
+
+#[cfg(target_os = "windows")]
 fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
     let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {}", e))?;
     let sdk_root = Path::new(&out_dir).join("npcap-sdk");
@@ -350,7 +355,7 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("failed to read SDK zip entry {}: {}", i, e))?;
-        let outpath = sdk_root.join(entry.sanitized_name());
+        let outpath = sdk_root.join(entry.mangled_name());
         if entry.is_dir() {
             fs::create_dir_all(&outpath)
                 .map_err(|e| format!("failed to create dir {}: {}", outpath.display(), e))?;
