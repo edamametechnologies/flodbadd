@@ -1,5 +1,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::io::{Read, Write};
+#[cfg(target_os = "windows")]
+use std::fs;
 
 // Public constants (used by build.rs and callers)
 pub const NPCAP_INSTALLER_URL: &str =
@@ -239,10 +243,22 @@ pub fn configure_build_linking_from_metadata() {
         println!("cargo:rustc-link-search=native={lib_dir}");
         sdk_path_available = true;
     } else {
-        println!(
-            "cargo:warning=Npcap SDK library path missing ({}). wpcap.lib may be unresolved.",
-            BUILD_ENV_NPCAP_LIB_DIR
-        );
+        match ensure_local_npcap_sdk_lib_dir() {
+            Ok(local_lib_dir) => {
+                println!(
+                    "cargo:warning=[Npcap SDK] Using locally downloaded SDK at {}",
+                    local_lib_dir.display()
+                );
+                println!("cargo:rustc-link-search=native={}", local_lib_dir.display());
+                sdk_path_available = true;
+            }
+            Err(err) => {
+                println!(
+                    "cargo:warning=Npcap SDK library path missing ({}). wpcap.lib may be unresolved. {}",
+                    BUILD_ENV_NPCAP_LIB_DIR, err
+                );
+            }
+        }
     }
 
     if let Ok(runtime_dir) = env::var(BUILD_ENV_NPCAP_RUNTIME_DIR) {
@@ -273,6 +289,74 @@ pub fn configure_build_linking_from_metadata() {
 
 #[cfg(not(target_os = "windows"))]
 pub fn configure_build_linking_from_metadata() {}
+
+#[cfg(target_os = "windows")]
+fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
+    let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {}", e))?;
+    let sdk_root = Path::new(&out_dir).join("npcap-sdk");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
+    let lib_subdir = if target_arch == "x86_64" { "x64" } else { "x86" };
+    let lib_dir = sdk_root.join("Lib").join(lib_subdir);
+
+    if contains_wpcap_and_packet(&lib_dir) {
+        return Ok(lib_dir);
+    }
+
+    if sdk_root.exists() {
+        fs::remove_dir_all(&sdk_root)
+            .map_err(|e| format!("failed to clean existing Npcap SDK dir {}: {}", sdk_root.display(), e))?;
+    }
+    fs::create_dir_all(&sdk_root)
+        .map_err(|e| format!("failed to create Npcap SDK dir {}: {}", sdk_root.display(), e))?;
+
+    let zip_path = sdk_root.with_extension("zip");
+    let url = ensure_wayback_raw(NPCAP_SDK_URL);
+    let response = reqwest::blocking::get(&url).map_err(|e| format!("Npcap SDK download failed: {}", e))?;
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("Npcap SDK download read failed: {}", e))?;
+    {
+        let mut file = std::fs::File::create(&zip_path)
+            .map_err(|e| format!("failed to create SDK zip {}: {}", zip_path.display(), e))?;
+        file.write_all(&bytes)
+            .map_err(|e| format!("failed to write SDK zip {}: {}", zip_path.display(), e))?;
+    }
+
+    let file = std::fs::File::open(&zip_path)
+        .map_err(|e| format!("failed to open SDK zip {}: {}", zip_path.display(), e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("failed to read SDK zip archive {}: {}", zip_path.display(), e))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("failed to read SDK zip entry {}: {}", i, e))?;
+        let outpath = sdk_root.join(entry.sanitized_name());
+        if entry.is_dir() {
+            fs::create_dir_all(&outpath)
+                .map_err(|e| format!("failed to create dir {}: {}", outpath.display(), e))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir {}: {}", parent.display(), e))?;
+            }
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("failed to create file {}: {}", outpath.display(), e))?;
+            std::io::copy(&mut entry, &mut outfile)
+                .map_err(|e| format!("failed to extract {}: {}", outpath.display(), e))?;
+        }
+    }
+    let _ = std::fs::remove_file(&zip_path);
+
+    if contains_wpcap_and_packet(&lib_dir) {
+        Ok(lib_dir)
+    } else {
+        Err(format!(
+            "Npcap SDK downloaded to {} but Lib/{} is missing wpcap.lib",
+            sdk_root.display(),
+            lib_subdir
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {
