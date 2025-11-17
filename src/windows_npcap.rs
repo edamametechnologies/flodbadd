@@ -1,8 +1,8 @@
+use std::env;
 #[cfg(target_os = "windows")]
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::io::Write;
-use std::env;
 use std::path::{Path, PathBuf};
 
 // Public constants (used by build.rs and callers)
