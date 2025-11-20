@@ -184,23 +184,64 @@ impl Whitelists {
     pub fn new_from_sessions(sessions: &Vec<SessionInfo>) -> Self {
         let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
+        // Helper function to check if an AS owner indicates a CDN/cloud provider
+        // These providers use shared IPs across many domains, so we require domain resolution
+        fn is_cdn_provider(owner: &str) -> bool {
+            let owner_lower = owner.to_lowercase();
+            owner_lower.contains("fastly")
+                || owner_lower.contains("cloudflare")
+                || owner_lower.contains("amazon")
+                || owner_lower.contains("aws")
+                || owner_lower.contains("google")
+                || owner_lower.contains("microsoft")
+                || owner_lower.contains("azure")
+                || owner_lower.contains("akamai")
+                || owner_lower.contains("cloudfront")
+                || owner_lower.contains("cdn")
+        }
+
         // Create a whitelist with the current sessions
         let mut endpoints = Vec::new();
         // HashSet to track unique endpoint fingerprints for deduplication
         let mut unique_fingerprints = std::collections::HashSet::new();
 
         for session in sessions {
+            // Check if domain is unresolved
+            let domain_unresolved = session.dst_domain == Some("Unknown".to_string())
+                || session.dst_domain == Some("Resolving".to_string());
+
+            // If domain is unresolved, check if this is a CDN/cloud provider
+            // CDN IPs are shared across many domains, so we must require domain resolution
+            // to prevent false positives (e.g., whitelisting one Fastly POP allows all Fastly domains)
+            // NOTE: CDN sessions WITH resolved domains will pass through and be whitelisted normally
+            if domain_unresolved {
+                if let Some(ref asn) = session.dst_asn {
+                    if is_cdn_provider(&asn.owner) {
+                        // Skip CDN sessions without resolved domain - they need domain-based whitelisting
+                        // CDN sessions with resolved domains will continue past this point and be included
+                        warn!(
+                            "Skipping CDN session without resolved domain: {}:{} -> {}:{} (AS owner: {})",
+                            session.session.src_ip,
+                            session.session.src_port,
+                            session.session.dst_ip,
+                            session.session.dst_port,
+                            asn.owner
+                        );
+                        continue;
+                    }
+                }
+            }
+
             let endpoint = WhitelistEndpoint {
                 // Do not include the domain if set to "Unknown" or "Resolving"
-                domain: if session.dst_domain == Some("Unknown".to_string())
-                    || session.dst_domain == Some("Resolving".to_string())
-                {
+                domain: if domain_unresolved {
                     None
                 } else {
                     session.dst_domain.clone()
                 },
                 domains: None,
                 // Always include the IP address as a fallback to when the domain is set but not resolved
+                // (but only for non-CDN providers, as CDNs are skipped above)
                 ip: Some(session.session.dst_ip.to_string()),
                 // Always include the port
                 port: Some(session.session.dst_port),
@@ -2669,6 +2710,290 @@ mod tests {
         //  - whitelist_c: all endpoints new (1)
         //  => different = 3 / total 5 = 60%
         assert_eq!(result, 60.0);
+    }
+
+    /// Test that CDN sessions without resolved domains are skipped
+    #[test]
+    fn test_new_from_sessions_skips_cdn_without_domain() {
+        use crate::asn_db::Record;
+        use crate::sessions::{
+            Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+        };
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+
+        // Test case 1: CDN (Fastly) session with unresolved domain - should be SKIPPED
+        let cdn_unresolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50000,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 110, 133)), // Fastly IP
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Unknown".to_string()), // Unresolved domain
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 54113,
+                owner: "FASTLY".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        // Test case 2: CDN (Fastly) session with resolved domain - should be INCLUDED
+        let cdn_resolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50001,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 108, 133)), // Different Fastly IP
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("gist.githubusercontent.com".to_string()), // Resolved domain
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 54113,
+                owner: "FASTLY".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        // Test case 3: Non-CDN session with unresolved domain - should be INCLUDED (IP-only)
+        let non_cdn_unresolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50002,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), // Internal IP
+                dst_port: 8080,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Resolving".to_string()), // Unresolved domain
+            dst_service: Some("http".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 64496, // Private ASN
+                owner: "Example ISP".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        // Test case 4: Non-CDN session with resolved domain - should be INCLUDED
+        let non_cdn_resolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50003,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), // example.com
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("example.com".to_string()), // Resolved domain
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 15133,
+                owner: "Edgecast Networks Inc.".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        // Test case 5: Session with no ASN info and unresolved domain - should be INCLUDED (backwards compatibility)
+        let no_asn_unresolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50004,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)),
+                dst_port: 22,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Unknown".to_string()),
+            dst_service: Some("ssh".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: None, // No ASN info
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        // Test case 6: Cloudflare CDN with unresolved domain - should be SKIPPED
+        let cloudflare_unresolved = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50005,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)), // Cloudflare IP
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Resolving".to_string()),
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 13335,
+                owner: "CLOUDFLARE".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        let sessions = vec![
+            cdn_unresolved,
+            cdn_resolved,
+            non_cdn_unresolved,
+            non_cdn_resolved,
+            no_asn_unresolved,
+            cloudflare_unresolved,
+        ];
+
+        let whitelist = Whitelists::new_from_sessions(&sessions);
+        let whitelist_json = WhitelistsJSON::from(whitelist);
+
+        // Should have 4 endpoints (CDN unresolved sessions should be skipped):
+        // 1. cdn_resolved (gist.githubusercontent.com)
+        // 2. non_cdn_unresolved (10.0.0.1:8080 - IP-only)
+        // 3. non_cdn_resolved (example.com)
+        // 4. no_asn_unresolved (192.168.1.200:22 - IP-only)
+        assert_eq!(
+            whitelist_json.whitelists.len(),
+            1,
+            "Should have one whitelist"
+        );
+        let endpoints = &whitelist_json.whitelists[0].endpoints;
+        assert_eq!(
+            endpoints.len(),
+            4,
+            "Should have 4 endpoints (CDN unresolved sessions skipped)"
+        );
+
+        // Verify cdn_resolved is included with domain
+        assert!(
+            endpoints.iter().any(
+                |ep| ep.domain == Some("gist.githubusercontent.com".to_string())
+                    && ep.ip == Some("185.199.108.133".to_string())
+            ),
+            "CDN session with resolved domain should be included"
+        );
+
+        // Verify non_cdn_unresolved is included (IP-only)
+        assert!(
+            endpoints.iter().any(|ep| ep.domain.is_none()
+                && ep.ip == Some("10.0.0.1".to_string())
+                && ep.port == Some(8080)),
+            "Non-CDN session with unresolved domain should be included (IP-only)"
+        );
+
+        // Verify non_cdn_resolved is included with domain
+        assert!(
+            endpoints
+                .iter()
+                .any(|ep| ep.domain == Some("example.com".to_string())
+                    && ep.ip == Some("93.184.216.34".to_string())),
+            "Non-CDN session with resolved domain should be included"
+        );
+
+        // Verify no_asn_unresolved is included (IP-only, backwards compatibility)
+        assert!(
+            endpoints.iter().any(|ep| ep.domain.is_none()
+                && ep.ip == Some("192.168.1.200".to_string())
+                && ep.port == Some(22)),
+            "Session with no ASN and unresolved domain should be included (backwards compatibility)"
+        );
+
+        // Verify CDN unresolved sessions are NOT included
+        assert!(
+            !endpoints
+                .iter()
+                .any(|ep| ep.ip == Some("185.199.110.133".to_string())),
+            "CDN session (Fastly) without resolved domain should be skipped"
+        );
+        assert!(
+            !endpoints
+                .iter()
+                .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
+            "CDN session (Cloudflare) without resolved domain should be skipped"
+        );
     }
 }
 
