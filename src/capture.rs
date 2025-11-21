@@ -1645,11 +1645,11 @@ impl FlodbaddCapture {
 
         // Collect sessions that need domain resolution (current sessions + finished sessions without domains)
         let mut sessions_to_resolve: Vec<Session> = current_sessions.clone();
-        
+
         // Create a HashSet for efficient lookup of current sessions
         use std::collections::HashSet;
         let current_sessions_set: HashSet<&Session> = current_sessions.iter().collect();
-        
+
         // Also add finished sessions that don't have domains yet
         for entry in sessions.iter() {
             let session_info = entry.value();

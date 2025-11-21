@@ -217,7 +217,9 @@ impl Whitelists {
         // Helper function to check if an AS owner indicates a CDN/cloud provider
         fn is_cdn_provider(owner: &str, cdn_providers: &[&str]) -> bool {
             let owner_lower = owner.to_lowercase();
-            cdn_providers.iter().any(|&provider| owner_lower.contains(provider))
+            cdn_providers
+                .iter()
+                .any(|&provider| owner_lower.contains(provider))
         }
 
         // Create a whitelist with the current sessions
@@ -3032,7 +3034,7 @@ mod tests {
         // Test all CDN providers with unresolved domains - all should be skipped
         // Automatically adapts to changes in CDN_PROVIDERS const
         use std::collections::HashMap;
-        
+
         // Build HashMap from const test data for efficient lookup
         let known_provider_test_data: HashMap<&str, (&str, &str)> = CDN_PROVIDER_TEST_DATA
             .iter()
@@ -3148,8 +3150,10 @@ mod tests {
 
         // Verify the resolved CDN session is included
         assert!(
-            endpoints.iter().any(|ep| ep.domain == Some("example.com".to_string())
-                && ep.ip == Some("185.199.108.133".to_string())),
+            endpoints
+                .iter()
+                .any(|ep| ep.domain == Some("example.com".to_string())
+                    && ep.ip == Some("185.199.108.133".to_string())),
             "Resolved CDN session should be included"
         );
 
