@@ -29,6 +29,36 @@ static WHITELIST_REVISION: AtomicU64 = AtomicU64::new(0);
 // Constants
 const WHITELISTS_FILE_NAME: &str = "whitelists-db.json";
 
+// CDN/cloud providers that use shared IPs across many domains
+// These require domain resolution before whitelisting to prevent false positives
+const CDN_PROVIDERS: &[&str] = &[
+    "fastly",
+    "cloudflare",
+    "amazon",
+    "aws",
+    "google",
+    "microsoft",
+    "azure",
+    "akamai",
+    "cloudfront",
+    "cdn",
+];
+
+// Test data for known CDN providers (AS owner name, test IP address)
+#[cfg(test)]
+const CDN_PROVIDER_TEST_DATA: &[(&str, &str, &str)] = &[
+    ("fastly", "FASTLY", "185.199.110.133"),
+    ("cloudflare", "Cloudflare", "104.16.0.1"),
+    ("amazon", "Amazon Technologies Inc.", "52.84.0.1"),
+    ("aws", "AWS", "3.5.0.1"),
+    ("google", "Google LLC", "8.8.8.8"),
+    ("microsoft", "Microsoft Corporation", "20.190.0.1"),
+    ("azure", "Microsoft Azure", "40.76.0.1"),
+    ("akamai", "Akamai Technologies", "23.185.0.1"),
+    ("cloudfront", "Amazon CloudFront", "13.32.0.1"),
+    ("cdn", "Some CDN Provider", "1.2.3.4"),
+];
+
 /// Endpoint rule supporting domain(s), IPs and ports with list/range semantics.
 ///
 /// Notes:
@@ -185,19 +215,9 @@ impl Whitelists {
         let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
         // Helper function to check if an AS owner indicates a CDN/cloud provider
-        // These providers use shared IPs across many domains, so we require domain resolution
-        fn is_cdn_provider(owner: &str) -> bool {
+        fn is_cdn_provider(owner: &str, cdn_providers: &[&str]) -> bool {
             let owner_lower = owner.to_lowercase();
-            owner_lower.contains("fastly")
-                || owner_lower.contains("cloudflare")
-                || owner_lower.contains("amazon")
-                || owner_lower.contains("aws")
-                || owner_lower.contains("google")
-                || owner_lower.contains("microsoft")
-                || owner_lower.contains("azure")
-                || owner_lower.contains("akamai")
-                || owner_lower.contains("cloudfront")
-                || owner_lower.contains("cdn")
+            cdn_providers.iter().any(|&provider| owner_lower.contains(provider))
         }
 
         // Create a whitelist with the current sessions
@@ -216,7 +236,7 @@ impl Whitelists {
             // NOTE: CDN sessions WITH resolved domains will pass through and be whitelisted normally
             if domain_unresolved {
                 if let Some(ref asn) = session.dst_asn {
-                    if is_cdn_provider(&asn.owner) {
+                    if is_cdn_provider(&asn.owner, CDN_PROVIDERS) {
                         // Skip CDN sessions without resolved domain - they need domain-based whitelisting
                         // CDN sessions with resolved domains will continue past this point and be included
                         warn!(
@@ -2993,6 +3013,217 @@ mod tests {
                 .iter()
                 .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
             "CDN session (Cloudflare) without resolved domain should be skipped"
+        );
+    }
+
+    /// Test that all CDN providers are detected correctly
+    #[test]
+    fn test_cdn_provider_detection() {
+        use crate::asn_db::Record;
+        use crate::sessions::{
+            Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+        };
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+        let mut sessions = Vec::new();
+
+        // Test all CDN providers with unresolved domains - all should be skipped
+        // Automatically adapts to changes in CDN_PROVIDERS const
+        use std::collections::HashMap;
+        
+        // Build HashMap from const test data for efficient lookup
+        let known_provider_test_data: HashMap<&str, (&str, &str)> = CDN_PROVIDER_TEST_DATA
+            .iter()
+            .map(|(provider, owner, ip)| (*provider, (*owner, *ip)))
+            .collect();
+
+        // Build test data from CDN_PROVIDERS const - automatically includes all providers
+        // Uses known test data if available, otherwise generates default test data
+        let cdn_provider_test_data: Vec<(String, String)> = CDN_PROVIDERS
+            .iter()
+            .map(|provider| {
+                if let Some((owner_name, ip)) = known_provider_test_data.get(provider) {
+                    (owner_name.to_string(), ip.to_string())
+                } else {
+                    // Auto-generate test data for new providers not in the known list
+                    // Capitalize provider name and use a default IP pattern
+                    let owner_name = if provider.len() > 1 {
+                        format!("{}{}", provider[..1].to_uppercase(), &provider[1..])
+                    } else {
+                        provider.to_uppercase()
+                    };
+                    // Generate a unique test IP based on provider name hash
+                    let ip_octet = (provider.len() % 255) as u8;
+                    let ip = format!("192.168.1.{}", ip_octet);
+                    (owner_name, ip)
+                }
+            })
+            .collect();
+
+        for (owner, ip_str) in &cdn_provider_test_data {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            sessions.push(SessionInfo {
+                session: Session {
+                    protocol: Protocol::TCP,
+                    src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                    src_port: 50000,
+                    dst_ip: ip,
+                    dst_port: 443,
+                },
+                status: SessionStatus::default(),
+                stats: SessionStats::new(now),
+                is_local_src: true,
+                is_local_dst: false,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: Some("Unknown".to_string()),
+                dst_service: Some("https".to_string()),
+                l7: None,
+                src_asn: None,
+                dst_asn: Some(Record {
+                    as_number: 12345,
+                    owner: owner.clone(),
+                    country: "US".to_string(),
+                }),
+                is_whitelisted: WhitelistState::Unknown,
+                criticality: String::new(),
+                dismissed: false,
+                whitelist_reason: None,
+                uid: Uuid::new_v4().to_string(),
+                last_modified: now,
+            });
+        }
+
+        // Add one resolved CDN session - should be included
+        sessions.push(SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50001,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 108, 133)),
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("example.com".to_string()), // Resolved!
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 54113,
+                owner: "FASTLY".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        });
+
+        let whitelist = Whitelists::new_from_sessions(&sessions);
+        let whitelist_json = WhitelistsJSON::from(whitelist);
+
+        // Should only have 1 endpoint (the resolved CDN session)
+        assert_eq!(
+            whitelist_json.whitelists.len(),
+            1,
+            "Should have one whitelist"
+        );
+        let endpoints = &whitelist_json.whitelists[0].endpoints;
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "Should have only 1 endpoint (resolved CDN), all unresolved CDNs should be skipped"
+        );
+
+        // Verify the resolved CDN session is included
+        assert!(
+            endpoints.iter().any(|ep| ep.domain == Some("example.com".to_string())
+                && ep.ip == Some("185.199.108.133".to_string())),
+            "Resolved CDN session should be included"
+        );
+
+        // Verify all unresolved CDN sessions are skipped
+        for (_, ip_str) in &cdn_provider_test_data {
+            assert!(
+                !endpoints.iter().any(|ep| ep.ip == Some(ip_str.clone())),
+                "CDN session from {} without resolved domain should be skipped",
+                ip_str
+            );
+        }
+    }
+
+    /// Test that sessions without ASN info are not skipped (backwards compatibility)
+    #[test]
+    fn test_no_asn_backwards_compatibility() {
+        use crate::sessions::{
+            Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+        };
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+
+        // Session with unresolved domain but no ASN info - should be included (backwards compatibility)
+        let session_no_asn = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50000,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                dst_port: 8080,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Resolving".to_string()), // Unresolved
+            dst_service: Some("http".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: None, // No ASN info - should not be skipped
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        let sessions = vec![session_no_asn];
+        let whitelist = Whitelists::new_from_sessions(&sessions);
+        let whitelist_json = WhitelistsJSON::from(whitelist);
+
+        // Should have 1 endpoint (IP-only, backwards compatibility)
+        assert_eq!(
+            whitelist_json.whitelists.len(),
+            1,
+            "Should have one whitelist"
+        );
+        let endpoints = &whitelist_json.whitelists[0].endpoints;
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "Session without ASN info should be included for backwards compatibility"
+        );
+        assert!(
+            endpoints.iter().any(|ep| ep.domain.is_none()
+                && ep.ip == Some("10.0.0.1".to_string())
+                && ep.port == Some(8080)),
+            "Session without ASN should be included as IP-only endpoint"
         );
     }
 }

@@ -1619,7 +1619,7 @@ impl FlodbaddCapture {
         info!("Finished stopping capture tasks.");
     }
 
-    // Only for current sessions
+    // Populate domain names for current sessions and any finished sessions missing domains
     async fn populate_domain_names(
         sessions: &CustomDashMap<Session, SessionInfo>,
         resolver: &Option<Arc<FlodbaddResolver>>,
@@ -1643,8 +1643,30 @@ impl FlodbaddCapture {
             lock_time, session_count
         );
 
+        // Collect sessions that need domain resolution (current sessions + finished sessions without domains)
+        let mut sessions_to_resolve: Vec<Session> = current_sessions.clone();
+        
+        // Create a HashSet for efficient lookup of current sessions
+        use std::collections::HashSet;
+        let current_sessions_set: HashSet<&Session> = current_sessions.iter().collect();
+        
+        // Also add finished sessions that don't have domains yet
+        for entry in sessions.iter() {
+            let session_info = entry.value();
+            let session = entry.key();
+            // Skip if already in current_sessions
+            if current_sessions_set.contains(session) {
+                continue;
+            }
+            // Add if missing src or dst domain
+            if session_info.src_domain.is_none() || session_info.dst_domain.is_none() {
+                sessions_to_resolve.push(session.clone());
+            }
+        }
+
+        let total_sessions_to_resolve = sessions_to_resolve.len();
         let mut update_count = 0;
-        for session in current_sessions {
+        for session in sessions_to_resolve {
             // Determine if this is an important service based on port numbers
             let is_important_dst = match session.dst_port {
                 // Common server ports that should be prioritized
@@ -1719,9 +1741,11 @@ impl FlodbaddCapture {
         }
 
         debug!(
-            "Domain name population completed in {:?} for {} sessions with {} updates",
+            "Domain name population completed in {:?} for {} current sessions + {} finished sessions without domains ({} total) with {} updates",
             Instant::now().duration_since(start_time),
             session_count,
+            total_sessions_to_resolve - session_count,
+            total_sessions_to_resolve,
             update_count
         );
     }
