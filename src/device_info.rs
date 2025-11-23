@@ -280,66 +280,55 @@ impl DeviceInfo {
     //  (1) same (non empty) hostname
     //  (2) same (non empty) IP v4
     //  (3) same (non empty) IP v6
+    const LAST_SEEN_CONFLICT_THRESHOLD_SECS: i64 = 6 * 60 * 60; // 6 hours
+
     fn dedup_vec(devices: &mut Vec<DeviceInfo>) {
         let mut i = 0;
         while i < devices.len() {
             let mut j = i + 1;
             while j < devices.len() {
-                let (left, right) = devices.split_at_mut(j); // Split the vector at j
-                let device1 = &mut left[i]; // Mutable reference to device1 from left side
-                let device2 = &mut right[0]; // Mutable reference to device2 from right side
+                let primary_ip_match = devices[i].ip_address == devices[j].ip_address;
 
-                // Primary IP address match
-                let primary_ip_match = device1.ip_address == device2.ip_address;
-
-                // Overlapping IP addresses in the lists
-                let ipv4_overlap = !device1.ip_addresses_v4.is_empty()
-                    && !device2.ip_addresses_v4.is_empty()
-                    && device1
+                let ipv4_overlap = !devices[i].ip_addresses_v4.is_empty()
+                    && !devices[j].ip_addresses_v4.is_empty()
+                    && devices[i]
                         .ip_addresses_v4
                         .iter()
-                        .any(|ip| device2.ip_addresses_v4.contains(ip));
+                        .any(|ip| devices[j].ip_addresses_v4.contains(ip));
 
-                let ipv6_overlap = !device1.ip_addresses_v6.is_empty()
-                    && !device2.ip_addresses_v6.is_empty()
-                    && device1
+                let ipv6_overlap = !devices[i].ip_addresses_v6.is_empty()
+                    && !devices[j].ip_addresses_v6.is_empty()
+                    && devices[i]
                         .ip_addresses_v6
                         .iter()
-                        .any(|ip| device2.ip_addresses_v6.contains(ip));
+                        .any(|ip| devices[j].ip_addresses_v6.contains(ip));
 
-                // Hostname matching
-                let hostname_match = !device1.hostname.is_empty()
-                    && !device2.hostname.is_empty()
-                    && device1.hostname == device2.hostname;
+                let hostname_match = !devices[i].hostname.is_empty()
+                    && !devices[j].hostname.is_empty()
+                    && devices[i].hostname == devices[j].hostname;
 
-                // Check for conflicts
-                let has_conflicting_characteristics =
-                    Self::has_conflicting_characteristics(device1, device2);
+                let has_conflicts = Self::has_conflicting_characteristics(&devices[i], &devices[j]);
 
-                // Decide whether to merge
                 let is_duplicate = if primary_ip_match || ipv4_overlap || ipv6_overlap {
-                    // Strong IP evidence - merge unless there are major conflicts
-                    if !has_conflicting_characteristics {
-                        true
-                    } else {
+                    if has_conflicts {
                         warn!(
                             "Conflicting device characteristics - aborting merge of {:?} and {:?}",
-                            device1, device2
+                            devices[i], devices[j]
                         );
                         false
+                    } else {
+                        true
                     }
                 } else if hostname_match {
-                    // Hostname match - be more careful
-                    Self::is_safe_hostname_merge(device1, device2)
+                    Self::is_safe_hostname_merge(&devices[i], &devices[j])
                 } else {
                     false
                 };
 
                 if is_duplicate {
-                    // Merge device2 into device1
-                    DeviceInfo::merge(device1, device2);
-                    // Remove device2 from the list
-                    devices.remove(j);
+                    let duplicate = devices.remove(j);
+                    let device = &mut devices[i];
+                    DeviceInfo::merge(device, &duplicate);
                 } else {
                     j += 1;
                 }
@@ -440,10 +429,31 @@ impl DeviceInfo {
 
     // Check if two devices have characteristics that suggest they shouldn't be merged
     fn has_conflicting_characteristics(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
-        // Check for conflicting device vendors (but allow empty ones)
-        !device1.device_vendor.is_empty()
-            && !device2.device_vendor.is_empty()
-            && device1.device_vendor != device2.device_vendor
+        let vendor_known = |device: &DeviceInfo| {
+            !device.device_vendor.is_empty() && device.device_vendor != "Unknown"
+        };
+
+        let vendor_conflict = vendor_known(device1)
+            && vendor_known(device2)
+            && device1.device_vendor != device2.device_vendor;
+
+        let mac_conflict = match (device1.get_mac_address(), device2.get_mac_address()) {
+            (Some(mac1), Some(mac2)) if mac1 != mac2 => {
+                vendor_known(device1) || vendor_known(device2)
+            }
+            _ => false,
+        };
+
+        let last_seen_conflict = {
+            let delta = device1
+                .effective_last_seen()
+                .signed_duration_since(device2.effective_last_seen())
+                .num_seconds()
+                .abs();
+            delta > Self::LAST_SEEN_CONFLICT_THRESHOLD_SECS
+        };
+
+        vendor_conflict || mac_conflict || last_seen_conflict
     }
 
     // Check if a hostname-based merge is safe
