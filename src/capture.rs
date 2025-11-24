@@ -1006,6 +1006,41 @@ impl FlodbaddCapture {
     ///  • On other platforms we simply return the result from `Device::lookup()`.
     ///    If that fails we fall back to the first entry from `Device::list()`.
     async fn get_default_device() -> Result<pcap::Device> {
+        fn device_is_usable(device: &pcap::Device) -> bool {
+            if cfg!(target_os = "windows") {
+                let desc_is_loopback = device
+                    .desc
+                    .as_deref()
+                    .map(|d| d.to_ascii_lowercase().contains("loopback"))
+                    .unwrap_or(false);
+                let name_is_loopback = device.name.to_ascii_lowercase().contains("loopback");
+                if desc_is_loopback || name_is_loopback {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn select_preferred_device(devices: &[pcap::Device]) -> Option<pcap::Device> {
+            if cfg!(target_os = "macos") {
+                if let Some(en_dev) = devices
+                    .iter()
+                    .find(|d| d.name.starts_with("en") && device_is_usable(d))
+                {
+                    return Some(en_dev.clone());
+                }
+
+                if let Some(non_ap_dev) = devices
+                    .iter()
+                    .find(|d| !d.name.starts_with("ap") && device_is_usable(d))
+                {
+                    return Some(non_ap_dev.clone());
+                }
+            }
+
+            devices.iter().find(|d| device_is_usable(d)).cloned()
+        }
+
         // First attempt – let libpcap decide.
         match pcap::Device::lookup() {
             Ok(Some(device)) => {
@@ -1020,26 +1055,29 @@ impl FlodbaddCapture {
 
                     // Enumerate all devices and pick the first sensible one.
                     let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
-                    // Prefer devices that start with "en" (e.g. en0 wifi/ethernet).
-                    if let Some(en_dev) = devices.iter().find(|d| d.name.starts_with("en")) {
-                        info!("Selected {} as default capture interface", en_dev.name);
-                        return Ok(en_dev.clone());
-                    }
-
-                    // Otherwise take the first non-"ap" device.
-                    if let Some(first_non_ap) =
-                        devices.into_iter().find(|d| !d.name.starts_with("ap"))
-                    {
-                        info!(
-                            "Selected {} (first non-ap device) as default capture interface",
-                            first_non_ap.name
-                        );
-                        return Ok(first_non_ap);
+                    if let Some(preferred) = select_preferred_device(&devices) {
+                        info!("Selected {} as default capture interface", preferred.name);
+                        return Ok(preferred);
                     }
 
                     // Give up – return the original device even if it is "ap*".
                     warn!(
                         "Falling back to {}, could not find a better alternative",
+                        device.name
+                    );
+                    Ok(device)
+                } else if cfg!(target_os = "windows") && !device_is_usable(&device) {
+                    warn!(
+                        "pcap::Device::lookup() returned {} which looks like a loopback adapter – searching for a better default…",
+                        device.name
+                    );
+                    let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
+                    if let Some(preferred) = select_preferred_device(&devices) {
+                        info!("Selected {} as default capture interface", preferred.name);
+                        return Ok(preferred);
+                    }
+                    warn!(
+                        "Falling back to {}, no non-loopback devices were available",
                         device.name
                     );
                     Ok(device)
@@ -1050,7 +1088,9 @@ impl FlodbaddCapture {
             Ok(None) => {
                 warn!("pcap::Device::lookup() returned None – falling back to Device::list()");
                 let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
-                if let Some(first) = devices.first() {
+                if let Some(preferred) = select_preferred_device(&devices) {
+                    Ok(preferred)
+                } else if let Some(first) = devices.first() {
                     Ok(first.clone())
                 } else {
                     Err(anyhow!("No pcap devices available"))
@@ -1062,7 +1102,9 @@ impl FlodbaddCapture {
                     e
                 );
                 let devices = pcap::Device::list().map_err(|e| anyhow!(e))?;
-                if let Some(first) = devices.first() {
+                if let Some(preferred) = select_preferred_device(&devices) {
+                    Ok(preferred)
+                } else if let Some(first) = devices.first() {
                     Ok(first.clone())
                 } else {
                     Err(anyhow!("No pcap devices available"))

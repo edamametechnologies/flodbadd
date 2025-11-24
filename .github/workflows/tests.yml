@@ -234,7 +234,7 @@ jobs:
           exit 1
 
   test-container:
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
