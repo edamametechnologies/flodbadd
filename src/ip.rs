@@ -42,6 +42,8 @@ fn ipv6_to_u128(ip: &Ipv6Addr) -> u128 {
 
 /// Applies a CIDR mask on an IPv6 address.
 pub fn apply_mask_v6(ip_addr: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+    // Clamp prefix to valid range [0, 128] to prevent overflow
+    let prefix = prefix.min(128);
     let mask: u128 = if prefix == 0 {
         0
     } else {
@@ -141,7 +143,7 @@ pub fn is_local_ipv6(ip: &Ipv6Addr) -> bool {
 fn is_lan_ipv6_fast(ip: &Ipv6Addr) -> bool {
     let ip_u128 = ipv6_to_u128(ip);
     for entry in LAN_IPV6_LOCAL_NETS.iter() {
-        let prefix = *entry.key();
+        let prefix = (*entry.key()).min(128); // Clamp to prevent overflow
         let mask = if prefix == 0 {
             0
         } else {
@@ -266,6 +268,8 @@ pub fn mask_to_prefix(mask: Ipv4Addr) -> u8 {
 
 /// Utility to apply a prefix (CIDR) as a subnet mask on an IPv4
 pub fn apply_mask(ip_addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    // Clamp prefix to valid range [0, 32] to prevent overflow
+    let prefix = prefix.min(32);
     let mask: u32 = if prefix == 0 {
         0
     } else {
@@ -332,6 +336,10 @@ mod tests {
         let zero_masked = apply_mask_v6(ip, 0);
         let expected_zero: Ipv6Addr = "::".parse().unwrap();
         assert_eq!(zero_masked, expected_zero);
+
+        // Test overflow protection: prefix > 128 should be clamped to 128
+        let overflow_masked = apply_mask_v6(ip, 200);
+        assert_eq!(overflow_masked, ip); // Should behave like prefix=128
     }
 
     #[test]
@@ -433,6 +441,10 @@ mod tests {
         let masked3 = apply_mask(ip3, 12);
         let expected3: Ipv4Addr = "172.16.0.0".parse().unwrap();
         assert_eq!(masked3, expected3);
+
+        // Test overflow protection: prefix > 32 should be clamped to 32
+        let overflow_masked = apply_mask(ip, 100);
+        assert_eq!(overflow_masked, ip); // Should behave like prefix=32
     }
 
     #[test]

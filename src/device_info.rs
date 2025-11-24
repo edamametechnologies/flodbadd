@@ -437,11 +437,13 @@ impl DeviceInfo {
             && vendor_known(device2)
             && device1.device_vendor != device2.device_vendor;
 
-        let mac_conflict = match (device1.get_mac_address(), device2.get_mac_address()) {
-            (Some(mac1), Some(mac2)) if mac1 != mac2 => {
-                vendor_known(device1) || vendor_known(device2)
+        let mac_conflict = if vendor_known(device1) && vendor_known(device2) {
+            match (device1.get_mac_address(), device2.get_mac_address()) {
+                (Some(mac1), Some(mac2)) if mac1 != mac2 => true,
+                _ => false,
             }
-            _ => false,
+        } else {
+            false
         };
 
         let last_seen_conflict = {
