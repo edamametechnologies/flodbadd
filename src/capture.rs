@@ -300,10 +300,9 @@ impl FlodbaddCapture {
         // Force immediate whitelist recomputation after changing whitelist
         // This ensures that existing sessions are immediately re-evaluated against the new whitelist
         info!(
-            "Whitelist changed to '{}', forcing immediate session update",
+            "Whitelist changed to '{}' (session update will be triggered by orchestrator)",
             whitelist_name
         );
-        self.update_sessions().await;
 
         Ok(())
     }
@@ -655,9 +654,8 @@ impl FlodbaddCapture {
             }
             self.reset_whitelist().await; // Reset session states
 
-            // Force immediate whitelist recomputation after clearing
-            info!("Custom whitelists cleared, forcing immediate session update");
-            self.update_sessions().await;
+            // Update triggered by orchestrator
+            info!("Custom whitelists cleared (session update will be triggered by orchestrator)");
             return;
         }
 
@@ -670,9 +668,7 @@ impl FlodbaddCapture {
                 // Reset per-session whitelist state *before* doing a single recomputation
                 self.reset_whitelist().await;
 
-                // One recompute is enough (avoid previous double run)
-                info!("Custom whitelists set successfully – performing single session update");
-                self.update_sessions().await;
+                info!("Custom whitelists set successfully (session update will be triggered by orchestrator)");
             }
             Err(e) => {
                 error!("Error setting custom whitelists: {}", e);
@@ -680,8 +676,6 @@ impl FlodbaddCapture {
                 *self.whitelist_name.write().await = "".to_string();
             }
         }
-
-        // No extra reset/update needed here – already done above
     }
 
     /// Create a empty whitelist
@@ -2158,8 +2152,7 @@ impl FlodbaddCapture {
         // Force immediate blacklist recomputation after setting custom blacklists
         // This ensures that existing sessions are immediately re-evaluated against the new blacklist
         if result.is_ok() {
-            info!("Custom blacklists set successfully, forcing immediate session update");
-            self.update_sessions().await;
+            info!("Custom blacklists set successfully (session update will be triggered by orchestrator)");
         }
 
         result
