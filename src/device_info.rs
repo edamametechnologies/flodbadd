@@ -447,12 +447,21 @@ impl DeviceInfo {
         };
 
         let last_seen_conflict = {
-            let delta = device1
-                .effective_last_seen()
-                .signed_duration_since(device2.effective_last_seen())
-                .num_seconds()
-                .abs();
-            delta > Self::LAST_SEEN_CONFLICT_THRESHOLD_SECS
+            let ts1 = device1.effective_last_seen();
+            let ts2 = device2.effective_last_seen();
+            let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+            let ts1_known = ts1 > epoch;
+            let ts2_known = ts2 > epoch;
+
+            if ts1_known && ts2_known {
+                let delta = ts1
+                    .signed_duration_since(ts2)
+                    .num_seconds()
+                    .abs();
+                delta > Self::LAST_SEEN_CONFLICT_THRESHOLD_SECS
+            } else {
+                false
+            }
         };
 
         vendor_conflict || mac_conflict || last_seen_conflict

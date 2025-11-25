@@ -1,6 +1,6 @@
 [package]
 name = "flodbadd"
-version = "0.9.79"
+version = "0.9.80"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
 description = "Network scanning and session monitoring library"
@@ -23,14 +23,14 @@ examples = ["clap", "tracing-subscriber"]
 [dependencies]
 # Core dependencies
 # Local copy in order to allow rapid development/debug
-#edamame_backend = { path = "../edamame_backend" }
-edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backend.git", branch = "main" }
+edamame_backend = { path = "../edamame_backend" }
+#edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backend.git", branch = "main" }
 # Local copy in order to allow rapid development/debug
-#undeadlock = { path = "../undeadlock" }
-undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
+undeadlock = { path = "../undeadlock" }
+#undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 # Local copy in order to allow rapid development/debug
-#edamame_models = { path = "../edamame_models" }
-edamame_models = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
+edamame_models = { path = "../edamame_models" }
+#edamame_models = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
 
 # Global statics w/ mutex
 lazy_static = "1.5"
@@ -62,8 +62,8 @@ chrono = { version = "0.4.42", features = ["serde"] }
 # Machine Learning
 # extended-isolation-forest = "0.2.3"
 # Local copy in order to allow rapid development/debug
-#extended-isolation-forest = { path = "../extended-isolation-forest" }
-extended-isolation-forest  = { git = "https://github.com/edamametechnologies/extended-isolation-forest", branch = "main" }
+extended-isolation-forest = { path = "../extended-isolation-forest" }
+#extended-isolation-forest  = { git = "https://github.com/edamametechnologies/extended-isolation-forest", branch = "main" }
 
 # Network utils
 socket2 = "0.6.0"
