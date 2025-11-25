@@ -454,10 +454,7 @@ impl DeviceInfo {
             let ts2_known = ts2 > epoch;
 
             if ts1_known && ts2_known {
-                let delta = ts1
-                    .signed_duration_since(ts2)
-                    .num_seconds()
-                    .abs();
+                let delta = ts1.signed_duration_since(ts2).num_seconds().abs();
                 delta > Self::LAST_SEEN_CONFLICT_THRESHOLD_SECS
             } else {
                 false
