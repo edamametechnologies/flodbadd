@@ -312,7 +312,7 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
     println!("cargo:warning=[Npcap SDK] Downloading from: {}", url);
 
     // Download the zip file
-    let response = reqwest::blocking::get(url)?;
+    let response = build_npcap_utils::download_file_with_retry(&url)?;
     println!("cargo:warning=[Npcap SDK] Received HTTP response, reading bytes...");
     let bytes = response.bytes()?;
     if !bytes.starts_with(b"PK\x03\x04") {

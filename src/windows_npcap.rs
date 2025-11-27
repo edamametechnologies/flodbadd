@@ -40,6 +40,33 @@ pub fn ensure_wayback_raw(url: &str) -> String {
     url.to_string()
 }
 
+pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response, String> {
+    let mut attempts = 0;
+    let max_attempts = 5;
+    let mut last_error = String::new();
+    loop {
+        match reqwest::blocking::get(url) {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(response);
+                }
+                last_error = format!("HTTP error: {}", response.status());
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+        attempts += 1;
+        if attempts >= max_attempts {
+            return Err(format!(
+                "Failed to download {} after {} attempts: {}",
+                url, max_attempts, last_error
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
 // --- Detection helpers ---
 
 fn find_npcap_runtime_dir_internal() -> Option<PathBuf> {
@@ -142,7 +169,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
     let raw_url = installer_url.unwrap_or_else(|| NPCAP_INSTALLER_URL.to_string());
     let url = ensure_wayback_raw(&raw_url);
 
-    let response = reqwest::blocking::get(&url).map_err(|e| format!("download failed: {}", e))?;
+    let response = download_file_with_retry(&url).map_err(|e| format!("download failed: {}", e))?;
     let bytes = response
         .bytes()
         .map_err(|e| format!("read failed: {}", e))?;
@@ -363,8 +390,8 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
 
     let zip_path = sdk_root.with_extension("zip");
     let url = ensure_wayback_raw(NPCAP_SDK_URL);
-    let response =
-        reqwest::blocking::get(&url).map_err(|e| format!("Npcap SDK download failed: {}", e))?;
+    let response = download_file_with_retry(&url)
+        .map_err(|e| format!("Npcap SDK download failed: {}", e))?;
     let bytes = response
         .bytes()
         .map_err(|e| format!("Npcap SDK download read failed: {}", e))?;

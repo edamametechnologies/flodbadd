@@ -280,7 +280,6 @@ impl DeviceInfo {
     //  (1) same (non empty) hostname
     //  (2) same (non empty) IP v4
     //  (3) same (non empty) IP v6
-    const LAST_SEEN_CONFLICT_THRESHOLD_SECS: i64 = 6 * 60 * 60; // 6 hours
 
     fn dedup_vec(devices: &mut Vec<DeviceInfo>) {
         let mut i = 0;
@@ -446,22 +445,7 @@ impl DeviceInfo {
             false
         };
 
-        let last_seen_conflict = {
-            let ts1 = device1.effective_last_seen();
-            let ts2 = device2.effective_last_seen();
-            let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
-            let ts1_known = ts1 > epoch;
-            let ts2_known = ts2 > epoch;
-
-            if ts1_known && ts2_known {
-                let delta = ts1.signed_duration_since(ts2).num_seconds().abs();
-                delta > Self::LAST_SEEN_CONFLICT_THRESHOLD_SECS
-            } else {
-                false
-            }
-        };
-
-        vendor_conflict || mac_conflict || last_seen_conflict
+        vendor_conflict || mac_conflict
     }
 
     // Check if a hostname-based merge is safe
@@ -618,8 +602,13 @@ impl DeviceInfo {
                 let mut found = false;
                 for existing_port in device.open_ports.iter_mut() {
                     if existing_port.port == new_port.port {
+                        // Preserve the existing dismissed flag
+                        let dismissed = existing_port.dismissed;
                         // Use the latest info
                         *existing_port = new_port.clone();
+                        if dismissed {
+                            existing_port.dismissed = true;
+                        }
                         found = true;
                         break;
                     }
@@ -702,11 +691,15 @@ impl DeviceInfo {
             }
         }
 
-        // Update the first seen time, but do not overwrite if new_device.first_seen is just the default epoch
-        if new_device.first_seen < device.first_seen
-            && new_device.first_seen > DateTime::<Utc>::from(std::time::UNIX_EPOCH)
-        {
-            device.first_seen = new_device.first_seen;
+        // Update first_seen:
+        //   * ignore placeholder epoch coming from the new device
+        //   * adopt the new value if ours is still the epoch placeholder
+        //   * otherwise keep the older (chronologically) timestamp
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+        if new_device.first_seen > epoch {
+            if device.first_seen <= epoch || new_device.first_seen < device.first_seen {
+                device.first_seen = new_device.first_seen;
+            }
         }
 
         // Update the last seen time only if the new device is local
@@ -1063,6 +1056,23 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_first_seen_replaces_epoch_placeholder() {
+        let mut device_current = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 4))));
+        // Simulate placeholder
+        device_current.first_seen = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+
+        let mut community_device = device_current.clone();
+        community_device.first_seen = Utc.with_ymd_and_hms(2023, 5, 1, 11, 45, 0).unwrap();
+
+        DeviceInfo::merge(&mut device_current, &community_device);
+
+        assert_eq!(
+            device_current.first_seen, community_device.first_seen,
+            "When the target still has the epoch placeholder, a valid incoming timestamp should replace it."
+        );
+    }
+
+    #[test]
     fn test_merge_last_seen_newer_overrides() {
         // If the new device has a more recent last_seen and is local, it should override the existing device
         let mut device_current = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 10, 1))));
@@ -1262,6 +1272,55 @@ mod tests {
         assert_eq!(
             local_device.last_seen,
             Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_dismissed_ports() {
+        // Test that a user-dismissed port stays dismissed after fresh scan data arrives
+        use chrono::{TimeZone, Utc};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut existing_device =
+            DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
+        existing_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        existing_device.is_local = true;
+        existing_device.open_ports.push(PortInfo {
+            port: 8443,
+            protocol: "tcp".to_string(),
+            service: "custom-admin".to_string(),
+            banner: "old-banner".to_string(),
+            dismissed: true,
+        });
+
+        // Fresh scan result for the same port with new metadata (dismissed flag false by default)
+        let mut refreshed_device =
+            DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
+        refreshed_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 15, 0).unwrap();
+        refreshed_device.is_local = true;
+        refreshed_device.open_ports.push(PortInfo {
+            port: 8443,
+            protocol: "tcp".to_string(),
+            service: "https-alt".to_string(),
+            banner: "new-banner".to_string(),
+            dismissed: false,
+        });
+
+        DeviceInfo::merge(&mut existing_device, &refreshed_device);
+
+        let merged_port = existing_device
+            .open_ports
+            .iter()
+            .find(|p| p.port == 8443)
+            .expect("Port 8443 should still exist after merge");
+
+        // Metadata should be refreshed from the latest scan
+        assert_eq!(merged_port.service, "https-alt");
+        assert_eq!(merged_port.banner, "new-banner");
+        // User dismissal must be preserved
+        assert!(
+            merged_port.dismissed,
+            "Dismissed flag should not be cleared by new scan data"
         );
     }
 
