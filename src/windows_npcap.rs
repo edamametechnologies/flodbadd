@@ -390,8 +390,8 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
 
     let zip_path = sdk_root.with_extension("zip");
     let url = ensure_wayback_raw(NPCAP_SDK_URL);
-    let response = download_file_with_retry(&url)
-        .map_err(|e| format!("Npcap SDK download failed: {}", e))?;
+    let response =
+        download_file_with_retry(&url).map_err(|e| format!("Npcap SDK download failed: {}", e))?;
     let bytes = response
         .bytes()
         .map_err(|e| format!("Npcap SDK download read failed: {}", e))?;
