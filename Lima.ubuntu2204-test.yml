@@ -1,0 +1,78 @@
+# Lima VM configuration for eBPF testing on Ubuntu 22.04 LTS
+# This is a common LTS version used in production environments.
+
+images:
+- location: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+- location: "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+
+cpus: 4
+memory: "8GiB"
+disk: "50GiB"
+
+mounts:
+- location: "~"
+  writable: true
+- location: "/tmp/lima"
+  writable: true
+
+provision:
+- mode: system
+  script: |
+    set -eux
+    apt-get update
+    
+    # Install build essentials
+    apt-get install -y \
+      build-essential \
+      pkg-config \
+      curl \
+      wget \
+      git
+
+    # Install eBPF development tools
+    apt-get install -y \
+      clang \
+      llvm \
+      libelf-dev \
+      zlib1g-dev \
+      libbpf-dev \
+      linux-headers-$(uname -r) \
+      linux-tools-$(uname -r) \
+      linux-tools-common
+
+    # Install libpcap
+    apt-get install -y libpcap-dev
+
+    # Install protobuf
+    apt-get install -y protobuf-compiler
+
+    # Configure kernel for eBPF
+    sysctl -w kernel.perf_event_paranoid=-1
+    sysctl -w kernel.unprivileged_bpf_disabled=0
+    sysctl -w net.core.bpf_jit_enable=1 || true
+
+    # Mount filesystems
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    mount -t bpf none /sys/fs/bpf 2>/dev/null || true
+
+    # Persist settings
+    cat >> /etc/sysctl.d/99-ebpf.conf << 'EOF'
+    kernel.perf_event_paranoid=-1
+    kernel.unprivileged_bpf_disabled=0
+    net.core.bpf_jit_enable=1
+    EOF
+
+    # Install Rust for lima user
+    sudo -u $(id -un 1000) bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+
+    echo "Ubuntu 22.04 eBPF environment ready!"
+    echo "Kernel: $(uname -r)"
+
+message: |
+  Ubuntu 22.04 LTS eBPF test VM is ready!
+  Run: make ubuntu2204_test
+
+
+

@@ -428,6 +428,10 @@ impl DeviceInfo {
 
     // Check if two devices have characteristics that suggest they shouldn't be merged
     fn has_conflicting_characteristics(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
+        let hostname_match = !device1.hostname.is_empty()
+            && !device2.hostname.is_empty()
+            && device1.hostname == device2.hostname;
+        let safe_hostname_match = hostname_match && Self::is_specific_hostname(&device1.hostname);
         let vendor_known = |device: &DeviceInfo| {
             !device.device_vendor.is_empty() && device.device_vendor != "Unknown"
         };
@@ -436,7 +440,9 @@ impl DeviceInfo {
             && vendor_known(device2)
             && device1.device_vendor != device2.device_vendor;
 
-        let mac_conflict = if vendor_known(device1) && vendor_known(device2) {
+        let mac_conflict = if safe_hostname_match {
+            false
+        } else if vendor_known(device1) && vendor_known(device2) {
             match (device1.get_mac_address(), device2.get_mac_address()) {
                 (Some(mac1), Some(mac2)) if mac1 != mac2 => true,
                 _ => false,
@@ -2052,6 +2058,51 @@ mod tests {
         assert!(
             devices[0].mac_address.is_some(),
             "MAC address should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_merge_vec_specific_hostname_different_macs_same_vendor() {
+        // Devices with the same specific hostname and vendor should merge even if MACs differ
+        let mac_primary = MacAddr6::new(0x00, 0x1C, 0x42, 0x7F, 0xAA, 0x01);
+        let mac_secondary = MacAddr6::new(0x00, 0x1C, 0x42, 0x7F, 0xAA, 0x02);
+
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 110))));
+            d.hostname = "alex-macbook-pro.local".to_string();
+            d.device_vendor = "Apple Inc.".to_string();
+            d.mac_address = Some(mac_primary);
+            d.mac_addresses = vec![mac_primary];
+            d.last_seen = Utc.with_ymd_and_hms(2023, 5, 1, 10, 0, 0).unwrap();
+            d
+        }];
+
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 111))));
+            d.hostname = "alex-macbook-pro.local".to_string();
+            d.device_vendor = "Apple Inc.".to_string();
+            d.mac_address = Some(mac_secondary);
+            d.mac_addresses = vec![mac_secondary];
+            d.last_seen = Utc.with_ymd_and_hms(2023, 5, 1, 11, 0, 0).unwrap();
+            d
+        }];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "Devices with the same specific hostname should merge despite differing MACs"
+        );
+        assert_eq!(
+            devices[0].mac_address,
+            Some(mac_secondary),
+            "Latest MAC address should be the primary one"
+        );
+        assert!(
+            devices[0].mac_addresses.contains(&mac_primary)
+                && devices[0].mac_addresses.contains(&mac_secondary),
+            "All observed MAC addresses should be retained after merge"
         );
     }
 

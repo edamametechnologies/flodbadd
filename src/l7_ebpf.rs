@@ -13,6 +13,7 @@
 // simply operate in stub mode.
 
 use crate::sessions::{Session, SessionL7};
+use tracing::info;
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 mod linux {
@@ -58,6 +59,8 @@ mod linux {
     unsafe impl AyaPod for ProcessInfo {}
 
     // Convert Session into SessionKey
+    // Note: eBPF reads IPs from sock_common using bpf_probe_read_kernel which gives
+    // the raw bytes as a u32 in host byte order. We match that format.
     fn session_to_key(s: &Session) -> SessionKey {
         let mut key = SessionKey {
             src_ip: [0; 4],
@@ -75,32 +78,36 @@ mod linux {
             padding: 0,
         };
 
-        // Set IP addresses
+        // Set IP addresses - use native byte order to match eBPF's bpf_probe_read_kernel
         match s.src_ip {
             std::net::IpAddr::V4(ipv4) => {
-                key.src_ip[0] = u32::from(ipv4);
+                // Read IP bytes as little-endian u32 (how eBPF reads from kernel)
+                let octets = ipv4.octets();
+                key.src_ip[0] = u32::from_le_bytes(octets);
             }
             std::net::IpAddr::V6(ipv6) => {
                 let octets = ipv6.octets();
-                key.src_ip[0] = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
-                key.src_ip[1] = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
-                key.src_ip[2] = u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]);
+                key.src_ip[0] = u32::from_le_bytes([octets[0], octets[1], octets[2], octets[3]]);
+                key.src_ip[1] = u32::from_le_bytes([octets[4], octets[5], octets[6], octets[7]]);
+                key.src_ip[2] = u32::from_le_bytes([octets[8], octets[9], octets[10], octets[11]]);
                 key.src_ip[3] =
-                    u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+                    u32::from_le_bytes([octets[12], octets[13], octets[14], octets[15]]);
             }
         }
 
         match s.dst_ip {
             std::net::IpAddr::V4(ipv4) => {
-                key.dst_ip[0] = u32::from(ipv4);
+                // Read IP bytes as little-endian u32 (how eBPF reads from kernel)
+                let octets = ipv4.octets();
+                key.dst_ip[0] = u32::from_le_bytes(octets);
             }
             std::net::IpAddr::V6(ipv6) => {
                 let octets = ipv6.octets();
-                key.dst_ip[0] = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
-                key.dst_ip[1] = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
-                key.dst_ip[2] = u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]);
+                key.dst_ip[0] = u32::from_le_bytes([octets[0], octets[1], octets[2], octets[3]]);
+                key.dst_ip[1] = u32::from_le_bytes([octets[4], octets[5], octets[6], octets[7]]);
+                key.dst_ip[2] = u32::from_le_bytes([octets[8], octets[9], octets[10], octets[11]]);
                 key.dst_ip[3] =
-                    u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+                    u32::from_le_bytes([octets[12], octets[13], octets[14], octets[15]]);
             }
         }
 
@@ -128,6 +135,7 @@ mod linux {
             {
                 if disabled.trim() == "1" {
                     if nix::unistd::geteuid().as_raw() != 0 {
+                        warn!("eBPF disabled: kernel has unprivileged_bpf_disabled=1 (need root or CAP_BPF)");
                         println!("[l7_ebpf] Disabled – kernel has unprivileged_bpf_disabled=1 (need root/CAP_BPF)");
                         return None;
                     }
@@ -140,6 +148,7 @@ mod linux {
             let uts = match nix::sys::utsname::uname() {
                 Ok(u) => u,
                 Err(e) => {
+                    warn!("eBPF disabled: uname() syscall failed: {}", e);
                     println!("[l7_ebpf] Disabled – uname() syscall failed: {}", e);
                     return None;
                 }
@@ -149,6 +158,10 @@ mod linux {
             if let (Some(maj), Some(min)) = (parts.next(), parts.next()) {
                 if let (Ok(maj), Ok(min)) = (maj.parse::<u32>(), min.parse::<u32>()) {
                     if maj < 5 || (maj == 5 && min < 3) {
+                        warn!(
+                            "eBPF disabled: kernel {}.{} < 5.3 (tracepoint+BTF required)",
+                            maj, min
+                        );
                         println!(
                             "[l7_ebpf] Disabled – kernel {}.{} < 5.3 (tracepoint+BTF required)",
                             maj, min
@@ -278,8 +291,11 @@ mod linux {
                     println!("[l7_ebpf] Disabled – kernel rejected program load: {}", e);
                     return None;
                 }
-                if let Err(e) = kp.attach("inet_sock_set_state", 0) {
-                    error!("Failed to attach kprobe: {}", e);
+                if let Err(e) = kp.attach("tcp_set_state", 0) {
+                    warn!(
+                        "eBPF disabled: failed to attach kprobe to tcp_set_state: {}",
+                        e
+                    );
                     println!("[l7_ebpf] Disabled – failed to attach kprobe: {}", e);
 
                     // Extra diagnostics for perf_event_open failure
@@ -313,6 +329,20 @@ mod linux {
                 warn!("eBPF object missing expected kprobe; running without eBPF");
                 println!("[l7_ebpf] Disabled – object missing kprobe program");
                 return None;
+            }
+
+            // Attach kprobe for tcp_v4_connect (captures process info in user context)
+            if let Some(prog_any) = bpf.program_mut("track_connect") {
+                use aya::programs::KProbe;
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if let Err(e) = kp.attach("tcp_v4_connect", 0) {
+                            debug!("Could not attach to tcp_v4_connect: {} (non-critical)", e);
+                        } else {
+                            debug!("Attached track_connect to tcp_v4_connect for process info");
+                        }
+                    }
+                }
             }
 
             // Obtain the `l7_connections` hash map from the object
@@ -454,6 +484,28 @@ pub fn is_available() -> bool {
     #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
     {
         false
+    }
+}
+
+/// Initialize and log the eBPF status. Call this at capture start to get
+/// early feedback about eBPF availability.
+pub fn init_and_log_status() {
+    let available = is_available();
+    if available {
+        info!(
+            "eBPF L7 resolution helper is ENABLED - network sessions will be resolved via kernel"
+        );
+    } else {
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        {
+            warn!("eBPF L7 resolution helper is DISABLED - falling back to /proc-based resolution");
+        }
+        #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+        {
+            info!(
+                "eBPF L7 resolution not available on this platform (non-Linux or feature disabled)"
+            );
+        }
     }
 }
 

@@ -72,6 +72,41 @@ Flodbadd transforms raw network packets into enriched, security-aware sessions a
 
 ---
 
+## eBPF Layer 7 Process Resolution
+
+On Linux, flodbadd can use eBPF (extended Berkeley Packet Filter) for high-performance, kernel-level process attribution. This provides accurate mapping of network connections to the processes that initiated them.
+
+### Key Benefits
+- **Near-zero overhead** - Runs directly in kernel space
+- **Real-time visibility** - Captures events as they happen  
+- **Accurate attribution** - Maps connections to PIDs, process names, and paths
+- **Automatic fallback** - Gracefully degrades to netstat when eBPF unavailable
+
+### Quick Start
+
+```toml
+# Enable eBPF in Cargo.toml
+flodbadd = { version = "*", features = ["packetcapture", "ebpf"] }
+```
+
+```bash
+# Install build dependencies (Ubuntu/Debian)
+sudo apt install clang llvm libbpf-dev linux-headers-$(uname -r)
+```
+
+### Platform Support
+
+| Platform | eBPF Support | Fallback |
+|----------|--------------|----------|
+| Linux (Native) | ✅ Full | netstat |
+| Linux (Container) | ⚠️ Requires privileges | netstat |
+| macOS | ❌ | netstat |
+| Windows | ❌ | native APIs |
+
+For comprehensive documentation including architecture, troubleshooting, and testing, see [EBPF.md](./EBPF.md).
+
+---
+
 ## Anomaly Detection System
 
 Flodbadd implements sophisticated on-device anomaly detection using an Extended Isolation Forest model. For a deep dive into the design, feature engineering, training pipeline, thresholds, diagnostics, and operational cadence, see [ANALYZER.md](./ANALYZER.md).

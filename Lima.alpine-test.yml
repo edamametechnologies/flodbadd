@@ -1,0 +1,112 @@
+# Lima VM configuration for eBPF testing on Alpine Linux
+# Alpine is commonly used in containers, so testing eBPF there is valuable.
+#
+# Usage:
+#   make alpine_create    # Create the VM
+#   make alpine_start     # Start the VM
+#   make alpine_test      # Run tests in the VM
+#   make alpine_stop      # Stop the VM
+#   make alpine_delete    # Delete the VM
+
+# Use Alpine cloud images (nocloud variant works with Lima)
+images:
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.3-x86_64-bios-cloudinit-r0.qcow2"
+  arch: "x86_64"
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.3-aarch64-uefi-cloudinit-r0.qcow2"
+  arch: "aarch64"
+
+# VM resources
+cpus: 4
+memory: "8GiB"
+disk: "30GiB"
+
+# Alpine uses OpenRC, not systemd - disable containerd
+containerd:
+  system: false
+  user: false
+
+# Mount the workspace
+mounts:
+- location: "~"
+  writable: true
+- location: "/tmp/lima"
+  writable: true
+
+# Provisioning script for Alpine
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+
+    # Enable community repository for additional packages
+    sed -i 's/#\(.*\/community\)/\1/' /etc/apk/repositories
+
+    # Update package index
+    apk update
+
+    # Install build essentials
+    apk add --no-cache \
+      build-base \
+      pkgconf \
+      curl \
+      wget \
+      git \
+      bash \
+      sudo \
+      musl-dev
+
+    # Install eBPF development tools
+    apk add --no-cache \
+      clang \
+      llvm \
+      elfutils-dev \
+      zlib-dev \
+      libbpf-dev \
+      linux-headers \
+      bpftool || true
+
+    # Install libpcap for packet capture
+    apk add --no-cache libpcap-dev
+
+    # Install protobuf compiler
+    apk add --no-cache protobuf protobuf-dev || apk add --no-cache protobuf
+
+    # Configure kernel for eBPF (if running on a compatible kernel)
+    sysctl -w kernel.perf_event_paranoid=-1 2>/dev/null || true
+    sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null || true
+    sysctl -w net.core.bpf_jit_enable=1 2>/dev/null || true
+
+    # Mount debugfs and bpffs
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    mount -t bpf none /sys/fs/bpf 2>/dev/null || true
+
+    # Create sysctl config for persistence
+    cat > /etc/sysctl.d/99-ebpf.conf << 'EOF'
+    kernel.perf_event_paranoid=-1
+    kernel.unprivileged_bpf_disabled=0
+    net.core.bpf_jit_enable=1
+    EOF
+
+    # Install Rust for the default user
+    LIMA_USER=$(getent passwd 1000 | cut -d: -f1 || echo "alpine")
+    su - "$LIMA_USER" -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' || true
+
+    echo "Alpine eBPF environment setup complete!"
+    echo "Kernel version: $(uname -r)"
+    echo "Clang version: $(clang --version 2>/dev/null | head -1 || echo 'not installed')"
+
+message: |
+  Alpine eBPF test VM is ready!
+  
+  To run tests:
+    limactl shell alpine-test
+    cd /Users/$(whoami)/Programming/flodbadd
+    source ~/.cargo/env
+    cargo test --features ebpf test_ebpf
+  
+  Or from macOS:
+    make alpine_test
+  
+  Note: Alpine uses musl libc. Some eBPF features may behave differently
+  compared to glibc-based distributions like Ubuntu.

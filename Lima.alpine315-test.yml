@@ -1,0 +1,80 @@
+# Lima VM configuration for eBPF testing on Alpine 3.18
+# (Alpine 3.15 cloud images are no longer available, using 3.18 as oldest available)
+
+images:
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/cloud/nocloud_alpine-3.18.9-x86_64-bios-cloudinit-r0.qcow2"
+  arch: "x86_64"
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/cloud/nocloud_alpine-3.18.9-aarch64-uefi-cloudinit-r0.qcow2"
+  arch: "aarch64"
+
+cpus: 4
+memory: "8GiB"
+disk: "30GiB"
+
+# Alpine uses OpenRC, not systemd
+containerd:
+  system: false
+  user: false
+
+mounts:
+- location: "~"
+  writable: true
+- location: "/tmp/lima"
+  writable: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+
+    # Enable community repository
+    sed -i 's/#\(.*\/community\)/\1/' /etc/apk/repositories
+    apk update
+
+    # Install build essentials
+    apk add --no-cache \
+      build-base \
+      pkgconf \
+      curl \
+      wget \
+      git \
+      bash \
+      sudo \
+      musl-dev
+
+    # Install eBPF tools
+    apk add --no-cache \
+      clang \
+      llvm \
+      elfutils-dev \
+      zlib-dev \
+      linux-headers || true
+
+    apk add --no-cache libbpf-dev 2>/dev/null || true
+
+    # Install libpcap
+    apk add --no-cache libpcap-dev
+
+    # Install protobuf
+    apk add --no-cache protobuf protobuf-dev || apk add --no-cache protobuf || true
+
+    # Configure kernel for eBPF
+    sysctl -w kernel.perf_event_paranoid=-1 2>/dev/null || true
+    sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null || true
+    sysctl -w net.core.bpf_jit_enable=1 2>/dev/null || true
+
+    # Mount filesystems
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    mount -t bpf none /sys/fs/bpf 2>/dev/null || true
+
+    # Install Rust
+    LIMA_USER=$(getent passwd 1000 | cut -d: -f1 || echo "alpine")
+    su - "$LIMA_USER" -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' || true
+
+    echo "Alpine 3.18 eBPF environment ready!"
+    echo "Kernel: $(uname -r)"
+
+message: |
+  Alpine 3.18 eBPF test VM is ready!
+  Run: make alpine315_test

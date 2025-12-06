@@ -4,28 +4,41 @@
 # Intended to be used from macOS via `make linux_test_macos`,
 # which mounts the workspace and invokes `make linux_test` inside.
 # -------------------------------------------------------------
-FROM rust:1.78-bullseye AS base
+FROM ubuntu:24.04 AS base
 
-# Install extra tooling required to compile eBPF objects and run tests
-RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y --no-install-recommends \
-        sudo libpcap-dev clang llvm make pkg-config build-essential \
-        libelf-dev zlib1g-dev ca-certificates protobuf-compiler iproute2 netcat-traditional \
-        kmod
-# Try to install bpftool - may not be available in all repositories
-RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y --no-install-recommends bpftool || true
+# Install Rust and extra tooling required to compile eBPF objects and run tests
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        curl ca-certificates build-essential pkg-config \
+        sudo libpcap-dev clang llvm make \
+        libbpf-dev libelf-dev zlib1g-dev linux-libc-dev \
+        protobuf-compiler iproute2 netcat-traditional kmod && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Add Rust to PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Try to install bpftool from linux-tools (may not work on all kernels)
+RUN apt-get update -y && apt-get install -y --no-install-recommends linux-tools-generic 2>/dev/null || true && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install nightly toolchain plus rust-src (needed for building `core` for
-# custom/embedded targets like `bpfel-unknown-none`).  We intentionally do
-# NOT attempt to download a pre-compiled std for the BPF target because it
-# is often unavailable; instead the compiler will build `core` from the
-# vendored sources when needed.
-RUN rustup toolchain install nightly --component rust-src
-RUN rustup component add --toolchain nightly llvm-tools-preview
+# custom/embedded targets like `bpfel-unknown-none`).
+RUN rustup toolchain install nightly --component rust-src && \
+    rustup component add --toolchain nightly llvm-tools-preview
 
 # Use nightly by default so that build.rs picks it up automatically
 ENV RUSTUP_TOOLCHAIN=nightly
+
+# Set architecture-specific variables for eBPF compilation
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        echo 'export EBPF_TARGET_ARCH=arm64' >> /etc/profile.d/ebpf.sh; \
+        echo 'export EBPF_ARCH_DIR=aarch64-linux-gnu' >> /etc/profile.d/ebpf.sh; \
+    else \
+        echo 'export EBPF_TARGET_ARCH=x86' >> /etc/profile.d/ebpf.sh; \
+        echo 'export EBPF_ARCH_DIR=x86_64-linux-gnu' >> /etc/profile.d/ebpf.sh; \
+    fi && chmod +x /etc/profile.d/ebpf.sh
 
 # Create necessary files and directories for eBPF
 RUN mkdir -p /sys/fs/bpf

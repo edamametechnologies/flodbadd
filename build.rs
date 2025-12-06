@@ -5,7 +5,7 @@ use std::env;
 #[cfg(target_os = "windows")]
 use std::fs;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
@@ -495,6 +495,7 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let src_file = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src/l7_ebpf.c");
+    let src_dir = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src");
 
     if !src_file.exists() {
         return Err("eBPF source file not found".into());
@@ -510,17 +511,42 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
         return Err("clang not found - required for eBPF compilation".into());
     }
 
-    // Compile the eBPF program
+    // Determine target architecture for eBPF
+    let target_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86",
+        "x86" => "x86",
+        arch => {
+            println!(
+                "cargo:warning=Unknown architecture {}, defaulting to x86 for eBPF",
+                arch
+            );
+            "x86"
+        }
+    };
+
+    // Determine architecture-specific include directory
+    let arch_include = match std::env::consts::ARCH {
+        "aarch64" => "/usr/include/aarch64-linux-gnu",
+        "x86_64" | "x86" => "/usr/include/x86_64-linux-gnu",
+        _ => "/usr/include",
+    };
+
+    let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
+
+    // Compile the eBPF program with proper architecture flags
     let output = Command::new("clang")
         .args([
             "-target",
             "bpf",
             "-D__BPF_TRACING__",
+            &target_arch_define,
             "-Wall",
-            "-Wextra",
             "-O2",
             "-g",
             "-c",
+            &format!("-I{}", arch_include),
+            &format!("-I{}", src_dir.to_str().unwrap()),
             "-o",
             obj_file.to_str().unwrap(),
             src_file.to_str().unwrap(),
@@ -536,16 +562,15 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
         .into());
     }
 
-    // Strip debug symbols if llvm-strip is available
-    if Command::new("llvm-strip").arg("--version").output().is_ok() {
-        let output = Command::new("llvm-strip")
-            .args(["-g", obj_file.to_str().unwrap()])
-            .output()?;
+    println!(
+        "cargo:warning=eBPF program compiled successfully to {}",
+        obj_file.display()
+    );
 
-        if !output.status.success() {
-            println!("cargo:warning=Failed to strip eBPF program (non-fatal)");
-        }
-    }
+    // Note: We intentionally do NOT strip the eBPF object file.
+    // The BTF (BPF Type Format) information is embedded alongside debug info
+    // and is required for the eBPF loader (aya) to work correctly.
+    // Stripping with -g would remove BTF sections (.BTF, .BTF.ext).
 
     Ok(())
 }

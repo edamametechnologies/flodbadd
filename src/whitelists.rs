@@ -476,11 +476,12 @@ impl Whitelists {
     /// - Ports are coalesced, merging overlapping/adjacent ranges (e.g., 80, 81-82 → 80-82).
     /// - IP specs are deduplicated (preserving list semantics; no CIDR synthesis is attempted).
     pub fn factorize_whitelist(input: &WhitelistInfo) -> WhitelistInfo {
-        // Group key excludes ports and IPs
+        // Group key excludes ports. IPs are only used as key for IP-only endpoints.
+        // When domains are present, IPs are accumulated into the ips list instead.
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         struct Key {
             domains: Vec<String>, // normalized, empty means no domain restriction
-            ip: String,
+            ip: String,           // only populated when domains is empty (IP-only endpoints)
             protocol: Option<String>,
             as_number: Option<u32>,
             as_country: Option<String>,
@@ -572,8 +573,15 @@ impl Whitelists {
             domains_vec.dedup();
 
             let key = Key {
-                domains: domains_vec,
-                ip: ep.ip.clone().unwrap_or_default(),
+                domains: domains_vec.clone(),
+                // Only use IP as grouping key when there's no domain (IP-only endpoints).
+                // When a domain is present, the IP should NOT be part of the key so that
+                // multiple IPs for the same domain get merged together.
+                ip: if domains_vec.is_empty() {
+                    ep.ip.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                },
                 protocol: ep.protocol.clone(),
                 as_number: ep.as_number,
                 as_country: ep.as_country.clone(),
@@ -1722,6 +1730,112 @@ mod tests {
             .endpoints
             .iter()
             .any(|e| e.domain.as_deref() == Some("a.com")));
+    }
+
+    /// Test that endpoints with the same domain but different IPs are merged together.
+    /// This is critical for auto-whitelist stability - without this, the same domain
+    /// appearing with different CDN/load-balancer IPs would create separate endpoints
+    /// and prevent the whitelist from ever stabilizing.
+    #[test]
+    fn test_factorize_whitelist_merges_same_domain_different_ips() {
+        let info = WhitelistInfo {
+            name: "custom_whitelist".to_string(),
+            extends: None,
+            endpoints: vec![
+                // Same domain "github.com" with different IPs (like CDN/load balancer)
+                WhitelistEndpoint {
+                    domain: Some("github.com".into()),
+                    domains: None,
+                    ip: Some("140.82.114.3".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: Some("First GitHub IP".into()),
+                    ports: None,
+                    ips: None,
+                },
+                WhitelistEndpoint {
+                    domain: Some("github.com".into()),
+                    domains: None,
+                    ip: Some("140.82.114.4".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: Some("Second GitHub IP".into()),
+                    ports: None,
+                    ips: None,
+                },
+                WhitelistEndpoint {
+                    domain: Some("github.com".into()),
+                    domains: None,
+                    ip: Some("140.82.112.4".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: Some("Third GitHub IP".into()),
+                    ports: None,
+                    ips: None,
+                },
+                // IP-only endpoint (no domain) - should remain separate
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("10.0.0.1".into()),
+                    port: Some(8080),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: Some("Internal IP only".into()),
+                    ports: None,
+                    ips: None,
+                },
+            ],
+        };
+
+        let factored = Whitelists::factorize_whitelist(&info);
+
+        // Should have exactly 2 endpoints:
+        // 1. github.com with merged IPs
+        // 2. 10.0.0.1 (IP-only)
+        assert_eq!(
+            factored.endpoints.len(),
+            2,
+            "Expected 2 endpoints after factorization, got {}",
+            factored.endpoints.len()
+        );
+
+        // Find the github.com endpoint
+        let github_ep = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.as_deref() == Some("github.com"))
+            .expect("Should have github.com endpoint");
+
+        // Should have merged all 3 IPs into the ips list
+        let ips = github_ep.ips.as_ref().expect("Should have ips list");
+        assert_eq!(ips.len(), 3, "Should have 3 merged IPs, got {}", ips.len());
+        assert!(ips.contains(&"140.82.114.3".to_string()));
+        assert!(ips.contains(&"140.82.114.4".to_string()));
+        assert!(ips.contains(&"140.82.112.4".to_string()));
+
+        // Find the IP-only endpoint - should still exist separately
+        let ip_only_ep = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.is_none() && e.ip.as_deref() == Some("10.0.0.1"))
+            .expect("Should have IP-only endpoint");
+        assert_eq!(ip_only_ep.port, Some(8080));
     }
 
     #[tokio::test]
