@@ -498,7 +498,9 @@ pub fn init_and_log_status() {
     } else {
         #[cfg(all(target_os = "linux", feature = "ebpf"))]
         {
-            warn!("eBPF L7 resolution helper is DISABLED - falling back to /proc-based resolution");
+            tracing::warn!(
+                "eBPF L7 resolution helper is DISABLED - falling back to /proc-based resolution"
+            );
         }
         #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
         {
