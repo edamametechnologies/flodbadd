@@ -5,7 +5,7 @@ use std::env;
 #[cfg(target_os = "windows")]
 use std::fs;
 #[cfg(any(all(feature = "ebpf", target_os = "linux"), target_os = "windows"))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(all(target_os = "windows", feature = "packetcapture"))]
 use zip;
 
