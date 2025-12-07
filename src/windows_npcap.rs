@@ -42,7 +42,8 @@ pub fn ensure_wayback_raw(url: &str) -> String {
 
 pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response, String> {
     let mut attempts = 0;
-    let max_attempts = 5;
+    let max_attempts = 10;
+    let max_wait_secs = 300; // 5 minutes
     let mut last_error = String::new();
     loop {
         match reqwest::blocking::get(url) {
@@ -63,7 +64,9 @@ pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response
                 url, max_attempts, last_error
             ));
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Exponential backoff: 2^attempts seconds, capped at 5 minutes
+        let wait_secs = std::cmp::min(2u64.pow(attempts), max_wait_secs);
+        std::thread::sleep(std::time::Duration::from_secs(wait_secs));
     }
 }
 
