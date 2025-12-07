@@ -121,7 +121,13 @@ mod linux {
     }
 
     impl Inner {
-        fn new() -> Option<Self> {
+        /// Initialize eBPF and return (Option<Inner>, status_message)
+        fn new_with_status() -> (Option<Self>, String) {
+            // Get kernel version first for status messages
+            let kernel_version = nix::sys::utsname::uname()
+                .map(|u| u.release().to_string_lossy().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+
             // -------------------------------------------------------------
             //  Quick pre-flight checks to give a clearer error message when
             //  the kernel/capabilities do not allow loading eBPF programs.
@@ -135,9 +141,13 @@ mod linux {
             {
                 if disabled.trim() == "1" {
                     if nix::unistd::geteuid().as_raw() != 0 {
+                        let msg = format!(
+                            "Disabled: unprivileged_bpf_disabled=1 and not running as root (kernel {})",
+                            kernel_version
+                        );
                         warn!("eBPF disabled: kernel has unprivileged_bpf_disabled=1 (need root or CAP_BPF)");
-                        println!("[l7_ebpf] Disabled – kernel has unprivileged_bpf_disabled=1 (need root/CAP_BPF)");
-                        return None;
+                        println!("[l7_ebpf] {}", msg);
+                        return (None, msg);
                     }
                 }
             }
@@ -148,9 +158,10 @@ mod linux {
             let uts = match nix::sys::utsname::uname() {
                 Ok(u) => u,
                 Err(e) => {
-                    warn!("eBPF disabled: uname() syscall failed: {}", e);
-                    println!("[l7_ebpf] Disabled – uname() syscall failed: {}", e);
-                    return None;
+                    let msg = format!("Disabled: uname() syscall failed: {}", e);
+                    warn!("eBPF disabled: {}", msg);
+                    println!("[l7_ebpf] {}", msg);
+                    return (None, msg);
                 }
             };
             let release_str = uts.release().to_string_lossy();
@@ -158,22 +169,21 @@ mod linux {
             if let (Some(maj), Some(min)) = (parts.next(), parts.next()) {
                 if let (Ok(maj), Ok(min)) = (maj.parse::<u32>(), min.parse::<u32>()) {
                     if maj < 5 || (maj == 5 && min < 3) {
-                        warn!(
-                            "eBPF disabled: kernel {}.{} < 5.3 (tracepoint+BTF required)",
+                        let msg = format!(
+                            "Disabled: kernel {}.{} < 5.3 (BTF/tracepoint support required)",
                             maj, min
                         );
-                        println!(
-                            "[l7_ebpf] Disabled – kernel {}.{} < 5.3 (tracepoint+BTF required)",
-                            maj, min
-                        );
-                        return None;
+                        warn!("eBPF disabled: {}", msg);
+                        println!("[l7_ebpf] {}", msg);
+                        return (None, msg);
                     }
                 }
             }
             println!("kernel version check passed");
 
             // Check for LinuxKit kernel (Docker Desktop, etc.)
-            if release_str.contains("linuxkit") {
+            let is_linuxkit = release_str.contains("linuxkit");
+            if is_linuxkit {
                 println!("[l7_ebpf] WARNING: Running on LinuxKit kernel ({}). eBPF functionality may be limited in Docker Desktop", release_str);
             }
 
@@ -240,24 +250,27 @@ mod linux {
             let data = match std::fs::read(&obj_path) {
                 Ok(d) => d,
                 Err(e) => {
-                    warn!(
-                        "Unable to read eBPF object {}: {} – running without eBPF",
+                    let msg = format!(
+                        "Disabled: couldn't read eBPF object '{}': {} (kernel {})",
                         obj_path.display(),
-                        e
+                        e,
+                        kernel_version
                     );
-                    println!("[l7_ebpf] Disabled – couldn't read object: {}", e);
-                    return None;
+                    warn!("Unable to read eBPF object: {}", e);
+                    println!("[l7_ebpf] {}", msg);
+                    return (None, msg);
                 }
             };
 
             let mut bpf = match Ebpf::load(&data) {
                 Ok(bpf) => bpf,
                 Err(e) => {
-                    error!("Failed to load eBPF program: {}", e);
-                    println!(
-                        "[l7_ebpf] Disabled – failed to parse/load object: {} (debug: {:?})",
-                        e, e
+                    let msg = format!(
+                        "Disabled: failed to load eBPF program: {} (kernel {})",
+                        e, kernel_version
                     );
+                    error!("Failed to load eBPF program: {}", e);
+                    println!("[l7_ebpf] {}", msg);
 
                     // Extra diagnostics inside the container
                     if let Ok(out) = Command::new("file").arg(&obj_path).output() {
@@ -272,31 +285,56 @@ mod linux {
                             String::from_utf8_lossy(&out.stdout)
                         );
                     }
-                    return None;
+                    return (None, msg);
                 }
             };
 
-            // Attach kprobe to inet_sock_set_state (matching our simplified eBPF program function name)
+            // Attach kprobe to tcp_set_state (matching our simplified eBPF program function name)
             if let Some(prog_any) = bpf.program_mut("minimal_probe") {
                 use aya::programs::KProbe;
                 let kp: &mut KProbe = match prog_any.try_into() {
                     Ok(kp) => kp,
                     Err(e) => {
+                        let msg = format!(
+                            "Disabled: failed to cast eBPF program to KProbe: {} (kernel {})",
+                            e, kernel_version
+                        );
                         error!("Failed to cast program into KProbe: {}", e);
-                        return None;
+                        return (None, msg);
                     }
                 };
                 if let Err(e) = kp.load() {
+                    let msg = format!(
+                        "Disabled: kernel rejected eBPF program load: {} (kernel {})",
+                        e, kernel_version
+                    );
                     error!("Failed to load kprobe program: {}", e);
-                    println!("[l7_ebpf] Disabled – kernel rejected program load: {}", e);
-                    return None;
+                    println!("[l7_ebpf] {}", msg);
+                    return (None, msg);
                 }
                 if let Err(e) = kp.attach("tcp_set_state", 0) {
-                    warn!(
-                        "eBPF disabled: failed to attach kprobe to tcp_set_state: {}",
-                        e
+                    // Check if we're in Docker for better error message
+                    let in_docker = std::path::Path::new("/.dockerenv").exists()
+                        || std::fs::read_to_string("/proc/1/cgroup")
+                            .map(|s| s.contains("/docker/"))
+                            .unwrap_or(false);
+
+                    let context = if is_linuxkit {
+                        "LinuxKit/Docker Desktop doesn't support kprobes"
+                    } else if in_docker {
+                        "container may lack SYS_ADMIN/BPF capabilities"
+                    } else if e.to_string().contains("perf_event_open") {
+                        "perf_event_open failed - need root or CAP_BPF"
+                    } else {
+                        "kprobe attachment failed"
+                    };
+
+                    let msg = format!(
+                        "Disabled: {} - {} (kernel {})",
+                        context, e, kernel_version
                     );
-                    println!("[l7_ebpf] Disabled – failed to attach kprobe: {}", e);
+                    warn!("eBPF disabled: failed to attach kprobe to tcp_set_state: {}", e);
+                    println!("[l7_ebpf] {}", msg);
 
                     // Extra diagnostics for perf_event_open failure
                     if e.to_string().contains("perf_event_open") {
@@ -308,12 +346,6 @@ mod linux {
                         println!("[l7_ebpf]   3. When in Docker, use --privileged and:");
                         println!("[l7_ebpf]      -v /sys/kernel/debug:/sys/kernel/debug");
 
-                        // Check if we're in Docker
-                        let in_docker = std::path::Path::new("/.dockerenv").exists()
-                            || std::fs::read_to_string("/proc/1/cgroup")
-                                .map(|s| s.contains("/docker/"))
-                                .unwrap_or(false);
-
                         if in_docker {
                             println!("[l7_ebpf] **DETECTED DOCKER ENVIRONMENT**");
                             println!("[l7_ebpf] Docker Desktop on macOS has limited eBPF support.");
@@ -323,12 +355,16 @@ mod linux {
                         }
                     }
 
-                    return None;
+                    return (None, msg);
                 }
             } else {
+                let msg = format!(
+                    "Disabled: eBPF object missing 'minimal_probe' kprobe program (kernel {})",
+                    kernel_version
+                );
                 warn!("eBPF object missing expected kprobe; running without eBPF");
-                println!("[l7_ebpf] Disabled – object missing kprobe program");
-                return None;
+                println!("[l7_ebpf] {}", msg);
+                return (None, msg);
             }
 
             // Attach kprobe for tcp_v4_connect (captures process info in user context)
@@ -350,22 +386,47 @@ mod linux {
                 Some(m) => match AyaHashMap::try_from(m) {
                     Ok(h) => h,
                     Err(e) => {
+                        let msg = format!(
+                            "Disabled: failed to open eBPF map: {} (kernel {})",
+                            e, kernel_version
+                        );
                         error!("Failed to open HashMap from map: {}", e);
-                        println!("[l7_ebpf] Disabled – failed to open user map: {}", e);
-                        return None;
+                        println!("[l7_ebpf] {}", msg);
+                        return (None, msg);
                     }
                 },
                 None => {
+                    let msg = format!(
+                        "Disabled: eBPF map 'l7_connections' not found in object (kernel {})",
+                        kernel_version
+                    );
                     error!("Failed to obtain eBPF hash map 'l7_connections'");
-                    println!("[l7_ebpf] Disabled – map 'l7_connections' not found in object");
-                    return None;
+                    println!("[l7_ebpf] {}", msg);
+                    return (None, msg);
                 }
             };
 
-            info!("eBPF L7 helper initialised successfully");
-            println!("[l7_ebpf] Initialised successfully (kernel eBPF enabled)");
+            // Check if we're in a container for the success message
+            let in_container = std::path::Path::new("/.dockerenv").exists()
+                || std::fs::read_to_string("/proc/1/cgroup")
+                    .map(|s| s.contains("/docker/") || s.contains("/lxc/") || s.contains("/containerd/"))
+                    .unwrap_or(false);
 
-            Some(Inner { _bpf: bpf, map })
+            let env_info = if in_container {
+                " (container)"
+            } else {
+                ""
+            };
+
+            let msg = format!(
+                "Enabled: kernel {} with tcp_set_state kprobe attached{}",
+                kernel_version, env_info
+            );
+
+            info!("eBPF L7 helper initialised successfully");
+            println!("[l7_ebpf] {}", msg);
+
+            (Some(Inner { _bpf: bpf, map }), msg)
         }
 
         fn lookup_session(&self, session: &Session) -> Option<SessionL7> {
@@ -424,12 +485,16 @@ mod linux {
     // Singleton wrapper so that the rest of the code only ever initialises once.
     pub struct FlodbaddL7Ebpf {
         inner: Option<Arc<Inner>>, // None when eBPF not available
+        init_status: String,       // Detailed initialization status message
     }
 
     impl FlodbaddL7Ebpf {
         fn init() -> Self {
-            let inner = Inner::new().map(Arc::new);
-            Self { inner }
+            let (inner, status) = Inner::new_with_status();
+            Self {
+                inner: inner.map(Arc::new),
+                init_status: status,
+            }
         }
 
         pub fn get_l7(&self, session: &Session) -> Option<SessionL7> {
@@ -439,6 +504,10 @@ mod linux {
         pub fn is_available(&self) -> bool {
             self.inner.is_some()
         }
+
+        pub fn init_status(&self) -> &str {
+            &self.init_status
+        }
     }
 
     // Global accessor – lazily initialises on first use
@@ -446,10 +515,16 @@ mod linux {
         static INSTANCE: OnceCell<FlodbaddL7Ebpf> = OnceCell::new();
         INSTANCE.get_or_init(|| FlodbaddL7Ebpf::init())
     }
+
+    /// Get the detailed initialization status message
+    pub fn get_init_status() -> &'static str {
+        global().init_status()
+    }
 }
 
 #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
 mod linux {
+    #![allow(dead_code)] // These stubs exist for API completeness on non-Linux platforms
     use super::*;
 
     pub struct FlodbaddL7Ebpf;
@@ -457,11 +532,24 @@ mod linux {
         pub fn get_l7(&self, _session: &Session) -> Option<SessionL7> {
             None
         }
+
+        pub fn is_available(&self) -> bool {
+            false
+        }
+
+        pub fn init_status(&self) -> &str {
+            "Not available: eBPF requires Linux with 'ebpf' feature"
+        }
     }
 
     pub fn global() -> &'static FlodbaddL7Ebpf {
         static INSTANCE: FlodbaddL7Ebpf = FlodbaddL7Ebpf {};
         &INSTANCE
+    }
+
+    /// Stub for non-Linux platforms
+    pub fn get_init_status() -> &'static str {
+        global().init_status()
     }
 }
 
@@ -508,6 +596,27 @@ pub fn init_and_log_status() {
                 "eBPF L7 resolution not available on this platform (non-Linux or feature disabled)"
             );
         }
+    }
+}
+
+/// Returns a detailed string describing eBPF support status.
+/// This includes the actual result of attempting to load and use the eBPF module.
+pub fn ebpf_support() -> String {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return "Not supported: eBPF requires Linux".to_string();
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "ebpf")))]
+    {
+        return "Not enabled: compiled without 'ebpf' feature flag".to_string();
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    {
+        // Trigger initialization if not already done and get the status
+        // This will actually attempt to load the eBPF program
+        linux::get_init_status().to_string()
     }
 }
 
