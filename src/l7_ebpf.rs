@@ -329,11 +329,11 @@ mod linux {
                         "kprobe attachment failed"
                     };
 
-                    let msg = format!(
-                        "Disabled: {} - {} (kernel {})",
-                        context, e, kernel_version
+                    let msg = format!("Disabled: {} - {} (kernel {})", context, e, kernel_version);
+                    warn!(
+                        "eBPF disabled: failed to attach kprobe to tcp_set_state: {}",
+                        e
                     );
-                    warn!("eBPF disabled: failed to attach kprobe to tcp_set_state: {}", e);
                     println!("[l7_ebpf] {}", msg);
 
                     // Extra diagnostics for perf_event_open failure
@@ -409,14 +409,12 @@ mod linux {
             // Check if we're in a container for the success message
             let in_container = std::path::Path::new("/.dockerenv").exists()
                 || std::fs::read_to_string("/proc/1/cgroup")
-                    .map(|s| s.contains("/docker/") || s.contains("/lxc/") || s.contains("/containerd/"))
+                    .map(|s| {
+                        s.contains("/docker/") || s.contains("/lxc/") || s.contains("/containerd/")
+                    })
                     .unwrap_or(false);
 
-            let env_info = if in_container {
-                " (container)"
-            } else {
-                ""
-            };
+            let env_info = if in_container { " (container)" } else { "" };
 
             let msg = format!(
                 "Enabled: kernel {} with tcp_set_state kprobe attached{}",
