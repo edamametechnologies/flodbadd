@@ -146,12 +146,11 @@ mod linux {
                             kernel_version
                         );
                         warn!("eBPF disabled: kernel has unprivileged_bpf_disabled=1 (need root or CAP_BPF)");
-                        println!("[l7_ebpf] {}", msg);
                         return (None, msg);
                     }
                 }
             }
-            println!("unprivileged_bpf_disabled check passed");
+            debug!("eBPF: unprivileged_bpf_disabled check passed");
 
             // 2. Basic kernel version heuristic – we need at least 5.3 for
             //    tracepoints with BTF; bail early on older kernels.
@@ -160,7 +159,6 @@ mod linux {
                 Err(e) => {
                     let msg = format!("Disabled: uname() syscall failed: {}", e);
                     warn!("eBPF disabled: {}", msg);
-                    println!("[l7_ebpf] {}", msg);
                     return (None, msg);
                 }
             };
@@ -174,28 +172,26 @@ mod linux {
                             maj, min
                         );
                         warn!("eBPF disabled: {}", msg);
-                        println!("[l7_ebpf] {}", msg);
                         return (None, msg);
                     }
                 }
             }
-            println!("kernel version check passed");
+            debug!("eBPF: kernel version check passed");
 
             // Check for LinuxKit kernel (Docker Desktop, etc.)
             let is_linuxkit = release_str.contains("linuxkit");
             if is_linuxkit {
-                println!("[l7_ebpf] WARNING: Running on LinuxKit kernel ({}). eBPF functionality may be limited in Docker Desktop", release_str);
+                warn!("eBPF: Running on LinuxKit kernel ({}). eBPF functionality may be limited in Docker Desktop", release_str);
             }
 
             // Check if perf_event_paranoid is set correctly
             if let Ok(paranoid) = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid") {
                 if let Ok(value) = paranoid.trim().parse::<i32>() {
                     if value > -1 {
-                        println!(
-                            "[l7_ebpf] WARNING: perf_event_paranoid = {} (should be -1 or lower)",
+                        debug!(
+                            "eBPF: perf_event_paranoid = {} (should be -1 or lower for unprivileged access)",
                             value
                         );
-                        println!("[l7_ebpf] Try: sudo sysctl -w kernel.perf_event_paranoid=-1");
                     }
                 }
             }
@@ -207,10 +203,7 @@ mod linux {
                 .unwrap_or(false);
 
             if !debug_mounted {
-                println!(
-                    "[l7_ebpf] WARNING: debugfs not mounted. This may cause issues with kprobes."
-                );
-                println!("[l7_ebpf] Try: sudo mount -t debugfs none /sys/kernel/debug");
+                debug!("eBPF: debugfs not mounted - this may cause issues with kprobes");
             }
 
             // Decide which object file to load.  Priority:
@@ -236,16 +229,9 @@ mod linux {
                         })
                         .unwrap_or_else(|_| PathBuf::from("l7_ebpf.o"))
                 });
-            println!("obj_path: {}", obj_path.display());
+            debug!("eBPF: object path: {}", obj_path.display());
 
-            // Even if the application hasn't initialised a logger we still want
-            // a clear indication during CI / test runs as to whether the eBPF
-            // helper was activated.  Therefore emit an unconditional
-            // `println!`.  (It will show up once per process, at most.)
-            println!(
-                "[l7_ebpf] Attempting to load object: {}",
-                obj_path.display()
-            );
+            info!("eBPF: Attempting to load object: {}", obj_path.display());
 
             let data = match std::fs::read(&obj_path) {
                 Ok(d) => d,
@@ -257,7 +243,6 @@ mod linux {
                         kernel_version
                     );
                     warn!("Unable to read eBPF object: {}", e);
-                    println!("[l7_ebpf] {}", msg);
                     return (None, msg);
                 }
             };
@@ -270,19 +255,21 @@ mod linux {
                         e, kernel_version
                     );
                     error!("Failed to load eBPF program: {}", e);
-                    println!("[l7_ebpf] {}", msg);
 
-                    // Extra diagnostics inside the container
+                    // Extra diagnostics inside the container (to debug log)
                     if let Ok(out) = Command::new("file").arg(&obj_path).output() {
-                        println!("[l7_ebpf] file: {}", String::from_utf8_lossy(&out.stdout));
+                        debug!(
+                            "eBPF file info: {}",
+                            String::from_utf8_lossy(&out.stdout).trim()
+                        );
                     }
                     if let Ok(out) = Command::new("readelf")
                         .args(["-h", obj_path.to_str().unwrap()])
                         .output()
                     {
-                        println!(
-                            "[l7_ebpf] readelf -h:\n{}",
-                            String::from_utf8_lossy(&out.stdout)
+                        debug!(
+                            "eBPF readelf -h: {}",
+                            String::from_utf8_lossy(&out.stdout).trim()
                         );
                     }
                     return (None, msg);
@@ -309,7 +296,6 @@ mod linux {
                         e, kernel_version
                     );
                     error!("Failed to load kprobe program: {}", e);
-                    println!("[l7_ebpf] {}", msg);
                     return (None, msg);
                 }
                 if let Err(e) = kp.attach("tcp_set_state", 0) {
@@ -334,24 +320,12 @@ mod linux {
                         "eBPF disabled: failed to attach kprobe to tcp_set_state: {}",
                         e
                     );
-                    println!("[l7_ebpf] {}", msg);
 
-                    // Extra diagnostics for perf_event_open failure
+                    // Extra diagnostics for perf_event_open failure (to debug log)
                     if e.to_string().contains("perf_event_open") {
-                        println!("[l7_ebpf] perf_event_open failure - common fixes:");
-                        println!("[l7_ebpf]   1. Set kernel.perf_event_paranoid=-1");
-                        println!("[l7_ebpf]      sudo sysctl -w kernel.perf_event_paranoid=-1");
-                        println!("[l7_ebpf]   2. Ensure debugfs is mounted:");
-                        println!("[l7_ebpf]      sudo mount -t debugfs none /sys/kernel/debug");
-                        println!("[l7_ebpf]   3. When in Docker, use --privileged and:");
-                        println!("[l7_ebpf]      -v /sys/kernel/debug:/sys/kernel/debug");
-
+                        debug!("eBPF perf_event_open failure - common fixes: 1) sudo sysctl -w kernel.perf_event_paranoid=-1, 2) mount debugfs, 3) use --privileged in Docker");
                         if in_docker {
-                            println!("[l7_ebpf] **DETECTED DOCKER ENVIRONMENT**");
-                            println!("[l7_ebpf] Docker Desktop on macOS has limited eBPF support.");
-                            println!(
-                                "[l7_ebpf] Consider testing on a native Linux system instead."
-                            );
+                            debug!("eBPF: Docker environment detected - Docker Desktop on macOS has limited eBPF support");
                         }
                     }
 
@@ -363,7 +337,6 @@ mod linux {
                     kernel_version
                 );
                 warn!("eBPF object missing expected kprobe; running without eBPF");
-                println!("[l7_ebpf] {}", msg);
                 return (None, msg);
             }
 
@@ -391,7 +364,6 @@ mod linux {
                             e, kernel_version
                         );
                         error!("Failed to open HashMap from map: {}", e);
-                        println!("[l7_ebpf] {}", msg);
                         return (None, msg);
                     }
                 },
@@ -401,7 +373,6 @@ mod linux {
                         kernel_version
                     );
                     error!("Failed to obtain eBPF hash map 'l7_connections'");
-                    println!("[l7_ebpf] {}", msg);
                     return (None, msg);
                 }
             };
@@ -421,8 +392,7 @@ mod linux {
                 kernel_version, env_info
             );
 
-            info!("eBPF L7 helper initialised successfully");
-            println!("[l7_ebpf] {}", msg);
+            info!("eBPF L7 helper initialised successfully: {}", msg);
 
             (Some(Inner { _bpf: bpf, map }), msg)
         }
