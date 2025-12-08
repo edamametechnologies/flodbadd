@@ -3,22 +3,29 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Debug: confirm this build.rs is running
-    println!("cargo:warning=[l7_ebpf_program] build.rs running on {}", std::env::consts::OS);
+    // Debug: confirm this build.rs is running - use eprintln for visibility
+    eprintln!("[l7_ebpf_program build.rs] Running on {}", std::env::consts::OS);
     
     // Only build eBPF program on Linux with ebpf feature
     // NOTE: cfg!(feature = "...") doesn't work in build.rs - must use env var
     let has_ebpf_feature = env::var("CARGO_FEATURE_EBPF").is_ok();
     let is_linux = std::env::consts::OS == "linux";
     
-    println!("cargo:warning=[l7_ebpf_program] is_linux={}, has_ebpf_feature={}", is_linux, has_ebpf_feature);
+    eprintln!("[l7_ebpf_program build.rs] is_linux={}, has_ebpf_feature={}", is_linux, has_ebpf_feature);
+    
+    // Also print all CARGO_FEATURE_* env vars for debugging
+    for (key, value) in env::vars() {
+        if key.starts_with("CARGO_FEATURE_") {
+            eprintln!("[l7_ebpf_program build.rs] {}={}", key, value);
+        }
+    }
     
     if !is_linux || !has_ebpf_feature {
-        println!("cargo:warning=[l7_ebpf_program] Skipping: not linux or no ebpf feature");
+        eprintln!("[l7_ebpf_program build.rs] Skipping: not linux or no ebpf feature");
         return;
     }
     
-    println!("cargo:warning=[l7_ebpf_program] Proceeding with eBPF compilation");
+    eprintln!("[l7_ebpf_program build.rs] Proceeding with eBPF compilation");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
