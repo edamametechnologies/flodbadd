@@ -3,10 +3,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Debug: confirm this build.rs is running
+    println!("cargo:warning=[l7_ebpf_program] build.rs running on {}", std::env::consts::OS);
+    
     // Only build eBPF program on Linux with ebpf feature
     if cfg!(not(target_os = "linux")) || !cfg!(feature = "ebpf") {
+        println!("cargo:warning=[l7_ebpf_program] Skipping: not linux or no ebpf feature");
         return;
     }
+    
+    println!("cargo:warning=[l7_ebpf_program] Proceeding with eBPF compilation");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();

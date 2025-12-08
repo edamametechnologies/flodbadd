@@ -459,6 +459,9 @@ fn find_installed_npcap_sdk_lib_dir(lib_subdir: &str) -> Option<PathBuf> {
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn handle_ebpf_build() {
+    // Debug: confirm this function is being called
+    println!("cargo:warning=[eBPF] handle_ebpf_build() called");
+    
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/build.rs");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/vmlinux.h");
