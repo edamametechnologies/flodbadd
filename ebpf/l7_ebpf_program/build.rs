@@ -7,7 +7,13 @@ fn main() {
     println!("cargo:warning=[l7_ebpf_program] build.rs running on {}", std::env::consts::OS);
     
     // Only build eBPF program on Linux with ebpf feature
-    if cfg!(not(target_os = "linux")) || !cfg!(feature = "ebpf") {
+    // NOTE: cfg!(feature = "...") doesn't work in build.rs - must use env var
+    let has_ebpf_feature = env::var("CARGO_FEATURE_EBPF").is_ok();
+    let is_linux = std::env::consts::OS == "linux";
+    
+    println!("cargo:warning=[l7_ebpf_program] is_linux={}, has_ebpf_feature={}", is_linux, has_ebpf_feature);
+    
+    if !is_linux || !has_ebpf_feature {
         println!("cargo:warning=[l7_ebpf_program] Skipping: not linux or no ebpf feature");
         return;
     }
