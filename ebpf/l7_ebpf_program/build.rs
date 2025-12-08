@@ -40,17 +40,43 @@ fn main() {
 
     // Note: llvm-strip is NOT used - we preserve BTF sections for aya
 
-    // Compile the eBPF program
+    // Determine target architecture for eBPF
+    let target_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86",
+        "x86" => "x86",
+        arch => {
+            println!(
+                "cargo:warning=Unknown architecture {}, defaulting to x86 for eBPF",
+                arch
+            );
+            "x86"
+        }
+    };
+
+    // Determine architecture-specific include directory
+    let arch_include = match std::env::consts::ARCH {
+        "aarch64" => "/usr/include/aarch64-linux-gnu",
+        "x86_64" | "x86" => "/usr/include/x86_64-linux-gnu",
+        _ => "/usr/include",
+    };
+
+    let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
+    let src_dir = PathBuf::from(&manifest_dir).join("src");
+
+    // Compile the eBPF program with proper architecture flags
     let output = Command::new("clang")
         .args([
             "-target",
             "bpf",
             "-D__BPF_TRACING__",
+            &target_arch_define,
             "-Wall",
-            "-Wextra",
             "-O2",
             "-g",
             "-c",
+            &format!("-I{}", arch_include),
+            &format!("-I{}", src_dir.to_str().unwrap()),
             "-o",
             obj_file.to_str().unwrap(),
             src_file.to_str().unwrap(),
