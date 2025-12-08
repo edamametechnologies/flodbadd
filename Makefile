@@ -190,12 +190,12 @@ lima_test: lima_start
 	limactl shell $(LIMA_VM_NAME) -- bash -c '\
 		cd /Users/flyonnet/Programming/flodbadd && \
 		source $$HOME/.cargo/env && \
-		echo "=== Environment ===" && \
-		echo "Kernel: $$(uname -r)" && \
-		echo "Clang: $$(clang --version | head -1)" && \
-		echo "Rust: $$(rustc --version)" && \
-		echo "perf_event_paranoid: $$(cat /proc/sys/kernel/perf_event_paranoid)" && \
+		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
 		echo "" && \
+		echo "=== eBPF Diagnostic Test ===" && \
+		BINARY_PATH=./target/release/examples/check_ebpf ./tests/ebpf_test.sh && \
+		echo "" && \
+		echo "=== Running Full Test Suite ===" && \
 		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf -- --nocapture --test-threads=1 \
 	'
@@ -263,18 +263,11 @@ alpine_test: alpine_start
 	@echo "Testing eBPF with musl libc (Alpine uses musl, not glibc)"
 	@echo "============================================================"
 	@echo ""
-	limactl shell $(ALPINE_VM_NAME) -- bash -c '\
+	limactl shell $(ALPINE_VM_NAME) -- sh -c '\
 		cd /Users/flyonnet/Programming/flodbadd && \
-		source $$HOME/.cargo/env && \
-		echo "=== Alpine Environment ===" && \
-		echo "Kernel: $$(uname -r)" && \
-		echo "Clang: $$(clang --version | head -1)" && \
-		echo "Rust: $$(rustc --version)" && \
-		echo "libc: musl (Alpine)" && \
-		echo "perf_event_paranoid: $$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo N/A)" && \
-		echo "" && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
-			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf -- --nocapture \
+		. $$HOME/.cargo/env && \
+		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
+		BINARY_PATH=./target/release/examples/check_ebpf ./tests/ebpf_test.sh \
 	'
 
 # -----------------------------------------------------------------------------
@@ -309,11 +302,8 @@ ubuntu2204_test: ubuntu2204_start
 	limactl shell $(UBUNTU2204_VM_NAME) -- bash -c '\
 		cd /Users/flyonnet/Programming/flodbadd && \
 		source $$HOME/.cargo/env && \
-		echo "=== Ubuntu 22.04 Environment ===" && \
-		echo "Kernel: $$(uname -r)" && \
-		cat /etc/lsb-release | grep DESCRIPTION && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
-			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf_availability -- --nocapture \
+		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
+		BINARY_PATH=./target/release/examples/check_ebpf ./tests/ebpf_test.sh \
 	'
 
 # -----------------------------------------------------------------------------
@@ -391,11 +381,8 @@ ubuntu2004_test: ubuntu2004_start
 	limactl shell $(UBUNTU2004_VM_NAME) -- bash -c '\
 		cd /Users/flyonnet/Programming/flodbadd && \
 		source $$HOME/.cargo/env && \
-		echo "=== Ubuntu 20.04 Environment ===" && \
-		echo "Kernel: $$(uname -r)" && \
-		cat /etc/lsb-release | grep DESCRIPTION && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
-			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf_availability -- --nocapture \
+		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
+		BINARY_PATH=./target/release/examples/check_ebpf ./tests/ebpf_test.sh \
 	'
 
 # =============================================================================
