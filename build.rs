@@ -461,6 +461,7 @@ fn find_installed_npcap_sdk_lib_dir(lib_subdir: &str) -> Option<PathBuf> {
 fn handle_ebpf_build() {
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/build.rs");
+    println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/vmlinux.h");
 
     // The eBPF program should be built by its own build.rs
     // We just need to ensure the path is available to our code
@@ -480,11 +481,18 @@ fn handle_ebpf_build() {
     }
 
     if obj_file.exists() {
+        // Set the environment variable so include_bytes!() can embed the eBPF object
+        // directly into the binary at compile time. No runtime file lookup needed!
         println!("cargo:rustc-env=L7_EBPF_OBJECT={}", obj_file.display());
-        println!("eBPF program available at: {}", obj_file.display());
-    } else {
         println!(
-            "cargo:warning=eBPF program not available - L7 resolution will use fallback methods"
+            "cargo:warning=eBPF program will be embedded from: {}",
+            obj_file.display()
+        );
+    } else {
+        // If eBPF object doesn't exist, compilation will fail with a clear error
+        // from include_bytes!(env!("L7_EBPF_OBJECT")) - which is the intended behavior
+        println!(
+            "cargo:warning=eBPF program not built - compilation will fail if 'ebpf' feature is enabled"
         );
     }
 }

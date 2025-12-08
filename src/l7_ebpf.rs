@@ -7,10 +7,9 @@
 // all public functions gracefully fall back to no-op stubs so that the rest
 // of the codebase does not need to care whether eBPF is available.
 //
-// NOTE: The actual eBPF program is **not** included here – the `aya` run-time
-// will attempt to load `l7_ebpf.o` from the same directory as the executable
-// (or the path specified in the `L7_EBPF_OBJECT` env-var). If that fails we
-// simply operate in stub mode.
+// NOTE: The eBPF program is embedded directly in the binary at compile time
+// using include_bytes!(). This avoids runtime file lookup issues and makes
+// the binary fully self-contained.
 
 use crate::sessions::{Session, SessionL7};
 use tracing::info;
@@ -25,10 +24,12 @@ mod linux {
     };
     use bytemuck::{Pod, Zeroable};
     use once_cell::sync::OnceCell;
-    use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::Arc;
     use tracing::{debug, error, info, warn};
+
+    // Embed the eBPF object file directly into the binary at compile time.
+    // The L7_EBPF_OBJECT environment variable is set by build.rs during compilation.
+    static EBPF_OBJECT: &[u8] = include_bytes!(env!("L7_EBPF_OBJECT"));
 
     // Match the eBPF program structures
     #[repr(C)]
@@ -215,39 +216,13 @@ mod linux {
             // time (which is not automatically exported into the runtime
             // environment).
 
-            let obj_path = std::env::var("L7_EBPF_OBJECT")
-                .ok()
-                .or_else(|| option_env!("L7_EBPF_OBJECT").map(|s| s.to_string()))
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    // Default: executable directory + "l7_ebpf.o"
-                    std::env::current_exe()
-                        .map(|mut p| {
-                            p.pop();
-                            p.push("l7_ebpf.o");
-                            p
-                        })
-                        .unwrap_or_else(|_| PathBuf::from("l7_ebpf.o"))
-                });
-            debug!("eBPF: object path: {}", obj_path.display());
+            // Load from embedded bytes (compiled into binary at build time)
+            info!(
+                "eBPF: Loading embedded object ({} bytes)",
+                EBPF_OBJECT.len()
+            );
 
-            info!("eBPF: Attempting to load object: {}", obj_path.display());
-
-            let data = match std::fs::read(&obj_path) {
-                Ok(d) => d,
-                Err(e) => {
-                    let msg = format!(
-                        "Disabled: couldn't read eBPF object '{}': {} (kernel {})",
-                        obj_path.display(),
-                        e,
-                        kernel_version
-                    );
-                    warn!("Unable to read eBPF object: {}", e);
-                    return (None, msg);
-                }
-            };
-
-            let mut bpf = match Ebpf::load(&data) {
+            let mut bpf = match Ebpf::load(EBPF_OBJECT) {
                 Ok(bpf) => bpf,
                 Err(e) => {
                     let msg = format!(
@@ -255,23 +230,6 @@ mod linux {
                         e, kernel_version
                     );
                     error!("Failed to load eBPF program: {}", e);
-
-                    // Extra diagnostics inside the container (to debug log)
-                    if let Ok(out) = Command::new("file").arg(&obj_path).output() {
-                        debug!(
-                            "eBPF file info: {}",
-                            String::from_utf8_lossy(&out.stdout).trim()
-                        );
-                    }
-                    if let Ok(out) = Command::new("readelf")
-                        .args(["-h", obj_path.to_str().unwrap()])
-                        .output()
-                    {
-                        debug!(
-                            "eBPF readelf -h: {}",
-                            String::from_utf8_lossy(&out.stdout).trim()
-                        );
-                    }
                     return (None, msg);
                 }
             };
