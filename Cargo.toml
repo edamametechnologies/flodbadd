@@ -150,7 +150,7 @@ reqwest = { version = "0.12.23", default-features = false, features = ["blocking
 # 4.2.0 creates issues
 zip = "5.1.0"
 # eBPF program build component
-l7_ebpf_program = { path = "ebpf/l7_ebpf_program", optional = true }
+l7_ebpf_program = { path = "ebpf/l7_ebpf_program", optional = true, features = ["ebpf"] }
 
 # Windows build-dependencies for Npcap auto-install
 [target.'cfg(target_os = "windows")'.build-dependencies]

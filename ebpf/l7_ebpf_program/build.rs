@@ -38,9 +38,7 @@ fn main() {
         panic!("clang not found - required for eBPF compilation");
     }
 
-    if !check_tool("llvm-strip") {
-        panic!("llvm-strip not found - required for eBPF compilation");
-    }
+    // Note: llvm-strip is NOT used - we preserve BTF sections for aya
 
     // Compile the eBPF program
     let output = Command::new("clang")
@@ -68,19 +66,10 @@ fn main() {
         );
     }
 
-    // Strip debug symbols
-    let output = Command::new("llvm-strip")
-        .args(["-g", obj_file.to_str().unwrap()])
-        .output()
-        .expect("Failed to execute llvm-strip");
-
-    if !output.status.success() {
-        panic!(
-            "Failed to strip eBPF program:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    // Note: We intentionally do NOT strip the eBPF object file.
+    // The BTF (BPF Type Format) information is embedded alongside debug info
+    // and is required for the eBPF loader (aya) to work correctly.
+    // Running llvm-strip -g would remove BTF sections (.BTF, .BTF.ext).
 
     println!("eBPF program compiled successfully: {}", obj_file.display());
 
