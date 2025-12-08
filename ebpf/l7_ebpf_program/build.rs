@@ -119,8 +119,9 @@ fn main() {
 }
 
 fn check_tool(tool: &str) -> bool {
-    Command::new("which")
-        .arg(tool)
+    // Use --version instead of 'which' for portability (Alpine doesn't have which by default)
+    Command::new(tool)
+        .arg("--version")
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
