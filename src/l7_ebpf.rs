@@ -233,12 +233,15 @@ mod linux {
             }
 
             // Load from embedded bytes (compiled into binary at build time)
+            // Note: We copy to a Vec to ensure proper 8-byte alignment, as include_bytes!
+            // doesn't guarantee alignment and aya's ELF parser requires aligned data.
             info!(
                 "eBPF: Loading embedded object ({} bytes)",
                 EBPF_OBJECT.len()
             );
+            let aligned_object: Vec<u8> = EBPF_OBJECT.to_vec();
 
-            let mut bpf = match Ebpf::load(EBPF_OBJECT) {
+            let mut bpf = match Ebpf::load(&aligned_object) {
                 Ok(bpf) => bpf,
                 Err(e) => {
                     let msg = format!(
