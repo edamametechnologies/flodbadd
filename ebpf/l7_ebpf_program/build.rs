@@ -13,7 +13,10 @@ fn main() {
 
     // Create eBPF output directory
     let ebpf_dir = PathBuf::from(&out_dir).join("ebpf");
-    std::fs::create_dir_all(&ebpf_dir).unwrap();
+    if let Err(e) = std::fs::create_dir_all(&ebpf_dir) {
+        println!("cargo:warning=Failed to create eBPF output directory: {}", e);
+        return;
+    }
 
     // Set up paths
     let src_file = PathBuf::from(&manifest_dir).join("src/l7_ebpf.c");
@@ -33,12 +36,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Check for required tools
+    // Check for required tools - gracefully skip if not available
     if !check_tool("clang") {
-        panic!("clang not found - required for eBPF compilation");
+        println!("cargo:warning=clang not found - eBPF program will not be compiled");
+        println!("cargo:warning=Install clang/llvm to enable eBPF L7 process resolution");
+        return;
     }
-
-    // Note: llvm-strip is NOT used - we preserve BTF sections for aya
 
     // Determine target architecture for eBPF
     let target_arch = match std::env::consts::ARCH {
@@ -65,7 +68,7 @@ fn main() {
     let src_dir = PathBuf::from(&manifest_dir).join("src");
 
     // Compile the eBPF program with proper architecture flags
-    let output = Command::new("clang")
+    let output = match Command::new("clang")
         .args([
             "-target",
             "bpf",
@@ -82,14 +85,23 @@ fn main() {
             src_file.to_str().unwrap(),
         ])
         .output()
-        .expect("Failed to execute clang");
+    {
+        Ok(output) => output,
+        Err(e) => {
+            println!("cargo:warning=Failed to execute clang: {}", e);
+            return;
+        }
+    };
 
     if !output.status.success() {
-        panic!(
-            "Failed to compile eBPF program:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
+        println!(
+            "cargo:warning=eBPF compilation failed (this is expected in containers without full eBPF support)"
+        );
+        println!(
+            "cargo:warning=clang stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        return;
     }
 
     // Note: We intentionally do NOT strip the eBPF object file.
@@ -97,7 +109,10 @@ fn main() {
     // and is required for the eBPF loader (aya) to work correctly.
     // Running llvm-strip -g would remove BTF sections (.BTF, .BTF.ext).
 
-    println!("eBPF program compiled successfully: {}", obj_file.display());
+    println!(
+        "cargo:warning=eBPF program compiled successfully: {}",
+        obj_file.display()
+    );
 
     // Set environment variables for the main program
     set_env_vars(&obj_file);
