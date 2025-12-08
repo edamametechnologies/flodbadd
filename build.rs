@@ -484,15 +484,17 @@ fn handle_ebpf_build() {
         // Set the environment variable so include_bytes!() can embed the eBPF object
         // directly into the binary at compile time. No runtime file lookup needed!
         println!("cargo:rustc-env=L7_EBPF_OBJECT={}", obj_file.display());
+        // Enable the cfg flag so the code knows the eBPF object is embedded
+        println!("cargo:rustc-cfg=L7_EBPF_EMBEDDED");
         println!(
             "cargo:warning=eBPF program will be embedded from: {}",
             obj_file.display()
         );
     } else {
-        // If eBPF object doesn't exist, compilation will fail with a clear error
-        // from include_bytes!(env!("L7_EBPF_OBJECT")) - which is the intended behavior
+        // eBPF object not available - the code will gracefully handle this at runtime
+        // by checking if EBPF_OBJECT is empty
         println!(
-            "cargo:warning=eBPF program not built - compilation will fail if 'ebpf' feature is enabled"
+            "cargo:warning=eBPF program not built (clang/llvm not available?) - L7 resolution will use fallback"
         );
     }
 }

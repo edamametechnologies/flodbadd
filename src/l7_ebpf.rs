@@ -24,12 +24,18 @@ mod linux {
     };
     use bytemuck::{Pod, Zeroable};
     use once_cell::sync::OnceCell;
+    use std::process::Command;
     use std::sync::Arc;
     use tracing::{debug, error, info, warn};
 
     // Embed the eBPF object file directly into the binary at compile time.
     // The L7_EBPF_OBJECT environment variable is set by build.rs during compilation.
+    // If not set (e.g., clang not available), we provide an empty slice and handle gracefully.
+    #[cfg(L7_EBPF_EMBEDDED)]
     static EBPF_OBJECT: &[u8] = include_bytes!(env!("L7_EBPF_OBJECT"));
+
+    #[cfg(not(L7_EBPF_EMBEDDED))]
+    static EBPF_OBJECT: &[u8] = &[];
 
     // Match the eBPF program structures
     #[repr(C)]
@@ -215,6 +221,16 @@ mod linux {
             // at runtime **and** when we rely on the path discovered at build
             // time (which is not automatically exported into the runtime
             // environment).
+
+            // Check if eBPF object was embedded at compile time
+            if EBPF_OBJECT.is_empty() {
+                let msg = format!(
+                    "Disabled: eBPF object not embedded (clang/llvm not available at build time) (kernel {})",
+                    kernel_version
+                );
+                warn!("eBPF object not embedded - was clang available during build?");
+                return (None, msg);
+            }
 
             // Load from embedded bytes (compiled into binary at build time)
             info!(
