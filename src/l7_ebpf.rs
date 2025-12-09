@@ -37,6 +37,13 @@ mod linux {
     #[cfg(not(L7_EBPF_EMBEDDED))]
     static EBPF_OBJECT: &[u8] = &[];
 
+    // Compile-time marker for debugging - this gets embedded in the binary
+    #[cfg(L7_EBPF_EMBEDDED)]
+    const EBPF_BUILD_STATUS: &str = "EMBEDDED";
+
+    #[cfg(not(L7_EBPF_EMBEDDED))]
+    const EBPF_BUILD_STATUS: &str = "NOT_EMBEDDED";
+
     // Match the eBPF program structures
     #[repr(C)]
     #[derive(Clone, Copy, Zeroable, Pod)]
