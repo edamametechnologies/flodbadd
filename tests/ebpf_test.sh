@@ -293,7 +293,7 @@ else
 fi
 
 # =============================================================================
-# Binary Detection
+# Binary Detection (flodbadd: check_ebpf example only)
 # =============================================================================
 echo ""
 echo "=== Binary Detection ==="
@@ -302,28 +302,15 @@ echo "=== Binary Detection ==="
 if [[ -n "$1" ]]; then
     BINARY_PATH="$1"
 elif [[ -z "$BINARY_PATH" ]]; then
-    # Try to find edamame_posture or flodbadd binary
-    FOUND_BINARY=$(find ./target -type f \( -name edamame_posture -o -name edamame_posture.exe \) -print -quit 2>/dev/null || echo "")
-    if [[ -z "$FOUND_BINARY" ]]; then
-        # Try flodbadd examples
-        FOUND_BINARY=$(find ./target -type f -name check_ebpf -print -quit 2>/dev/null || echo "")
-    fi
-    BINARY_PATH="$FOUND_BINARY"
+    # Look for check_ebpf example binary
+    BINARY_PATH=$(find ./target -type f -name check_ebpf -print -quit 2>/dev/null || echo "")
 fi
 
 if [[ -z "$BINARY_PATH" ]] || [[ ! -f "$BINARY_PATH" ]]; then
-    echo "⚠️  No binary found for runtime test"
-    echo "   Searched: ./target for edamame_posture or check_ebpf"
-    
-    # Check if we have flodbadd path for cargo-based test
-    if [[ -n "$FLODBADD_PATH" ]] && [[ -d "$FLODBADD_PATH" ]]; then
-        echo "   FLODBADD_PATH set: $FLODBADD_PATH (will use cargo run)"
-        BINARY_PATH=""
-        USE_CARGO_RUN="yes"
-    else
-        BINARY_PATH=""
-        USE_CARGO_RUN="no"
-    fi
+    echo "ℹ️  check_ebpf binary not found - will use cargo run"
+    echo "   (Build with: cargo build --release --features ebpf --example check_ebpf)"
+    BINARY_PATH=""
+    USE_CARGO_RUN="yes"
 else
     echo "✅ Binary found: $BINARY_PATH"
     USE_CARGO_RUN="no"
@@ -362,8 +349,8 @@ else
     EBPF_DETAIL=""
 
     if [[ -n "$BINARY_PATH" ]]; then
-        echo "Running short capture to test eBPF..."
-        CAPTURE_OUTPUT=$($SUDO_CMD "$BINARY_PATH" -v capture 2 2>&1 || true)
+        echo "Running check_ebpf to test eBPF..."
+        CAPTURE_OUTPUT=$($SUDO_CMD "$BINARY_PATH" 2>&1 || true)
         
         # Parse eBPF status from output
         if echo "$CAPTURE_OUTPUT" | grep -qi "eBPF.*enabled\|kprobe attached\|kprobe_tcp"; then
@@ -405,7 +392,6 @@ else
         
     elif [[ "$USE_CARGO_RUN" == "yes" ]]; then
         echo "Running flodbadd check_ebpf example via cargo..."
-        cd "$FLODBADD_PATH"
         
         # Source cargo env if needed
         if [[ -f "$HOME/.cargo/env" ]]; then
