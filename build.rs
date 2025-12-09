@@ -460,7 +460,10 @@ fn find_installed_npcap_sdk_lib_dir(lib_subdir: &str) -> Option<PathBuf> {
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn handle_ebpf_build() {
     // Debug: confirm this function is being called
-    println!("cargo:warning=[eBPF] handle_ebpf_build() called on {}", std::env::consts::ARCH);
+    println!(
+        "cargo:warning=[eBPF] handle_ebpf_build() called on {}",
+        std::env::consts::ARCH
+    );
 
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/build.rs");
@@ -469,18 +472,21 @@ fn handle_ebpf_build() {
     // Check if the eBPF program was built
     let out_dir = env::var("OUT_DIR").unwrap();
     println!("cargo:warning=[eBPF] OUT_DIR={}", out_dir);
-    
+
     let ebpf_dir = Path::new(&out_dir).join("ebpf");
     let obj_file = ebpf_dir.join("l7_ebpf.o");
 
     // ALWAYS rebuild the eBPF program to avoid caching issues
     // This ensures clang runs every time and we get fresh diagnostics
     println!("cargo:warning=[eBPF] Building eBPF program...");
-    
+
     // Clean any existing object file to force rebuild
     if obj_file.exists() {
         if let Err(e) = std::fs::remove_file(&obj_file) {
-            println!("cargo:warning=[eBPF] Could not remove old object file: {}", e);
+            println!(
+                "cargo:warning=[eBPF] Could not remove old object file: {}",
+                e
+            );
         } else {
             println!("cargo:warning=[eBPF] Removed old object file for clean rebuild");
         }
@@ -635,12 +641,13 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
         obj_file.to_str().unwrap(),
         src_file.to_str().unwrap(),
     ];
-    
-    println!("cargo:warning=[eBPF] clang command: clang {}", clang_args.join(" "));
-    
-    let output = Command::new("clang")
-        .args(&clang_args)
-        .output()?;
+
+    println!(
+        "cargo:warning=[eBPF] clang command: clang {}",
+        clang_args.join(" ")
+    );
+
+    let output = Command::new("clang").args(&clang_args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
