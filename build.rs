@@ -573,9 +573,22 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
         _ => "/usr/include",
     };
 
+    // Check if arch-specific include directory exists
+    if !Path::new(arch_include).exists() {
+        println!("cargo:warning=[eBPF] ⚠ arch include dir NOT FOUND: {}", arch_include);
+        // Try fallback
+        if Path::new("/usr/include").join("asm").exists() {
+            println!("cargo:warning=[eBPF] Fallback: /usr/include/asm exists");
+        }
+    } else {
+        println!("cargo:warning=[eBPF] ✓ arch include dir exists: {}", arch_include);
+    }
+
     let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
+    println!("cargo:warning=[eBPF] Target arch define: {}", target_arch_define);
 
     // Compile the eBPF program with proper architecture flags
+    println!("cargo:warning=[eBPF] Running clang to compile eBPF program...");
     let output = Command::new("clang")
         .args([
             "-target",
