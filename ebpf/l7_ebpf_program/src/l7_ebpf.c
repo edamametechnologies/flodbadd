@@ -4,8 +4,10 @@
  * This program hooks into kernel network events to track socket
  * connections and associate them with the processes that created them.
  * 
- * It attaches to the inet_sock_set_state kprobe to capture TCP connection
- * state changes and associates them with the responsible process.
+ * It attaches to tcp_set_state, tcp_v4_connect, and tcp_v6_connect kprobes
+ * to capture TCP connection state changes and associate them with processes.
+ * 
+ * Supports both IPv4 and IPv6.
  */
 
 /* Include our minimal vmlinux.h first for kernel structure definitions */
@@ -49,13 +51,17 @@
  *     unsigned short skc_family;                               // 16
  *     volatile unsigned char skc_state;                        // 18
  *     ...
+ *     struct in6_addr skc_v6_daddr;                            // 56 (16 bytes)
+ *     struct in6_addr skc_v6_rcv_saddr;                        // 72 (16 bytes)
  * };
  */
-#define SKC_DADDR_OFFSET      0
-#define SKC_RCV_SADDR_OFFSET  4
-#define SKC_DPORT_OFFSET      12
-#define SKC_NUM_OFFSET        14
-#define SKC_FAMILY_OFFSET     16
+#define SKC_DADDR_OFFSET        0
+#define SKC_RCV_SADDR_OFFSET    4
+#define SKC_DPORT_OFFSET        12
+#define SKC_NUM_OFFSET          14
+#define SKC_FAMILY_OFFSET       16
+#define SKC_V6_DADDR_OFFSET     56
+#define SKC_V6_RCV_SADDR_OFFSET 72
 
 /* Data structures matching the Rust side */
 struct session_key {
@@ -105,17 +111,14 @@ static __always_inline __u32 extract_ipv4_addr(struct sock *sk, int is_src) {
 }
 
 /*
- * Helper to extract IPv6 address
- * Note: Full IPv6 support requires BTF-generated vmlinux.h
- * Currently returns zeros - IPv4 is prioritized
+ * Helper to extract IPv6 address from sock_common
+ * Uses skc_v6_rcv_saddr (src) at offset 72 and skc_v6_daddr (dst) at offset 56
  */
 static __always_inline void extract_ipv6_addr(struct sock *sk, int is_src, __u32 *addr) {
-    addr[0] = 0;
-    addr[1] = 0;
-    addr[2] = 0;
-    addr[3] = 0;
-    (void)sk;
-    (void)is_src;
+    int offset = is_src ? SKC_V6_RCV_SADDR_OFFSET : SKC_V6_DADDR_OFFSET;
+    
+    /* Read all 16 bytes (4 x __u32) of the IPv6 address */
+    bpf_probe_read_kernel(addr, 16, (void *)sk + offset);
 }
 
 /*
@@ -232,7 +235,7 @@ static __always_inline void get_process_info(struct process_info *info) {
 /*
  * Kprobe handler for tcp_set_state
  * Called when a TCP socket changes state (e.g., becomes ESTABLISHED)
- * Note: Some kernels use tcp_set_state, others use inet_sock_set_state
+ * Works for both IPv4 and IPv6 connections
  */
 SEC("kprobe/tcp_set_state")
 int minimal_probe(struct pt_regs *ctx) {
@@ -264,6 +267,7 @@ int minimal_probe(struct pt_regs *ctx) {
         key.src_ip[0] = extract_ipv4_addr(sk, 1);
         key.dst_ip[0] = extract_ipv4_addr(sk, 0);
     } else {
+        /* IPv6: read full 128-bit addresses */
         extract_ipv6_addr(sk, 1, key.src_ip);
         extract_ipv6_addr(sk, 0, key.dst_ip);
     }
@@ -277,7 +281,7 @@ int minimal_probe(struct pt_regs *ctx) {
     }
     
     /* Try to get process info from socket_to_process map first
-     * (captured earlier in tcp_v4_connect when we were in user context) */
+     * (captured earlier in tcp_v4_connect/tcp_v6_connect when we were in user context) */
     __u64 sock_ptr = (__u64)sk;
     struct process_info *stored_info = bpf_map_lookup_elem(&socket_to_process, &sock_ptr);
     
@@ -297,12 +301,37 @@ int minimal_probe(struct pt_regs *ctx) {
 }
 
 /*
- * Kprobe handler for tcp_v4_connect (and tcp_v6_connect)
- * Called from userspace context when connect() syscall is made.
+ * Kprobe handler for tcp_v4_connect
+ * Called from userspace context when connect() syscall is made for IPv4.
  * This gives us accurate process information since we're in user context.
  */
 SEC("kprobe/tcp_v4_connect")
-int track_connect(struct pt_regs *ctx) {
+int track_connect_v4(struct pt_regs *ctx) {
+    struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+    
+    if (!sk) return 0;
+    
+    /* Store process info keyed by socket pointer - we'll merge this
+     * with connection info when tcp_set_state is called */
+    __u64 sock_ptr = (__u64)sk;
+    struct process_info info = {0};
+    get_process_info(&info);
+    
+    /* Only store if we have a valid PID (not kernel context) */
+    if (info.pid > 0) {
+        bpf_map_update_elem(&socket_to_process, &sock_ptr, &info, BPF_ANY);
+    }
+    
+    return 0;
+}
+
+/*
+ * Kprobe handler for tcp_v6_connect
+ * Called from userspace context when connect() syscall is made for IPv6.
+ * This gives us accurate process information since we're in user context.
+ */
+SEC("kprobe/tcp_v6_connect")
+int track_connect_v6(struct pt_regs *ctx) {
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     
     if (!sk) return 0;

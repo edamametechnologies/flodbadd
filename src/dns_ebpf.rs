@@ -22,6 +22,12 @@ pub struct DnsSocketInfo {
     pub process_name: String,
     pub src_port: u16,
     pub timestamp: u64,
+    /// Address family: 2 = IPv4, 10 = IPv6
+    pub family: u8,
+    /// Source IP address (for IPv4, only first element is used)
+    pub src_ip: [u32; 4],
+    /// Destination IP address (DNS server)
+    pub dst_ip: [u32; 4],
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -53,7 +59,8 @@ mod linux {
         dst_port: u16,
         family: u8,
         padding: [u8; 3],
-        dst_ip: [u32; 4],
+        src_ip: [u32; 4],  // Source IP (IPv4 in first element, or full IPv6)
+        dst_ip: [u32; 4],  // Destination IP (DNS server)
         process_name: [u8; 16],
     }
 
@@ -151,9 +158,23 @@ mod linux {
 
             info!("DNS eBPF: udp_sendmsg kprobe attached successfully");
 
+            // Attach udpv6_sendmsg kprobe for IPv6 DNS (non-critical if fails)
+            let mut ipv6_attached = false;
+            if let Some(prog_any) = bpf.program_mut("trace_udpv6_send") {
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if kp.attach("udpv6_sendmsg", 0).is_ok() {
+                            info!("DNS eBPF: udpv6_sendmsg kprobe attached for IPv6");
+                            ipv6_attached = true;
+                        }
+                    }
+                }
+            }
+
+            let ipv6_note = if ipv6_attached { " + IPv6" } else { "" };
             let msg = format!(
-                "Enabled: kernel {} with udp_sendmsg kprobe attached",
-                kernel_version
+                "Enabled: kernel {} with udp_sendmsg{} kprobe attached",
+                kernel_version, ipv6_note
             );
             info!("DNS eBPF L7 helper initialised successfully: {}", msg);
 
@@ -180,6 +201,9 @@ mod linux {
                 process_name: name,
                 src_port: info.src_port,
                 timestamp: info.timestamp,
+                family: info.family,
+                src_ip: info.src_ip,
+                dst_ip: info.dst_ip,
             })
         }
     }

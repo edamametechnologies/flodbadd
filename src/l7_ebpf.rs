@@ -326,15 +326,29 @@ mod linux {
                 return (None, msg);
             }
 
-            // Attach kprobe for tcp_v4_connect (captures process info in user context)
-            if let Some(prog_any) = bpf.program_mut("track_connect") {
+            // Attach kprobe for tcp_v4_connect (captures process info in user context for IPv4)
+            if let Some(prog_any) = bpf.program_mut("track_connect_v4") {
                 use aya::programs::KProbe;
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
                     if kp.load().is_ok() {
                         if let Err(e) = kp.attach("tcp_v4_connect", 0) {
                             debug!("Could not attach to tcp_v4_connect: {} (non-critical)", e);
                         } else {
-                            debug!("Attached track_connect to tcp_v4_connect for process info");
+                            debug!("Attached track_connect_v4 to tcp_v4_connect for IPv4 process info");
+                        }
+                    }
+                }
+            }
+
+            // Attach kprobe for tcp_v6_connect (captures process info in user context for IPv6)
+            if let Some(prog_any) = bpf.program_mut("track_connect_v6") {
+                use aya::programs::KProbe;
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if let Err(e) = kp.attach("tcp_v6_connect", 0) {
+                            debug!("Could not attach to tcp_v6_connect: {} (non-critical)", e);
+                        } else {
+                            debug!("Attached track_connect_v6 to tcp_v6_connect for IPv6 process info");
                         }
                     }
                 }
