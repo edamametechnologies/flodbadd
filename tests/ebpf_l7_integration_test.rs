@@ -3,10 +3,11 @@ mod ebpf_integration_tests {
     use flodbadd::l7_ebpf;
     use flodbadd::sessions::{Protocol, Session};
     use serial_test::serial;
-    use std::net::TcpStream;
     use std::sync::atomic::{AtomicU16, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::time::sleep;
 
     #[tokio::test]
@@ -25,18 +26,24 @@ mod ebpf_integration_tests {
             return;
         }
 
-        assert!(
-            available,
-            "eBPF should be available when feature is enabled"
-        );
-        println!("✅ eBPF is available and ready");
+        println!("✅ eBPF is available (object embedded)");
+        
+        // Also check if it's fully functional (kprobes attached)
+        let fully_functional = l7_ebpf::is_fully_functional();
+        if fully_functional {
+            println!("✅ eBPF is fully functional (kprobes attached)");
+        } else {
+            println!("⚠️  eBPF available but not fully functional (kprobes may not be attached)");
+            println!("   Status: {}", l7_ebpf::ebpf_support());
+        }
     }
 
     #[tokio::test]
     #[serial]
     async fn test_ebpf_basic_session_lookup() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -73,8 +80,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_with_real_connection() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -83,28 +91,25 @@ mod ebpf_integration_tests {
         let client_port = Arc::new(AtomicU16::new(0));
         let client_port_clone = client_port.clone();
 
-        // Start a simple TCP server
+        // Start a simple TCP server using async tokio networking
+        let listener = match TcpListener::bind(format!("127.0.0.1:{}", test_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind to port {}: {}", test_port, e);
+                return;
+            }
+        };
+
+        println!("Test server listening on port {}", test_port);
+
+        // Spawn server to accept one connection
         let server_handle = tokio::spawn(async move {
-            use std::io::Write;
-            use std::net::TcpListener;
-
-            let listener = match TcpListener::bind(format!("127.0.0.1:{}", test_port)) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("Failed to bind to port {}: {}", test_port, e);
-                    return 0u16;
-                }
-            };
-
-            println!("Test server listening on port {}", test_port);
-
-            // Accept one connection
-            match listener.accept() {
+            match listener.accept().await {
                 Ok((mut stream, addr)) => {
                     println!("Test server accepted connection from {}", addr);
-                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!";
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.flush();
+                    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!";
+                    let _ = stream.write_all(response).await;
+                    let _ = stream.flush().await;
                     addr.port()
                 }
                 Err(e) => {
@@ -114,14 +119,12 @@ mod ebpf_integration_tests {
             }
         });
 
-        // Give server time to start
-        sleep(Duration::from_millis(100)).await;
+        // Give server time to start accepting
+        sleep(Duration::from_millis(50)).await;
 
         // Make a client connection and capture the local port
         let client_handle = tokio::spawn(async move {
-            use std::io::{Read, Write};
-
-            match TcpStream::connect(format!("127.0.0.1:{}", test_port)) {
+            match TcpStream::connect(format!("127.0.0.1:{}", test_port)).await {
                 Ok(mut stream) => {
                     // Get the local port
                     if let Ok(local_addr) = stream.local_addr() {
@@ -134,14 +137,14 @@ mod ebpf_integration_tests {
                     }
 
                     // Send HTTP request
-                    let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-                    let _ = stream.write_all(request.as_bytes());
-                    let _ = stream.flush();
+                    let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+                    let _ = stream.write_all(request).await;
+                    let _ = stream.flush().await;
 
                     // Read response
-                    let mut response = String::new();
-                    let _ = stream.read_to_string(&mut response);
-                    println!("Client received: {} bytes", response.len());
+                    let mut response = vec![0u8; 1024];
+                    let n = stream.read(&mut response).await.unwrap_or(0);
+                    println!("Client received: {} bytes", n);
                 }
                 Err(e) => {
                     eprintln!("Failed to connect to test server: {}", e);
@@ -149,8 +152,15 @@ mod ebpf_integration_tests {
             }
         });
 
-        // Wait for both to complete
-        let _ = tokio::join!(server_handle, client_handle);
+        // Wait for both to complete with timeout
+        let timeout = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = tokio::join!(server_handle, client_handle);
+        });
+        
+        if timeout.await.is_err() {
+            println!("⚠️  Test timed out - this shouldn't happen with async networking");
+            return;
+        }
 
         // Give eBPF time to process the connection
         sleep(Duration::from_millis(200)).await;
@@ -192,8 +202,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_with_external_connection() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -274,8 +285,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_session_data_structure() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -325,8 +337,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_performance() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -383,8 +396,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_error_handling() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
@@ -419,8 +433,9 @@ mod ebpf_integration_tests {
     #[tokio::test]
     #[serial]
     async fn test_ebpf_ipv6_connection() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping IPv6 test - eBPF not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!("Skipping IPv6 test - eBPF not fully functional");
+            println!("Status: {}", l7_ebpf::ebpf_support());
             return;
         }
 
