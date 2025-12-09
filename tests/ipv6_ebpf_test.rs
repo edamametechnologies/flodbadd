@@ -6,7 +6,7 @@
 //! - DNS queries over IPv6
 //! - Mixed IPv4/IPv6 scenarios
 
-use std::net::{SocketAddr, TcpStream, UdpSocket, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 /// Test L7 eBPF IPv6 support status
@@ -56,7 +56,10 @@ async fn test_tcp_ipv6_loopback() {
     let listener = match TcpListener::bind("[::1]:0") {
         Ok(l) => l,
         Err(e) => {
-            println!("Cannot bind to IPv6 loopback: {} (IPv6 may not be available)", e);
+            println!(
+                "Cannot bind to IPv6 loopback: {} (IPv6 may not be available)",
+                e
+            );
             return;
         }
     };
@@ -116,7 +119,7 @@ fn test_dns_ipv6_resolution() {
 
     for domain in domains {
         println!("\nResolving {} for IPv6 addresses...", domain);
-        
+
         match format!("{}:80", domain).to_socket_addrs() {
             Ok(addrs) => {
                 let addrs: Vec<_> = addrs.collect();
@@ -144,9 +147,9 @@ fn test_dns_udp_ipv6_query() {
     // Google's IPv6 DNS: 2001:4860:4860::8888
 
     let ipv6_dns_servers = [
-        "[2001:4860:4860::8888]:53",  // Google
-        "[2606:4700:4700::1111]:53",  // Cloudflare
-        "[2620:fe::fe]:53",           // Quad9
+        "[2001:4860:4860::8888]:53", // Google
+        "[2606:4700:4700::1111]:53", // Cloudflare
+        "[2620:fe::fe]:53",          // Quad9
     ];
 
     // DNS query for example.com (A record)
@@ -158,9 +161,8 @@ fn test_dns_udp_ipv6_query() {
         0x00, 0x00, // Authority RRs: 0
         0x00, 0x00, // Additional RRs: 0
         // Query: example.com
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
-        0x00,       // Root label
+        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+        0x00, // Root label
         0x00, 0x01, // Type A
         0x00, 0x01, // Class IN
     ];
@@ -176,22 +178,24 @@ fn test_dns_udp_ipv6_query() {
 
             for dns_server in ipv6_dns_servers {
                 println!("\nTrying IPv6 DNS server: {}", dns_server);
-                
+
                 match socket.send_to(&dns_query, dns_server) {
                     Ok(sent) => {
                         println!("  Sent {} bytes to {}", sent, dns_server);
-                        
+
                         // Check if eBPF captured this
                         if let Some(addr) = local_addr {
                             let src_port = addr.port();
                             if flodbadd::dns_ebpf::is_available() {
                                 std::thread::sleep(Duration::from_millis(10));
-                                if let Some(info) = flodbadd::dns_ebpf::get_process_by_src_port(src_port) {
+                                if let Some(info) =
+                                    flodbadd::dns_ebpf::get_process_by_src_port(src_port)
+                                {
                                     println!("  ✅ eBPF captured DNS query!");
                                     println!("     PID: {}", info.pid);
                                     println!("     Process: {}", info.process_name);
                                     println!("     Family: {} (10 = IPv6)", info.family);
-                                    
+
                                     // Check if it's IPv6
                                     if info.family == 10 {
                                         println!("     ✅ Correctly identified as IPv6!");
@@ -225,7 +229,10 @@ fn test_dns_udp_ipv6_query() {
             }
         }
         Err(e) => {
-            println!("Cannot create IPv6 UDP socket: {} (IPv6 may not be available)", e);
+            println!(
+                "Cannot create IPv6 UDP socket: {} (IPv6 may not be available)",
+                e
+            );
         }
     }
 }
@@ -237,14 +244,17 @@ async fn test_mixed_ipv4_ipv6() {
 
     // Test 1: Resolve domain that has both A and AAAA records
     let domain = "google.com";
-    println!("1. Resolving {} (should have both IPv4 and IPv6)...", domain);
-    
+    println!(
+        "1. Resolving {} (should have both IPv4 and IPv6)...",
+        domain
+    );
+
     match format!("{}:443", domain).to_socket_addrs() {
         Ok(addrs) => {
             let addrs: Vec<_> = addrs.collect();
             let has_ipv4 = addrs.iter().any(|a| a.is_ipv4());
             let has_ipv6 = addrs.iter().any(|a| a.is_ipv6());
-            
+
             println!("   Has IPv4: {}", has_ipv4);
             println!("   Has IPv6: {}", has_ipv6);
             println!("   All addresses: {:?}", addrs);
@@ -256,10 +266,10 @@ async fn test_mixed_ipv4_ipv6() {
 
     // Test 2: Create both IPv4 and IPv6 sockets
     println!("\n2. Creating both IPv4 and IPv6 UDP sockets...");
-    
+
     let v4_socket = UdpSocket::bind("0.0.0.0:0");
     let v6_socket = UdpSocket::bind("[::]:0");
-    
+
     match (&v4_socket, &v6_socket) {
         (Ok(v4), Ok(v6)) => {
             println!("   ✅ IPv4 socket: {}", v4.local_addr().unwrap());
@@ -281,14 +291,14 @@ async fn test_mixed_ipv4_ipv6() {
 
     // Test 3: If eBPF is available, check status
     println!("\n3. eBPF Support Status:");
-    
+
     if flodbadd::l7_ebpf::is_available() {
         println!("   L7 eBPF: ✅ Enabled");
         println!("   Status: {}", flodbadd::l7_ebpf::ebpf_support());
     } else {
         println!("   L7 eBPF: ❌ Disabled");
     }
-    
+
     if flodbadd::dns_ebpf::is_available() {
         println!("   DNS eBPF: ✅ Enabled");
         println!("   Status: {}", flodbadd::dns_ebpf::dns_ebpf_support());
@@ -304,25 +314,28 @@ async fn test_mixed_ipv4_ipv6() {
 fn test_ipv6_only_dns() {
     // Try to resolve AAAA records specifically
     let domain = "ipv6.google.com";
-    
+
     println!("\nTesting IPv6-only DNS for {}...", domain);
-    
+
     // This will use the system resolver which typically returns both A and AAAA
     match format!("{}:443", domain).to_socket_addrs() {
         Ok(addrs) => {
             let addrs: Vec<_> = addrs.collect();
             let ipv6_count = addrs.iter().filter(|a| a.is_ipv6()).count();
             let ipv4_count = addrs.iter().filter(|a| a.is_ipv4()).count();
-            
-            println!("Resolved {} IPv4 and {} IPv6 addresses", ipv4_count, ipv6_count);
-            
+
+            println!(
+                "Resolved {} IPv4 and {} IPv6 addresses",
+                ipv4_count, ipv6_count
+            );
+
             for addr in &addrs {
                 match addr {
                     SocketAddr::V4(v4) => println!("  IPv4: {}", v4),
                     SocketAddr::V6(v6) => println!("  IPv6: {}", v6),
                 }
             }
-            
+
             if ipv6_count > 0 {
                 println!("✅ IPv6 addresses resolved successfully");
             }
@@ -350,20 +363,16 @@ async fn test_ipv6_dns_performance() {
         0x00, 0x01, // Transaction ID
         0x01, 0x00, // Flags
         0x00, 0x01, // Questions: 1
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
-        0x00, 0x00, 0x01, 0x00, 0x01,  // Type A (IPv4)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03,
+        b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01, // Type A (IPv4)
     ];
 
     let dns_query_aaaa: Vec<u8> = vec![
         0x00, 0x02, // Transaction ID
         0x01, 0x00, // Flags
         0x00, 0x01, // Questions: 1
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
-        0x00, 0x00, 0x1c, 0x00, 0x01,  // Type AAAA (IPv6)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03,
+        b'c', b'o', b'm', 0x00, 0x00, 0x1c, 0x00, 0x01, // Type AAAA (IPv6)
     ];
 
     let iterations = 500;
@@ -374,7 +383,9 @@ async fn test_ipv6_dns_performance() {
         let mut query = dns_query_a.clone();
         query[0] = ((i >> 8) & 0xff) as u8;
         query[1] = (i & 0xff) as u8;
-        processor.process_dns_packet_with_port(query, Some(50000 + (i % 10000) as u16)).await;
+        processor
+            .process_dns_packet_with_port(query, Some(50000 + (i % 10000) as u16))
+            .await;
     }
     let ipv4_time = start.elapsed();
 
@@ -384,12 +395,21 @@ async fn test_ipv6_dns_performance() {
         let mut query = dns_query_aaaa.clone();
         query[0] = ((i >> 8) & 0xff) as u8;
         query[1] = (i & 0xff) as u8;
-        processor.process_dns_packet_with_port(query, Some(60000 + (i % 10000) as u16)).await;
+        processor
+            .process_dns_packet_with_port(query, Some(60000 + (i % 10000) as u16))
+            .await;
     }
     let ipv6_time = start.elapsed();
 
     println!("\nDNS Processing Performance:");
-    println!("  IPv4 (A) records:    {:?} ({} ns/query)", ipv4_time, ipv4_time.as_nanos() / iterations as u128);
-    println!("  IPv6 (AAAA) records: {:?} ({} ns/query)", ipv6_time, ipv6_time.as_nanos() / iterations as u128);
+    println!(
+        "  IPv4 (A) records:    {:?} ({} ns/query)",
+        ipv4_time,
+        ipv4_time.as_nanos() / iterations as u128
+    );
+    println!(
+        "  IPv6 (AAAA) records: {:?} ({} ns/query)",
+        ipv6_time,
+        ipv6_time.as_nanos() / iterations as u128
+    );
 }
-

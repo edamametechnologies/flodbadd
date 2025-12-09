@@ -334,7 +334,9 @@ mod linux {
                         if let Err(e) = kp.attach("tcp_v4_connect", 0) {
                             debug!("Could not attach to tcp_v4_connect: {} (non-critical)", e);
                         } else {
-                            debug!("Attached track_connect_v4 to tcp_v4_connect for IPv4 process info");
+                            debug!(
+                                "Attached track_connect_v4 to tcp_v4_connect for IPv4 process info"
+                            );
                         }
                     }
                 }
@@ -348,7 +350,9 @@ mod linux {
                         if let Err(e) = kp.attach("tcp_v6_connect", 0) {
                             debug!("Could not attach to tcp_v6_connect: {} (non-critical)", e);
                         } else {
-                            debug!("Attached track_connect_v6 to tcp_v6_connect for IPv6 process info");
+                            debug!(
+                                "Attached track_connect_v6 to tcp_v6_connect for IPv6 process info"
+                            );
                         }
                     }
                 }

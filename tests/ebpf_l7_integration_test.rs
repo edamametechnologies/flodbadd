@@ -27,7 +27,7 @@ mod ebpf_integration_tests {
         }
 
         println!("✅ eBPF is available (object embedded)");
-        
+
         // Also check if it's fully functional (kprobes attached)
         let fully_functional = l7_ebpf::is_fully_functional();
         if fully_functional {
@@ -156,7 +156,7 @@ mod ebpf_integration_tests {
         let timeout = tokio::time::timeout(Duration::from_secs(5), async {
             let _ = tokio::join!(server_handle, client_handle);
         });
-        
+
         if timeout.await.is_err() {
             println!("⚠️  Test timed out - this shouldn't happen with async networking");
             return;
@@ -444,28 +444,30 @@ mod ebpf_integration_tests {
         // Try to establish an IPv6 TCP connection to a known server
         // We'll try multiple IPv6 addresses in case some aren't reachable
         let ipv6_targets = [
-            ("2607:f8b0:4004:800::200e", 80),  // Google
-            ("2606:4700::6810:84e5", 80),       // Cloudflare
-            ("2001:4860:4860::8888", 53),       // Google DNS
+            ("2607:f8b0:4004:800::200e", 80), // Google
+            ("2606:4700::6810:84e5", 80),     // Cloudflare
+            ("2001:4860:4860::8888", 53),     // Google DNS
         ];
 
         for (ip, port) in &ipv6_targets {
             let addr = format!("[{}]:{}", ip, port);
             println!("Trying to connect to {} ...", addr);
-            
+
             match tokio::time::timeout(
                 Duration::from_secs(5),
-                tokio::net::TcpStream::connect(&addr)
-            ).await {
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
                 Ok(Ok(stream)) => {
                     let local_addr = stream.local_addr().ok();
                     let peer_addr = stream.peer_addr().ok();
-                    
+
                     println!("✅ Connected to {} from {:?}", addr, local_addr);
-                    
+
                     // Give eBPF time to process the connection
                     sleep(Duration::from_millis(100)).await;
-                    
+
                     // Create a session to query
                     if let (Some(local), Some(peer)) = (local_addr, peer_addr) {
                         let session = Session {
@@ -475,9 +477,9 @@ mod ebpf_integration_tests {
                             dst_ip: peer.ip(),
                             dst_port: peer.port(),
                         };
-                        
+
                         println!("Session: {:?}", session);
-                        
+
                         // Query eBPF for L7 info
                         let l7_data = l7_ebpf::get_l7_for_session(&session);
                         if let Some(ref data) = l7_data {

@@ -74,7 +74,7 @@ impl DnsPacketProcessor {
     }
 
     /// Process a DNS packet with optional source port for eBPF lookup
-    /// 
+    ///
     /// If src_port is provided and eBPF is available, we can look up which
     /// process made the DNS query.
     pub async fn process_dns_packet_with_port(&self, dns_payload: Vec<u8>, src_port: Option<u16>) {

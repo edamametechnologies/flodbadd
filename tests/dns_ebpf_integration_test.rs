@@ -74,7 +74,7 @@ fn test_manual_udp_dns_query() {
         // Query: example.com
         0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
         0x03, b'c', b'o', b'm', // "com"
-        0x00,       // Root label
+        0x00, // Root label
         0x00, 0x01, // Type A
         0x00, 0x01, // Class IN
     ];
@@ -86,12 +86,12 @@ fn test_manual_udp_dns_query() {
         Ok(socket) => {
             let local_addr = socket.local_addr().ok();
             println!("Bound to local address: {:?}", local_addr);
-            
+
             // Get the source port - this is what eBPF would track
             if let Some(addr) = local_addr {
                 let src_port = addr.port();
                 println!("Source port: {} (eBPF would track this)", src_port);
-                
+
                 // Check if eBPF can find info for this port
                 if flodbadd::dns_ebpf::is_available() {
                     // The eBPF map is populated when udp_sendmsg is called
@@ -101,19 +101,15 @@ fn test_manual_udp_dns_query() {
                 }
             }
 
-            socket
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .ok();
-            socket
-                .set_write_timeout(Some(Duration::from_secs(1)))
-                .ok();
+            socket.set_read_timeout(Some(Duration::from_secs(1))).ok();
+            socket.set_write_timeout(Some(Duration::from_secs(1))).ok();
 
             // Try sending to a public DNS (8.8.8.8) on port 53
             // This might fail due to network restrictions, which is fine
             match socket.send_to(&dns_query, "8.8.8.8:53") {
                 Ok(sent) => {
                     println!("Sent {} bytes to 8.8.8.8:53", sent);
-                    
+
                     // Now check if eBPF captured this
                     if let Some(addr) = local_addr {
                         let src_port = addr.port();
@@ -183,15 +179,16 @@ async fn test_dns_packet_processor_ebpf_integration() {
         0x00, 0x00, // Authority RRs: 0
         0x00, 0x00, // Additional RRs: 0
         // Query: test.example
-        0x04, b't', b'e', b's', b't',
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x00,       // Root label
+        0x04, b't', b'e', b's', b't', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        0x00, // Root label
         0x00, 0x01, // Type A
         0x00, 0x01, // Class IN
     ];
 
     // Process the query with a source port
-    processor.process_dns_packet_with_port(dns_query, Some(54321)).await;
+    processor
+        .process_dns_packet_with_port(dns_query, Some(54321))
+        .await;
 
     // Create a mock response
     let dns_response: Vec<u8> = vec![
@@ -202,9 +199,8 @@ async fn test_dns_packet_processor_ebpf_integration() {
         0x00, 0x00, // Authority RRs: 0
         0x00, 0x00, // Additional RRs: 0
         // Query section (same as request)
-        0x04, b't', b'e', b's', b't',
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x00,       // Root label
+        0x04, b't', b'e', b's', b't', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        0x00, // Root label
         0x00, 0x01, // Type A
         0x00, 0x01, // Class IN
         // Answer section
@@ -233,7 +229,10 @@ async fn test_dns_packet_processor_ebpf_integration() {
     let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
     if let Some(domain) = resolutions.get(&ip) {
         println!("Found resolution: {} -> {}", ip, *domain);
-        assert!(domain.contains("example"), "Domain should contain 'example'");
+        assert!(
+            domain.contains("example"),
+            "Domain should contain 'example'"
+        );
     }
 
     if let Some(resolution) = resolutions_with_process.get(&ip) {
@@ -259,10 +258,8 @@ async fn test_dns_ebpf_performance() {
     // Create a test DNS query
     let dns_query: Vec<u8> = vec![
         0x00, 0x00, // Transaction ID (will be varied)
-        0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
-        0x00, 0x00, 0x01, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e', b'x', b'a', b'm',
+        b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
     ];
 
     // Process many packets and measure time
@@ -276,7 +273,9 @@ async fn test_dns_ebpf_performance() {
         query[1] = (i & 0xff) as u8;
         // Vary source port
         let port = 50000 + (i % 10000) as u16;
-        processor.process_dns_packet_with_port(query, Some(port)).await;
+        processor
+            .process_dns_packet_with_port(query, Some(port))
+            .await;
     }
 
     let elapsed = start.elapsed();
@@ -297,7 +296,7 @@ async fn test_dns_ebpf_performance() {
 /// Test IPv6 DNS resolution
 #[test]
 fn test_ipv6_dns_query() {
-    use std::net::{SocketAddr, SocketAddrV6, Ipv6Addr, UdpSocket};
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 
     println!("=== IPv6 DNS eBPF Test ===");
     println!("DNS eBPF available: {}", flodbadd::dns_ebpf::is_available());
@@ -322,10 +321,8 @@ fn test_ipv6_dns_query() {
         0xAB, 0xCD, // Transaction ID
         0x01, 0x00, // Flags: standard query
         0x00, 0x01, // Questions: 1
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
-        0x00, 0x00, 0x1c, // Type AAAA (28 = 0x1c)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03,
+        b'c', b'o', b'm', 0x00, 0x00, 0x1c, // Type AAAA (28 = 0x1c)
         0x00, 0x01, // Class IN
     ];
 
@@ -333,7 +330,7 @@ fn test_ipv6_dns_query() {
         Ok(socket) => {
             let local_addr = socket.local_addr().ok();
             println!("Bound to: {:?}", local_addr);
-            
+
             if let Some(addr) = local_addr {
                 let src_port = addr.port();
                 println!("Source port: {}", src_port);
@@ -344,18 +341,20 @@ fn test_ipv6_dns_query() {
 
             // Try Google's IPv6 DNS
             let dns_server: SocketAddr = "[2001:4860:4860::8888]:53".parse().unwrap();
-            
+
             match socket.send_to(&dns_query, dns_server) {
                 Ok(sent) => {
                     println!("✅ Sent {} bytes to {:?}", sent, dns_server);
-                    
+
                     // Check eBPF tracking
                     if let Some(addr) = local_addr {
                         let src_port = addr.port();
                         std::thread::sleep(Duration::from_millis(50));
-                        
+
                         if flodbadd::dns_ebpf::is_available() {
-                            if let Some(info) = flodbadd::dns_ebpf::get_process_by_src_port(src_port) {
+                            if let Some(info) =
+                                flodbadd::dns_ebpf::get_process_by_src_port(src_port)
+                            {
                                 println!("✅ eBPF captured IPv6 DNS query!");
                                 println!("   PID: {}", info.pid);
                                 println!("   Process: {}", info.process_name);
@@ -395,7 +394,7 @@ fn test_ipv6_dns_query() {
 /// Test IPv6 TCP connection tracking (L7 eBPF)
 #[tokio::test]
 async fn test_ipv6_tcp_connection() {
-    use std::net::{TcpStream, SocketAddr};
+    use std::net::{SocketAddr, TcpStream};
 
     println!("=== IPv6 L7 eBPF Test ===");
     println!("L7 eBPF available: {}", flodbadd::l7_ebpf::is_available());
@@ -403,27 +402,29 @@ async fn test_ipv6_tcp_connection() {
     // Try connecting to an IPv6 endpoint
     // Using Google's IPv6 address for google.com
     let ipv6_targets = [
-        "[2607:f8b0:4004:800::200e]:80",  // Google
-        "[2606:4700::6810:84e5]:80",       // Cloudflare
+        "[2607:f8b0:4004:800::200e]:80", // Google
+        "[2606:4700::6810:84e5]:80",     // Cloudflare
     ];
 
     for target in &ipv6_targets {
         match target.parse::<SocketAddr>() {
             Ok(addr) => {
                 println!("Trying to connect to {} ...", addr);
-                
+
                 // Use tokio for async connect with timeout
                 match tokio::time::timeout(
                     Duration::from_secs(5),
-                    tokio::net::TcpStream::connect(&addr)
-                ).await {
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await
+                {
                     Ok(Ok(stream)) => {
                         let local_addr = stream.local_addr().ok();
                         println!("✅ Connected to {} from {:?}", addr, local_addr);
-                        
+
                         // Give eBPF time to process
                         tokio::time::sleep(Duration::from_millis(100)).await;
-                        
+
                         // The connection is established, eBPF should have tracked it
                         // (actual verification requires querying the l7_connections map)
                         println!("   Connection established - eBPF should have tracked this");

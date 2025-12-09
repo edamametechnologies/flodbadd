@@ -35,8 +35,8 @@ mod linux {
     use super::*;
     use aya::maps::HashMap as AyaHashMap;
     use aya::maps::MapData;
-    use aya::Pod as AyaPod;
     use aya::Ebpf;
+    use aya::Pod as AyaPod;
     use bytemuck::{Pod, Zeroable};
     use once_cell::sync::OnceCell;
     use std::sync::{Arc, RwLock};
@@ -167,7 +167,7 @@ mod linux {
             // Attach additional kprobes (non-critical if they fail)
             let mut ipv6_attached = false;
             let mut sendto_attached = false;
-            
+
             // Attach __sys_sendto for unconnected UDP sockets
             if let Some(prog_any) = bpf.program_mut("trace_sendto") {
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
@@ -179,7 +179,7 @@ mod linux {
                     }
                 }
             }
-            
+
             // Attach ip4_datagram_connect for UDP connect() calls
             if let Some(prog_any) = bpf.program_mut("trace_udp4_connect") {
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
@@ -190,7 +190,7 @@ mod linux {
                     }
                 }
             }
-            
+
             // Attach ip6_datagram_connect for IPv6 UDP connect() calls
             if let Some(prog_any) = bpf.program_mut("trace_udp6_connect") {
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
@@ -201,7 +201,7 @@ mod linux {
                     }
                 }
             }
-            
+
             // Attach udpv6_sendmsg for IPv6
             if let Some(prog_any) = bpf.program_mut("trace_udpv6_send") {
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
@@ -215,7 +215,7 @@ mod linux {
             }
 
             // Take ownership of the dns_sockets map for efficient lookups
-            let dns_sockets_map: AyaHashMap<MapData, u16, EbpfDnsSocketInfo> = 
+            let dns_sockets_map: AyaHashMap<MapData, u16, EbpfDnsSocketInfo> =
                 match bpf.take_map("dns_sockets") {
                     Some(m) => match AyaHashMap::try_from(m) {
                         Ok(map) => map,
@@ -231,7 +231,7 @@ mod linux {
                         return (None, msg);
                     }
                 };
-            
+
             debug!("DNS eBPF: dns_sockets map initialized");
 
             let sendto_note = if sendto_attached { " + sendto" } else { "" };
@@ -242,7 +242,13 @@ mod linux {
             );
             info!("DNS eBPF L7 helper initialised successfully: {}", msg);
 
-            (Some(Self { bpf, dns_sockets_map }), msg)
+            (
+                Some(Self {
+                    bpf,
+                    dns_sockets_map,
+                }),
+                msg,
+            )
         }
 
         fn lookup_by_src_port(&self, src_port: u16) -> Option<DnsSocketInfo> {
@@ -276,7 +282,7 @@ mod linux {
                 }
             }
         }
-        
+
         /// Get the number of entries in the dns_sockets map (for debugging)
         fn map_size(&self) -> usize {
             self.dns_sockets_map.iter().count()
@@ -310,7 +316,7 @@ mod linux {
             let inner = self.inner.as_ref()?;
             inner.lookup_by_src_port(src_port)
         }
-        
+
         /// Get the current number of tracked DNS sockets (for debugging)
         pub fn map_size(&self) -> usize {
             self.inner.as_ref().map(|i| i.map_size()).unwrap_or(0)
@@ -350,7 +356,7 @@ mod linux {
         pub fn get_process_by_src_port(&self, _src_port: u16) -> Option<DnsSocketInfo> {
             None
         }
-        
+
         #[allow(dead_code)]
         pub fn map_size(&self) -> usize {
             0

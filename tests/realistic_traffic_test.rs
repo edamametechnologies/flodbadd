@@ -32,18 +32,16 @@ async fn test_l7_ebpf_captures_real_tcp_with_correct_pid() {
     println!("Server listening on port {}", server_port);
 
     // Server thread
-    let server_handle = thread::spawn(move || {
-        match listener.accept() {
-            Ok((mut stream, addr)) => {
-                println!("Server: Accepted connection from {}", addr);
-                let mut buf = [0u8; 1024];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                println!("Server: Received {} bytes", n);
-                stream.write_all(b"PONG").ok();
-            }
-            Err(e) => {
-                eprintln!("Server: Accept failed: {}", e);
-            }
+    let server_handle = thread::spawn(move || match listener.accept() {
+        Ok((mut stream, addr)) => {
+            println!("Server: Accepted connection from {}", addr);
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            println!("Server: Received {} bytes", n);
+            stream.write_all(b"PONG").ok();
+        }
+        Err(e) => {
+            eprintln!("Server: Accept failed: {}", e);
         }
     });
 
@@ -219,9 +217,7 @@ fn test_dns_ebpf_captures_real_dns_query() {
     let src_port = local_addr.port();
     println!("Bound to {}", local_addr);
 
-    socket
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    socket.set_write_timeout(Some(Duration::from_secs(2))).ok();
     socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
     // DNS query for example.com A record
@@ -237,7 +233,10 @@ fn test_dns_ebpf_captures_real_dns_query() {
     let dns_servers = ["8.8.8.8:53", "1.1.1.1:53", "9.9.9.9:53"];
 
     for dns_server in dns_servers {
-        println!("\nSending DNS query to {} from port {}...", dns_server, src_port);
+        println!(
+            "\nSending DNS query to {} from port {}...",
+            dns_server, src_port
+        );
 
         match socket.send_to(&dns_query, dns_server) {
             Ok(sent) => {
@@ -315,9 +314,7 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
     let src_port = local_addr.port();
     println!("Bound to {} (port {})", local_addr, src_port);
 
-    socket
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    socket.set_write_timeout(Some(Duration::from_secs(2))).ok();
     socket.set_read_timeout(Some(Duration::from_secs(2))).ok();
 
     // DNS query for AAAA record
@@ -335,14 +332,14 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
         Ok(sent) => {
             println!("  Sent {} bytes to IPv6 loopback", sent);
             thread::sleep(Duration::from_millis(20));
-            
+
             let info = flodbadd::dns_ebpf::get_process_by_src_port(src_port);
             if let Some(info) = info {
                 println!("  ✅ DNS eBPF captured IPv6 loopback query!");
                 println!("     PID: {} (ours: {})", info.pid, process::id());
                 println!("     Process: {}", info.process_name);
                 println!("     Family: {} (10 = IPv6)", info.family);
-                
+
                 if info.family == 10 {
                     println!("     ✅ Correctly identified as IPv6!");
                     println!("=== DNS eBPF IPv6 Test PASSED ===\n");
@@ -391,7 +388,10 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
                 }
             }
             Err(e) => {
-                println!("  Network unreachable: {} (IPv6 routing may not be available)", e);
+                println!(
+                    "  Network unreachable: {} (IPv6 routing may not be available)",
+                    e
+                );
             }
         }
     }
@@ -422,10 +422,7 @@ async fn test_ebpf_multiple_concurrent_connections() {
             let targets = ["1.1.1.1:80", "8.8.8.8:53"];
             let target = targets[i % targets.len()];
 
-            match TcpStream::connect_timeout(
-                &target.parse().unwrap(),
-                Duration::from_secs(2),
-            ) {
+            match TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_secs(2)) {
                 Ok(stream) => {
                     let local = stream.local_addr().ok();
                     println!("  [{}] Connected to {} from {:?}", i, target, local);
@@ -436,18 +433,8 @@ async fn test_ebpf_multiple_concurrent_connections() {
                             protocol: flodbadd::sessions::Protocol::TCP,
                             src_ip: local.ip(),
                             src_port: local.port(),
-                            dst_ip: target
-                                .split(':')
-                                .next()
-                                .unwrap()
-                                .parse()
-                                .unwrap(),
-                            dst_port: target
-                                .split(':')
-                                .last()
-                                .unwrap()
-                                .parse()
-                                .unwrap(),
+                            dst_ip: target.split(':').next().unwrap().parse().unwrap(),
+                            dst_port: target.split(':').last().unwrap().parse().unwrap(),
                         };
 
                         let data = flodbadd::l7_ebpf::get_l7_for_session(&session);
@@ -467,7 +454,10 @@ async fn test_ebpf_multiple_concurrent_connections() {
 
     // Wait for all connections
     let results: Vec<_> = futures::future::join_all(handles).await;
-    let captured_count = results.iter().filter(|r| r.as_ref().map(|r| r.1).unwrap_or(false)).count();
+    let captured_count = results
+        .iter()
+        .filter(|r| r.as_ref().map(|r| r.1).unwrap_or(false))
+        .count();
 
     println!(
         "\n  Captured {}/{} concurrent connections",
@@ -477,10 +467,7 @@ async fn test_ebpf_multiple_concurrent_connections() {
 }
 
 /// Integration test verifying eBPF with full capture pipeline
-#[cfg(all(
-    any(target_os = "linux"),
-    feature = "packetcapture"
-))]
+#[cfg(all(any(target_os = "linux"), feature = "packetcapture"))]
 #[tokio::test]
 async fn test_full_capture_pipeline_with_ebpf() {
     use flodbadd::dns::DnsPacketProcessor;
@@ -538,13 +525,9 @@ async fn test_full_capture_pipeline_with_ebpf() {
                 .await;
 
             let resolutions = dns_processor.get_dns_resolutions_with_process();
-            println!(
-                "DNS resolutions with process info: {}",
-                resolutions.len()
-            );
+            println!("DNS resolutions with process info: {}", resolutions.len());
         }
     }
 
     println!("=== Full Pipeline Test Complete ===\n");
 }
-
