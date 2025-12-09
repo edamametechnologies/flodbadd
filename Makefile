@@ -33,12 +33,6 @@ android:
 windows_test:
 	cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
-unix_test:
-	cargo test -- --nocapture
-	# Use sudo for capture tests - on Linux need to pass cargo path
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
-	#$(shell which sudo) -E $(shell which cargo) test --features packetcapture -- --nocapture --test-threads=1
-
 # Setup the environment for eBPF testing
 ebpf_setup:
 	@echo "Setting up eBPF environment..."
@@ -48,20 +42,18 @@ ebpf_setup:
 	-sudo sysctl -w kernel.unprivileged_bpf_disabled=0 || true
 	-sudo sysctl -w net.core.bpf_jit_enable=1 || true
 
-linux_test_ebpf: ebpf_setup
-	@echo "Running eBPF tests with configured environment..."
+linux_test: ebpf_setup
+	@echo "Running all tests with eBPF support..."
 	@echo "Current kernel: $$(uname -r)"
 	@echo "Debug filesystem: $$(mount | grep debugfs || echo 'Not mounted')"
 	@echo "BPF filesystem: $$(mount | grep bpf || echo 'Not mounted')"
-	@echo "perf_event_paranoid = $$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 'Not available')"
-	@echo "unprivileged_bpf_disabled = $$(cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null || echo 'Not available')"
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf -- --nocapture --test-threads=1
 
-linux_test: unix_test linux_test_ebpf
+linux_test_no_ebpf:
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
-linux_test_no_ebpf: unix_test
-
-macos_test: unix_test
+macos_test:
+	sudo -E cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
 ios_test: ios
 
