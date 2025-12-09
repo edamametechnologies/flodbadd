@@ -510,18 +510,46 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
     let src_file = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src/l7_ebpf.c");
     let src_dir = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src");
 
+    println!("cargo:warning=[eBPF] CARGO_MANIFEST_DIR={}", manifest_dir);
+    println!("cargo:warning=[eBPF] Looking for source at: {}", src_file.display());
+
     if !src_file.exists() {
-        return Err("eBPF source file not found".into());
+        println!("cargo:warning=[eBPF] Source file NOT FOUND at expected path!");
+        // Try alternative paths
+        let alt_paths = [
+            Path::new(&manifest_dir).join("src/l7_ebpf.c"),
+            Path::new(&manifest_dir).join("l7_ebpf.c"),
+        ];
+        for alt in &alt_paths {
+            println!("cargo:warning=[eBPF] Trying alternative: {}", alt.display());
+        }
+        return Err(format!("eBPF source file not found at {}", src_file.display()).into());
     }
+    println!("cargo:warning=[eBPF] ✓ Source file exists");
 
     // Create output directory
     if let Some(parent) = obj_file.parent() {
         std::fs::create_dir_all(parent)?;
+        println!("cargo:warning=[eBPF] Output dir: {}", parent.display());
     }
 
-    // Check for required tools
-    if !Command::new("clang").arg("--version").output().is_ok() {
-        return Err("clang not found - required for eBPF compilation".into());
+    // Check for required tools with detailed output
+    println!("cargo:warning=[eBPF] Checking for clang...");
+    let clang_check = Command::new("clang").arg("--version").output();
+    match &clang_check {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let first_line = version.lines().next().unwrap_or("unknown");
+            println!("cargo:warning=[eBPF] ✓ clang found: {}", first_line);
+        }
+        Ok(output) => {
+            println!("cargo:warning=[eBPF] ✗ clang --version failed: {}", String::from_utf8_lossy(&output.stderr));
+            return Err("clang --version failed".into());
+        }
+        Err(e) => {
+            println!("cargo:warning=[eBPF] ✗ clang not found: {}", e);
+            return Err(format!("clang not found: {}", e).into());
+        }
     }
 
     // Determine target architecture for eBPF
