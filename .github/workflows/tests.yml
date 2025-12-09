@@ -258,10 +258,10 @@ jobs:
           fi
 
       - name: Run eBPF Diagnostic Test
+        id: ebpf_test
         if: ${{ matrix.platform == 'linux' }}
         shell: bash
-        run: |
-          ./tests/ebpf_test.sh || echo "eBPF diagnostic completed (non-fatal)"
+        run: ./tests/ebpf_test.sh
         continue-on-error: true
 
       - name: Run tests
@@ -285,20 +285,26 @@ jobs:
           echo "--- Native Log Dump Complete ---"
 
       - name: Slack alerts
-        if: steps.tests.outcome != 'success'
+        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')
         uses: slackapi/slack-github-action@v1.26.0
         with:
           channel-id: "C072J0U9TH7"
-          slack-message: "Tests ran in ${{ github.workflow }} for ${{ github.repository }} for ${{ runner.os }} on branch ${{ github.ref }} failed: see https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          slack-message: |
+            *Native Test Results for ${{ github.repository }} (${{ matrix.os }}-${{ matrix.arch }})*:
+            - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
+            - eBPF Test: ${{ steps.ebpf_test.outcome != 'failure' && '✅ Success' || '❌ Failed' }}
+            Branch: ${{ github.ref }}
+            More details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Fail job if tests failed
-        if: steps.tests.outcome != 'success'
+        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')
         shell: bash
         run: |
           echo "## Test Results Summary (Native - ${{ matrix.os }}-${{ matrix.platform }})"
           echo "- Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}"
+          echo "- eBPF Test: ${{ steps.ebpf_test.outcome != 'failure' && '✅ Success' || '❌ Failed' }}"
           echo ""
           echo "Forcing job to fail because tests did not succeed."
           exit 1
@@ -430,11 +436,12 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Run eBPF Diagnostic Test
+        id: ebpf_test
         if: ${{ matrix.platform == 'linux' }}
         shell: bash
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          ./tests/ebpf_test.sh || echo "eBPF diagnostic completed (non-fatal)"
+          ./tests/ebpf_test.sh
         continue-on-error: true
 
       - name: Run tests
@@ -457,24 +464,28 @@ jobs:
       - name: Slack alerts
         # Won't work on 18.04 because of glibc version
         # Won't work on ARM64 Alpine because of JavaScript support
-        if: steps.tests.outcome != 'success' && !contains(matrix.container_name, '18.04') && !contains(matrix.container_name, 'aarch64-musl')
+        # eBPF test failure only matters if NOT on 18.04 (which doesn't support eBPF well)
+        if: (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))) && !contains(matrix.container_name, '18.04') && !contains(matrix.container_name, 'aarch64-musl')
         uses: slackapi/slack-github-action@v1.26.0
         with:
           channel-id: "C072J0U9TH7"
           slack-message: |
             *Container Test Results for ${{ github.repository }} (${{ matrix.container_name }})*:
             - Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}
+            - eBPF Test: ${{ steps.ebpf_test.outcome != 'failure' && '✅ Success' || '❌ Failed' }}
             Branch: ${{ github.ref }}
             More details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Fail job if tests failed
-        if: steps.tests.outcome != 'success'
+        # eBPF test failure only matters if NOT on 18.04 (which doesn't support eBPF well)
+        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))
         shell: bash
         run: |
           echo "## Test Results Summary (Container - ${{ matrix.container_name }})"
           echo "- Tests: ${{ steps.tests.outcome == 'success' && '✅ Success' || '❌ Failed' }}"
+          echo "- eBPF Test: ${{ steps.ebpf_test.outcome != 'failure' && '✅ Success' || '❌ Failed' }}"
           echo ""
           echo "Forcing container job to fail because tests did not succeed."
           exit 1
