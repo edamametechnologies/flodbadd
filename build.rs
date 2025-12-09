@@ -511,7 +511,10 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
     let src_dir = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src");
 
     println!("cargo:warning=[eBPF] CARGO_MANIFEST_DIR={}", manifest_dir);
-    println!("cargo:warning=[eBPF] Looking for source at: {}", src_file.display());
+    println!(
+        "cargo:warning=[eBPF] Looking for source at: {}",
+        src_file.display()
+    );
 
     if !src_file.exists() {
         println!("cargo:warning=[eBPF] Source file NOT FOUND at expected path!");
@@ -543,7 +546,10 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
             println!("cargo:warning=[eBPF] ✓ clang found: {}", first_line);
         }
         Ok(output) => {
-            println!("cargo:warning=[eBPF] ✗ clang --version failed: {}", String::from_utf8_lossy(&output.stderr));
+            println!(
+                "cargo:warning=[eBPF] ✗ clang --version failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Err("clang --version failed".into());
         }
         Err(e) => {
@@ -575,17 +581,26 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     // Check if arch-specific include directory exists
     if !Path::new(arch_include).exists() {
-        println!("cargo:warning=[eBPF] ⚠ arch include dir NOT FOUND: {}", arch_include);
+        println!(
+            "cargo:warning=[eBPF] ⚠ arch include dir NOT FOUND: {}",
+            arch_include
+        );
         // Try fallback
         if Path::new("/usr/include").join("asm").exists() {
             println!("cargo:warning=[eBPF] Fallback: /usr/include/asm exists");
         }
     } else {
-        println!("cargo:warning=[eBPF] ✓ arch include dir exists: {}", arch_include);
+        println!(
+            "cargo:warning=[eBPF] ✓ arch include dir exists: {}",
+            arch_include
+        );
     }
 
     let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
-    println!("cargo:warning=[eBPF] Target arch define: {}", target_arch_define);
+    println!(
+        "cargo:warning=[eBPF] Target arch define: {}",
+        target_arch_define
+    );
 
     // Compile the eBPF program with proper architecture flags
     println!("cargo:warning=[eBPF] Running clang to compile eBPF program...");
