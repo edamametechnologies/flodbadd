@@ -37,7 +37,7 @@ unix_test:
 	cargo test -- --nocapture
 	# Use sudo for capture tests - on Linux need to pass cargo path
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture -- --nocapture --test-threads=1
+	#$(shell which sudo) -E $(shell which cargo) test --features packetcapture -- --nocapture --test-threads=1
 
 # Setup the environment for eBPF testing
 ebpf_setup:

@@ -27,6 +27,9 @@ fn emit_npcap_metadata(key: &str, path: &Path) {
 }
 
 fn main() {
+    // Declare the custom cfg flag used for eBPF embedding
+    println!("cargo::rustc-check-cfg=cfg(L7_EBPF_EMBEDDED)");
+
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
     {
