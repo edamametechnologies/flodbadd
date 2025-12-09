@@ -27,8 +27,9 @@ fn emit_npcap_metadata(key: &str, path: &Path) {
 }
 
 fn main() {
-    // Declare the custom cfg flag used for eBPF embedding
+    // Declare the custom cfg flags used for eBPF embedding
     println!("cargo::rustc-check-cfg=cfg(L7_EBPF_EMBEDDED)");
+    println!("cargo::rustc-check-cfg=cfg(DNS_EBPF_EMBEDDED)");
 
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
@@ -192,6 +193,7 @@ fn main() {
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     {
         handle_ebpf_build();
+        handle_dns_ebpf_build();
     }
 }
 
@@ -522,6 +524,128 @@ fn handle_ebpf_build() {
             "cargo:warning=[eBPF] ❌ eBPF object not created - L7 resolution will use fallback"
         );
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+fn handle_dns_ebpf_build() {
+    println!("cargo:warning=[DNS-eBPF] Building DNS eBPF program...");
+
+    println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/dns_ebpf.c");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let ebpf_dir = Path::new(&out_dir).join("ebpf");
+    let obj_file = ebpf_dir.join("dns_ebpf.o");
+
+    // Clean any existing object file
+    if obj_file.exists() {
+        let _ = std::fs::remove_file(&obj_file);
+    }
+
+    // Build the DNS eBPF program
+    match build_dns_ebpf_program(&obj_file) {
+        Ok(()) => {
+            println!("cargo:warning=[DNS-eBPF] ✅ Build succeeded");
+        }
+        Err(e) => {
+            println!("cargo:warning=[DNS-eBPF] ❌ Build failed: {}", e);
+        }
+    }
+
+    if obj_file.exists() {
+        println!("cargo:rustc-env=DNS_EBPF_OBJECT={}", obj_file.display());
+        println!("cargo:rustc-cfg=DNS_EBPF_EMBEDDED");
+        println!(
+            "cargo:warning=[DNS-eBPF] ✅ DNS eBPF program will be embedded from: {}",
+            obj_file.display()
+        );
+    } else {
+        println!(
+            "cargo:warning=[DNS-eBPF] ❌ DNS eBPF object not created - DNS process resolution will use fallback"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+fn build_dns_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let src_file = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src/dns_ebpf.c");
+    let src_dir = Path::new(&manifest_dir).join("ebpf/l7_ebpf_program/src");
+
+    if !src_file.exists() {
+        return Err(format!("DNS eBPF source file not found at {}", src_file.display()).into());
+    }
+
+    // Create output directory
+    if let Some(parent) = obj_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Check for clang
+    if !Command::new("clang").arg("--version").output().is_ok() {
+        return Err("clang not found - required for DNS eBPF compilation".into());
+    }
+
+    // Determine target architecture
+    let target_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86",
+        "x86" => "x86",
+        arch => {
+            println!(
+                "cargo:warning=[DNS-eBPF] Unknown architecture {}, defaulting to x86",
+                arch
+            );
+            "x86"
+        }
+    };
+
+    // Determine arch-specific include directory
+    let arch_include_primary = match std::env::consts::ARCH {
+        "aarch64" => "/usr/include/aarch64-linux-gnu",
+        "x86_64" | "x86" => "/usr/include/x86_64-linux-gnu",
+        _ => "/usr/include",
+    };
+
+    let arch_include = if Path::new(arch_include_primary).exists() {
+        arch_include_primary.to_string()
+    } else {
+        "/usr/include".to_string()
+    };
+
+    let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
+
+    let clang_args = [
+        "-target",
+        "bpf",
+        "-D__BPF_TRACING__",
+        &target_arch_define,
+        "-Wall",
+        "-O2",
+        "-g",
+        "-c",
+        &format!("-I{}", arch_include),
+        &format!("-I{}", src_dir.to_str().unwrap()),
+        "-o",
+        obj_file.to_str().unwrap(),
+        src_file.to_str().unwrap(),
+    ];
+
+    let output = Command::new("clang").args(&clang_args).output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("cargo:warning=[DNS-eBPF] clang FAILED: {}", stderr);
+        return Err(format!("clang failed: {}", stderr).into());
+    }
+
+    println!(
+        "cargo:warning=[DNS-eBPF] DNS eBPF program compiled successfully to {}",
+        obj_file.display()
+    );
+
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]

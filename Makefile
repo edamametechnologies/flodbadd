@@ -202,6 +202,21 @@ lima_test_ebpf: lima_start
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf -- --nocapture \
 	'
 
+# DNS eBPF test in Lima - tests DNS process attribution
+lima_test_dns_ebpf: lima_start
+	@echo "Running DNS eBPF tests in Lima VM..."
+	limactl shell $(LIMA_VM_NAME) -- bash -c '\
+		cd /Users/flyonnet/Programming/flodbadd && \
+		source $$HOME/.cargo/env && \
+		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
+		echo "=== DNS eBPF Check ===" && \
+		sudo -E $$HOME/.cargo/bin/cargo run --release --features packetcapture,asyncpacketcapture,ebpf --example check_dns_ebpf && \
+		echo "" && \
+		echo "=== DNS eBPF Integration Tests ===" && \
+		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
+			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf dns_ebpf -- --nocapture \
+	'
+
 # -----------------------------------------------------------------------------
 # Option 3: Alpine Linux VM (test eBPF on musl libc)
 # -----------------------------------------------------------------------------

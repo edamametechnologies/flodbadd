@@ -26,6 +26,7 @@ pub mod ip;
 ))]
 pub mod l7;
 pub mod l7_ebpf;
+pub mod dns_ebpf;
 pub mod mdns;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub mod neighbors;
