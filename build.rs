@@ -460,26 +460,39 @@ fn find_installed_npcap_sdk_lib_dir(lib_subdir: &str) -> Option<PathBuf> {
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn handle_ebpf_build() {
     // Debug: confirm this function is being called
-    println!("cargo:warning=[eBPF] handle_ebpf_build() called");
+    println!("cargo:warning=[eBPF] handle_ebpf_build() called on {}", std::env::consts::ARCH);
 
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/l7_ebpf.c");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/build.rs");
     println!("cargo:rerun-if-changed=ebpf/l7_ebpf_program/src/vmlinux.h");
 
-    // The eBPF program should be built by its own build.rs
-    // We just need to ensure the path is available to our code
-
     // Check if the eBPF program was built
     let out_dir = env::var("OUT_DIR").unwrap();
+    println!("cargo:warning=[eBPF] OUT_DIR={}", out_dir);
+    
     let ebpf_dir = Path::new(&out_dir).join("ebpf");
     let obj_file = ebpf_dir.join("l7_ebpf.o");
 
-    if !obj_file.exists() {
-        // Try to build it manually if the build dependency didn't work
-        println!("cargo:warning=eBPF object file not found, attempting manual build");
+    // ALWAYS rebuild the eBPF program to avoid caching issues
+    // This ensures clang runs every time and we get fresh diagnostics
+    println!("cargo:warning=[eBPF] Building eBPF program...");
+    
+    // Clean any existing object file to force rebuild
+    if obj_file.exists() {
+        if let Err(e) = std::fs::remove_file(&obj_file) {
+            println!("cargo:warning=[eBPF] Could not remove old object file: {}", e);
+        } else {
+            println!("cargo:warning=[eBPF] Removed old object file for clean rebuild");
+        }
+    }
 
-        if let Err(e) = build_ebpf_program(&obj_file) {
-            println!("cargo:warning=Failed to build eBPF program: {}", e);
+    // Build the eBPF program
+    match build_ebpf_program(&obj_file) {
+        Ok(()) => {
+            println!("cargo:warning=[eBPF] ✅ Build succeeded");
+        }
+        Err(e) => {
+            println!("cargo:warning=[eBPF] ❌ Build failed: {}", e);
         }
     }
 
@@ -490,14 +503,14 @@ fn handle_ebpf_build() {
         // Enable the cfg flag so the code knows the eBPF object is embedded
         println!("cargo:rustc-cfg=L7_EBPF_EMBEDDED");
         println!(
-            "cargo:warning=eBPF program will be embedded from: {}",
+            "cargo:warning=[eBPF] ✅ eBPF program will be embedded from: {}",
             obj_file.display()
         );
     } else {
         // eBPF object not available - the code will gracefully handle this at runtime
         // by checking if EBPF_OBJECT is empty
         println!(
-            "cargo:warning=eBPF program not built (clang/llvm not available?) - L7 resolution will use fallback"
+            "cargo:warning=[eBPF] ❌ eBPF object not created - L7 resolution will use fallback"
         );
     }
 }
@@ -573,28 +586,32 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
     };
 
     // Determine architecture-specific include directory
-    let arch_include = match std::env::consts::ARCH {
+    // Try arch-specific first, then fall back to /usr/include
+    let arch_include_primary = match std::env::consts::ARCH {
         "aarch64" => "/usr/include/aarch64-linux-gnu",
         "x86_64" | "x86" => "/usr/include/x86_64-linux-gnu",
         _ => "/usr/include",
     };
 
-    // Check if arch-specific include directory exists
-    if !Path::new(arch_include).exists() {
-        println!(
-            "cargo:warning=[eBPF] ⚠ arch include dir NOT FOUND: {}",
-            arch_include
-        );
-        // Try fallback
-        if Path::new("/usr/include").join("asm").exists() {
-            println!("cargo:warning=[eBPF] Fallback: /usr/include/asm exists");
-        }
-    } else {
+    let arch_include = if Path::new(arch_include_primary).exists() {
         println!(
             "cargo:warning=[eBPF] ✓ arch include dir exists: {}",
-            arch_include
+            arch_include_primary
         );
-    }
+        arch_include_primary.to_string()
+    } else {
+        println!(
+            "cargo:warning=[eBPF] ⚠ arch include dir NOT FOUND: {}",
+            arch_include_primary
+        );
+        // Fall back to /usr/include
+        if Path::new("/usr/include/asm").exists() {
+            println!("cargo:warning=[eBPF] ✓ Fallback: /usr/include has asm headers");
+        } else {
+            println!("cargo:warning=[eBPF] ⚠ /usr/include/asm also not found!");
+        }
+        "/usr/include".to_string()
+    };
 
     let target_arch_define = format!("-D__TARGET_ARCH_{}", target_arch);
     println!(
@@ -603,30 +620,35 @@ fn build_ebpf_program(obj_file: &Path) -> Result<(), Box<dyn std::error::Error>>
     );
 
     // Compile the eBPF program with proper architecture flags
-    println!("cargo:warning=[eBPF] Running clang to compile eBPF program...");
+    let clang_args = [
+        "-target",
+        "bpf",
+        "-D__BPF_TRACING__",
+        &target_arch_define,
+        "-Wall",
+        "-O2",
+        "-g",
+        "-c",
+        &format!("-I{}", arch_include),
+        &format!("-I{}", src_dir.to_str().unwrap()),
+        "-o",
+        obj_file.to_str().unwrap(),
+        src_file.to_str().unwrap(),
+    ];
+    
+    println!("cargo:warning=[eBPF] clang command: clang {}", clang_args.join(" "));
+    
     let output = Command::new("clang")
-        .args([
-            "-target",
-            "bpf",
-            "-D__BPF_TRACING__",
-            &target_arch_define,
-            "-Wall",
-            "-O2",
-            "-g",
-            "-c",
-            &format!("-I{}", arch_include),
-            &format!("-I{}", src_dir.to_str().unwrap()),
-            "-o",
-            obj_file.to_str().unwrap(),
-            src_file.to_str().unwrap(),
-        ])
+        .args(&clang_args)
         .output()?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("cargo:warning=[eBPF] clang FAILED with stderr: {}", stderr);
         return Err(format!(
-            "Failed to compile eBPF program:\nstdout: {}\nstderr: {}",
+            "clang failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         )
         .into());
     }
