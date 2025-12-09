@@ -147,19 +147,21 @@ mod linux {
             //  the kernel/capabilities do not allow loading eBPF programs.
             // -------------------------------------------------------------
 
-            // 1. Check unprivileged_bpf_disabled.  When it is "1" and the
-            //    process is not running as root the kernel will reject any
-            //    program load attempt with EPERM.
+            // 1. Check unprivileged_bpf_disabled.
+            //    - 0 = unprivileged allowed
+            //    - 1 = unprivileged disabled (need root or CAP_BPF)
+            //    - 2 = permanently disabled until reboot (even root may have issues)
             if let Ok(disabled) =
                 std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
             {
-                if disabled.trim() == "1" {
+                let value = disabled.trim();
+                if value == "1" || value == "2" {
                     if nix::unistd::geteuid().as_raw() != 0 {
                         let msg = format!(
-                            "Disabled: unprivileged_bpf_disabled=1 and not running as root (kernel {})",
-                            kernel_version
+                            "Disabled: unprivileged_bpf_disabled={} and not running as root (kernel {})",
+                            value, kernel_version
                         );
-                        warn!("eBPF disabled: kernel has unprivileged_bpf_disabled=1 (need root or CAP_BPF)");
+                        warn!("eBPF disabled: kernel has unprivileged_bpf_disabled={} (need root or CAP_BPF)", value);
                         return (None, msg);
                     }
                 }
