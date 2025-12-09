@@ -280,7 +280,7 @@ fn test_dns_ebpf_captures_real_dns_query() {
     println!("=== DNS eBPF Realistic Test Complete ===\n");
 }
 
-/// Test DNS eBPF with IPv6 DNS servers
+/// Test DNS eBPF with IPv6 DNS servers and loopback
 #[test]
 fn test_dns_ebpf_captures_ipv6_dns_query() {
     if !flodbadd::dns_ebpf::is_available() {
@@ -317,7 +317,37 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
         0x00, 0x01,
     ];
 
-    // IPv6 DNS servers
+    // First test IPv6 loopback (always available)
+    println!("\nTesting IPv6 loopback [::1]:53...");
+    match socket.send_to(&dns_query, "[::1]:53") {
+        Ok(sent) => {
+            println!("  Sent {} bytes to IPv6 loopback", sent);
+            thread::sleep(Duration::from_millis(20));
+            
+            let info = flodbadd::dns_ebpf::get_process_by_src_port(src_port);
+            if let Some(info) = info {
+                println!("  ✅ DNS eBPF captured IPv6 loopback query!");
+                println!("     PID: {} (ours: {})", info.pid, process::id());
+                println!("     Process: {}", info.process_name);
+                println!("     Family: {} (10 = IPv6)", info.family);
+                
+                if info.family == 10 {
+                    println!("     ✅ Correctly identified as IPv6!");
+                    println!("=== DNS eBPF IPv6 Test PASSED ===\n");
+                    return; // Success with loopback
+                } else {
+                    println!("     ⚠️  Family is {} not 10 (IPv6)", info.family);
+                }
+            } else {
+                println!("  ⚠️  eBPF didn't capture loopback");
+            }
+        }
+        Err(e) => {
+            println!("  Loopback send failed: {}", e);
+        }
+    }
+
+    // Try external IPv6 DNS servers
     let ipv6_dns_servers = [
         "[2001:4860:4860::8888]:53", // Google
         "[2606:4700:4700::1111]:53", // Cloudflare
@@ -354,7 +384,7 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
         }
     }
 
-    println!("\n⚠️  No IPv6 DNS queries captured - IPv6 may not be routed");
+    println!("\n⚠️  No IPv6 DNS queries captured");
     println!("=== DNS eBPF IPv6 Test Complete ===\n");
 }
 
