@@ -5,7 +5,7 @@
 // sendmsg operations to capture DNS traffic.
 //
 // The eBPF program tracks UDP sockets sending to port 53 (DNS) and
-// stores the process info keyed by source port. When the packet capture
+// stores process information keyed by source port. When packet capture
 // sees a DNS query, it can look up the source port to find which process
 // made the query.
 //
@@ -34,12 +34,13 @@ pub struct DnsSocketInfo {
 mod linux {
     use super::*;
     use aya::maps::HashMap as AyaHashMap;
+    use aya::maps::MapData;
     use aya::Pod as AyaPod;
     use aya::Ebpf;
     use bytemuck::{Pod, Zeroable};
     use once_cell::sync::OnceCell;
     use std::sync::{Arc, RwLock};
-    use tracing::{error, info, warn};
+    use tracing::{debug, error, info, warn};
 
     // Embed the DNS eBPF object file at compile time
     #[cfg(DNS_EBPF_EMBEDDED)]
@@ -49,6 +50,7 @@ mod linux {
     static DNS_EBPF_OBJECT: &[u8] = &[];
 
     // Match the eBPF structure for dns_socket_info
+    // MUST exactly match the C struct in dns_ebpf.c!
     #[repr(C)]
     #[derive(Clone, Copy, Zeroable, Pod)]
     struct EbpfDnsSocketInfo {
@@ -59,15 +61,19 @@ mod linux {
         dst_port: u16,
         family: u8,
         padding: [u8; 3],
-        src_ip: [u32; 4],  // Source IP (IPv4 in first element, or full IPv6)
-        dst_ip: [u32; 4],  // Destination IP (DNS server)
+        src_ip: [u32; 4],
+        dst_ip: [u32; 4],
         process_name: [u8; 16],
     }
 
     unsafe impl AyaPod for EbpfDnsSocketInfo {}
 
     struct Inner {
-        bpf: RwLock<Ebpf>,
+        // The eBPF object (kept alive to maintain kprobes)
+        #[allow(dead_code)]
+        bpf: Ebpf,
+        // The dns_sockets map - taken from bpf for efficient lookups
+        dns_sockets_map: AyaHashMap<MapData, u16, EbpfDnsSocketInfo>,
     }
 
     impl Inner {
@@ -158,8 +164,45 @@ mod linux {
 
             info!("DNS eBPF: udp_sendmsg kprobe attached successfully");
 
-            // Attach udpv6_sendmsg kprobe for IPv6 DNS (non-critical if fails)
+            // Attach additional kprobes (non-critical if they fail)
             let mut ipv6_attached = false;
+            let mut sendto_attached = false;
+            
+            // Attach __sys_sendto for unconnected UDP sockets
+            if let Some(prog_any) = bpf.program_mut("trace_sendto") {
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if kp.attach("__sys_sendto", 0).is_ok() {
+                            info!("DNS eBPF: __sys_sendto kprobe attached");
+                            sendto_attached = true;
+                        }
+                    }
+                }
+            }
+            
+            // Attach ip4_datagram_connect for UDP connect() calls
+            if let Some(prog_any) = bpf.program_mut("trace_udp4_connect") {
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if kp.attach("ip4_datagram_connect", 0).is_ok() {
+                            debug!("DNS eBPF: ip4_datagram_connect kprobe attached");
+                        }
+                    }
+                }
+            }
+            
+            // Attach ip6_datagram_connect for IPv6 UDP connect() calls
+            if let Some(prog_any) = bpf.program_mut("trace_udp6_connect") {
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    if kp.load().is_ok() {
+                        if kp.attach("ip6_datagram_connect", 0).is_ok() {
+                            debug!("DNS eBPF: ip6_datagram_connect kprobe attached");
+                        }
+                    }
+                }
+            }
+            
+            // Attach udpv6_sendmsg for IPv6
             if let Some(prog_any) = bpf.program_mut("trace_udpv6_send") {
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
                     if kp.load().is_ok() {
@@ -171,40 +214,72 @@ mod linux {
                 }
             }
 
+            // Take ownership of the dns_sockets map for efficient lookups
+            let dns_sockets_map: AyaHashMap<MapData, u16, EbpfDnsSocketInfo> = 
+                match bpf.take_map("dns_sockets") {
+                    Some(m) => match AyaHashMap::try_from(m) {
+                        Ok(map) => map,
+                        Err(e) => {
+                            let msg = format!("Disabled: failed to get dns_sockets map: {}", e);
+                            error!("{}", msg);
+                            return (None, msg);
+                        }
+                    },
+                    None => {
+                        let msg = "Disabled: dns_sockets map not found".to_string();
+                        error!("{}", msg);
+                        return (None, msg);
+                    }
+                };
+            
+            debug!("DNS eBPF: dns_sockets map initialized");
+
+            let sendto_note = if sendto_attached { " + sendto" } else { "" };
             let ipv6_note = if ipv6_attached { " + IPv6" } else { "" };
             let msg = format!(
-                "Enabled: kernel {} with udp_sendmsg{} kprobe attached",
-                kernel_version, ipv6_note
+                "Enabled: kernel {} with udp_sendmsg{}{} kprobe attached",
+                kernel_version, sendto_note, ipv6_note
             );
             info!("DNS eBPF L7 helper initialised successfully: {}", msg);
 
-            (Some(Self { bpf: RwLock::new(bpf) }), msg)
+            (Some(Self { bpf, dns_sockets_map }), msg)
         }
 
         fn lookup_by_src_port(&self, src_port: u16) -> Option<DnsSocketInfo> {
-            let bpf = self.bpf.read().ok()?;
-            
-            let map = bpf.map("dns_sockets")?;
-            let map: AyaHashMap<_, u16, EbpfDnsSocketInfo> =
-                AyaHashMap::try_from(map).ok()?;
+            // Look up in the dns_sockets map
+            match self.dns_sockets_map.get(&src_port, 0) {
+                Ok(info) => {
+                    let name = std::str::from_utf8(&info.process_name)
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                        .to_string();
 
-            let info = map.get(&src_port, 0).ok()?;
-            
-            let name = std::str::from_utf8(&info.process_name)
-                .unwrap_or("")
-                .trim_end_matches('\0')
-                .to_string();
+                    debug!(
+                        "DNS eBPF: Found entry for port {}: PID={}, process={}",
+                        src_port, info.pid, name
+                    );
 
-            Some(DnsSocketInfo {
-                pid: info.pid,
-                uid: info.uid,
-                process_name: name,
-                src_port: info.src_port,
-                timestamp: info.timestamp,
-                family: info.family,
-                src_ip: info.src_ip,
-                dst_ip: info.dst_ip,
-            })
+                    Some(DnsSocketInfo {
+                        pid: info.pid,
+                        uid: info.uid,
+                        process_name: name,
+                        src_port: info.src_port,
+                        timestamp: info.timestamp,
+                        family: info.family,
+                        src_ip: info.src_ip,
+                        dst_ip: info.dst_ip,
+                    })
+                }
+                Err(e) => {
+                    debug!("DNS eBPF: No entry for port {}: {:?}", src_port, e);
+                    None
+                }
+            }
+        }
+        
+        /// Get the number of entries in the dns_sockets map (for debugging)
+        fn map_size(&self) -> usize {
+            self.dns_sockets_map.iter().count()
         }
     }
 
@@ -234,6 +309,11 @@ mod linux {
         pub fn get_process_by_src_port(&self, src_port: u16) -> Option<DnsSocketInfo> {
             let inner = self.inner.as_ref()?;
             inner.lookup_by_src_port(src_port)
+        }
+        
+        /// Get the current number of tracked DNS sockets (for debugging)
+        pub fn map_size(&self) -> usize {
+            self.inner.as_ref().map(|i| i.map_size()).unwrap_or(0)
         }
     }
 
@@ -269,6 +349,11 @@ mod linux {
         #[allow(dead_code)]
         pub fn get_process_by_src_port(&self, _src_port: u16) -> Option<DnsSocketInfo> {
             None
+        }
+        
+        #[allow(dead_code)]
+        pub fn map_size(&self) -> usize {
+            0
         }
     }
 
@@ -330,6 +415,19 @@ pub fn get_process_by_src_port(src_port: u16) -> Option<DnsSocketInfo> {
     {
         let _ = src_port;
         None
+    }
+}
+
+/// Get the number of DNS sockets currently being tracked (for debugging)
+pub fn map_size() -> usize {
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    {
+        linux::global().map_size()
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+    {
+        0
     }
 }
 

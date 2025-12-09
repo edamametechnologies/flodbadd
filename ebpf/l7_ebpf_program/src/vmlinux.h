@@ -115,6 +115,7 @@ struct pt_regs {
 #define PT_REGS_PARM3(x) ((x)->rdx)
 #define PT_REGS_PARM4(x) ((x)->rcx)
 #define PT_REGS_PARM5(x) ((x)->r8)
+#define PT_REGS_PARM6(x) ((x)->r9)
 #define PT_REGS_RC(x)    ((x)->rax)
 #define PT_REGS_IP(x)    ((x)->rip)
 
@@ -142,6 +143,7 @@ struct user_pt_regs {
 #define PT_REGS_PARM3(x) ((x)->regs[2])
 #define PT_REGS_PARM4(x) ((x)->regs[3])
 #define PT_REGS_PARM5(x) ((x)->regs[4])
+#define PT_REGS_PARM6(x) ((x)->regs[5])
 #define PT_REGS_RC(x)    ((x)->regs[0])
 #define PT_REGS_IP(x)    ((x)->pc)
 

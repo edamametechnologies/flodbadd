@@ -61,15 +61,21 @@ fn main() {
                             // Give eBPF time to process
                             std::thread::sleep(Duration::from_millis(50));
                             
-                            // Check if eBPF captured it
-                            if let Some(info) = flodbadd::dns_ebpf::get_process_by_src_port(src_port) {
-                                println!("\n✅ eBPF captured the DNS query!");
-                                println!("   PID: {}", info.pid);
-                                println!("   Process: {}", info.process_name);
-                                println!("   Source Port: {}", info.src_port);
-                            } else {
-                                println!("\n⚠️  eBPF did not capture the query (timing issue?)");
-                            }
+                        // Check if eBPF captured it
+                        // Check map size for debugging
+                        let map_size = flodbadd::dns_ebpf::map_size();
+                        println!("DNS eBPF map size: {} entries", map_size);
+                        
+                        if let Some(info) = flodbadd::dns_ebpf::get_process_by_src_port(src_port) {
+                            println!("\n✅ eBPF captured the DNS query!");
+                            println!("   PID: {}", info.pid);
+                            println!("   Process: {}", info.process_name);
+                            println!("   Source Port: {}", info.src_port);
+                            println!("   Family: {} (2=IPv4, 10=IPv6)", info.family);
+                        } else {
+                            println!("\n⚠️  eBPF did not capture the query for port {}", src_port);
+                            println!("   Map has {} entries", map_size);
+                        }
                             
                             // Try to get response
                             let mut buf = [0u8; 512];
