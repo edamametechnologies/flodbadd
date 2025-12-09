@@ -11,10 +11,16 @@
 /* Include our minimal vmlinux.h first for kernel structure definitions */
 #include "vmlinux.h"
 
-/* Then include BPF helper headers */
+/* Include BPF helper headers */
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+
+/* 
+ * Note: We intentionally do NOT include <bpf/bpf_tracing.h> because it 
+ * redefines PT_REGS_PARM* macros using short register names (di, si) that
+ * conflict with our vmlinux.h struct pt_regs which uses full names (rdi, rsi).
+ * Our vmlinux.h already provides the necessary PT_REGS_PARM* definitions.
+ */
 
 #define MAX_ENTRIES 65536
 
