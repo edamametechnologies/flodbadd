@@ -384,6 +384,17 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Returns true if DNS eBPF is not just available but actually has kprobes attached
+/// and is fully functional.
+pub fn is_fully_functional() -> bool {
+    if !is_available() {
+        return false;
+    }
+    // Check if the status indicates kprobes are attached
+    let status = dns_ebpf_support();
+    status.contains("kprobe attached")
+}
+
 /// Get detailed DNS eBPF support status
 pub fn dns_ebpf_support() -> String {
     #[cfg(not(target_os = "linux"))]

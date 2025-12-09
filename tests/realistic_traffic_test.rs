@@ -14,8 +14,11 @@ use std::time::Duration;
 /// This test creates a real TCP connection and verifies eBPF tracked it
 #[tokio::test]
 async fn test_l7_ebpf_captures_real_tcp_with_correct_pid() {
-    if !flodbadd::l7_ebpf::is_available() {
-        println!("⚠️  L7 eBPF not available - skipping realistic test");
+    if !flodbadd::l7_ebpf::is_fully_functional() {
+        println!(
+            "⚠️  L7 eBPF not fully functional - skipping (status: {})",
+            flodbadd::l7_ebpf::ebpf_support()
+        );
         return;
     }
 
@@ -122,8 +125,11 @@ async fn test_l7_ebpf_captures_real_tcp_with_correct_pid() {
 /// Test that L7 eBPF captures external TCP connection with correct PID
 #[tokio::test]
 async fn test_l7_ebpf_captures_external_tcp() {
-    if !flodbadd::l7_ebpf::is_available() {
-        println!("⚠️  L7 eBPF not available - skipping");
+    if !flodbadd::l7_ebpf::is_fully_functional() {
+        println!(
+            "⚠️  L7 eBPF not fully functional - skipping (status: {})",
+            flodbadd::l7_ebpf::ebpf_support()
+        );
         return;
     }
 
@@ -195,8 +201,11 @@ async fn test_l7_ebpf_captures_external_tcp() {
 /// Test that DNS eBPF captures real DNS queries with correct PID
 #[test]
 fn test_dns_ebpf_captures_real_dns_query() {
-    if !flodbadd::dns_ebpf::is_available() {
-        println!("⚠️  DNS eBPF not available - skipping");
+    if !flodbadd::dns_ebpf::is_fully_functional() {
+        println!(
+            "⚠️  DNS eBPF not fully functional - skipping (status: {})",
+            flodbadd::dns_ebpf::dns_ebpf_support()
+        );
         return;
     }
 
@@ -283,8 +292,11 @@ fn test_dns_ebpf_captures_real_dns_query() {
 /// Test DNS eBPF with IPv6 DNS servers and loopback
 #[test]
 fn test_dns_ebpf_captures_ipv6_dns_query() {
-    if !flodbadd::dns_ebpf::is_available() {
-        println!("⚠️  DNS eBPF not available - skipping");
+    if !flodbadd::dns_ebpf::is_fully_functional() {
+        println!(
+            "⚠️  DNS eBPF not fully functional - skipping (status: {})",
+            flodbadd::dns_ebpf::dns_ebpf_support()
+        );
         return;
     }
 
@@ -391,8 +403,11 @@ fn test_dns_ebpf_captures_ipv6_dns_query() {
 /// Test that eBPF correctly tracks multiple simultaneous connections
 #[tokio::test]
 async fn test_ebpf_multiple_concurrent_connections() {
-    if !flodbadd::l7_ebpf::is_available() {
-        println!("⚠️  L7 eBPF not available - skipping");
+    if !flodbadd::l7_ebpf::is_fully_functional() {
+        println!(
+            "⚠️  L7 eBPF not fully functional - skipping (status: {})",
+            flodbadd::l7_ebpf::ebpf_support()
+        );
         return;
     }
 

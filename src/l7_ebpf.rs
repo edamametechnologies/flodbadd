@@ -543,6 +543,18 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Returns true if eBPF is not just available but actually has kprobes attached
+/// and is fully functional. This is useful for tests that need to know if eBPF
+/// will actually capture traffic, not just if the object was embedded.
+pub fn is_fully_functional() -> bool {
+    if !is_available() {
+        return false;
+    }
+    // Check if the status indicates kprobes are attached
+    let status = ebpf_support();
+    status.contains("kprobe attached")
+}
+
 /// Initialize and log the eBPF status. Call this at capture start to get
 /// early feedback about eBPF availability.
 pub fn init_and_log_status() {

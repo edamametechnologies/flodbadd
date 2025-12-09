@@ -1922,8 +1922,11 @@ mod ebpf_tests {
 
     #[tokio::test]
     async fn test_ebpf_l7_resolution() {
-        if !l7_ebpf::is_available() {
-            println!("Skipping test_ebpf_l7_resolution: eBPF helper not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!(
+                "Skipping test_ebpf_l7_resolution: eBPF not fully functional (status: {})",
+                l7_ebpf::ebpf_support()
+            );
             return;
         }
         let port: u16 = rand::rng().random_range(20000..40000);
@@ -1986,9 +1989,10 @@ mod ebpf_tests {
 
     #[tokio::test]
     async fn test_ebpf_l7_priority_over_standard_resolver() {
-        if !l7_ebpf::is_available() {
+        if !l7_ebpf::is_fully_functional() {
             println!(
-                "Skipping test_ebpf_l7_priority_over_standard_resolver: eBPF helper not available"
+                "Skipping test_ebpf_l7_priority_over_standard_resolver: eBPF not fully functional (status: {})",
+                l7_ebpf::ebpf_support()
             );
             return;
         }
@@ -2074,8 +2078,11 @@ mod ebpf_tests {
         use crate::capture::FlodbaddCapture;
         use crate::interface::FlodbaddInterfaces;
 
-        if !l7_ebpf::is_available() {
-            println!("Skipping test_ebpf_l7_integration_with_capture: eBPF helper not available");
+        if !l7_ebpf::is_fully_functional() {
+            println!(
+                "Skipping test_ebpf_l7_integration_with_capture: eBPF not fully functional (status: {})",
+                l7_ebpf::ebpf_support()
+            );
             return;
         }
         let port: u16 = rand::rng().random_range(20000..40000);
