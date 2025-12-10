@@ -701,6 +701,22 @@ impl FlodbaddCapture {
     }
 
     pub async fn create_custom_whitelists(&self) -> Result<String> {
+        self.create_custom_whitelists_with_options(false).await
+    }
+
+    /// Create custom whitelists with process information included.
+    /// This provides stricter matching (connections must come from the same process)
+    /// but may cause whitelist instability if process names change between runs.
+    pub async fn create_custom_whitelists_with_process(&self) -> Result<String> {
+        self.create_custom_whitelists_with_options(true).await
+    }
+
+    /// Create custom whitelists with configurable options.
+    /// If include_process is true, process names will be included in whitelist entries.
+    pub async fn create_custom_whitelists_with_options(
+        &self,
+        include_process: bool,
+    ) -> Result<String> {
         // First update all sessions
         self.update_sessions().await;
 
@@ -714,7 +730,7 @@ impl FlodbaddCapture {
         // Exclude ingress sessions
         sessions_vec.retain(|session| !crate::ip::is_local_ip(&session.session.dst_ip));
 
-        let whitelist = Whitelists::new_from_sessions(&sessions_vec);
+        let whitelist = Whitelists::new_from_sessions_with_options(&sessions_vec, include_process);
         let whitelist_json = WhitelistsJSON::from(whitelist);
         match serde_json::to_string_pretty(&whitelist_json) {
             Ok(json) => Ok(json),

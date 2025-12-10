@@ -211,7 +211,19 @@ impl Whitelists {
     }
 
     // Create a whitelist from a list of sessions
+    // If include_process is true, process names will be included in the whitelist entries.
+    // This provides stricter matching but may cause whitelist instability across runs.
     pub fn new_from_sessions(sessions: &Vec<SessionInfo>) -> Self {
+        Self::new_from_sessions_with_options(sessions, false)
+    }
+
+    // Create a whitelist from a list of sessions with process info included
+    pub fn new_from_sessions_with_process(sessions: &Vec<SessionInfo>) -> Self {
+        Self::new_from_sessions_with_options(sessions, true)
+    }
+
+    // Create a whitelist from a list of sessions with configurable options
+    pub fn new_from_sessions_with_options(sessions: &Vec<SessionInfo>, include_process: bool) -> Self {
         let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
         // Helper function to check if an AS owner indicates a CDN/cloud provider
@@ -273,9 +285,20 @@ impl Whitelists {
                 as_number: None, // Session doesn't have AS info
                 as_country: None,
                 as_owner: None,
-                // Process/user info attached to sessions is highly volatile; omit it
+                // Process/user info attached to sessions is highly volatile; omit it by default
                 // so that generated custom whitelists stay stable across runs.
-                process: None,
+                // When include_process is true, process names are included for stricter matching.
+                process: if include_process {
+                    session.l7.as_ref().and_then(|l7| {
+                        if l7.process_name.is_empty() {
+                            None
+                        } else {
+                            Some(l7.process_name.clone())
+                        }
+                    })
+                } else {
+                    None
+                },
                 description: Some(format!(
                     "Auto-generated from session: {}:{} -> {}:{}",
                     session.session.src_ip,
@@ -289,6 +312,7 @@ impl Whitelists {
 
             // Create a fingerprint tuple that uniquely identifies this endpoint
             // (excluding description which doesn't affect deduplication)
+            // Include process in fingerprint when include_process is enabled
             let fingerprint = (
                 endpoint.domain.clone(),
                 endpoint.ip.clone(),
@@ -297,6 +321,7 @@ impl Whitelists {
                 endpoint.as_number,
                 endpoint.as_country.clone(),
                 endpoint.as_owner.clone(),
+                endpoint.process.clone(),
             );
 
             // Only add the endpoint if we haven't seen this fingerprint before
