@@ -223,7 +223,10 @@ impl Whitelists {
     }
 
     // Create a whitelist from a list of sessions with configurable options
-    pub fn new_from_sessions_with_options(sessions: &Vec<SessionInfo>, include_process: bool) -> Self {
+    pub fn new_from_sessions_with_options(
+        sessions: &Vec<SessionInfo>,
+        include_process: bool,
+    ) -> Self {
         let whitelists = Arc::new(CustomDashMap::new("whitelists"));
 
         // Helper function to check if an AS owner indicates a CDN/cloud provider
