@@ -731,7 +731,7 @@ impl FlodbaddCapture {
         sessions_vec.retain(|session| !crate::ip::is_local_ip(&session.session.dst_ip));
 
         let whitelist = Whitelists::new_from_sessions_with_options(&sessions_vec, include_process);
-        
+
         // Factorize each whitelist to merge endpoints with same domain/protocol/AS/process
         // This is consistent with augment_custom_whitelists() and set_custom_whitelists()
         // which also factorize, ensuring file and daemon endpoint counts match
