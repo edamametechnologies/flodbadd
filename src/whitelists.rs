@@ -269,6 +269,35 @@ impl Whitelists {
                 }
             }
 
+            // When include_process is enabled, we need a valid process name.
+            // Skip sessions without resolved process info to avoid creating wildcard entries.
+            let process_name: Option<String> = if include_process {
+                let name = session.l7.as_ref().and_then(|l7| {
+                    let name = &l7.process_name;
+                    // Filter out unresolved/unknown process names
+                    if name.is_empty() || name == "Unknown" || name == "Resolving" {
+                        None
+                    } else {
+                        Some(name.clone())
+                    }
+                });
+                // If include_process is true but we couldn't get a valid process name,
+                // skip this session - we don't want to create wildcard entries
+                if name.is_none() {
+                    warn!(
+                        "Skipping session without resolved process (include_process=true): {}:{} -> {}:{}",
+                        session.session.src_ip,
+                        session.session.src_port,
+                        session.session.dst_ip,
+                        session.session.dst_port
+                    );
+                    continue;
+                }
+                name
+            } else {
+                None
+            };
+
             let endpoint = WhitelistEndpoint {
                 // Do not include the domain if set to "Unknown" or "Resolving"
                 domain: if domain_unresolved {
@@ -288,20 +317,8 @@ impl Whitelists {
                 as_number: None, // Session doesn't have AS info
                 as_country: None,
                 as_owner: None,
-                // Process/user info attached to sessions is highly volatile; omit it by default
-                // so that generated custom whitelists stay stable across runs.
-                // When include_process is true, process names are included for stricter matching.
-                process: if include_process {
-                    session.l7.as_ref().and_then(|l7| {
-                        if l7.process_name.is_empty() {
-                            None
-                        } else {
-                            Some(l7.process_name.clone())
-                        }
-                    })
-                } else {
-                    None
-                },
+                // Process name is set above (with validation when include_process is true)
+                process: process_name,
                 description: Some(format!(
                     "Auto-generated from session: {}:{} -> {}:{}",
                     session.session.src_ip,
