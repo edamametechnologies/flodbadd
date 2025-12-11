@@ -732,23 +732,15 @@ impl FlodbaddCapture {
 
         let whitelist = Whitelists::new_from_sessions_with_options(&sessions_vec, include_process);
         
-        // Factorize the whitelist to merge endpoints with same domain/protocol/AS/process
+        // Factorize each whitelist to merge endpoints with same domain/protocol/AS/process
         // This is consistent with augment_custom_whitelists() and set_custom_whitelists()
         // which also factorize, ensuring file and daemon endpoint counts match
-        let factorized_whitelists = Whitelists {
-            date: whitelist.date.clone(),
-            signature: whitelist.signature.clone(),
-            whitelists: {
-                let map = crate::whitelists::CustomDashMap::new("whitelists");
-                for entry in whitelist.whitelists.iter() {
-                    let factorized_info = Whitelists::factorize_whitelist(entry.value());
-                    map.insert(entry.key().clone(), factorized_info);
-                }
-                std::sync::Arc::new(map)
-            },
-        };
-        
-        let whitelist_json = WhitelistsJSON::from(factorized_whitelists);
+        let mut whitelist_json = WhitelistsJSON::from(whitelist);
+        whitelist_json.whitelists = whitelist_json
+            .whitelists
+            .into_iter()
+            .map(|info| Whitelists::factorize_whitelist(&info))
+            .collect();
         match serde_json::to_string_pretty(&whitelist_json) {
             Ok(json) => Ok(json),
             Err(e) => {
