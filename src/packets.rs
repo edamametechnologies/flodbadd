@@ -663,7 +663,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     // 1. Destination port is 443 (outgoing HTTPS)
                     // 2. Payload starts with TLS handshake (0x16)
                     // 3. Has enough data for SNI extraction
-                    let tls_client_hello = if dst_port == 443 
+                    let tls_client_hello = if dst_port == 443
                         && packet_length >= 43  // Minimum TLS ClientHello size
                         && tcp.payload().first() == Some(&0x16)
                     // TLS handshake content type
