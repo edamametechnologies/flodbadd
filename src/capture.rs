@@ -1745,38 +1745,50 @@ impl FlodbaddCapture {
                 _ => false,
             };
 
-            // Try to get domain from DNS resolutions first
-            let src_domain = dns_resolutions
+            // Try to get domain from DNS resolutions first (forward DNS)
+            let src_domain_forward = dns_resolutions
                 .get(&session.src_ip)
                 .map(|d| d.value().clone());
-            let dst_domain = dns_resolutions
+            let dst_domain_forward = dns_resolutions
                 .get(&session.dst_ip)
                 .map(|d| d.value().clone());
 
             // Use prioritize_resolution for important services
             if is_important_dst {
                 resolver.prioritize_resolution(&session.dst_ip, true).await;
-            } else if dst_domain.is_none() {
+            } else if dst_domain_forward.is_none() {
                 resolver.add_ip_to_resolver(&session.dst_ip).await;
             }
 
             if is_important_src {
                 resolver.prioritize_resolution(&session.src_ip, true).await;
-            } else if src_domain.is_none() {
+            } else if src_domain_forward.is_none() {
                 resolver.add_ip_to_resolver(&session.src_ip).await;
             }
 
-            // Try to get domain from resolver cache
-            let src_domain = match src_domain {
-                Some(domain) => Some(domain),
-                None => resolver.get_resolved_ip(&session.src_ip).await,
-            };
-            let dst_domain = match dst_domain {
-                Some(domain) => Some(domain),
-                None => resolver.get_resolved_ip(&session.dst_ip).await,
+            // Determine source domain and resolution type
+            let (src_domain, src_domain_type) = match src_domain_forward {
+                Some(domain) => (Some(domain), DomainResolutionType::Forward),
+                None => {
+                    match resolver.get_resolved_ip(&session.src_ip).await {
+                        Some(domain) => (Some(domain), DomainResolutionType::Reverse),
+                        None => (None, DomainResolutionType::None),
+                    }
+                }
             };
 
-            // Update session info with domains
+            // Determine destination domain and resolution type
+            let (dst_domain, dst_domain_type) = match dst_domain_forward {
+                Some(domain) => (Some(domain), DomainResolutionType::Forward),
+                None => {
+                    match resolver.get_resolved_ip(&session.dst_ip).await {
+                        Some(domain) => (Some(domain), DomainResolutionType::Reverse),
+                        None => (None, DomainResolutionType::None),
+                    }
+                }
+            };
+
+            // Update session info with domains and resolution types
             if src_domain.is_some() || dst_domain.is_some() {
                 if let Some(mut session_info) = sessions.get_mut(&session) {
                     let mut modified = false;
@@ -1784,6 +1796,10 @@ impl FlodbaddCapture {
                         if domain != "Unknown" && domain != "Resolving" {
                             if session_info.src_domain.as_ref() != Some(&domain) {
                                 session_info.src_domain = Some(domain);
+                                // Only update resolution type if it's an upgrade (SNI > Forward > Reverse > None)
+                                if session_info.src_domain_type < src_domain_type {
+                                    session_info.src_domain_type = src_domain_type;
+                                }
                                 modified = true;
                             }
                         }
@@ -1792,6 +1808,10 @@ impl FlodbaddCapture {
                         if domain != "Unknown" && domain != "Resolving" {
                             if session_info.dst_domain.as_ref() != Some(&domain) {
                                 session_info.dst_domain = Some(domain);
+                                // Only update resolution type if it's an upgrade (SNI > Forward > Reverse > None)
+                                if session_info.dst_domain_type < dst_domain_type {
+                                    session_info.dst_domain_type = dst_domain_type;
+                                }
                                 modified = true;
                             }
                         }
@@ -2498,6 +2518,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Use imported TcpFlags
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         }
     }
 
@@ -2525,6 +2546,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         // Second packet: server SYN+ACK to client
@@ -2540,6 +2562,7 @@ mod tests {
             ip_packet_length: 170,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         // Third packet: client ACK to server
@@ -2555,6 +2578,7 @@ mod tests {
             ip_packet_length: 110,
             flags: Some(TcpFlags::ACK),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         let own_ips_vec = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
@@ -2680,6 +2704,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         // Get self IPs (your local IP)
@@ -2801,6 +2826,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -2907,6 +2934,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -2989,6 +3018,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
         };
@@ -3010,6 +3041,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
         };
@@ -3141,6 +3174,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
         };
@@ -3162,6 +3197,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
         };
@@ -3979,6 +4016,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         let own_ips_vec = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
@@ -4103,6 +4141,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -4168,6 +4208,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -4436,6 +4478,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         let google_dns_packet = SessionPacketData {
@@ -4450,6 +4493,7 @@ mod tests {
             ip_packet_length: 120,
             flags: None,
             timestamp: chrono::Utc::now(),
+            tls_client_hello: None,
         };
 
         // Process packets with custom whitelist
@@ -5235,6 +5279,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -5298,6 +5344,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -5493,6 +5541,8 @@ mod tests {
             criticality: "test".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: "test-uid".to_string(),
             last_modified: Utc::now(),
         };

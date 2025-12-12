@@ -5,6 +5,7 @@ use crate::packetstats::PACKET_STATS;
 use crate::port_vulns::get_name_from_port;
 use crate::sessions::session_macros::*;
 use crate::sessions::*;
+use crate::sni;
 use chrono::{DateTime, Utc};
 use dashmap::mapref::entry::Entry;
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
@@ -38,6 +39,8 @@ pub struct SessionPacketData {
     pub ip_packet_length: usize,
     pub flags: Option<u8>,
     pub timestamp: DateTime<Utc>,
+    /// TCP payload for potential SNI extraction (only for port 443 first packets)
+    pub tls_client_hello: Option<Vec<u8>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -480,6 +483,18 @@ pub async fn process_parsed_packet(
                 deactivated: false,
             };
 
+            // Try to extract SNI from TLS ClientHello if available
+            let (dst_domain, dst_domain_type) = if let Some(ref payload) = parsed_packet.tls_client_hello {
+                if let Some(sni_info) = sni::extract_sni(payload) {
+                    trace!("Extracted SNI hostname '{}' for session {:?}", sni_info.hostname, key);
+                    (Some(sni_info.hostname), DomainResolutionType::SNI)
+                } else {
+                    (None, DomainResolutionType::None)
+                }
+            } else {
+                (None, DomainResolutionType::None)
+            };
+
             // Create the SessionInfo struct using the results from join!
             let session_info = SessionInfo {
                 session: key.clone(),
@@ -490,7 +505,7 @@ pub async fn process_parsed_packet(
                 is_self_src,
                 is_self_dst,
                 src_domain: None, // Domain resolution happens later
-                dst_domain: None, // Domain resolution happens later
+                dst_domain, // May be set from SNI extraction
                 dst_service: dst_service,
                 l7: None, // L7 resolution happens later
                 src_asn: src_asn_opt,
@@ -499,6 +514,8 @@ pub async fn process_parsed_packet(
                 criticality: "".to_string(),             // Blacklist check happens later
                 dismissed: false,
                 whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type, // Set from SNI extraction
                 uid: uid,
                 last_modified: Utc::now(),
             };
@@ -636,12 +653,27 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
+                    // Check for TLS ClientHello on port 443 (HTTPS)
+                    // We capture the payload if:
+                    // 1. Destination port is 443 (outgoing HTTPS)
+                    // 2. Payload starts with TLS handshake (0x16)
+                    // 3. Has enough data for SNI extraction
+                    let tls_client_hello = if dst_port == 443 
+                        && packet_length >= 43  // Minimum TLS ClientHello size
+                        && tcp.payload().first() == Some(&0x16)  // TLS handshake content type
+                    {
+                        Some(tcp.payload().to_vec())
+                    } else {
+                        None
+                    };
+
                     Some(ParsedPacket::SessionPacket(SessionPacketData {
                         session,
                         packet_length,
                         ip_packet_length,
                         flags: Some(flags),
                         timestamp,
+                        tls_client_hello,
                     }))
                 }
                 IpNextHeaderProtocols::Udp => {
@@ -679,6 +711,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
+                        tls_client_hello: None,  // UDP doesn't have TLS ClientHello
                     }))
                 }
                 _ => None,
@@ -732,12 +765,23 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
+                    // Check for TLS ClientHello on port 443 (HTTPS) - IPv6
+                    let tls_client_hello = if dst_port == 443 
+                        && packet_length >= 43
+                        && tcp.payload().first() == Some(&0x16)
+                    {
+                        Some(tcp.payload().to_vec())
+                    } else {
+                        None
+                    };
+
                     Some(ParsedPacket::SessionPacket(SessionPacketData {
                         session,
                         packet_length,
                         ip_packet_length,
                         flags: Some(flags),
                         timestamp,
+                        tls_client_hello,
                     }))
                 }
                 IpNextHeaderProtocols::Udp => {
@@ -775,6 +819,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
+                        tls_client_hello: None,  // UDP doesn't have TLS ClientHello
                     }))
                 }
                 _ => None,
@@ -811,6 +856,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Server response
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -870,6 +916,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -931,6 +978,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating with SYN
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -989,6 +1037,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Response with SYN+ACK
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Process the packet
@@ -1049,6 +1098,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet1,
@@ -1094,6 +1144,7 @@ mod tests {
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Debug check direction swapping logic
@@ -1185,6 +1236,7 @@ mod tests {
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK | TCP_PSH),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet3,
@@ -1227,6 +1279,7 @@ mod tests {
             ip_packet_length: 170,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet4,
@@ -1261,6 +1314,7 @@ mod tests {
             ip_packet_length: 270,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet5,
@@ -1301,6 +1355,7 @@ mod tests {
             ip_packet_length: 120,
             flags: None, // UDP has no flags
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             udp_packet1,
@@ -1365,6 +1420,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -1422,6 +1478,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -1480,6 +1537,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN), // Client initiating with SYN
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Create necessary objects for the test
@@ -1545,6 +1603,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN | TcpFlags::ACK), // Server responding with SYN+ACK
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
 
         // Process the SYN+ACK packet
@@ -1607,6 +1666,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::SYN),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet1,
@@ -1628,6 +1688,7 @@ mod tests {
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK | TCP_PSH),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet2,
@@ -1660,6 +1721,7 @@ mod tests {
             ip_packet_length: 170,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet3,
@@ -1678,6 +1740,7 @@ mod tests {
             ip_packet_length: 270,
             flags: Some(TcpFlags::ACK | TCP_PSH),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet4,
@@ -1714,6 +1777,7 @@ mod tests {
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet5,
@@ -1740,6 +1804,7 @@ mod tests {
             ip_packet_length: 370,
             flags: Some(TcpFlags::ACK | TCP_PSH),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet6,
@@ -1798,6 +1863,7 @@ mod tests {
             ip_packet_length: 120,
             flags: None, // UDP has no flags
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             udp_packet1,
@@ -1838,6 +1904,7 @@ mod tests {
             ip_packet_length: 220,
             flags: None,
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             udp_packet2,
@@ -1874,6 +1941,7 @@ mod tests {
                 ip_packet_length: 120 + i * 20,
                 flags: None,
                 timestamp: Utc::now(),
+            tls_client_hello: None,
             };
             process_parsed_packet(
                 udp_packet_n,
@@ -1932,6 +2000,7 @@ mod tests {
             ip_packet_length: 120,
             flags: Some(TcpFlags::FIN | TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet_fin,
@@ -1950,6 +2019,7 @@ mod tests {
             ip_packet_length: 170,
             flags: Some(TcpFlags::SYN),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet_syn,
@@ -2029,6 +2099,7 @@ mod tests {
             ip_packet_length: 220,
             flags: Some(TcpFlags::ACK | TCP_PSH),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet_psh,
@@ -2047,6 +2118,7 @@ mod tests {
             ip_packet_length: 320,
             flags: Some(TcpFlags::ACK),
             timestamp: Utc::now(),
+            tls_client_hello: None,
         };
         process_parsed_packet(
             packet_ack,

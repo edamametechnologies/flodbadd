@@ -53,6 +53,11 @@ pub mod profiles_db;
 ))]
 pub mod resolver;
 pub mod sessions;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "packetcapture"
+))]
+pub mod sni;
 pub mod task;
 pub mod vendor_vulns;
 pub mod vendor_vulns_db;

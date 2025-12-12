@@ -20,6 +20,27 @@ pub enum Protocol {
     UDP,
 }
 
+/// How the domain name was resolved for a session.
+/// This affects whitelist generation decisions - forward DNS and SNI are reliable,
+/// while reverse DNS can produce misleading results for CDN/cloud providers.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd, Default,
+)]
+pub enum DomainResolutionType {
+    /// Domain obtained from forward DNS query capture (most reliable)
+    /// The actual domain that the application requested
+    Forward,
+    /// Domain obtained from TLS SNI (Server Name Indication) extraction
+    /// Very reliable - the actual hostname sent in TLS ClientHello
+    SNI,
+    /// Domain obtained from reverse DNS (PTR) lookup
+    /// Less reliable for CDNs - may show infrastructure names like "cdn-1-2-3-4.example.com"
+    Reverse,
+    /// Domain resolution not yet attempted or domain not available
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct Session {
     pub protocol: Protocol,
@@ -65,6 +86,12 @@ pub struct SessionInfo {
     pub is_self_dst: bool,
     pub src_domain: Option<String>,
     pub dst_domain: Option<String>,
+    /// How src_domain was resolved (Forward DNS, Reverse DNS, SNI, or None)
+    #[serde(default)]
+    pub src_domain_type: DomainResolutionType,
+    /// How dst_domain was resolved (Forward DNS, Reverse DNS, SNI, or None)
+    #[serde(default)]
+    pub dst_domain_type: DomainResolutionType,
     pub dst_service: Option<String>,
     pub l7: Option<SessionL7>,
     pub src_asn: Option<Record>,
@@ -173,6 +200,8 @@ impl Default for SessionInfo {
             is_self_dst: false,
             src_domain: None,
             dst_domain: None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             dst_service: None,
             l7: None,
             src_asn: None,
@@ -1218,6 +1247,8 @@ mod tests {
                 criticality: "".to_string(),
                 dismissed: false,
                 whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
                 uid: format!("S{}", idx),
                 last_modified: Utc::now(),
             };
@@ -1415,6 +1446,8 @@ mod tests {
                 criticality: "".to_string(),
                 dismissed: false,
                 whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
                 uid: format!("E{}", idx),
                 last_modified: Utc::now(),
             };
@@ -1545,6 +1578,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: "S1".to_string(),
             last_modified: Utc::now(),
         };
@@ -1604,6 +1639,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: Some("Reason for non-conforming".to_string()),
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: "S2".to_string(),
             last_modified: Utc::now(),
         };
@@ -1682,6 +1719,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: "S3".to_string(),
             last_modified: Utc::now(),
         };
@@ -1776,6 +1815,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
             uid: "S4".to_string(),
             last_modified: Utc::now(),
         };
