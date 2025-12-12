@@ -39,7 +39,7 @@ mod linux {
     use aya::Pod as AyaPod;
     use bytemuck::{Pod, Zeroable};
     use once_cell::sync::OnceCell;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use tracing::{debug, error, info, warn};
 
     // Embed the DNS eBPF object file at compile time

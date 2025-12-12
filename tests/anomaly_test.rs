@@ -69,6 +69,8 @@ fn create_basic_session(
         criticality: String::new(),
         dismissed: false,
         whitelist_reason: None,
+        src_domain_type: flodbadd::sessions::DomainResolutionType::None,
+        dst_domain_type: flodbadd::sessions::DomainResolutionType::None,
         uid: Uuid::new_v4().to_string(),
         last_modified: now,
     }

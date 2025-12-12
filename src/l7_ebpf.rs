@@ -38,9 +38,11 @@ mod linux {
     static EBPF_OBJECT: &[u8] = &[];
 
     // Compile-time marker for debugging - this gets embedded in the binary
+    #[allow(dead_code)]
     #[cfg(L7_EBPF_EMBEDDED)]
     const EBPF_BUILD_STATUS: &str = "EMBEDDED";
 
+    #[allow(dead_code)]
     #[cfg(not(L7_EBPF_EMBEDDED))]
     const EBPF_BUILD_STATUS: &str = "NOT_EMBEDDED";
 
