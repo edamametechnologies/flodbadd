@@ -870,11 +870,29 @@ pub fn format_sessions_log(sessions: &Vec<SessionInfo>) -> Vec<String> {
             None => "ongoing".to_string(),
         };
 
+        // Helper to format resolution type
+        fn resolution_type_str(res_type: &DomainResolutionType) -> &'static str {
+            match res_type {
+                DomainResolutionType::Forward => "fwd",
+                DomainResolutionType::SNI => "sni",
+                DomainResolutionType::Reverse => "rev",
+                DomainResolutionType::None => "",
+            }
+        }
+
         // Replace IP addresses with resolved names when available and not "Resolving" or "Unknown"
+        // Include the resolution source (fwd=forward DNS, sni=TLS SNI, rev=reverse DNS)
         let src_name = match src_domain {
             Some(name) => match name.as_str() {
                 "Resolving" | "Unknown" => session.src_ip.to_string(),
-                _ => format!("{} ({})", name, session.src_ip.to_string()),
+                _ => {
+                    let res_type = resolution_type_str(&session_info.src_domain_type);
+                    if res_type.is_empty() {
+                        format!("{} ({})", name, session.src_ip)
+                    } else {
+                        format!("{} ({}) [{}]", name, session.src_ip, res_type)
+                    }
+                }
             },
             None => session.src_ip.to_string(),
         };
@@ -882,7 +900,14 @@ pub fn format_sessions_log(sessions: &Vec<SessionInfo>) -> Vec<String> {
         let dst_name = match dst_domain {
             Some(name) => match name.as_str() {
                 "Resolving" | "Unknown" => session.dst_ip.to_string(),
-                _ => format!("{} ({})", name, session.dst_ip.to_string()),
+                _ => {
+                    let res_type = resolution_type_str(&session_info.dst_domain_type);
+                    if res_type.is_empty() {
+                        format!("{} ({})", name, session.dst_ip)
+                    } else {
+                        format!("{} ({}) [{}]", name, session.dst_ip, res_type)
+                    }
+                }
             },
             None => session.dst_ip.to_string(),
         };
