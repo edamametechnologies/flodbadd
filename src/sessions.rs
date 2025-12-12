@@ -24,7 +24,18 @@ pub enum Protocol {
 /// This affects whitelist generation decisions - forward DNS and SNI are reliable,
 /// while reverse DNS can produce misleading results for CDN/cloud providers.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd, Default,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    Serialize,
+    Deserialize,
+    Ord,
+    PartialOrd,
+    Default,
 )]
 pub enum DomainResolutionType {
     /// Domain obtained from forward DNS query capture (most reliable)
@@ -1578,8 +1589,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: "S1".to_string(),
             last_modified: Utc::now(),
         };
@@ -1719,8 +1730,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: "S3".to_string(),
             last_modified: Utc::now(),
         };
@@ -1815,8 +1826,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: "S4".to_string(),
             last_modified: Utc::now(),
         };

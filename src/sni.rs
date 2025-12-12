@@ -72,7 +72,11 @@ pub fn extract_sni(payload: &[u8]) -> Option<SniInfo> {
     // Record length
     let record_length = u16::from_be_bytes([payload[3], payload[4]]) as usize;
     if payload.len() < 5 + record_length {
-        trace!("TLS record truncated: have {}, need {}", payload.len(), 5 + record_length);
+        trace!(
+            "TLS record truncated: have {}, need {}",
+            payload.len(),
+            5 + record_length
+        );
         return None;
     }
 
@@ -92,10 +96,9 @@ pub fn extract_sni(payload: &[u8]) -> Option<SniInfo> {
     if handshake.len() < 4 {
         return None;
     }
-    let handshake_length = ((handshake[1] as usize) << 16) 
-        | ((handshake[2] as usize) << 8) 
-        | (handshake[3] as usize);
-    
+    let handshake_length =
+        ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | (handshake[3] as usize);
+
     if handshake.len() < 4 + handshake_length {
         trace!("ClientHello truncated");
         return None;
@@ -162,7 +165,7 @@ fn parse_client_hello(data: &[u8]) -> Option<SniInfo> {
     }
     let extensions_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
     offset += 2;
-    
+
     if data.len() < offset + extensions_len {
         trace!("Extensions truncated");
         return None;
@@ -219,7 +222,7 @@ fn parse_sni_extension(data: &[u8]) -> Option<String> {
     }
 
     let mut offset = 2;
-    
+
     // Parse Server Name entries
     while offset + 3 <= 2 + list_len {
         // Name Type (1 byte)
@@ -264,9 +267,9 @@ fn is_valid_hostname(hostname: &str) -> bool {
     }
 
     // Basic character validation
-    hostname.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
-    })
+    hostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 /// Check if a domain name looks like reverse DNS (PTR record)
@@ -277,15 +280,13 @@ fn is_valid_hostname(hostname: &str) -> bool {
 /// - "159.240.178.107.bc.googleusercontent.com" (Google Cloud pattern)
 pub fn is_reverse_dns_pattern(domain: &str) -> bool {
     let domain_lower = domain.to_lowercase();
-    
+
     // Pattern 1: IP octets at the start (e.g., "185.199.111.133.example.com")
     // or reversed (e.g., "133.111.199.185.in-addr.arpa")
     let parts: Vec<&str> = domain_lower.split('.').collect();
     if parts.len() >= 4 {
         // Check if first 4 parts are numbers (potential IP)
-        let first_four_numeric = parts[0..4].iter().all(|p| {
-            p.parse::<u8>().is_ok()
-        });
+        let first_four_numeric = parts[0..4].iter().all(|p| p.parse::<u8>().is_ok());
         if first_four_numeric {
             return true;
         }
@@ -298,9 +299,7 @@ pub fn is_reverse_dns_pattern(domain: &str) -> bool {
         if subdomain_parts.len() >= 4 {
             // Check if last 4 parts are numbers
             let last_four = &subdomain_parts[subdomain_parts.len().saturating_sub(4)..];
-            let last_four_numeric = last_four.iter().all(|p| {
-                p.parse::<u8>().is_ok()
-            });
+            let last_four_numeric = last_four.iter().all(|p| p.parse::<u8>().is_ok());
             if last_four_numeric {
                 return true;
             }
@@ -311,9 +310,9 @@ pub fn is_reverse_dns_pattern(domain: &str) -> bool {
     let reverse_dns_suffixes = [
         ".in-addr.arpa",
         ".ip6.arpa",
-        ".bc.googleusercontent.com",  // Google Cloud reverse DNS
+        ".bc.googleusercontent.com", // Google Cloud reverse DNS
     ];
-    
+
     for suffix in reverse_dns_suffixes {
         if domain_lower.ends_with(suffix) {
             return true;
@@ -328,8 +327,8 @@ pub fn is_reverse_dns_pattern(domain: &str) -> bool {
 
     // Pattern 5: Generic "lb-" or "cdn-" with IP-like patterns
     if let Some(subdomain) = parts.first() {
-        if (subdomain.starts_with("lb-") || subdomain.starts_with("cdn-")) 
-            && subdomain.chars().filter(|&c| c == '-').count() >= 4 
+        if (subdomain.starts_with("lb-") || subdomain.starts_with("cdn-"))
+            && subdomain.chars().filter(|&c| c == '-').count() >= 4
         {
             // Likely "lb-140-82-112-24-..." pattern
             return true;
@@ -349,7 +348,7 @@ mod tests {
         assert!(is_valid_hostname("sub.example.com"));
         assert!(is_valid_hostname("api.github.com"));
         assert!(is_valid_hostname("my-site.example.org"));
-        
+
         assert!(!is_valid_hostname(""));
         assert!(!is_valid_hostname("localhost")); // No dot
         assert!(!is_valid_hostname("example")); // No dot
@@ -359,17 +358,25 @@ mod tests {
     fn test_is_reverse_dns_pattern() {
         // Should detect as reverse DNS
         assert!(is_reverse_dns_pattern("cdn-185-199-111-133.github.com"));
-        assert!(is_reverse_dns_pattern("51.241.186.35.bc.googleusercontent.com"));
-        assert!(is_reverse_dns_pattern("ec2-54-171-230-55.eu-west-1.compute.amazonaws.com"));
+        assert!(is_reverse_dns_pattern(
+            "51.241.186.35.bc.googleusercontent.com"
+        ));
+        assert!(is_reverse_dns_pattern(
+            "ec2-54-171-230-55.eu-west-1.compute.amazonaws.com"
+        ));
         assert!(is_reverse_dns_pattern("lb-140-82-112-24-iad.github.com"));
         assert!(is_reverse_dns_pattern("1.2.3.4.in-addr.arpa"));
-        assert!(is_reverse_dns_pattern("159.240.178.107.bc.googleusercontent.com"));
+        assert!(is_reverse_dns_pattern(
+            "159.240.178.107.bc.googleusercontent.com"
+        ));
 
         // Should NOT detect as reverse DNS (these are legitimate forward DNS)
         assert!(!is_reverse_dns_pattern("api.github.com"));
         assert!(!is_reverse_dns_pattern("github.com"));
         assert!(!is_reverse_dns_pattern("api.mixpanel.com"));
-        assert!(!is_reverse_dns_pattern("edamame.s3.eu-west-1.amazonaws.com"));
+        assert!(!is_reverse_dns_pattern(
+            "edamame.s3.eu-west-1.amazonaws.com"
+        ));
         assert!(!is_reverse_dns_pattern("registry.npmjs.org"));
         assert!(!is_reverse_dns_pattern("backend-score-prod.edamame.tech"));
         assert!(!is_reverse_dns_pattern("s3-eu-west-1-r-w.amazonaws.com"));
@@ -390,11 +397,11 @@ mod tests {
         // HTTP GET request - should return None
         let http_data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         assert!(extract_sni(http_data).is_none());
-        
+
         // Random data
         let random_data = [0u8; 100];
         assert!(extract_sni(&random_data).is_none());
-        
+
         // Too short
         let short_data = [0x16, 0x03, 0x01];
         assert!(extract_sni(&short_data).is_none());
@@ -434,7 +441,7 @@ mod tests {
         client_hello.push(0x00);
         // Cipher Suites (2 bytes for length + 2 bytes for one suite)
         client_hello.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // TLS_RSA_WITH_AES_128_CBC_SHA
-        // Compression Methods (1 byte for length + 1 byte for null compression)
+                                                                   // Compression Methods (1 byte for length + 1 byte for null compression)
         client_hello.extend_from_slice(&[0x01, 0x00]);
         // Extensions
         client_hello.extend_from_slice(&(extensions_len as u16).to_be_bytes());
@@ -464,4 +471,3 @@ mod tests {
         record
     }
 }
-

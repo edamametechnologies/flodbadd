@@ -3238,8 +3238,8 @@ pub(crate) mod tests {
             criticality: "anomaly:suspicious".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -3268,8 +3268,8 @@ pub(crate) mod tests {
             criticality: "blacklist:test_blacklist".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -3568,8 +3568,8 @@ pub(crate) mod tests {
             criticality,
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid,
             last_modified,
         }

@@ -254,8 +254,12 @@ impl Whitelists {
             // (e.g., "cdn-185-199-111-133.github.com" or "51.241.186.35.bc.googleusercontent.com")
             // These are unreliable for CDN providers as they don't represent the actual requested domain
             #[cfg(feature = "packetcapture")]
-            let domain_is_reverse_pattern = session.dst_domain_type == DomainResolutionType::Reverse
-                && session.dst_domain.as_ref().map_or(false, |d| is_reverse_dns_pattern(d));
+            let domain_is_reverse_pattern = session.dst_domain_type
+                == DomainResolutionType::Reverse
+                && session
+                    .dst_domain
+                    .as_ref()
+                    .map_or(false, |d| is_reverse_dns_pattern(d));
             #[cfg(not(feature = "packetcapture"))]
             let domain_is_reverse_pattern = false;
 
@@ -263,7 +267,7 @@ impl Whitelists {
             // - Forward DNS (from captured DNS queries) - reliable
             // - SNI (from TLS ClientHello) - reliable
             // Reverse DNS is unreliable for CDNs as it often shows infrastructure names
-            let domain_unreliable_for_cdn = domain_unresolved 
+            let domain_unreliable_for_cdn = domain_unresolved
                 || domain_is_reverse_pattern
                 || (session.dst_domain_type == DomainResolutionType::Reverse);
 
@@ -323,17 +327,20 @@ impl Whitelists {
             // Reverse DNS can produce misleading names for CDNs
             let reliable_domain = if domain_unresolved {
                 None
-            } else if session.dst_domain_type == DomainResolutionType::Forward 
-                   || session.dst_domain_type == DomainResolutionType::SNI {
+            } else if session.dst_domain_type == DomainResolutionType::Forward
+                || session.dst_domain_type == DomainResolutionType::SNI
+            {
                 session.dst_domain.clone()
             } else {
                 // Reverse DNS - only use if it doesn't look like a reverse DNS pattern
                 #[cfg(feature = "packetcapture")]
-                let use_domain = session.dst_domain.as_ref()
+                let use_domain = session
+                    .dst_domain
+                    .as_ref()
                     .map_or(false, |d| !is_reverse_dns_pattern(d));
                 #[cfg(not(feature = "packetcapture"))]
                 let use_domain = true;
-                
+
                 if use_domain {
                     session.dst_domain.clone()
                 } else {
@@ -2977,8 +2984,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3012,8 +3019,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3047,8 +3054,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3082,8 +3089,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3113,8 +3120,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3148,8 +3155,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3344,8 +3351,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         });
@@ -3421,8 +3428,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };

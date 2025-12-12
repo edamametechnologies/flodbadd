@@ -1769,23 +1769,19 @@ impl FlodbaddCapture {
             // Determine source domain and resolution type
             let (src_domain, src_domain_type) = match src_domain_forward {
                 Some(domain) => (Some(domain), DomainResolutionType::Forward),
-                None => {
-                    match resolver.get_resolved_ip(&session.src_ip).await {
-                        Some(domain) => (Some(domain), DomainResolutionType::Reverse),
-                        None => (None, DomainResolutionType::None),
-                    }
-                }
+                None => match resolver.get_resolved_ip(&session.src_ip).await {
+                    Some(domain) => (Some(domain), DomainResolutionType::Reverse),
+                    None => (None, DomainResolutionType::None),
+                },
             };
 
             // Determine destination domain and resolution type
             let (dst_domain, dst_domain_type) = match dst_domain_forward {
                 Some(domain) => (Some(domain), DomainResolutionType::Forward),
-                None => {
-                    match resolver.get_resolved_ip(&session.dst_ip).await {
-                        Some(domain) => (Some(domain), DomainResolutionType::Reverse),
-                        None => (None, DomainResolutionType::None),
-                    }
-                }
+                None => match resolver.get_resolved_ip(&session.dst_ip).await {
+                    Some(domain) => (Some(domain), DomainResolutionType::Reverse),
+                    None => (None, DomainResolutionType::None),
+                },
             };
 
             // Update session info with domains and resolution types
@@ -2826,8 +2822,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -2934,8 +2930,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -3018,8 +3014,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
         };
@@ -3041,8 +3037,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10),
         };
@@ -3174,8 +3170,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
         };
@@ -3197,8 +3193,8 @@ mod tests {
             criticality: "".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: now - ChronoDuration::seconds(10), // Older timestamp
         };
@@ -4141,8 +4137,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -4208,8 +4204,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -5279,8 +5275,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -5344,8 +5340,8 @@ mod tests {
             criticality: String::new(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: Uuid::new_v4().to_string(),
             last_modified: Utc::now(),
         };
@@ -5541,8 +5537,8 @@ mod tests {
             criticality: "test".to_string(),
             dismissed: false,
             whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
             uid: "test-uid".to_string(),
             last_modified: Utc::now(),
         };

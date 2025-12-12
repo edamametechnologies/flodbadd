@@ -484,16 +484,21 @@ pub async fn process_parsed_packet(
             };
 
             // Try to extract SNI from TLS ClientHello if available
-            let (dst_domain, dst_domain_type) = if let Some(ref payload) = parsed_packet.tls_client_hello {
-                if let Some(sni_info) = sni::extract_sni(payload) {
-                    trace!("Extracted SNI hostname '{}' for session {:?}", sni_info.hostname, key);
-                    (Some(sni_info.hostname), DomainResolutionType::SNI)
+            let (dst_domain, dst_domain_type) =
+                if let Some(ref payload) = parsed_packet.tls_client_hello {
+                    if let Some(sni_info) = sni::extract_sni(payload) {
+                        trace!(
+                            "Extracted SNI hostname '{}' for session {:?}",
+                            sni_info.hostname,
+                            key
+                        );
+                        (Some(sni_info.hostname), DomainResolutionType::SNI)
+                    } else {
+                        (None, DomainResolutionType::None)
+                    }
                 } else {
                     (None, DomainResolutionType::None)
-                }
-            } else {
-                (None, DomainResolutionType::None)
-            };
+                };
 
             // Create the SessionInfo struct using the results from join!
             let session_info = SessionInfo {
@@ -505,7 +510,7 @@ pub async fn process_parsed_packet(
                 is_self_src,
                 is_self_dst,
                 src_domain: None, // Domain resolution happens later
-                dst_domain, // May be set from SNI extraction
+                dst_domain,       // May be set from SNI extraction
                 dst_service: dst_service,
                 l7: None, // L7 resolution happens later
                 src_asn: src_asn_opt,
@@ -660,7 +665,8 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     // 3. Has enough data for SNI extraction
                     let tls_client_hello = if dst_port == 443 
                         && packet_length >= 43  // Minimum TLS ClientHello size
-                        && tcp.payload().first() == Some(&0x16)  // TLS handshake content type
+                        && tcp.payload().first() == Some(&0x16)
+                    // TLS handshake content type
                     {
                         Some(tcp.payload().to_vec())
                     } else {
@@ -711,7 +717,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
-                        tls_client_hello: None,  // UDP doesn't have TLS ClientHello
+                        tls_client_hello: None, // UDP doesn't have TLS ClientHello
                     }))
                 }
                 _ => None,
@@ -766,7 +772,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     };
 
                     // Check for TLS ClientHello on port 443 (HTTPS) - IPv6
-                    let tls_client_hello = if dst_port == 443 
+                    let tls_client_hello = if dst_port == 443
                         && packet_length >= 43
                         && tcp.payload().first() == Some(&0x16)
                     {
@@ -819,7 +825,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
-                        tls_client_hello: None,  // UDP doesn't have TLS ClientHello
+                        tls_client_hello: None, // UDP doesn't have TLS ClientHello
                     }))
                 }
                 _ => None,
@@ -1941,7 +1947,7 @@ mod tests {
                 ip_packet_length: 120 + i * 20,
                 flags: None,
                 timestamp: Utc::now(),
-            tls_client_hello: None,
+                tls_client_hello: None,
             };
             process_parsed_packet(
                 udp_packet_n,
