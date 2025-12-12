@@ -41,6 +41,7 @@ fn pkt(
         ip_packet_length: len + 20, // assume fixed IP hdr for simplicity
         flags: Some(flags),
         timestamp: Utc::now(),
+        tls_client_hello: None,
     }
 }
 
