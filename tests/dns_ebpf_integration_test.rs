@@ -296,7 +296,7 @@ async fn test_dns_ebpf_performance() {
 /// Test IPv6 DNS resolution
 #[test]
 fn test_ipv6_dns_query() {
-    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+    use std::net::{SocketAddr, UdpSocket};
 
     println!("=== IPv6 DNS eBPF Test ===");
     println!("DNS eBPF available: {}", flodbadd::dns_ebpf::is_available());
@@ -394,7 +394,7 @@ fn test_ipv6_dns_query() {
 /// Test IPv6 TCP connection tracking (L7 eBPF)
 #[tokio::test]
 async fn test_ipv6_tcp_connection() {
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::SocketAddr;
 
     println!("=== IPv6 L7 eBPF Test ===");
     println!("L7 eBPF available: {}", flodbadd::l7_ebpf::is_available());
