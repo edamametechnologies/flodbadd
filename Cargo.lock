@@ -995,7 +995,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 [[package]]
 name = "edamame_backend"
 version = "0.3.5"
-source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#77b189ca8ebc22cf38bd33fc3b3f62c718fb44e6"
+source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#f030670ba64ecd59df3105745b00fb6ec5c4264c"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1009,7 +1009,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#195c40d93878412b0ef32293f6a621a22fb419bb"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#6f7027289b6470532a7c915f7b437fde6af2f7d6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2945,9 +2945,9 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "reqwest"
-version = "0.12.25"
+version = "0.12.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6eff9328d40131d43bd911d42d79eb6a47312002a4daefc9e37f17e74a7701a"
+checksum = "3b4c14b2d9afca6a60277086b0cc6a6ae0b568f6f7916c943a8cdc79f8be240f"
 dependencies = [
  "base64",
  "bytes",
