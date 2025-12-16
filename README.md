@@ -1,6 +1,6 @@
 # Flodbadd
 
-Flodbadd is a comprehensive network visibility and traffic analysis library that powers the EDAMAME security platform. It provides real-time packet capture, session tracking, anomaly detection, and security analysis with cross-platform support.
+Flodbadd is a comprehensive network visibility and traffic analysis library that powers the EDAMAME Security platform. It provides real-time packet capture, session tracking, anomaly detection, and security analysis with cross-platform support.
 
 ## Core Architecture
 
