@@ -494,9 +494,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.19.0"
+version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
+checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
 name = "bytemuck"
@@ -995,7 +995,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 [[package]]
 name = "edamame_backend"
 version = "0.3.5"
-source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#f030670ba64ecd59df3105745b00fb6ec5c4264c"
+source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#90b45dbf8b5affa695c5f0675ffd7635ffcbc647"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1009,7 +1009,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#6f7027289b6470532a7c915f7b437fde6af2f7d6"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#4096d18570555a588babe251a5b6cd28dfee40a8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3086,9 +3086,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.13.1"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "708c0f9d5f54ba0272468c1d306a52c495b31fa155e91bc25371e6df7996908c"
+checksum = "21e6f2ab2928ca4291b86736a8bd920a277a399bba1589409d72154ff87c1282"
 dependencies = [
  "web-time",
  "zeroize",
