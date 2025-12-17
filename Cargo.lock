@@ -995,7 +995,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 [[package]]
 name = "edamame_backend"
 version = "0.3.5"
-source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#90b45dbf8b5affa695c5f0675ffd7635ffcbc647"
+source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#6e231bbb7994c0bd9a199a8daeb8812e27608b39"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1009,7 +1009,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#4096d18570555a588babe251a5b6cd28dfee40a8"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#26b48f31ec8287ee6cbe0f37559fd8720ef735ca"
 dependencies = [
  "anyhow",
  "chrono",
