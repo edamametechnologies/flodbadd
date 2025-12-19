@@ -5635,7 +5635,7 @@ mod tests {
             "Whitelist exceptions fetch timestamp should be reset"
         );
 
-        println!("✅ Session clearing on stop verified - clean slate achieved");
+        println!("Session clearing on stop verified - clean slate achieved");
     }
 
     #[tokio::test]
@@ -6046,7 +6046,7 @@ mod tests {
             sessions_while_stopped.len()
         );
 
-        println!("✅ First stop: Capture stopped, sessions preserved");
+        println!("First stop: Capture stopped, sessions preserved");
 
         // === SECOND START (RESTART) ===
         println!("=== SECOND START: Restarting capture ===");
@@ -6177,7 +6177,7 @@ mod tests {
         capture.stop().await;
         analyzer.stop().await;
 
-        println!("✅ CAPTURE START/STOP/START TEST COMPLETED SUCCESSFULLY!");
+        println!("CAPTURE START/STOP/START TEST COMPLETED SUCCESSFULLY!");
         println!("   - Capture works correctly after first start");
         println!("   - Sessions are preserved during stop");
         println!("   - Capture works correctly after restart");
@@ -6242,7 +6242,7 @@ mod tests {
 
             match client.get(*endpoint).send().await {
                 Ok(response) => {
-                    println!("✅ Request successful: Status {}", response.status());
+                    println!("Request successful: Status {}", response.status());
                     let _ = response.bytes().await; // Consume the response
                     successful_requests += 1;
 
@@ -6262,7 +6262,7 @@ mod tests {
             let resolver = match tokio::net::lookup_host("google.com:80").await {
                 Ok(mut addrs) => {
                     if addrs.next().is_some() {
-                        println!("✅ DNS lookup successful");
+                        println!("DNS lookup successful");
                         successful_requests += 1;
                     }
                     true
@@ -6440,7 +6440,7 @@ mod tests {
         assert!(retrieved_normal.criticality.contains("whitelist:trusted"));
         assert!(retrieved_normal.criticality.contains("custom:approved"));
 
-        println!("✅ First start: All sessions properly classified and stored");
+        println!("First start: All sessions properly classified and stored");
 
         // === FIRST STOP ===
         println!("=== ANALYZER FIRST STOP ===");
@@ -6493,7 +6493,7 @@ mod tests {
         );
         assert_eq!(preserved_session3.criticality, retrieved_normal.criticality);
 
-        println!("✅ First stop: All security findings preserved with correct criticality");
+        println!("First stop: All security findings preserved with correct criticality");
 
         // === SECOND START (RESTART) ===
         println!("=== ANALYZER RESTART ===");
@@ -6550,7 +6550,7 @@ mod tests {
         );
         assert_eq!(restart_session3.criticality, retrieved_normal.criticality);
 
-        println!("✅ Restart: All sessions and security findings available");
+        println!("Restart: All sessions and security findings available");
 
         // === ADD NEW SESSIONS AFTER RESTART ===
         println!("=== ADDING NEW SESSIONS AFTER RESTART ===");
@@ -6602,7 +6602,7 @@ mod tests {
         );
         assert_eq!(final_session3.criticality, retrieved_normal.criticality);
 
-        println!("✅ New sessions added successfully alongside preserved ones");
+        println!("New sessions added successfully alongside preserved ones");
 
         // === SECOND STOP ===
         println!("=== ANALYZER SECOND STOP ===");
@@ -6681,12 +6681,12 @@ mod tests {
         assert!(cycle_session4.criticality.contains("blacklist:new_threat"));
         assert!(cycle_session4.criticality.contains("priority:high"));
 
-        println!("✅ Second restart: All sessions and classifications intact");
+        println!("Second restart: All sessions and classifications intact");
 
         // === FINAL CLEANUP ===
         analyzer.stop().await;
 
-        println!("✅ Start/Stop/Start sequence test completed successfully!");
+        println!("Start/Stop/Start sequence test completed successfully!");
         println!("   - Security findings preserved across multiple restart cycles");
         println!("   - Session criticality maintained correctly");
         println!("   - New sessions can be added after restarts");

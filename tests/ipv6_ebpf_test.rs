@@ -39,7 +39,7 @@ fn test_dns_ebpf_ipv6_status() {
 
     // On Linux with eBPF support, if IPv6 is enabled, status should mention it
     if available && status.contains("IPv6") {
-        println!("✅ DNS eBPF has IPv6 support enabled");
+        println!("DNS eBPF has IPv6 support enabled");
     } else if available {
         println!("⚠️  DNS eBPF is enabled but IPv6 status unclear");
     }
@@ -108,7 +108,7 @@ async fn test_tcp_ipv6_loopback() {
     }
 
     let _ = server_handle.join();
-    println!("✅ IPv6 TCP loopback test completed");
+    println!("IPv6 TCP loopback test completed");
 }
 
 /// Test DNS resolution over IPv6
@@ -337,7 +337,7 @@ fn test_ipv6_only_dns() {
             }
 
             if ipv6_count > 0 {
-                println!("✅ IPv6 addresses resolved successfully");
+                println!("IPv6 addresses resolved successfully");
             }
         }
         Err(e) => {
@@ -413,3 +413,6 @@ async fn test_ipv6_dns_performance() {
         ipv6_time.as_nanos() / iterations as u128
     );
 }
+
+
+

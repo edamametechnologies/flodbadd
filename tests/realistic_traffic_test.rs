@@ -89,7 +89,7 @@ async fn test_l7_ebpf_captures_real_tcp_with_correct_pid() {
 
     // Report results
     if let Some(ref data) = l7_data {
-        println!("✅ L7 eBPF captured the connection!");
+        println!("L7 eBPF captured the connection!");
         println!("   Captured PID: {}", data.pid);
         println!("   Our PID:      {}", my_pid);
         println!("   Process name: {}", data.process_name);
@@ -105,7 +105,7 @@ async fn test_l7_ebpf_captures_real_tcp_with_correct_pid() {
             println!("   ⚠️  PID mismatch (might be from different connection)");
         }
     } else if let Some(ref data) = reverse_data {
-        println!("✅ L7 eBPF captured the connection (reverse direction)!");
+        println!("L7 eBPF captured the connection (reverse direction)!");
         println!("   Captured PID: {}", data.pid);
         println!("   Process name: {}", data.process_name);
     } else {
@@ -511,7 +511,7 @@ async fn test_full_capture_pipeline_with_ebpf() {
         // Verify DNS eBPF captured it
         if dns_processor.is_ebpf_enabled() {
             if let Some(info) = flodbadd::dns_ebpf::get_process_by_src_port(src_port) {
-                println!("✅ DNS eBPF captured real traffic from port {}", src_port);
+                println!("DNS eBPF captured real traffic from port {}", src_port);
                 println!("   PID: {}, Process: {}", info.pid, info.process_name);
             }
         }

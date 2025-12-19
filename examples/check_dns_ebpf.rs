@@ -126,7 +126,7 @@ fn main() {
     // Summary
     println!("\n=== Summary ===\n");
     if available {
-        println!("✅ DNS eBPF is ENABLED");
+        println!("DNS eBPF is ENABLED");
         println!("   DNS queries will be attributed to processes via source port tracking");
     } else {
         println!("⚠️  DNS eBPF is DISABLED");

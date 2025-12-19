@@ -26,12 +26,12 @@ mod ebpf_integration_tests {
             return;
         }
 
-        println!("✅ eBPF is available (object embedded)");
+        println!("eBPF is available (object embedded)");
 
         // Also check if it's fully functional (kprobes attached)
         let fully_functional = l7_ebpf::is_fully_functional();
         if fully_functional {
-            println!("✅ eBPF is fully functional (kprobes attached)");
+            println!("eBPF is fully functional (kprobes attached)");
         } else {
             println!("⚠️  eBPF available but not fully functional (kprobes may not be attached)");
             println!("   Status: {}", l7_ebpf::ebpf_support());
@@ -74,7 +74,7 @@ mod ebpf_integration_tests {
         let udp_l7_data = l7_ebpf::get_l7_for_session(&udp_session);
         println!("UDP L7 lookup result: {:?}", udp_l7_data);
 
-        println!("✅ eBPF session lookup API works correctly");
+        println!("eBPF session lookup API works correctly");
     }
 
     #[tokio::test]
@@ -183,7 +183,7 @@ mod ebpf_integration_tests {
             println!("eBPF lookup for client session: {:?}", l7_data);
 
             if let Some(data) = l7_data {
-                println!("✅ Found L7 data for test connection:");
+                println!("Found L7 data for test connection:");
                 println!("   PID: {}", data.pid);
                 println!("   Process: {}", data.process_name);
                 assert!(data.pid > 0, "PID should be valid");
@@ -196,7 +196,7 @@ mod ebpf_integration_tests {
             }
         }
 
-        println!("✅ Real connection test completed");
+        println!("Real connection test completed");
     }
 
     #[tokio::test]
@@ -252,7 +252,7 @@ mod ebpf_integration_tests {
                     let l7_data = l7_ebpf::get_l7_for_session(&session);
 
                     if let Some(data) = l7_data {
-                        println!("✅ eBPF captured external connection!");
+                        println!("eBPF captured external connection!");
                         println!("   PID: {}", data.pid);
                         println!("   Process: {}", data.process_name);
                         println!("   Path: {}", data.process_path);
@@ -279,7 +279,7 @@ mod ebpf_integration_tests {
             println!("   This may be due to network restrictions or timing issues");
         }
 
-        println!("✅ External connection test completed");
+        println!("External connection test completed");
     }
 
     #[tokio::test]
@@ -331,7 +331,7 @@ mod ebpf_integration_tests {
             }
         }
 
-        println!("✅ Session data structure test completed");
+        println!("Session data structure test completed");
     }
 
     #[tokio::test]
@@ -372,7 +372,7 @@ mod ebpf_integration_tests {
             avg_time
         );
 
-        println!("✅ Performance test passed");
+        println!("Performance test passed");
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod ebpf_integration_tests {
         };
 
         let _result = l7_ebpf::get_l7_for_session(&session);
-        println!("✅ eBPF feature compilation test passed");
+        println!("eBPF feature compilation test passed");
     }
 
     #[tokio::test]
@@ -426,7 +426,7 @@ mod ebpf_integration_tests {
             // Should handle gracefully (return None, not panic)
         }
 
-        println!("✅ Error handling test passed");
+        println!("Error handling test passed");
     }
 
     /// Test IPv6 connection tracking
@@ -463,7 +463,7 @@ mod ebpf_integration_tests {
                     let local_addr = stream.local_addr().ok();
                     let peer_addr = stream.peer_addr().ok();
 
-                    println!("✅ Connected to {} from {:?}", addr, local_addr);
+                    println!("Connected to {} from {:?}", addr, local_addr);
 
                     // Give eBPF time to process the connection
                     sleep(Duration::from_millis(100)).await;
@@ -483,7 +483,7 @@ mod ebpf_integration_tests {
                         // Query eBPF for L7 info
                         let l7_data = l7_ebpf::get_l7_for_session(&session);
                         if let Some(ref data) = l7_data {
-                            println!("✅ eBPF tracked IPv6 connection!");
+                            println!("eBPF tracked IPv6 connection!");
                             println!("   PID: {}", data.pid);
                             println!("   Process: {:?}", data.process_name);
                             return; // Success
@@ -497,7 +497,7 @@ mod ebpf_integration_tests {
                                 dst_port: local.port(),
                             };
                             if let Some(ref data) = l7_ebpf::get_l7_for_session(&reverse_session) {
-                                println!("✅ eBPF tracked IPv6 connection (reverse lookup)!");
+                                println!("eBPF tracked IPv6 connection (reverse lookup)!");
                                 println!("   PID: {}", data.pid);
                                 println!("   Process: {:?}", data.process_name);
                                 return; // Success
@@ -544,6 +544,6 @@ mod non_ebpf_tests {
             "Should return None when eBPF is unavailable"
         );
 
-        println!("✅ Non-eBPF fallback test passed");
+        println!("Non-eBPF fallback test passed");
     }
 }

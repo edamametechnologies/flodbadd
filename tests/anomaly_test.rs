@@ -392,7 +392,7 @@ async fn wait_for_analyzer_ready(analyzer: &SessionAnalyzer, timeout_secs: u64) 
         }
 
         if ready {
-            println!("✅  analyser ready (tags no longer show warming_up/no_model)");
+            println!(" analyser ready (tags no longer show warming_up/no_model)");
             break;
         }
 

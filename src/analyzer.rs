@@ -3386,7 +3386,7 @@ pub(crate) mod tests {
         // Final cleanup
         analyzer.stop().await;
 
-        println!("✅ Security findings preservation across stop/start verified");
+        println!("Security findings preservation across stop/start verified");
     }
 
     /// Test that all sessions are tracked and retrievable even during warmup
@@ -3535,7 +3535,7 @@ pub(crate) mod tests {
         // Cleanup
         analyzer.stop().await;
 
-        println!("✅ Session tracking during warmup verified");
+        println!("Session tracking during warmup verified");
     }
 
     /// Helper function to create a test session with specific parameters
@@ -3642,7 +3642,7 @@ pub(crate) mod tests {
         );
 
         analyzer.stop().await;
-        println!("✅ Criticality merging preserves blacklist tags verified");
+        println!("Criticality merging preserves blacklist tags verified");
     }
 
     /// Test that anomaly tags are replaced while other tags are preserved
@@ -3708,7 +3708,7 @@ pub(crate) mod tests {
         );
 
         analyzer.stop().await;
-        println!("✅ Criticality merging replaces anomaly tags verified");
+        println!("Criticality merging replaces anomaly tags verified");
     }
 
     /// Test that multiple non-anomaly tags are preserved and deduplicated
@@ -3778,7 +3778,7 @@ pub(crate) mod tests {
         assert_eq!(tags, sorted_tags, "Tags should be sorted");
 
         analyzer.stop().await;
-        println!("✅ Criticality merging handles multiple tags verified");
+        println!("Criticality merging handles multiple tags verified");
     }
 
     /// Test that sessions with same UID but no timestamp update may still be re-analyzed
@@ -3840,7 +3840,7 @@ pub(crate) mod tests {
         );
 
         analyzer.stop().await;
-        println!("✅ Dynamic session analysis behavior verified");
+        println!("Dynamic session analysis behavior verified");
     }
 
     /// Test that empty criticality gets proper anomaly classification
@@ -3892,7 +3892,7 @@ pub(crate) mod tests {
         assert!(retrieved_v2.criticality.contains("blacklist:new_threat"));
 
         analyzer.stop().await;
-        println!("✅ Empty criticality handling verified");
+        println!("Empty criticality handling verified");
     }
 
     /// Test edge case: session with only whitespace in criticality
@@ -3933,6 +3933,6 @@ pub(crate) mod tests {
         }
 
         analyzer.stop().await;
-        println!("✅ Whitespace criticality handling verified");
+        println!("Whitespace criticality handling verified");
     }
 }

@@ -118,7 +118,7 @@ fn test_manual_udp_dns_query() {
                             std::thread::sleep(Duration::from_millis(10));
                             let info = flodbadd::dns_ebpf::get_process_by_src_port(src_port);
                             if let Some(info) = info {
-                                println!("✅ eBPF captured DNS query!");
+                                println!("eBPF captured DNS query!");
                                 println!("   PID: {}", info.pid);
                                 println!("   Process: {}", info.process_name);
                             } else {
@@ -344,7 +344,7 @@ fn test_ipv6_dns_query() {
 
             match socket.send_to(&dns_query, dns_server) {
                 Ok(sent) => {
-                    println!("✅ Sent {} bytes to {:?}", sent, dns_server);
+                    println!("Sent {} bytes to {:?}", sent, dns_server);
 
                     // Check eBPF tracking
                     if let Some(addr) = local_addr {
@@ -355,7 +355,7 @@ fn test_ipv6_dns_query() {
                             if let Some(info) =
                                 flodbadd::dns_ebpf::get_process_by_src_port(src_port)
                             {
-                                println!("✅ eBPF captured IPv6 DNS query!");
+                                println!("eBPF captured IPv6 DNS query!");
                                 println!("   PID: {}", info.pid);
                                 println!("   Process: {}", info.process_name);
                             } else {
@@ -368,7 +368,7 @@ fn test_ipv6_dns_query() {
                     let mut buf = [0u8; 512];
                     match socket.recv_from(&mut buf) {
                         Ok((size, from)) => {
-                            println!("✅ Received {} bytes from {:?}", size, from);
+                            println!("Received {} bytes from {:?}", size, from);
                             if size >= 2 {
                                 let tx_id = ((buf[0] as u16) << 8) | (buf[1] as u16);
                                 println!("   Transaction ID: 0x{:04x}", tx_id);
@@ -420,7 +420,7 @@ async fn test_ipv6_tcp_connection() {
                 {
                     Ok(Ok(stream)) => {
                         let local_addr = stream.local_addr().ok();
-                        println!("✅ Connected to {} from {:?}", addr, local_addr);
+                        println!("Connected to {} from {:?}", addr, local_addr);
 
                         // Give eBPF time to process
                         tokio::time::sleep(Duration::from_millis(100)).await;
