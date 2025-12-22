@@ -8,6 +8,7 @@ use edamame_backend::lanscan_vulnerability_info_backend::VulnerabilityInfoBacken
 use macaddr::MacAddr6;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, warn};
 
@@ -30,18 +31,79 @@ impl std::fmt::Display for DeviceCriticality {
     }
 }
 
+// Timestamped entry for IP addresses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpAddressEntry<T> {
+    pub address: T,
+    pub last_seen: DateTime<Utc>,
+}
+
+impl<T: PartialEq> PartialEq for IpAddressEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+    }
+}
+
+impl<T: Eq> Eq for IpAddressEntry<T> {}
+
+impl<T: PartialOrd> PartialOrd for IpAddressEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.address.partial_cmp(&other.address)
+    }
+}
+
+impl<T: Ord> Ord for IpAddressEntry<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.address.cmp(&other.address)
+    }
+}
+
+// Timestamped entry for mDNS services
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MdnsServiceEntry {
+    pub service: String,
+    pub last_seen: DateTime<Utc>,
+}
+
+// Timestamped entry for MAC addresses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacAddressEntry {
+    pub address: MacAddr6,
+    pub last_seen: DateTime<Utc>,
+}
+
+impl PartialEq for MacAddressEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+    }
+}
+
+impl Eq for MacAddressEntry {}
+
+impl PartialOrd for MacAddressEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.address.partial_cmp(&other.address)
+    }
+}
+
+impl Ord for MacAddressEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.address.cmp(&other.address)
+    }
+}
+
 // We should really use HashSets instead of Vec, but we don't in order to make it more usable with FFI
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceInfo {
     // PII
     // Main address is IPv4 or IPv6
     ip_address: IpAddr,
-    pub ip_addresses_v4: Vec<Ipv4Addr>,
-    pub ip_addresses_v6: Vec<Ipv6Addr>,
+    pub ip_addresses_v4: Vec<IpAddressEntry<Ipv4Addr>>,
+    pub ip_addresses_v6: Vec<IpAddressEntry<Ipv6Addr>>,
     mac_address: Option<MacAddr6>,
-    pub mac_addresses: Vec<MacAddr6>,
+    pub mac_addresses: Vec<MacAddressEntry>,
     pub hostname: String,
-    pub mdns_services: Vec<String>,
+    pub mdns_services: Vec<MdnsServiceEntry>,
     // Non-PII
     pub os_name: String,
     pub os_version: String,
@@ -82,13 +144,20 @@ pub struct DeviceInfo {
 impl DeviceInfo {
     pub fn new(ip_address: Option<IpAddr>) -> DeviceInfo {
         let ip_address = ip_address.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let now = Utc::now();
         let ip_addresses_v4 = match ip_address {
-            IpAddr::V4(ip) => vec![ip],
+            IpAddr::V4(ip) => vec![IpAddressEntry {
+                address: ip,
+                last_seen: now,
+            }],
             IpAddr::V6(_) => vec![],
         };
         let ip_addresses_v6 = match ip_address {
             IpAddr::V4(_) => vec![],
-            IpAddr::V6(ip) => vec![ip],
+            IpAddr::V6(ip) => vec![IpAddressEntry {
+                address: ip,
+                last_seen: now,
+            }],
         };
         DeviceInfo {
             ip_address: ip_address,
@@ -97,7 +166,7 @@ impl DeviceInfo {
             mac_address: None,
             mac_addresses: Vec::new(),
             hostname: "".to_string(),
-            mdns_services: Vec::new(),
+            mdns_services: vec![],
             os_name: "".to_string(),
             os_version: "".to_string(),
             device_vendor: "".to_string(),
@@ -135,11 +204,31 @@ impl DeviceInfo {
         self.ip_address
     }
 
+    /// Set the primary IP address and add additional addresses.
+    /// Uses current time as timestamp. For mDNS or other sources with known timestamps,
+    /// use `set_ip_address_with_timestamp` or `populate_from_mdns` instead.
     pub fn set_ip_address(
         &mut self,
         ip_address: IpAddr,
         ip_addresses_v4: Vec<Ipv4Addr>,
         ip_addresses_v6: Vec<Ipv6Addr>,
+    ) {
+        self.set_ip_address_with_timestamp(
+            ip_address,
+            ip_addresses_v4,
+            ip_addresses_v6,
+            Utc::now(),
+        );
+    }
+
+    /// Set the primary IP address and add additional addresses with explicit timestamp.
+    /// Use this when you know when the IP addresses were discovered (e.g., from mDNS, scanning, etc.).
+    pub fn set_ip_address_with_timestamp(
+        &mut self,
+        ip_address: IpAddr,
+        ip_addresses_v4: Vec<Ipv4Addr>,
+        ip_addresses_v6: Vec<Ipv6Addr>,
+        timestamp: DateTime<Utc>,
     ) {
         // Ignore unspecified ip addresses
         if ip_address.is_unspecified() {
@@ -149,10 +238,10 @@ impl DeviceInfo {
         // First, preserve the current primary IP address by adding it to the appropriate list
         match self.ip_address {
             IpAddr::V4(ip) if !ip.is_unspecified() => {
-                self.ip_addresses_v4.push(ip);
+                self.add_ipv4_entry(ip, timestamp);
             }
             IpAddr::V6(ip) if !ip.is_unspecified() => {
-                self.ip_addresses_v6.push(ip);
+                self.add_ipv6_entry(ip, timestamp);
             }
             _ => {
                 // Current IP is unspecified, nothing to preserve
@@ -165,32 +254,285 @@ impl DeviceInfo {
         // Add the new IP address to the appropriate list as well
         match ip_address {
             IpAddr::V4(ip) => {
-                self.ip_addresses_v4.push(ip);
+                self.add_ipv4_entry(ip, timestamp);
             }
             IpAddr::V6(ip) => {
-                self.ip_addresses_v6.push(ip);
+                self.add_ipv6_entry(ip, timestamp);
             }
         }
 
-        // Add any additional IP addresses provided
-        self.add_ip_addresses(ip_addresses_v4, ip_addresses_v6);
+        // Add any additional IP addresses provided with the same timestamp
+        self.add_ip_addresses_with_timestamp(ip_addresses_v4, ip_addresses_v6, timestamp);
     }
 
+    // Helper method to add IPv4 entry with timestamp (updates if exists)
+    fn add_ipv4_entry(&mut self, addr: Ipv4Addr, timestamp: DateTime<Utc>) {
+        // Check if address already exists, update timestamp if it does
+        if let Some(entry) = self.ip_addresses_v4.iter_mut().find(|e| e.address == addr) {
+            if timestamp > entry.last_seen {
+                entry.last_seen = timestamp;
+            }
+        } else {
+            self.ip_addresses_v4.push(IpAddressEntry {
+                address: addr,
+                last_seen: timestamp,
+            });
+        }
+    }
+
+    // Helper method to add IPv6 entry with timestamp (updates if exists)
+    fn add_ipv6_entry(&mut self, addr: Ipv6Addr, timestamp: DateTime<Utc>) {
+        // Check if address already exists, update timestamp if it does
+        if let Some(entry) = self.ip_addresses_v6.iter_mut().find(|e| e.address == addr) {
+            if timestamp > entry.last_seen {
+                entry.last_seen = timestamp;
+            }
+        } else {
+            self.ip_addresses_v6.push(IpAddressEntry {
+                address: addr,
+                last_seen: timestamp,
+            });
+        }
+    }
+
+    // Helper method to add mDNS service entry with timestamp (updates if exists)
+    fn add_mdns_entry(&mut self, service: String, timestamp: DateTime<Utc>) {
+        // Check if service already exists, update timestamp if it does
+        if let Some(entry) = self.mdns_services.iter_mut().find(|e| e.service == service) {
+            if timestamp > entry.last_seen {
+                entry.last_seen = timestamp;
+            }
+        } else {
+            self.mdns_services.push(MdnsServiceEntry {
+                service,
+                last_seen: timestamp,
+            });
+        }
+    }
+
+    // Helper method to add MAC address entry with timestamp (updates if exists)
+    pub(crate) fn add_mac_entry(&mut self, addr: MacAddr6, timestamp: DateTime<Utc>) {
+        // Check if address already exists, update timestamp if it does
+        if let Some(entry) = self.mac_addresses.iter_mut().find(|e| e.address == addr) {
+            if timestamp > entry.last_seen {
+                entry.last_seen = timestamp;
+            }
+        } else {
+            self.mac_addresses.push(MacAddressEntry {
+                address: addr,
+                last_seen: timestamp,
+            });
+        }
+    }
+
+    /// Add IP addresses using current time as timestamp.
+    /// For mDNS or other sources with known timestamps, use `add_ip_addresses_with_timestamp` instead.
     pub fn add_ip_addresses(
         &mut self,
         ip_addresses_v4: Vec<Ipv4Addr>,
         ip_addresses_v6: Vec<Ipv6Addr>,
     ) {
-        // Add the provided vectors
-        self.ip_addresses_v4.extend(ip_addresses_v4);
-        // Sort and deduplicate
-        self.ip_addresses_v4.sort();
-        self.ip_addresses_v4.dedup();
+        // Default to current time if not explicitly provided
+        self.add_ip_addresses_with_timestamp(ip_addresses_v4, ip_addresses_v6, Utc::now());
+    }
 
-        self.ip_addresses_v6.extend(ip_addresses_v6);
-        // Sort and deduplicate
-        self.ip_addresses_v6.sort();
-        self.ip_addresses_v6.dedup();
+    /// Add IP addresses with explicit timestamp.
+    /// Use this when you know when the IP addresses were discovered (e.g., from mDNS discovery).
+    pub fn add_ip_addresses_with_timestamp(
+        &mut self,
+        ip_addresses_v4: Vec<Ipv4Addr>,
+        ip_addresses_v6: Vec<Ipv6Addr>,
+        timestamp: DateTime<Utc>,
+    ) {
+        // Add IPv4 addresses with timestamps
+        for addr in ip_addresses_v4 {
+            self.add_ipv4_entry(addr, timestamp);
+        }
+
+        // Add IPv6 addresses with timestamps
+        for addr in ip_addresses_v6 {
+            self.add_ipv6_entry(addr, timestamp);
+        }
+
+        // Deduplicate and truncate
+        self.deduplicate_and_truncate_ips();
+    }
+
+    // Truncate IPv6 addresses to keep only the most recently seen (by timestamp)
+    fn truncate_ipv6_addresses(&mut self) {
+        const MAX_IPV6_ADDRESSES: usize = 10;
+        if self.ip_addresses_v6.len() <= MAX_IPV6_ADDRESSES {
+            return;
+        }
+
+        // Sort by timestamp (most recent first), then take the first N
+        self.ip_addresses_v6
+            .sort_by(|a, b| b.last_seen.cmp(&a.last_seen)); // Most recent first
+        self.ip_addresses_v6.truncate(MAX_IPV6_ADDRESSES);
+    }
+
+    // Truncate mDNS services to keep only the most recently seen (by timestamp)
+    fn truncate_mdns_services(&mut self) {
+        const MAX_MDNS_SERVICES: usize = 20;
+        if self.mdns_services.len() <= MAX_MDNS_SERVICES {
+            return;
+        }
+
+        // Sort by timestamp (most recent first), then take the first N
+        self.mdns_services
+            .sort_by(|a, b| b.last_seen.cmp(&a.last_seen)); // Most recent first
+        self.mdns_services.truncate(MAX_MDNS_SERVICES);
+    }
+
+    // Truncate MAC addresses to keep only the most recently seen (by timestamp)
+    fn truncate_mac_addresses(&mut self) {
+        const MAX_MAC_ADDRESSES: usize = 10;
+        if self.mac_addresses.len() <= MAX_MAC_ADDRESSES {
+            return;
+        }
+
+        // Ensure the primary MAC address is always preserved (if set)
+        // This prevents vendor lookup and stable ID generation from failing
+        let primary_mac = self.mac_address;
+
+        // Sort by timestamp (most recent first)
+        self.mac_addresses
+            .sort_by(|a, b| b.last_seen.cmp(&a.last_seen)); // Most recent first
+
+        // If we have a primary MAC, ensure it's in the list before truncation
+        if let Some(primary) = primary_mac {
+            // Check if primary MAC is already in the top MAX_MAC_ADDRESSES entries
+            let primary_in_top = self
+                .mac_addresses
+                .iter()
+                .take(MAX_MAC_ADDRESSES)
+                .any(|e| e.address == primary);
+
+            if !primary_in_top {
+                // Primary MAC would be truncated - find it and move it to position MAX_MAC_ADDRESSES-1
+                if let Some(primary_pos) =
+                    self.mac_addresses.iter().position(|e| e.address == primary)
+                {
+                    let primary_entry = self.mac_addresses.remove(primary_pos);
+                    // Insert at position MAX_MAC_ADDRESSES-1 to ensure it's kept
+                    // (it will push out the oldest of the top MAX_MAC_ADDRESSES)
+                    if self.mac_addresses.len() >= MAX_MAC_ADDRESSES {
+                        self.mac_addresses[MAX_MAC_ADDRESSES - 1] = primary_entry;
+                    } else {
+                        self.mac_addresses.push(primary_entry);
+                    }
+                }
+            }
+        }
+
+        // Now truncate to MAX_MAC_ADDRESSES
+        self.mac_addresses.truncate(MAX_MAC_ADDRESSES);
+    }
+
+    /// Populate DeviceInfo from mDNS data with explicit timestamps.
+    ///
+    /// This should be called when mDNS data is discovered, using the mDNS discovery timestamp
+    /// from `mDNSInfo.last_seen`. This ensures that IP addresses and services are timestamped
+    /// with when they were actually seen via mDNS, not when they're added to DeviceInfo.
+    ///
+    /// Example usage:
+    /// ```ignore
+    /// if let Some(mdns_info) = mdns_get_by_ip(&ip).await {
+    ///     device.populate_from_mdns(
+    ///         mdns_info.ip_addr.map(|ip| ip).into_iter().filter_map(|ip| {
+    ///             if let IpAddr::V4(v4) = ip { Some(v4) } else { None }
+    ///         }).collect(),
+    ///         mdns_info.ipv6_addr.into_iter().filter_map(|ip| {
+    ///             if let IpAddr::V6(v6) = ip { Some(v6) } else { None }
+    ///         }).collect(),
+    ///         mdns_info.services.into_iter().collect(),
+    ///         mdns_info.last_seen, // Use the mDNS discovery timestamp
+    ///     );
+    /// }
+    /// ```
+    pub fn populate_from_mdns(
+        &mut self,
+        ipv4_addresses: Vec<Ipv4Addr>,
+        ipv6_addresses: Vec<Ipv6Addr>,
+        mdns_services: Vec<String>,
+        discovery_timestamp: DateTime<Utc>,
+    ) {
+        // Add IPv4 addresses with the mDNS discovery timestamp
+        for addr in ipv4_addresses {
+            self.add_ipv4_entry(addr, discovery_timestamp);
+        }
+
+        // Add IPv6 addresses with the mDNS discovery timestamp
+        for addr in ipv6_addresses {
+            self.add_ipv6_entry(addr, discovery_timestamp);
+        }
+
+        // Add mDNS services with the mDNS discovery timestamp
+        for service in mdns_services {
+            self.add_mdns_entry(service, discovery_timestamp);
+        }
+
+        // Deduplicate and truncate
+        self.deduplicate_and_truncate_ips();
+        self.truncate_mdns_services();
+    }
+
+    // Helper method to deduplicate IP addresses (called after adding new ones)
+    fn deduplicate_and_truncate_ips(&mut self) {
+        // Deduplicate IPv4: keep entry with most recent timestamp
+        let mut ipv4_deduped: Vec<IpAddressEntry<Ipv4Addr>> = Vec::new();
+        let mut seen_v4 = HashMap::new();
+        for entry in self.ip_addresses_v4.iter() {
+            match seen_v4.get(&entry.address) {
+                Some(existing_timestamp) if entry.last_seen > *existing_timestamp => {
+                    // Update with newer timestamp
+                    if let Some(existing_entry) =
+                        ipv4_deduped.iter_mut().find(|e| e.address == entry.address)
+                    {
+                        existing_entry.last_seen = entry.last_seen;
+                    }
+                    seen_v4.insert(entry.address, entry.last_seen);
+                }
+                None => {
+                    // New address
+                    ipv4_deduped.push(entry.clone());
+                    seen_v4.insert(entry.address, entry.last_seen);
+                }
+                _ => {
+                    // Older timestamp, skip
+                }
+            }
+        }
+        self.ip_addresses_v4 = ipv4_deduped;
+
+        // Deduplicate IPv6: keep entry with most recent timestamp
+        let mut ipv6_deduped: Vec<IpAddressEntry<Ipv6Addr>> = Vec::new();
+        let mut seen_v6 = HashMap::new();
+        for entry in self.ip_addresses_v6.iter() {
+            match seen_v6.get(&entry.address) {
+                Some(existing_timestamp) if entry.last_seen > *existing_timestamp => {
+                    // Update with newer timestamp
+                    if let Some(existing_entry) =
+                        ipv6_deduped.iter_mut().find(|e| e.address == entry.address)
+                    {
+                        existing_entry.last_seen = entry.last_seen;
+                    }
+                    seen_v6.insert(entry.address, entry.last_seen);
+                }
+                None => {
+                    // New address
+                    ipv6_deduped.push(entry.clone());
+                    seen_v6.insert(entry.address, entry.last_seen);
+                }
+                _ => {
+                    // Older timestamp, skip
+                }
+            }
+        }
+        self.ip_addresses_v6 = ipv6_deduped;
+
+        // Truncate to keep only the most recently seen entries
+        self.truncate_ipv6_addresses();
     }
 
     // Effective last seen across local and community sources
@@ -216,17 +558,69 @@ impl DeviceInfo {
         self.mac_address
     }
 
+    /// Set the primary MAC address and add additional addresses.
+    /// Uses current time as timestamp.
     pub fn set_mac_address(&mut self, mac_address: MacAddr6, mac_addresses: Vec<MacAddr6>) {
+        self.set_mac_address_with_timestamp(mac_address, mac_addresses, Utc::now());
+    }
+
+    /// Set the primary MAC address and add additional addresses with explicit timestamp.
+    pub fn set_mac_address_with_timestamp(
+        &mut self,
+        mac_address: MacAddr6,
+        mac_addresses: Vec<MacAddr6>,
+        timestamp: DateTime<Utc>,
+    ) {
         // Ignore nil mac addresses
         if mac_address.is_nil() {
             return;
         }
         self.mac_address = Some(mac_address);
-        self.mac_addresses.push(mac_address);
-        self.mac_addresses.extend(mac_addresses);
-        // Sort and deduplicate
-        self.mac_addresses.sort();
-        self.mac_addresses.dedup();
+
+        // Add the primary MAC address
+        self.add_mac_entry(mac_address, timestamp);
+
+        // Add additional MAC addresses
+        for addr in mac_addresses {
+            if !addr.is_nil() {
+                self.add_mac_entry(addr, timestamp);
+            }
+        }
+
+        // Deduplicate and truncate
+        self.deduplicate_and_truncate_macs();
+    }
+
+    // Helper method to deduplicate MAC addresses (called after adding new ones)
+    pub(crate) fn deduplicate_and_truncate_macs(&mut self) {
+        // Deduplicate MACs: keep entry with most recent timestamp
+        let mut mac_deduped: Vec<MacAddressEntry> = Vec::new();
+        let mut seen = HashMap::new();
+        for entry in self.mac_addresses.iter() {
+            match seen.get(&entry.address) {
+                Some(existing_timestamp) if entry.last_seen > *existing_timestamp => {
+                    // Update with newer timestamp
+                    if let Some(existing_entry) =
+                        mac_deduped.iter_mut().find(|e| e.address == entry.address)
+                    {
+                        existing_entry.last_seen = entry.last_seen;
+                    }
+                    seen.insert(entry.address, entry.last_seen);
+                }
+                None => {
+                    // New address
+                    mac_deduped.push(entry.clone());
+                    seen.insert(entry.address, entry.last_seen);
+                }
+                _ => {
+                    // Older timestamp, skip
+                }
+            }
+        }
+        self.mac_addresses = mac_deduped;
+
+        // Truncate to keep only the most recently seen entries
+        self.truncate_mac_addresses();
     }
 
     // Used before any query to AI assistance
@@ -257,9 +651,9 @@ impl DeviceInfo {
         let re = Regex::new(r".*?(_.*?\.local)").unwrap();
 
         let mut mdns_services = Vec::new();
-        for mdns_service in device.mdns_services.iter() {
+        for mdns_entry in device.mdns_services.iter() {
             // Replace the matched pattern with the first captured group, which is _xxx._yyy.local
-            let sanitized = re.replace(mdns_service, "$1").to_string();
+            let sanitized = re.replace(&mdns_entry.service, "$1").to_string();
             mdns_services.push(sanitized);
         }
         // Sort and deduplicate mDNS services
@@ -290,17 +684,21 @@ impl DeviceInfo {
 
                 let ipv4_overlap = !devices[i].ip_addresses_v4.is_empty()
                     && !devices[j].ip_addresses_v4.is_empty()
-                    && devices[i]
-                        .ip_addresses_v4
-                        .iter()
-                        .any(|ip| devices[j].ip_addresses_v4.contains(ip));
+                    && devices[i].ip_addresses_v4.iter().any(|entry| {
+                        devices[j]
+                            .ip_addresses_v4
+                            .iter()
+                            .any(|e| e.address == entry.address)
+                    });
 
                 let ipv6_overlap = !devices[i].ip_addresses_v6.is_empty()
                     && !devices[j].ip_addresses_v6.is_empty()
-                    && devices[i]
-                        .ip_addresses_v6
-                        .iter()
-                        .any(|ip| devices[j].ip_addresses_v6.contains(ip));
+                    && devices[i].ip_addresses_v6.iter().any(|entry| {
+                        devices[j]
+                            .ip_addresses_v6
+                            .iter()
+                            .any(|e| e.address == entry.address)
+                    });
 
                 let hostname_match = !devices[i].hostname.is_empty()
                     && !devices[j].hostname.is_empty()
@@ -359,17 +757,21 @@ impl DeviceInfo {
                 // Overlapping IP addresses in the lists
                 let ipv4_overlap = !new_device.ip_addresses_v4.is_empty()
                     && !device.ip_addresses_v4.is_empty()
-                    && new_device
-                        .ip_addresses_v4
-                        .iter()
-                        .any(|ip| device.ip_addresses_v4.contains(ip));
+                    && new_device.ip_addresses_v4.iter().any(|entry| {
+                        device
+                            .ip_addresses_v4
+                            .iter()
+                            .any(|e| e.address == entry.address)
+                    });
 
                 let ipv6_overlap = !new_device.ip_addresses_v6.is_empty()
                     && !device.ip_addresses_v6.is_empty()
-                    && new_device
-                        .ip_addresses_v6
-                        .iter()
-                        .any(|ip| device.ip_addresses_v6.contains(ip));
+                    && new_device.ip_addresses_v6.iter().any(|entry| {
+                        device
+                            .ip_addresses_v6
+                            .iter()
+                            .any(|e| e.address == entry.address)
+                    });
 
                 // Hostname matching (for multi-interface devices)
                 let hostname_match = !new_device.hostname.is_empty()
@@ -441,17 +843,101 @@ impl DeviceInfo {
             && device1.device_vendor != device2.device_vendor;
 
         let mac_conflict = if safe_hostname_match {
+            // Safe hostname match - no MAC conflict even if different
             false
         } else if vendor_known(device1) && vendor_known(device2) {
-            match (device1.get_mac_address(), device2.get_mac_address()) {
-                (Some(mac1), Some(mac2)) if mac1 != mac2 => true,
-                _ => false,
-            }
+            // Both vendors known - check for MAC conflicts using timestamp-aware logic
+            Self::has_mac_conflict(device1, device2)
         } else {
             false
         };
 
         vendor_conflict || mac_conflict
+    }
+
+    // Check if two devices have conflicting MAC addresses using timestamp-aware logic
+    // Returns true if MACs suggest these are different devices
+    fn has_mac_conflict(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
+        match (device1.get_mac_address(), device2.get_mac_address()) {
+            (Some(mac1), Some(mac2)) if mac1 != mac2 => {
+                // Different primary MACs - check if they could be the same device
+
+                // 1. Check for MAC overlap in the historical lists
+                // If any MAC appears in both devices, they're likely the same device at different times
+                let mac_overlap = device1.mac_addresses.iter().any(|entry1| {
+                    device2
+                        .mac_addresses
+                        .iter()
+                        .any(|entry2| entry1.address == entry2.address)
+                });
+
+                if mac_overlap {
+                    debug!(
+                        "No MAC conflict: MACs overlap in historical lists (privacy extension or multi-interface)"
+                    );
+                    return false; // Not a conflict - same device with multiple MACs over time
+                }
+
+                // 2. Check if current MACs were seen very recently in both devices
+                // If both MACs are fresh (< 1 hour old), it's a strong signal of different devices
+                let now = Utc::now();
+                const MAC_CONFLICT_FRESHNESS_THRESHOLD: i64 = 3600; // 1 hour in seconds
+
+                let mac1_fresh = device1
+                    .mac_addresses
+                    .iter()
+                    .find(|e| e.address == mac1)
+                    .map(|e| (now - e.last_seen).num_seconds() < MAC_CONFLICT_FRESHNESS_THRESHOLD)
+                    .unwrap_or(false);
+
+                let mac2_fresh = device2
+                    .mac_addresses
+                    .iter()
+                    .find(|e| e.address == mac2)
+                    .map(|e| (now - e.last_seen).num_seconds() < MAC_CONFLICT_FRESHNESS_THRESHOLD)
+                    .unwrap_or(false);
+
+                if mac1_fresh && mac2_fresh {
+                    debug!(
+                        "MAC conflict: Both MACs ({} and {}) are fresh (< 1h old), likely different devices",
+                        mac1, mac2
+                    );
+                    return true; // Conflict - both fresh MACs, different devices
+                }
+
+                // 3. Check if the MACs were seen at very different times (> 24 hours apart)
+                // This could indicate privacy MAC rotation or device reuse
+                let mac1_timestamp = device1
+                    .mac_addresses
+                    .iter()
+                    .find(|e| e.address == mac1)
+                    .map(|e| e.last_seen);
+
+                let mac2_timestamp = device2
+                    .mac_addresses
+                    .iter()
+                    .find(|e| e.address == mac2)
+                    .map(|e| e.last_seen);
+
+                if let (Some(t1), Some(t2)) = (mac1_timestamp, mac2_timestamp) {
+                    let time_diff_hours = (t1 - t2).num_hours().abs();
+                    const MAC_ROTATION_THRESHOLD_HOURS: i64 = 24;
+
+                    if time_diff_hours > MAC_ROTATION_THRESHOLD_HOURS {
+                        debug!(
+                            "No MAC conflict: MACs seen {} hours apart, likely privacy rotation or device reuse",
+                            time_diff_hours
+                        );
+                        return false; // Not a conflict - likely privacy rotation over time
+                    }
+                }
+
+                // 4. Default: different MACs without overlap and seen around same time = conflict
+                debug!("MAC conflict: Different MACs without overlap or strong temporal signal");
+                true
+            }
+            _ => false, // Same MAC or one/both missing - no conflict
+        }
     }
 
     // Check if a hostname-based merge is safe
@@ -533,34 +1019,33 @@ impl DeviceInfo {
         // Now we merge based on the hostname or IPv4 or IPv6 address(es)
         // At that stage the new_device.ip_address is guaranteed to be valid
 
+        // Merge IP addresses with timestamps
+        // Use each entry's last_seen timestamp directly - this is when that specific IP was seen
+        // The entry timestamp is the authoritative source for when that IP address was discovered
+        for entry in new_device.ip_addresses_v4.iter() {
+            device.add_ipv4_entry(entry.address, entry.last_seen);
+        }
+
+        // Merge IPv6 addresses with their individual timestamps
+        for entry in new_device.ip_addresses_v6.iter() {
+            device.add_ipv6_entry(entry.address, entry.last_seen);
+        }
+
         // IPv4 takes precedence over IPv6: always use the new_device.ip_address if it's IPv4
         if let IpAddr::V4(_) = new_device.ip_address {
             if new_device.last_seen > device.last_seen {
-                device.set_ip_address(
-                    new_device.ip_address,
-                    new_device.ip_addresses_v4.clone(),
-                    new_device.ip_addresses_v6.clone(),
-                );
+                device.ip_address = new_device.ip_address;
             }
-        // The new device is IPv6 and the device is IPv4, we keep the device's IPv4 and we merge the IP addresses
+        // The new device is IPv6 and the device is IPv4, we keep the device's IPv4
         } else if matches!(new_device.ip_address, IpAddr::V6(_))
             && matches!(device.ip_address, IpAddr::V4(_))
         {
-            if new_device.last_seen > device.last_seen {
-                device.add_ip_addresses(
-                    new_device.ip_addresses_v4.clone(),
-                    new_device.ip_addresses_v6.clone(),
-                );
-            }
+            // Keep IPv4, IPv6 addresses already merged above
         } else {
             // The new device is IPv6 and the device is IPv6
             // We set the device's ip_address to the new IPv6 if it's fresher
             if new_device.last_seen > device.last_seen {
-                device.set_ip_address(
-                    new_device.ip_address,
-                    new_device.ip_addresses_v4.clone(),
-                    new_device.ip_addresses_v6.clone(),
-                );
+                device.ip_address = new_device.ip_address;
             }
         }
 
@@ -571,15 +1056,13 @@ impl DeviceInfo {
             }
         }
 
-        // Merge the MAC addresses
-        if !new_device.mac_addresses.is_empty() {
-            device
-                .mac_addresses
-                .extend(new_device.mac_addresses.clone());
-            // Deduplicate
-            device.mac_addresses.sort();
-            device.mac_addresses.dedup();
+        // Merge the MAC addresses with their timestamps
+        for entry in new_device.mac_addresses.iter() {
+            device.add_mac_entry(entry.address, entry.last_seen);
         }
+
+        // Deduplicate and truncate
+        device.deduplicate_and_truncate_macs();
 
         // Use the most recent non empty hostname
         if !new_device.hostname.is_empty() {
@@ -630,33 +1113,35 @@ impl DeviceInfo {
         }
 
         // Merge mDNS services
+        // Use each entry's last_seen timestamp directly - this is when that specific service was seen
+        // The entry timestamp is the authoritative source for when that service was discovered
         if !new_device.mdns_services.is_empty() {
-            device
-                .mdns_services
-                .extend(new_device.mdns_services.clone());
-
-            // Deduplicate
-            device.mdns_services.sort();
-            device.mdns_services.dedup();
+            for entry in new_device.mdns_services.iter() {
+                device.add_mdns_entry(entry.service.clone(), entry.last_seen);
+            }
         }
 
         // Remove entries that are the suffix of another entry
         // For example, if we have _xxx._apple-mobdev2._tcp.local and _apple-mobdev2._tcp.local, we remove _apple-mobdev2._tcp.local
         let mut mdns_services_cleaned = Vec::new();
-        for mdns_service in device.mdns_services.iter() {
+        for mdns_entry in device.mdns_services.iter() {
             let mut found = false;
-            for mdns_service2 in device.mdns_services.iter() {
-                if mdns_service != mdns_service2 && mdns_service2.ends_with(mdns_service) {
+            for mdns_entry2 in device.mdns_services.iter() {
+                if mdns_entry.service != mdns_entry2.service
+                    && mdns_entry2.service.ends_with(&mdns_entry.service)
+                {
                     found = true;
                     break;
                 }
             }
             if !found {
-                mdns_services_cleaned.push(mdns_service.clone());
+                mdns_services_cleaned.push(mdns_entry.clone());
             }
         }
 
         device.mdns_services = mdns_services_cleaned;
+        // Keep only the most recently seen mDNS services (by timestamp)
+        device.truncate_mdns_services();
 
         // Update the flags
         // Only local updates affect local active; community updates affect community_active
@@ -762,13 +1247,20 @@ impl DeviceInfo {
     pub fn clear(&mut self) {
         // Clear the device, only keep the main IP address, the first_seen timestamp and the last_seen timestamp
         let ip_address = self.ip_address.clone();
+        let now = Utc::now();
         let ip_addresses_v4 = if let IpAddr::V4(ipv4) = ip_address {
-            vec![ipv4]
+            vec![IpAddressEntry {
+                address: ipv4,
+                last_seen: now,
+            }]
         } else {
             vec![]
         };
         let ip_addresses_v6 = if let IpAddr::V6(ipv6) = ip_address {
-            vec![ipv6]
+            vec![IpAddressEntry {
+                address: ipv6,
+                last_seen: now,
+            }]
         } else {
             vec![]
         };
@@ -803,6 +1295,35 @@ impl DeviceInfo {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    // Helper functions for tests
+    fn ipv4_entry(addr: Ipv4Addr) -> IpAddressEntry<Ipv4Addr> {
+        IpAddressEntry {
+            address: addr,
+            last_seen: Utc::now(),
+        }
+    }
+
+    fn ipv6_entry(addr: Ipv6Addr) -> IpAddressEntry<Ipv6Addr> {
+        IpAddressEntry {
+            address: addr,
+            last_seen: Utc::now(),
+        }
+    }
+
+    fn mdns_entry(service: &str) -> MdnsServiceEntry {
+        MdnsServiceEntry {
+            service: service.to_string(),
+            last_seen: Utc::now(),
+        }
+    }
+
+    fn mac_entry(addr: MacAddr6) -> MacAddressEntry {
+        MacAddressEntry {
+            address: addr,
+            last_seen: Utc::now(),
+        }
+    }
 
     #[test]
     fn test_merge_deletion() {
@@ -1479,14 +2000,20 @@ mod tests {
         mdns_device.last_seen = mdns_timestamp;
 
         // Add mDNS services
-        mdns_device.mdns_services.push("_http._tcp".to_string());
+        mdns_device.mdns_services.push(MdnsServiceEntry {
+            service: "_http._tcp".to_string(),
+            last_seen: mdns_timestamp,
+        });
 
         // Merge the mDNS device into our device
         DeviceInfo::merge(&mut device, &mdns_device);
 
         // Verify mDNS update
         assert_eq!(device.hostname, "mdns-hostname");
-        assert_eq!(device.mdns_services, vec!["_http._tcp"]);
+        assert!(device
+            .mdns_services
+            .iter()
+            .any(|e| e.service == "_http._tcp"));
         assert_eq!(device.last_seen, mdns_timestamp);
 
         // Step 3: Simulate a re-scan 30 minutes later (creates a new device instance)
@@ -1824,13 +2351,15 @@ mod tests {
         assert!(
             device
                 .ip_addresses_v4
-                .contains(&Ipv4Addr::new(192, 168, 1, 10)),
+                .iter()
+                .any(|e| e.address == Ipv4Addr::new(192, 168, 1, 10)),
             "Old IP should be preserved in list"
         );
         assert!(
             device
                 .ip_addresses_v4
-                .contains(&Ipv4Addr::new(192, 168, 1, 20)),
+                .iter()
+                .any(|e| e.address == Ipv4Addr::new(192, 168, 1, 20)),
             "New IP should be added to list"
         );
     }
@@ -1849,19 +2378,27 @@ mod tests {
         assert_eq!(device.get_ip_address(), new_primary);
 
         // Verify all IPs are in the appropriate lists
-        assert!(device.ip_addresses_v4.contains(&Ipv4Addr::new(10, 0, 0, 1))); // Original
         assert!(device
             .ip_addresses_v4
-            .contains(&Ipv4Addr::new(192, 168, 1, 100))); // New primary
+            .iter()
+            .any(|e| e.address == Ipv4Addr::new(10, 0, 0, 1))); // Original
         assert!(device
             .ip_addresses_v4
-            .contains(&Ipv4Addr::new(172, 16, 0, 1))); // Additional
+            .iter()
+            .any(|e| e.address == Ipv4Addr::new(192, 168, 1, 100))); // New primary
         assert!(device
             .ip_addresses_v4
-            .contains(&Ipv4Addr::new(172, 16, 0, 2))); // Additional
+            .iter()
+            .any(|e| e.address == Ipv4Addr::new(172, 16, 0, 1))); // Additional
+        assert!(device
+            .ip_addresses_v4
+            .iter()
+            .any(|e| e.address == Ipv4Addr::new(172, 16, 0, 2))); // Additional
         assert!(device
             .ip_addresses_v6
-            .contains(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))); // Additional IPv6
+            .iter()
+            .any(|e| e.address == Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        // Additional IPv6
     }
 
     #[test]
@@ -1871,7 +2408,10 @@ mod tests {
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
             d.hostname = "test-device.local".to_string(); // Specific hostname
             d.device_vendor = "Apple Inc.".to_string();
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 2)]; // Add shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 2)),
+            ]; // Add shared IP
             d.open_ports = vec![
                 PortInfo {
                     port: 22,
@@ -1895,7 +2435,10 @@ mod tests {
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
             d.hostname = "test-device.local".to_string(); // Same specific hostname
             d.device_vendor = "Samsung Electronics".to_string(); // Different vendor
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 2)]; // Same shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 2)),
+            ]; // Same shared IP
             d.open_ports = vec![
                 PortInfo {
                     port: 443,
@@ -1975,7 +2518,10 @@ mod tests {
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
             d.hostname = "john-macbook-pro.local".to_string(); // Very specific hostname
             d.device_vendor = "Apple Inc.".to_string();
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 5)]; // Add shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 5)),
+            ]; // Add shared IP
             d.open_ports = vec![PortInfo {
                 port: 22,
                 protocol: "tcp".to_string(),
@@ -1990,7 +2536,10 @@ mod tests {
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
             d.hostname = "john-macbook-pro.local".to_string(); // Same specific hostname
             d.device_vendor = "Apple Inc.".to_string(); // Same vendor
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 5)]; // Same shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 5)),
+            ]; // Same shared IP
             d.open_ports = vec![PortInfo {
                 port: 80,
                 protocol: "tcp".to_string(),
@@ -2072,7 +2621,7 @@ mod tests {
             d.hostname = "alex-macbook-pro.local".to_string();
             d.device_vendor = "Apple Inc.".to_string();
             d.mac_address = Some(mac_primary);
-            d.mac_addresses = vec![mac_primary];
+            d.mac_addresses = vec![mac_entry(mac_primary)];
             d.last_seen = Utc.with_ymd_and_hms(2023, 5, 1, 10, 0, 0).unwrap();
             d
         }];
@@ -2082,7 +2631,7 @@ mod tests {
             d.hostname = "alex-macbook-pro.local".to_string();
             d.device_vendor = "Apple Inc.".to_string();
             d.mac_address = Some(mac_secondary);
-            d.mac_addresses = vec![mac_secondary];
+            d.mac_addresses = vec![mac_entry(mac_secondary)];
             d.last_seen = Utc.with_ymd_and_hms(2023, 5, 1, 11, 0, 0).unwrap();
             d
         }];
@@ -2100,8 +2649,14 @@ mod tests {
             "Latest MAC address should be the primary one"
         );
         assert!(
-            devices[0].mac_addresses.contains(&mac_primary)
-                && devices[0].mac_addresses.contains(&mac_secondary),
+            devices[0]
+                .mac_addresses
+                .iter()
+                .any(|e| e.address == mac_primary)
+                && devices[0]
+                    .mac_addresses
+                    .iter()
+                    .any(|e| e.address == mac_secondary),
             "All observed MAC addresses should be retained after merge"
         );
     }
@@ -2111,7 +2666,10 @@ mod tests {
         // Test that IP overlap with conflicting characteristics is blocked
         let mut devices = vec![{
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 1)]; // Shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
+            ]; // Shared IP
             d.device_vendor = "Raspberry Pi Foundation".to_string();
             d.open_ports = vec![PortInfo {
                 port: 22,
@@ -2125,7 +2683,10 @@ mod tests {
 
         let new_devices = vec![{
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 1)]; // Same shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
+            ]; // Same shared IP
             d.device_vendor = "Freebox SAS".to_string(); // Conflicting vendor
             d.open_ports = vec![PortInfo {
                 port: 80,
@@ -2152,7 +2713,10 @@ mod tests {
         // Test that IP overlap without conflicts allows merging
         let mut devices = vec![{
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 100), Ipv4Addr::new(10, 0, 0, 1)]; // Shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
+            ]; // Shared IP
             d.device_vendor = "Apple Inc.".to_string();
             d.open_ports = vec![
                 PortInfo {
@@ -2175,7 +2739,10 @@ mod tests {
 
         let new_devices = vec![{
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
-            d.ip_addresses_v4 = vec![Ipv4Addr::new(192, 168, 1, 101), Ipv4Addr::new(10, 0, 0, 1)]; // Same shared IP
+            d.ip_addresses_v4 = vec![
+                ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
+                ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
+            ]; // Same shared IP
             d.device_vendor = "Apple Inc.".to_string(); // Same vendor
             d.open_ports = vec![
                 PortInfo {
@@ -2287,8 +2854,8 @@ mod tests {
                 d.hostname = "john-macbook.local".to_string(); // Specific
                 d.device_vendor = "Apple Inc.".to_string();
                 d.ip_addresses_v4 = vec![
-                    Ipv4Addr::new(192, 168, 1, 100),
-                    Ipv4Addr::new(169, 254, 0, 1),
+                    ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
+                    ipv4_entry(Ipv4Addr::new(169, 254, 0, 1)),
                 ]; // Add shared IP
                 d.open_ports = vec![PortInfo {
                     port: 22,
@@ -2304,8 +2871,8 @@ mod tests {
                 d.hostname = "john-macbook.local".to_string(); // Same specific hostname
                 d.device_vendor = "Apple Inc.".to_string(); // Same vendor
                 d.ip_addresses_v4 = vec![
-                    Ipv4Addr::new(192, 168, 1, 101),
-                    Ipv4Addr::new(169, 254, 0, 1),
+                    ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
+                    ipv4_entry(Ipv4Addr::new(169, 254, 0, 1)),
                 ]; // Same shared IP
                 d.open_ports = vec![PortInfo {
                     port: 80,
@@ -2507,6 +3074,727 @@ mod tests {
         assert!(
             rpi.open_ports.iter().any(|p| p.port == 111),
             "Raspberry Pi should have sunrpc port"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_truncation_keeps_most_recent() {
+        // Test that IPv6 addresses are truncated to keep only the last 10 most recently added
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Add 15 IPv6 addresses (should keep only last 10)
+        let mut old_addresses = Vec::new();
+        for i in 0..5 {
+            old_addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
+        }
+
+        let mut new_addresses = Vec::new();
+        for i in 5..15 {
+            new_addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
+        }
+
+        // Add old addresses first
+        device.add_ip_addresses(vec![], old_addresses.clone());
+        // Add new addresses (these should be kept)
+        device.add_ip_addresses(vec![], new_addresses.clone());
+
+        // Should have exactly 10 addresses
+        assert_eq!(
+            device.ip_addresses_v6.len(),
+            10,
+            "Should have exactly 10 IPv6 addresses"
+        );
+
+        // Should contain the new addresses (5-14) and not the oldest ones (0-4)
+        for addr in new_addresses.iter() {
+            assert!(
+                device.ip_addresses_v6.iter().any(|e| e.address == *addr),
+                "Should contain new address {:?}",
+                addr
+            );
+        }
+
+        // Should not contain the oldest addresses
+        for addr in old_addresses.iter() {
+            assert!(
+                !device.ip_addresses_v6.iter().any(|e| e.address == *addr),
+                "Should not contain old address {:?}",
+                addr
+            );
+        }
+    }
+
+    #[test]
+    fn test_mdns_truncation_keeps_most_recent() {
+        // Test that mDNS services are truncated to keep only the last 20 most recently added
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Add 25 mDNS services (should keep only last 20)
+        let mut old_services = Vec::new();
+        for i in 0..5 {
+            old_services.push(mdns_entry(&format!("_service{}.local", i)));
+        }
+
+        let mut new_services = Vec::new();
+        for i in 5..25 {
+            new_services.push(mdns_entry(&format!("_service{}.local", i)));
+        }
+
+        // Add old services first
+        device.mdns_services.extend(old_services.clone());
+        // Add new services (these should be kept)
+        device.mdns_services.extend(new_services.clone());
+        // Truncate
+        device.truncate_mdns_services();
+
+        // Should have exactly 20 services
+        assert_eq!(
+            device.mdns_services.len(),
+            20,
+            "Should have exactly 20 mDNS services"
+        );
+
+        // Should contain the new services (5-24) and not the oldest ones (0-4)
+        for i in 5..25 {
+            let service = format!("_service{}.local", i);
+            assert!(
+                device.mdns_services.iter().any(|e| e.service == service),
+                "Should contain new service {}",
+                service
+            );
+        }
+
+        // Should not contain the oldest services
+        for i in 0..5 {
+            let service = format!("_service{}.local", i);
+            assert!(
+                !device.mdns_services.iter().any(|e| e.service == service),
+                "Should not contain old service {}",
+                service
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipv6_deduplication_preserves_most_recent() {
+        // Test that deduplication keeps the most recent occurrence
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let addr1 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let addr2 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let addr3 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3);
+
+        // Add addresses: addr1, addr2, addr1 (duplicate), addr3
+        device.add_ip_addresses(vec![], vec![addr1]);
+        device.add_ip_addresses(vec![], vec![addr2]);
+        device.add_ip_addresses(vec![], vec![addr1]); // Duplicate
+        device.add_ip_addresses(vec![], vec![addr3]);
+
+        // Should have 3 addresses (addr1 should appear only once, as the most recent occurrence)
+        assert_eq!(
+            device.ip_addresses_v6.len(),
+            3,
+            "Should have 3 unique addresses"
+        );
+
+        // Verify all addresses are present and addr1 appears only once
+        let addresses: Vec<_> = device.ip_addresses_v6.iter().map(|e| e.address).collect();
+        assert_eq!(addresses.len(), 3, "Should have exactly 3 addresses");
+        assert!(addresses.contains(&addr1), "Should contain addr1");
+        assert!(addresses.contains(&addr2), "Should contain addr2");
+        assert!(addresses.contains(&addr3), "Should contain addr3");
+
+        // Verify addr1 appears only once (deduplication worked)
+        let addr1_count = addresses.iter().filter(|&&a| a == addr1).count();
+        assert_eq!(
+            addr1_count, 1,
+            "addr1 should appear only once after deduplication"
+        );
+
+        // Verify timestamps: addr3 was added last, so it should have the most recent timestamp
+        // addr1 was added twice (second time before addr3), so it should have timestamp between addr2 and addr3
+        let addr1_entry = device
+            .ip_addresses_v6
+            .iter()
+            .find(|e| e.address == addr1)
+            .unwrap();
+        let addr2_entry = device
+            .ip_addresses_v6
+            .iter()
+            .find(|e| e.address == addr2)
+            .unwrap();
+        let addr3_entry = device
+            .ip_addresses_v6
+            .iter()
+            .find(|e| e.address == addr3)
+            .unwrap();
+        // addr3 was added last, so it should have the most recent timestamp
+        assert!(
+            addr3_entry.last_seen >= addr1_entry.last_seen,
+            "addr3 should have timestamp >= addr1 (was added most recently)"
+        );
+        assert!(
+            addr3_entry.last_seen >= addr2_entry.last_seen,
+            "addr3 should have timestamp >= addr2 (was added most recently)"
+        );
+        // addr1 (second addition) should be more recent than addr2
+        assert!(
+            addr1_entry.last_seen >= addr2_entry.last_seen,
+            "addr1 should have timestamp >= addr2 (was added after addr2)"
+        );
+    }
+
+    #[test]
+    fn test_mdns_deduplication_preserves_most_recent() {
+        // Test that mDNS deduplication keeps the most recent occurrence
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        device1.mdns_services.push(mdns_entry("_service1.local"));
+        device1.mdns_services.push(mdns_entry("_service2.local"));
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        device2.mdns_services.push(mdns_entry("_service1.local")); // Duplicate
+        device2.mdns_services.push(mdns_entry("_service3.local"));
+
+        // Merge device2 into device1
+        DeviceInfo::merge(&mut device1, &device2);
+
+        // Should have 3 unique services
+        assert_eq!(
+            device1.mdns_services.len(),
+            3,
+            "Should have 3 unique mDNS services"
+        );
+
+        // Should contain all services
+        assert!(
+            device1
+                .mdns_services
+                .iter()
+                .any(|e| e.service == "_service1.local"),
+            "Should contain service1"
+        );
+        assert!(
+            device1
+                .mdns_services
+                .iter()
+                .any(|e| e.service == "_service2.local"),
+            "Should contain service2"
+        );
+        assert!(
+            device1
+                .mdns_services
+                .iter()
+                .any(|e| e.service == "_service3.local"),
+            "Should contain service3"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_truncation_before_add() {
+        // Test that truncation happens before adding new items
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Fill up to 10 addresses
+        let mut addresses = Vec::new();
+        for i in 0..10 {
+            addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
+        }
+        device.add_ip_addresses(vec![], addresses);
+
+        // Now add 5 more addresses
+        let new_addresses = vec![
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 10),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 11),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 12),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 13),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 14),
+        ];
+        device.add_ip_addresses(vec![], new_addresses.clone());
+
+        // Should still have exactly 10 addresses
+        assert_eq!(
+            device.ip_addresses_v6.len(),
+            10,
+            "Should have exactly 10 addresses after adding more"
+        );
+
+        // Should contain the new addresses
+        for addr in new_addresses.iter() {
+            assert!(
+                device.ip_addresses_v6.iter().any(|e| e.address == *addr),
+                "Should contain new address {:?}",
+                addr
+            );
+        }
+    }
+
+    #[test]
+    fn test_mdns_truncation_before_add() {
+        // Test that truncation happens before adding new items
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Fill up to 20 services
+        for i in 0..20 {
+            device
+                .mdns_services
+                .push(mdns_entry(&format!("_service{}.local", i)));
+        }
+
+        // Now add 5 more services
+        let new_services: Vec<MdnsServiceEntry> = (20..25)
+            .map(|i| mdns_entry(&format!("_service{}.local", i)))
+            .collect();
+
+        // Add new services (truncation will happen automatically)
+        device.mdns_services.extend(new_services.clone());
+
+        // Deduplicate (simulate merge behavior) - keep most recent timestamp
+        let mut seen = HashMap::new();
+        for entry in device.mdns_services.iter() {
+            match seen.get(&entry.service) {
+                Some(existing_timestamp) if entry.last_seen > *existing_timestamp => {
+                    seen.insert(entry.service.clone(), entry.last_seen);
+                }
+                None => {
+                    seen.insert(entry.service.clone(), entry.last_seen);
+                }
+                _ => {}
+            }
+        }
+        let mut deduped = Vec::new();
+        for entry in device.mdns_services.iter() {
+            if seen.get(&entry.service) == Some(&entry.last_seen) {
+                deduped.push(entry.clone());
+            }
+        }
+        device.mdns_services = deduped;
+        device.truncate_mdns_services();
+
+        // Should still have exactly 20 services
+        assert_eq!(
+            device.mdns_services.len(),
+            20,
+            "Should have exactly 20 services after adding more"
+        );
+
+        // Should contain the new services
+        for service_entry in new_services.iter() {
+            assert!(
+                device
+                    .mdns_services
+                    .iter()
+                    .any(|e| e.service == service_entry.service),
+                "Should contain new service {}",
+                service_entry.service
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipv6_insertion_order_preserved() {
+        // Test that entries are properly tracked (order doesn't matter since we sort by timestamp)
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let addr1 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let addr2 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let addr3 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3);
+
+        // Add addresses in order
+        device.add_ip_addresses(vec![], vec![addr1]);
+        device.add_ip_addresses(vec![], vec![addr2]);
+        device.add_ip_addresses(vec![], vec![addr3]);
+
+        // Verify order is preserved
+        let addresses: Vec<_> = device.ip_addresses_v6.iter().map(|e| e.address).collect();
+        assert_eq!(addresses[0], addr1, "First should be addr1");
+        assert_eq!(addresses[1], addr2, "Second should be addr2");
+        assert_eq!(addresses[2], addr3, "Third should be addr3");
+    }
+
+    #[test]
+    fn test_mac_addresses_serialization() {
+        // Test that new format serializes and deserializes correctly
+        let mac1 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        let timestamp1 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        let entry = MacAddressEntry {
+            address: mac1,
+            last_seen: timestamp1,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&vec![entry.clone()]).expect("Should serialize");
+
+        // Deserialize back
+        let entries: Vec<MacAddressEntry> =
+            serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].address, mac1);
+        assert_eq!(entries[0].last_seen, timestamp1);
+    }
+
+    #[test]
+    fn test_device_info_mac_addresses_serialization() {
+        // Test full DeviceInfo serialization/deserialization
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device.set_mac_address(MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55), vec![]);
+
+        // Serialize device
+        let json = serde_json::to_string(&device).expect("Should serialize");
+
+        // Deserialize back
+        let deserialized: DeviceInfo = serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(deserialized.mac_addresses.len(), 1);
+        assert_eq!(
+            deserialized.mac_addresses[0].address,
+            MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55)
+        );
+    }
+
+    #[test]
+    fn test_mac_truncation_keeps_most_recent() {
+        // Test that MAC addresses are truncated to keep only the last 10 most recently added
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Add 15 MAC addresses (should keep only last 10)
+        let mut old_macs = Vec::new();
+        for i in 0..5 {
+            old_macs.push(MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, i));
+        }
+
+        let mut new_macs = Vec::new();
+        for i in 5..15 {
+            new_macs.push(MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, i));
+        }
+
+        // Add old MACs first
+        device.set_mac_address(old_macs[0], old_macs[1..].to_vec());
+        // Add new MACs (these should be kept)
+        device.set_mac_address(new_macs[0], new_macs[1..].to_vec());
+
+        // Should have exactly 10 addresses
+        assert_eq!(
+            device.mac_addresses.len(),
+            10,
+            "Should have exactly 10 MAC addresses"
+        );
+
+        // Should contain the new MACs and not the oldest ones
+        for mac in new_macs.iter() {
+            assert!(
+                device.mac_addresses.iter().any(|e| e.address == *mac),
+                "Should contain new MAC {:?}",
+                mac
+            );
+        }
+
+        // Should not contain the oldest MACs
+        for mac in old_macs.iter() {
+            assert!(
+                !device.mac_addresses.iter().any(|e| e.address == *mac),
+                "Should not contain old MAC {:?}",
+                mac
+            );
+        }
+    }
+
+    #[test]
+    fn test_mac_deduplication_preserves_most_recent() {
+        // Test that deduplication keeps the most recent occurrence
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let mac1 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x01);
+        let mac2 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x02);
+        let mac3 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x03);
+
+        // Add MACs: mac1, mac2, mac1 (duplicate), mac3
+        device.set_mac_address(mac1, vec![]);
+        device.set_mac_address(mac2, vec![]);
+        device.set_mac_address(mac1, vec![]); // Duplicate
+        device.set_mac_address(mac3, vec![]);
+
+        // Should have 3 MACs (mac1 should appear only once)
+        assert_eq!(
+            device.mac_addresses.len(),
+            3,
+            "Should have 3 unique MAC addresses"
+        );
+
+        // Verify all MACs are present
+        let macs: Vec<_> = device.mac_addresses.iter().map(|e| e.address).collect();
+        assert!(macs.contains(&mac1), "Should contain mac1");
+        assert!(macs.contains(&mac2), "Should contain mac2");
+        assert!(macs.contains(&mac3), "Should contain mac3");
+
+        // Verify mac1 appears only once
+        let mac1_count = macs.iter().filter(|&&m| m == mac1).count();
+        assert_eq!(
+            mac1_count, 1,
+            "mac1 should appear only once after deduplication"
+        );
+    }
+
+    #[test]
+    fn test_mac_merge_preserves_timestamps() {
+        // Test that merging devices preserves MAC address timestamps
+        use chrono::{TimeZone, Utc};
+
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        let mac1 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x01);
+        let timestamp1 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        device1.set_mac_address_with_timestamp(mac1, vec![], timestamp1);
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        let mac2 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x02);
+        let timestamp2 = Utc.with_ymd_and_hms(2023, 1, 1, 13, 0, 0).unwrap();
+        device2.set_mac_address_with_timestamp(mac2, vec![], timestamp2);
+
+        // Merge device2 into device1
+        DeviceInfo::merge(&mut device1, &device2);
+
+        // Should have both MACs
+        assert_eq!(
+            device1.mac_addresses.len(),
+            2,
+            "Should have 2 MAC addresses"
+        );
+
+        // Verify both MACs are present with their timestamps
+        let mac1_entry = device1
+            .mac_addresses
+            .iter()
+            .find(|e| e.address == mac1)
+            .unwrap();
+        let mac2_entry = device1
+            .mac_addresses
+            .iter()
+            .find(|e| e.address == mac2)
+            .unwrap();
+
+        assert_eq!(
+            mac1_entry.last_seen, timestamp1,
+            "mac1 timestamp should be preserved"
+        );
+        assert_eq!(
+            mac2_entry.last_seen, timestamp2,
+            "mac2 timestamp should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_primary_mac_updated_by_set_mac_address() {
+        // Test that set_mac_address updates the primary MAC (by design)
+        // This is expected behavior - each call to set_mac_address sets a NEW primary
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Set first primary MAC
+        let mac1 = MacAddr6::new(0x11, 0x11, 0x11, 0x11, 0x11, 0x11);
+        device.set_mac_address(mac1, vec![]);
+        assert_eq!(
+            device.get_mac_address(),
+            Some(mac1),
+            "Primary should be mac1"
+        );
+
+        // Set second primary MAC - this UPDATES the primary
+        let mac2 = MacAddr6::new(0x22, 0x22, 0x22, 0x22, 0x22, 0x22);
+        device.set_mac_address(mac2, vec![]);
+        assert_eq!(
+            device.get_mac_address(),
+            Some(mac2),
+            "Primary should now be mac2"
+        );
+
+        // Both MACs should be in the list
+        assert_eq!(device.mac_addresses.len(), 2);
+        assert!(device.mac_addresses.iter().any(|e| e.address == mac1));
+        assert!(device.mac_addresses.iter().any(|e| e.address == mac2));
+    }
+
+    #[test]
+    fn test_primary_mac_protection_in_truncation() {
+        // Test that primary MAC is protected from truncation
+        // The truncation logic ensures the primary MAC stays in the list
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Set an old primary MAC
+        let primary_mac = MacAddr6::new(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+        let old_timestamp = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        device.set_mac_address_with_timestamp(primary_mac, vec![], old_timestamp);
+        assert_eq!(device.get_mac_address(), Some(primary_mac));
+
+        // Add 10 newer MACs WITHOUT calling set_mac_address (to avoid updating primary)
+        // Use add_mac_entry directly to simulate discovering new MACs without changing primary
+        for i in 0..10 {
+            let newer_mac = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, i);
+            let newer_timestamp = Utc.with_ymd_and_hms(2023, 1, 1, 13, i as u32, 0).unwrap();
+            device.add_mac_entry(newer_mac, newer_timestamp);
+        }
+
+        // Manually trigger dedup and truncate
+        device.deduplicate_and_truncate_macs();
+
+        // Should have exactly 10 MACs (truncated from 11)
+        assert_eq!(
+            device.mac_addresses.len(),
+            10,
+            "Should have exactly 10 MACs after truncation"
+        );
+
+        // Primary MAC should still be the old one
+        assert_eq!(
+            device.get_mac_address(),
+            Some(primary_mac),
+            "Primary should not have changed"
+        );
+
+        // Primary MAC should be in the list (protection logic)
+        let primary_in_list = device
+            .mac_addresses
+            .iter()
+            .any(|e| e.address == primary_mac);
+        assert!(
+            primary_in_list,
+            "Primary MAC should be preserved in the list even if it's the oldest"
+        );
+    }
+
+    #[test]
+    fn test_mac_deduplication_logic_correctness() {
+        // Test the deduplication logic with out-of-order timestamps
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let mac_a = MacAddr6::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
+        let t1 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2023, 1, 1, 13, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2023, 1, 1, 14, 0, 0).unwrap();
+
+        // Add same MAC with different timestamps in non-chronological order
+        device.set_mac_address_with_timestamp(mac_a, vec![], t1);
+        device.set_mac_address_with_timestamp(mac_a, vec![], t3); // Newest
+        device.set_mac_address_with_timestamp(mac_a, vec![], t2); // Middle
+
+        // Should have only one MAC entry with the newest timestamp
+        assert_eq!(
+            device.mac_addresses.len(),
+            1,
+            "Should deduplicate to 1 entry"
+        );
+        assert_eq!(device.mac_addresses[0].address, mac_a);
+        assert_eq!(
+            device.mac_addresses[0].last_seen, t3,
+            "Should keep the most recent timestamp"
+        );
+    }
+
+    #[test]
+    fn test_mac_conflict_detection_privacy_rotation() {
+        // Test that devices with privacy MAC rotation are allowed to merge
+        // Scenario: iOS device with rotating MACs seen at different times
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.hostname = "iphone-specific.local".to_string();
+        device1.device_vendor = "Apple Inc.".to_string();
+        let mac1 = MacAddr6::new(0x02, 0x11, 0x22, 0x33, 0x44, 0x55); // Privacy MAC
+        let yesterday = Utc::now() - chrono::Duration::days(1);
+        device1.add_mac_entry(mac1, yesterday);
+        device1.mac_address = Some(mac1);
+        device1.last_seen = yesterday;
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device2.hostname = "iphone-specific.local".to_string();
+        device2.device_vendor = "Apple Inc.".to_string();
+        let mac2 = MacAddr6::new(0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE); // Different privacy MAC
+        let now = Utc::now();
+        device2.add_mac_entry(mac2, now);
+        device2.mac_address = Some(mac2);
+        device2.last_seen = now;
+
+        // MACs are 24+ hours apart - should NOT be a conflict (privacy rotation)
+        let has_conflict = DeviceInfo::has_conflicting_characteristics(&device1, &device2);
+        assert!(
+            !has_conflict,
+            "Should allow merge: different MACs seen 24+ hours apart (privacy rotation)"
+        );
+    }
+
+    #[test]
+    fn test_mac_conflict_detection_simultaneous_fresh_macs() {
+        // Test that two devices with fresh different MACs are detected as conflict
+        // Scenario: Two different devices on network with different MACs, both recently seen
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        let mac1 = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        let now = Utc::now();
+        device1.add_mac_entry(mac1, now);
+        device1.mac_address = Some(mac1);
+        device1.last_seen = now;
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+        device2.device_vendor = "Apple Inc.".to_string();
+        let mac2 = MacAddr6::new(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+        device2.add_mac_entry(mac2, now);
+        device2.mac_address = Some(mac2);
+        device2.last_seen = now;
+
+        // Both MACs fresh (< 1 hour) and different - should be a conflict
+        let has_conflict = DeviceInfo::has_conflicting_characteristics(&device1, &device2);
+        assert!(
+            has_conflict,
+            "Should detect conflict: different fresh MACs (< 1h old) suggest different devices"
+        );
+    }
+
+    #[test]
+    fn test_mac_conflict_detection_overlapping_macs() {
+        // Test that devices with overlapping MAC lists are allowed to merge
+        // Scenario: Same device seen multiple times, accumulated different MACs
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        let shared_mac = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        let mac1_only = MacAddr6::new(0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE);
+        device1.add_mac_entry(shared_mac, Utc::now());
+        device1.add_mac_entry(mac1_only, Utc::now());
+        device1.mac_address = Some(mac1_only);
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device2.device_vendor = "Apple Inc.".to_string();
+        let mac2_only = MacAddr6::new(0x02, 0x11, 0x22, 0x33, 0x44, 0x66);
+        device2.add_mac_entry(shared_mac, Utc::now()); // Same MAC!
+        device2.add_mac_entry(mac2_only, Utc::now());
+        device2.mac_address = Some(mac2_only);
+
+        // MAC overlap detected - should NOT be a conflict
+        let has_conflict = DeviceInfo::has_conflicting_characteristics(&device1, &device2);
+        assert!(
+            !has_conflict,
+            "Should allow merge: MAC overlap indicates same device with multiple MACs"
+        );
+    }
+
+    #[test]
+    fn test_mac_conflict_detection_with_safe_hostname() {
+        // Test that specific hostname bypasses MAC conflict check
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.hostname = "johns-specific-macbook.local".to_string();
+        device1.device_vendor = "Apple Inc.".to_string();
+        let mac1 = MacAddr6::new(0x11, 0x11, 0x11, 0x11, 0x11, 0x11);
+        device1.add_mac_entry(mac1, Utc::now());
+        device1.mac_address = Some(mac1);
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+        device2.hostname = "johns-specific-macbook.local".to_string();
+        device2.device_vendor = "Apple Inc.".to_string();
+        let mac2 = MacAddr6::new(0x22, 0x22, 0x22, 0x22, 0x22, 0x22); // Different MAC
+        device2.add_mac_entry(mac2, Utc::now());
+        device2.mac_address = Some(mac2);
+
+        // Specific hostname - should NOT be a conflict even with fresh different MACs
+        let has_conflict = DeviceInfo::has_conflicting_characteristics(&device1, &device2);
+        assert!(
+            !has_conflict,
+            "Should allow merge: specific hostname overrides MAC conflict"
         );
     }
 }
