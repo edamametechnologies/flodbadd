@@ -413,6 +413,3 @@ async fn test_ipv6_dns_performance() {
         ipv6_time.as_nanos() / iterations as u128
     );
 }
-
-
-

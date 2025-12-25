@@ -471,6 +471,3 @@ mod tests {
         record
     }
 }
-
-
-
