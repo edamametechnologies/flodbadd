@@ -266,7 +266,7 @@ impl DeviceInfo {
     }
 
     // Helper method to add IPv4 entry with timestamp (updates if exists)
-    fn add_ipv4_entry(&mut self, addr: Ipv4Addr, timestamp: DateTime<Utc>) {
+    pub(crate) fn add_ipv4_entry(&mut self, addr: Ipv4Addr, timestamp: DateTime<Utc>) {
         // Check if address already exists, update timestamp if it does
         if let Some(entry) = self.ip_addresses_v4.iter_mut().find(|e| e.address == addr) {
             if timestamp > entry.last_seen {
@@ -281,7 +281,7 @@ impl DeviceInfo {
     }
 
     // Helper method to add IPv6 entry with timestamp (updates if exists)
-    fn add_ipv6_entry(&mut self, addr: Ipv6Addr, timestamp: DateTime<Utc>) {
+    pub(crate) fn add_ipv6_entry(&mut self, addr: Ipv6Addr, timestamp: DateTime<Utc>) {
         // Check if address already exists, update timestamp if it does
         if let Some(entry) = self.ip_addresses_v6.iter_mut().find(|e| e.address == addr) {
             if timestamp > entry.last_seen {
@@ -296,7 +296,7 @@ impl DeviceInfo {
     }
 
     // Helper method to add mDNS service entry with timestamp (updates if exists)
-    fn add_mdns_entry(&mut self, service: String, timestamp: DateTime<Utc>) {
+    pub(crate) fn add_mdns_entry(&mut self, service: String, timestamp: DateTime<Utc>) {
         // Check if service already exists, update timestamp if it does
         if let Some(entry) = self.mdns_services.iter_mut().find(|e| e.service == service) {
             if timestamp > entry.last_seen {
@@ -369,6 +369,131 @@ impl DeviceInfo {
         self.ip_addresses_v6
             .sort_by(|a, b| b.last_seen.cmp(&a.last_seen)); // Most recent first
         self.ip_addresses_v6.truncate(MAX_IPV6_ADDRESSES);
+    }
+
+    /// Get the most recently seen IPv4 address (by entry timestamp)
+    pub fn get_most_recent_ipv4(&self) -> Option<(Ipv4Addr, DateTime<Utc>)> {
+        self.ip_addresses_v4
+            .iter()
+            .max_by_key(|e| e.last_seen)
+            .map(|e| (e.address, e.last_seen))
+    }
+
+    /// Get the most recently seen IPv6 address (by entry timestamp)
+    pub fn get_most_recent_ipv6(&self) -> Option<(Ipv6Addr, DateTime<Utc>)> {
+        self.ip_addresses_v6
+            .iter()
+            .max_by_key(|e| e.last_seen)
+            .map(|e| (e.address, e.last_seen))
+    }
+
+    /// Validate and sanitize timestamps from external sources (e.g., community sharing).
+    /// Returns true if the device was modified.
+    /// - Clamps future timestamps to now (clock skew protection)
+    /// - Replaces UNIX_EPOCH timestamps with now (placeholder detection)
+    /// Note: Old timestamps are valid - a device could have been first seen years ago.
+    pub fn validate_timestamps(&mut self) -> bool {
+        let now = Utc::now();
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+        // Small buffer to detect epoch-like timestamps (within 1 day of epoch)
+        let epoch_threshold = epoch + chrono::Duration::days(1);
+        let mut modified = false;
+
+        // Helper to clamp a timestamp - only clamps future or epoch timestamps
+        let clamp_timestamp = |ts: DateTime<Utc>| -> (DateTime<Utc>, bool) {
+            if ts > now {
+                // Future timestamp - clamp to now (clock skew)
+                (now, true)
+            } else if ts < epoch_threshold {
+                // Epoch or near-epoch - this is a placeholder, use now
+                (now, true)
+            } else {
+                // Valid historical timestamp - preserve it
+                (ts, false)
+            }
+        };
+
+        // Validate device-level timestamps
+        let (clamped_first, first_modified) = clamp_timestamp(self.first_seen);
+        if first_modified {
+            self.first_seen = clamped_first;
+            modified = true;
+        }
+
+        let (clamped_last, last_modified) = clamp_timestamp(self.last_seen);
+        if last_modified {
+            self.last_seen = clamped_last;
+            modified = true;
+        }
+
+        // Validate IPv4 entry timestamps
+        for entry in self.ip_addresses_v4.iter_mut() {
+            let (clamped, was_modified) = clamp_timestamp(entry.last_seen);
+            if was_modified {
+                entry.last_seen = clamped;
+                modified = true;
+            }
+        }
+
+        // Validate IPv6 entry timestamps
+        for entry in self.ip_addresses_v6.iter_mut() {
+            let (clamped, was_modified) = clamp_timestamp(entry.last_seen);
+            if was_modified {
+                entry.last_seen = clamped;
+                modified = true;
+            }
+        }
+
+        // Validate MAC entry timestamps
+        for entry in self.mac_addresses.iter_mut() {
+            let (clamped, was_modified) = clamp_timestamp(entry.last_seen);
+            if was_modified {
+                entry.last_seen = clamped;
+                modified = true;
+            }
+        }
+
+        // Validate mDNS service timestamps
+        for entry in self.mdns_services.iter_mut() {
+            let (clamped, was_modified) = clamp_timestamp(entry.last_seen);
+            if was_modified {
+                entry.last_seen = clamped;
+                modified = true;
+            }
+        }
+
+        modified
+    }
+
+    /// Update primary IP to be the most recently seen address.
+    /// IPv4 takes precedence over IPv6 when both have recent entries.
+    pub fn update_primary_ip_from_entries(&mut self) {
+        let most_recent_v4 = self.get_most_recent_ipv4();
+        let most_recent_v6 = self.get_most_recent_ipv6();
+
+        match (most_recent_v4, most_recent_v6) {
+            (Some((ipv4, ts_v4)), Some((_, ts_v6))) => {
+                // IPv4 takes precedence, but only if it's not significantly older
+                // If IPv6 is more than 24 hours newer, use IPv6
+                let ipv6_much_newer = (ts_v6 - ts_v4).num_hours() > 24;
+                if ipv6_much_newer {
+                    if let Some((ipv6, _)) = most_recent_v6 {
+                        self.ip_address = IpAddr::V6(ipv6);
+                    }
+                } else {
+                    self.ip_address = IpAddr::V4(ipv4);
+                }
+            }
+            (Some((ipv4, _)), None) => {
+                self.ip_address = IpAddr::V4(ipv4);
+            }
+            (None, Some((ipv6, _))) => {
+                self.ip_address = IpAddr::V6(ipv6);
+            }
+            (None, None) => {
+                // Keep current primary if no entries
+            }
+        }
     }
 
     // Truncate mDNS services to keep only the most recently seen (by timestamp)
@@ -478,7 +603,7 @@ impl DeviceInfo {
     }
 
     // Helper method to deduplicate IP addresses (called after adding new ones)
-    fn deduplicate_and_truncate_ips(&mut self) {
+    pub(crate) fn deduplicate_and_truncate_ips(&mut self) {
         // Deduplicate IPv4: keep entry with most recent timestamp
         let mut ipv4_deduped: Vec<IpAddressEntry<Ipv4Addr>> = Vec::new();
         let mut seen_v4 = HashMap::new();
@@ -691,36 +816,63 @@ impl DeviceInfo {
                             .any(|e| e.address == entry.address)
                     });
 
+                // IPv6 overlap - same IPv6 address means same device
+                // (IPv6 address collision is essentially impossible)
                 let ipv6_overlap = !devices[i].ip_addresses_v6.is_empty()
                     && !devices[j].ip_addresses_v6.is_empty()
-                    && devices[i].ip_addresses_v6.iter().any(|entry| {
+                    && devices[i].ip_addresses_v6.iter().any(|entry_i| {
                         devices[j]
                             .ip_addresses_v6
                             .iter()
-                            .any(|e| e.address == entry.address)
+                            .any(|entry_j| entry_i.address == entry_j.address)
                     });
 
                 let hostname_match = !devices[i].hostname.is_empty()
                     && !devices[j].hostname.is_empty()
                     && devices[i].hostname == devices[j].hostname;
 
+                // MAC address match - same MAC means same physical device
+                // (MAC collision is essentially impossible)
+                let mac_match = devices[i].get_mac_address().is_some()
+                    && devices[j].get_mac_address().is_some()
+                    && devices[i].get_mac_address() == devices[j].get_mac_address();
+
+                // MAC overlap in historical lists - indicates same device over time
+                let mac_overlap = devices[i].mac_addresses.iter().any(|e1| {
+                    devices[j]
+                        .mac_addresses
+                        .iter()
+                        .any(|e2| e1.address == e2.address)
+                });
+
                 let has_conflicts = Self::has_conflicting_characteristics(&devices[i], &devices[j]);
 
-                let is_duplicate = if primary_ip_match || ipv4_overlap || ipv6_overlap {
-                    if has_conflicts {
-                        warn!(
+                // IPv4 overlap alone is WEAK evidence - IPs are frequently reused by DHCP
+                // Require additional confirmation: MAC or hostname match
+                let ipv4_confirmed = ipv4_overlap && (mac_match || mac_overlap || hostname_match);
+
+                // Merge criteria:
+                // - Primary IP match: same endpoint in current context
+                // - IPv4 list overlap: only if confirmed by MAC or hostname (IPs are reused)
+                // - IPv6 overlap: strong evidence (collision essentially impossible)
+                // - MAC match: strong evidence (physical device identifier)
+                // - Hostname match: weak evidence, requires specific hostname
+                let is_duplicate =
+                    if primary_ip_match || ipv4_confirmed || ipv6_overlap || mac_match {
+                        if has_conflicts {
+                            warn!(
                             "Conflicting device characteristics - aborting merge of {:?} and {:?}",
                             devices[i], devices[j]
                         );
-                        false
+                            false
+                        } else {
+                            true
+                        }
+                    } else if hostname_match {
+                        Self::is_safe_hostname_merge(&devices[i], &devices[j])
                     } else {
-                        true
-                    }
-                } else if hostname_match {
-                    Self::is_safe_hostname_merge(&devices[i], &devices[j])
-                } else {
-                    false
-                };
+                        false
+                    };
 
                 if is_duplicate {
                     let duplicate = devices.remove(j);
@@ -764,13 +916,15 @@ impl DeviceInfo {
                             .any(|e| e.address == entry.address)
                     });
 
+                // IPv6 overlap - same IPv6 address means same device
+                // (IPv6 address collision is essentially impossible)
                 let ipv6_overlap = !new_device.ip_addresses_v6.is_empty()
                     && !device.ip_addresses_v6.is_empty()
-                    && new_device.ip_addresses_v6.iter().any(|entry| {
+                    && new_device.ip_addresses_v6.iter().any(|new_entry| {
                         device
                             .ip_addresses_v6
                             .iter()
-                            .any(|e| e.address == entry.address)
+                            .any(|existing_entry| new_entry.address == existing_entry.address)
                     });
 
                 // Hostname matching (for multi-interface devices)
@@ -778,20 +932,44 @@ impl DeviceInfo {
                     && !device.hostname.is_empty()
                     && device.hostname == new_device.hostname;
 
+                // MAC address match - same MAC means same physical device
+                // (MAC collision is essentially impossible)
+                let mac_match = device.get_mac_address().is_some()
+                    && new_device.get_mac_address().is_some()
+                    && device.get_mac_address() == new_device.get_mac_address();
+
+                // MAC overlap in historical lists - indicates same device over time
+                let mac_overlap = device.mac_addresses.iter().any(|e1| {
+                    new_device
+                        .mac_addresses
+                        .iter()
+                        .any(|e2| e1.address == e2.address)
+                });
+
                 // Check for potential problematic merges
                 let has_conflicting_characteristics =
                     Self::has_conflicting_characteristics(device, &new_device);
 
-                // Decide whether to merge
-                let should_merge = if primary_ip_match || ipv4_overlap || ipv6_overlap {
-                    // Strong IP evidence - merge unless there are major conflicts
-                    !has_conflicting_characteristics
-                } else if hostname_match {
-                    // Hostname match - be more careful
-                    Self::is_safe_hostname_merge(device, &new_device)
-                } else {
-                    false
-                };
+                // IPv4 overlap alone is WEAK evidence - IPs are frequently reused by DHCP
+                // Require additional confirmation: MAC or hostname match
+                let ipv4_confirmed = ipv4_overlap && (mac_match || mac_overlap || hostname_match);
+
+                // Decide whether to merge:
+                // - Primary IP match: same endpoint in current context
+                // - IPv4 list overlap: only if confirmed by MAC or hostname (IPs are reused)
+                // - IPv6 overlap: strong evidence (collision essentially impossible)
+                // - MAC match: strong evidence (physical device identifier)
+                // - Hostname match: weak evidence, requires specific hostname
+                let should_merge =
+                    if primary_ip_match || ipv4_confirmed || ipv6_overlap || mac_match {
+                        // Strong evidence - merge unless there are major conflicts
+                        !has_conflicting_characteristics
+                    } else if hostname_match {
+                        // Hostname match - be more careful
+                        Self::is_safe_hostname_merge(device, &new_device)
+                    } else {
+                        false
+                    };
 
                 if should_merge {
                     debug!(
@@ -1031,23 +1209,10 @@ impl DeviceInfo {
             device.add_ipv6_entry(entry.address, entry.last_seen);
         }
 
-        // IPv4 takes precedence over IPv6: always use the new_device.ip_address if it's IPv4
-        if let IpAddr::V4(_) = new_device.ip_address {
-            if new_device.last_seen > device.last_seen {
-                device.ip_address = new_device.ip_address;
-            }
-        // The new device is IPv6 and the device is IPv4, we keep the device's IPv4
-        } else if matches!(new_device.ip_address, IpAddr::V6(_))
-            && matches!(device.ip_address, IpAddr::V4(_))
-        {
-            // Keep IPv4, IPv6 addresses already merged above
-        } else {
-            // The new device is IPv6 and the device is IPv6
-            // We set the device's ip_address to the new IPv6 if it's fresher
-            if new_device.last_seen > device.last_seen {
-                device.ip_address = new_device.ip_address;
-            }
-        }
+        // Update primary IP based on the most recently seen entry timestamps
+        // IPv4 takes precedence over IPv6 (more stable), but we use entry timestamps
+        // to determine which specific address to use
+        device.update_primary_ip_from_entries();
 
         // Use the most recent non empty mac address
         if new_device.mac_address.is_some() {
@@ -2710,13 +2875,15 @@ mod tests {
 
     #[test]
     fn test_merge_vec_ip_overlap_without_conflicts() {
-        // Test that IP overlap without conflicts allows merging
+        // Test that IP overlap WITH hostname confirmation allows merging
+        // (IPv4 overlap alone is not enough - needs MAC or hostname confirmation)
         let mut devices = vec![{
             let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
             d.ip_addresses_v4 = vec![
                 ipv4_entry(Ipv4Addr::new(192, 168, 1, 100)),
                 ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
             ]; // Shared IP
+            d.hostname = "multi-interface-device.local".to_string(); // Hostname for confirmation
             d.device_vendor = "Apple Inc.".to_string();
             d.open_ports = vec![
                 PortInfo {
@@ -2743,6 +2910,7 @@ mod tests {
                 ipv4_entry(Ipv4Addr::new(192, 168, 1, 101)),
                 ipv4_entry(Ipv4Addr::new(10, 0, 0, 1)),
             ]; // Same shared IP
+            d.hostname = "multi-interface-device.local".to_string(); // Same hostname
             d.device_vendor = "Apple Inc.".to_string(); // Same vendor
             d.open_ports = vec![
                 PortInfo {
@@ -3795,6 +3963,733 @@ mod tests {
         assert!(
             !has_conflict,
             "Should allow merge: specific hostname overrides MAC conflict"
+        );
+    }
+
+    #[test]
+    fn test_update_primary_ip_from_entries() {
+        // Test that primary IP is selected based on entry timestamps
+        // Start with an empty device and manually set up entries
+        let mut device = DeviceInfo::new(None);
+
+        let old_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let new_time = Utc.with_ymd_and_hms(2023, 1, 2, 12, 0, 0).unwrap();
+
+        // Clear default entries and add controlled ones
+        device.ip_addresses_v4.clear();
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), old_time);
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 20), new_time);
+
+        // Update primary from entries
+        device.update_primary_ip_from_entries();
+
+        // Should select the most recent IPv4
+        assert_eq!(
+            device.get_ip_address(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            "Primary IP should be the most recently seen IPv4"
+        );
+    }
+
+    #[test]
+    fn test_update_primary_ip_ipv4_precedence() {
+        // Test that IPv4 takes precedence over IPv6
+        let mut device = DeviceInfo::new(None);
+
+        let same_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        // Clear default entries and add controlled ones
+        device.ip_addresses_v4.clear();
+        device.ip_addresses_v6.clear();
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), same_time);
+        device.add_ipv6_entry(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), same_time);
+
+        // Update primary from entries
+        device.update_primary_ip_from_entries();
+
+        // Should select IPv4 (takes precedence)
+        assert!(
+            matches!(device.get_ip_address(), IpAddr::V4(_)),
+            "IPv4 should take precedence over IPv6"
+        );
+    }
+
+    #[test]
+    fn test_update_primary_ip_ipv6_much_newer() {
+        // Test that IPv6 wins if it's significantly newer (> 24h)
+        let mut device = DeviceInfo::new(None);
+
+        let old_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let much_newer_time = Utc.with_ymd_and_hms(2023, 1, 3, 12, 0, 0).unwrap(); // 48 hours later
+
+        // Clear default entries and add controlled ones
+        device.ip_addresses_v4.clear();
+        device.ip_addresses_v6.clear();
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), old_time);
+        device.add_ipv6_entry(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            much_newer_time,
+        );
+
+        // Update primary from entries
+        device.update_primary_ip_from_entries();
+
+        // Should select IPv6 (much newer)
+        assert!(
+            matches!(device.get_ip_address(), IpAddr::V6(_)),
+            "IPv6 should win if significantly newer than IPv4"
+        );
+    }
+
+    #[test]
+    fn test_validate_timestamps_future() {
+        // Test that future timestamps are clamped to now
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let future_time = Utc::now() + chrono::Duration::hours(24);
+
+        device.first_seen = future_time;
+        device.last_seen = future_time;
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), future_time);
+
+        let modified = device.validate_timestamps();
+
+        assert!(modified, "Should have modified timestamps");
+        assert!(
+            device.first_seen <= Utc::now(),
+            "first_seen should be clamped to now"
+        );
+        assert!(
+            device.last_seen <= Utc::now(),
+            "last_seen should be clamped to now"
+        );
+        assert!(
+            device.ip_addresses_v4[0].last_seen <= Utc::now(),
+            "IPv4 entry timestamp should be clamped"
+        );
+    }
+
+    #[test]
+    fn test_validate_timestamps_epoch() {
+        // Test that epoch timestamps are treated as invalid
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+
+        device.first_seen = epoch;
+        device.last_seen = epoch;
+
+        let modified = device.validate_timestamps();
+
+        assert!(modified, "Should have modified timestamps");
+        assert!(
+            device.first_seen > epoch,
+            "first_seen should be updated from epoch"
+        );
+        assert!(
+            device.last_seen > epoch,
+            "last_seen should be updated from epoch"
+        );
+    }
+
+    #[test]
+    fn test_validate_timestamps_normal() {
+        // Test that normal timestamps are not modified (including old historical ones)
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Use an old timestamp from 2 years ago - this should be preserved
+        let old_time = Utc.with_ymd_and_hms(2022, 1, 1, 12, 0, 0).unwrap();
+
+        device.first_seen = old_time;
+        device.last_seen = old_time;
+        device.ip_addresses_v4.clear();
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), old_time);
+
+        let modified = device.validate_timestamps();
+
+        assert!(
+            !modified,
+            "Should not have modified valid historical timestamps"
+        );
+        assert_eq!(device.first_seen, old_time);
+        assert_eq!(device.last_seen, old_time);
+        assert_eq!(device.ip_addresses_v4[0].last_seen, old_time);
+    }
+
+    #[test]
+    fn test_ipv6_overlap_triggers_merge() {
+        // Same IPv6 = same device (IPv6 collision is essentially impossible)
+        let old_time = Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap();
+
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        device1.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xABCD),
+            last_seen: old_time,
+        });
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device2.device_vendor = "Apple Inc.".to_string(); // Same vendor
+        device2.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xABCD),
+            last_seen: old_time,
+        });
+
+        // Should merge - same IPv6 means same device, regardless of timestamp age
+        let mut devices = vec![device1];
+        let new_devices = vec![device2];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "Same IPv6 = same device, should merge regardless of timestamp age"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_overlap_blocked_by_vendor_conflict() {
+        // Same IPv6 but different vendors - vendor conflict blocks merge
+        let time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        device1.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xABCD),
+            last_seen: time,
+        });
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 101))));
+        device2.device_vendor = "Samsung".to_string(); // Different vendor = conflict
+        device2.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xABCD),
+            last_seen: time,
+        });
+
+        // Should NOT merge - vendor conflict blocks the merge
+        let mut devices = vec![device1];
+        let new_devices = vec![device2];
+
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            2,
+            "Vendor conflict should block merge even with IPv6 overlap"
+        );
+    }
+
+    #[test]
+    fn test_merge_updates_primary_from_entries() {
+        // Test that merge updates primary IP based on entry timestamps
+        let old_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let new_time = Utc.with_ymd_and_hms(2023, 1, 2, 12, 0, 0).unwrap();
+
+        // Create device1 with controlled timestamps
+        let mut device1 = DeviceInfo::new(None);
+        device1.ip_addresses_v4.clear();
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), old_time);
+        device1.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        device1.last_seen = old_time;
+        device1.is_local = true;
+
+        // Create device2 with matching IP (for merge) but newer additional IP
+        let mut device2 = DeviceInfo::new(None);
+        device2.ip_addresses_v4.clear();
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), old_time);
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 20), new_time);
+        device2.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        device2.last_seen = new_time;
+        device2.is_local = true;
+
+        DeviceInfo::merge(&mut device1, &device2);
+
+        // Primary should be the most recently seen IPv4
+        assert_eq!(
+            device1.get_ip_address(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            "After merge, primary should be the most recent IPv4 entry"
+        );
+    }
+
+    #[test]
+    fn test_network_change_same_mac_different_ipv4() {
+        // Scenario: Device moves to a different network (gets new DHCP lease)
+        // Same MAC, different IPv4 - should merge because MAC = same physical device
+        let t1 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2023, 1, 2, 12, 0, 0).unwrap();
+
+        let mac = MacAddr6::new(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+
+        let mut device1 = DeviceInfo::new(None);
+        device1.ip_addresses_v4.clear();
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), t1);
+        device1.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        device1.add_mac_entry(mac, t1);
+        device1.mac_address = Some(mac);
+        device1.last_seen = t1;
+        device1.is_local = true;
+
+        // Same device on new network (192.168.2.x instead of 192.168.1.x)
+        let mut device2 = DeviceInfo::new(None);
+        device2.ip_addresses_v4.clear();
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 2, 50), t2);
+        device2.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 2, 50));
+        device2.add_mac_entry(mac, t2);
+        device2.mac_address = Some(mac);
+        device2.last_seen = t2;
+        device2.is_local = true;
+
+        // Put both devices in same list and use dedup_vec (which merges by MAC)
+        let mut devices = vec![device1, device2];
+        DeviceInfo::dedup_vec(&mut devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "Should merge devices with same MAC (MAC = same physical device)"
+        );
+        assert_eq!(
+            devices[0].get_ip_address(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 2, 50)),
+            "Primary IP should be the newer one after network change"
+        );
+        assert_eq!(
+            devices[0].ip_addresses_v4.len(),
+            2,
+            "Both IPv4 addresses should be preserved in history"
+        );
+    }
+
+    #[test]
+    fn test_mac_match_merges_regardless_of_timestamp_age() {
+        // Same MAC = same physical device, regardless of how old the timestamps are
+        // MAC collision is essentially impossible
+        let old_time = Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap(); // 4+ years ago
+
+        let mac = MacAddr6::new(0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33);
+
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        device1.add_mac_entry(mac, old_time);
+        device1.mac_address = Some(mac);
+        device1.last_seen = old_time;
+
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        device2.device_vendor = "Apple Inc.".to_string(); // Same vendor
+        device2.add_mac_entry(mac, old_time);
+        device2.mac_address = Some(mac);
+        device2.last_seen = old_time;
+
+        // Should merge - same MAC means same device, period
+        let mut devices = vec![device1, device2];
+        DeviceInfo::dedup_vec(&mut devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "Same MAC = same device, should merge regardless of timestamp age"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_only_device_primary_selection() {
+        // Test device with only IPv6 addresses (no IPv4)
+        let mut device = DeviceInfo::new(None);
+
+        let t1 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2023, 1, 2, 12, 0, 0).unwrap();
+
+        device.ip_addresses_v4.clear();
+        device.ip_addresses_v6.clear();
+
+        // Add two IPv6 addresses
+        device.add_ipv6_entry(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), t1);
+        device.add_ipv6_entry(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2), t2);
+
+        device.update_primary_ip_from_entries();
+
+        // Should select the most recent IPv6
+        assert_eq!(
+            device.get_ip_address(),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            "Primary should be the most recent IPv6 when no IPv4"
+        );
+    }
+
+    #[test]
+    fn test_update_primary_ip_no_entries() {
+        // Test update_primary_ip_from_entries when there are no entries
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        // Clear all entries
+        device.ip_addresses_v4.clear();
+        device.ip_addresses_v6.clear();
+
+        let original_ip = device.get_ip_address();
+        device.update_primary_ip_from_entries();
+
+        // Should keep the current primary (no change)
+        assert_eq!(
+            device.get_ip_address(),
+            original_ip,
+            "Should keep current primary when no entries"
+        );
+    }
+
+    #[test]
+    fn test_same_timestamp_entries() {
+        // Test handling of entries with identical timestamps
+        let same_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        let mut device = DeviceInfo::new(None);
+        device.ip_addresses_v4.clear();
+
+        // Add multiple entries with same timestamp
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), same_time);
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 20), same_time);
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 30), same_time);
+
+        // Should have all entries
+        assert_eq!(
+            device.ip_addresses_v4.len(),
+            3,
+            "All entries with same timestamp should be preserved"
+        );
+
+        device.update_primary_ip_from_entries();
+
+        // Should select one consistently (max_by_key is deterministic)
+        assert!(
+            matches!(device.get_ip_address(), IpAddr::V4(_)),
+            "Should select one of the IPv4 addresses"
+        );
+    }
+
+    #[test]
+    fn test_local_vs_community_data_priority() {
+        // Fresh local data should take priority over stale community data
+        let old_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let new_time = Utc.with_ymd_and_hms(2023, 1, 2, 12, 0, 0).unwrap();
+
+        // Local device with fresh data
+        let mut local_device = DeviceInfo::new(None);
+        local_device.ip_addresses_v4.clear();
+        local_device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), new_time);
+        local_device.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        local_device.hostname = "my-device.local".to_string();
+        local_device.last_seen = new_time;
+        local_device.is_local = true;
+
+        // Community device with older data (same IP)
+        let mut community_device = DeviceInfo::new(None);
+        community_device.ip_addresses_v4.clear();
+        community_device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), old_time);
+        community_device.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        community_device.hostname = "old-name.local".to_string();
+        community_device.last_seen = old_time;
+        community_device.is_local = false;
+
+        DeviceInfo::merge(&mut local_device, &community_device);
+
+        // Local device's last_seen should not be downgraded
+        assert_eq!(
+            local_device.last_seen, new_time,
+            "Local last_seen should not be overwritten by older community data"
+        );
+
+        // is_local should still be true
+        assert!(
+            local_device.is_local,
+            "is_local should remain true after merge with non-local"
+        );
+    }
+
+    #[test]
+    fn test_merge_ipv4_list_accumulation() {
+        // Test that IPv4 list doesn't grow unboundedly through merges
+        // Even though IPv4 is stable, we merge data from multiple sources
+        let base_time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        let mut device = DeviceInfo::new(None);
+        device.ip_addresses_v4.clear();
+        device.is_local = true;
+
+        // Simulate multiple merges adding different IPv4 addresses
+        for i in 0..15 {
+            let mut new_device = DeviceInfo::new(None);
+            new_device.ip_addresses_v4.clear();
+            let time = base_time + chrono::Duration::hours(i as i64);
+            new_device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, i as u8 + 1), time);
+            new_device.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8 + 1));
+            new_device.last_seen = time;
+            new_device.is_local = true;
+
+            DeviceInfo::merge(&mut device, &new_device);
+        }
+
+        // IPv4 list should have some entries but potentially bounded
+        // (Currently no explicit limit on IPv4, but test documents behavior)
+        assert!(
+            device.ip_addresses_v4.len() <= 15,
+            "IPv4 list should not exceed number of unique IPs added"
+        );
+
+        // Primary should be the most recent
+        assert_eq!(
+            device.get_ip_address(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 15)),
+            "Primary should be the most recently seen IPv4"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_overlap_alone_does_not_merge() {
+        // IPv4 addresses are frequently reused by DHCP
+        // IPv4 overlap alone (without MAC or hostname confirmation) should NOT trigger merge
+        let time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        // Device 1: had IP 192.168.1.100 in the past
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        device1.hostname = "device-a.local".to_string();
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time); // Historical IP
+        device1.last_seen = time;
+
+        // Device 2: also had IP 192.168.1.100 (DHCP reused it)
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        device2.hostname = "device-b.local".to_string(); // Different hostname
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time); // Same historical IP
+        device2.last_seen = time;
+
+        // Should NOT merge - IPv4 overlap but no MAC or hostname confirmation
+        let mut devices = vec![device1];
+        let new_devices = vec![device2];
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            2,
+            "IPv4 overlap alone should NOT trigger merge (IPs are reused by DHCP)"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_overlap_with_mac_confirmation_merges() {
+        // IPv4 overlap WITH MAC confirmation should merge
+        let time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let mac = MacAddr6::new(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x10);
+
+        // Device 1: had IP 192.168.1.100 in the past
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        device1.hostname = "device.local".to_string();
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time);
+        device1.add_mac_entry(mac, time);
+        device1.mac_address = Some(mac);
+        device1.last_seen = time;
+
+        // Device 2: same MAC (confirms same device)
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        device2.hostname = "device.local".to_string();
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time);
+        device2.add_mac_entry(mac, time);
+        device2.mac_address = Some(mac);
+        device2.last_seen = time;
+
+        // Should merge - IPv4 overlap confirmed by MAC
+        let mut devices = vec![device1];
+        let new_devices = vec![device2];
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "IPv4 overlap with MAC confirmation should merge"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_overlap_with_hostname_confirmation_merges() {
+        // IPv4 overlap WITH hostname confirmation should merge
+        let time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        // Device 1: had IP 192.168.1.100 in the past
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        device1.hostname = "johns-macbook-pro.local".to_string(); // Specific hostname
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time);
+        device1.last_seen = time;
+
+        // Device 2: same hostname (confirms same device)
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        device2.hostname = "johns-macbook-pro.local".to_string(); // Same hostname
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 100), time);
+        device2.last_seen = time;
+
+        // Should merge - IPv4 overlap confirmed by hostname
+        let mut devices = vec![device1];
+        let new_devices = vec![device2];
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+
+        assert_eq!(
+            devices.len(),
+            1,
+            "IPv4 overlap with hostname confirmation should merge"
+        );
+    }
+
+    #[test]
+    fn test_ipv6_overlap_blocked_by_vendor_conflict_dedup() {
+        // Two devices with same IPv6 but different vendors
+        // Vendor conflict should block the merge
+        let time = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+
+        // Device 1: Apple device
+        let mut device1 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        device1.device_vendor = "Apple Inc.".to_string();
+        device1.hostname = "johns-macbook.local".to_string();
+        let mac1 = MacAddr6::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA);
+        device1.add_mac_entry(mac1, time);
+        device1.mac_address = Some(mac1);
+        device1.last_seen = time;
+        device1.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0xfe80, 0, 0, 0, 0x1234, 0x5678, 0x9abc, 0xdef0),
+            last_seen: time,
+        });
+
+        // Device 2: Samsung device - different vendor
+        let mut device2 = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))));
+        device2.device_vendor = "Samsung".to_string(); // Different vendor = conflict
+        device2.hostname = "galaxy-phone.local".to_string();
+        let mac2 = MacAddr6::new(0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB);
+        device2.add_mac_entry(mac2, time);
+        device2.mac_address = Some(mac2);
+        device2.last_seen = time;
+        // Same IPv6
+        device2.ip_addresses_v6.push(IpAddressEntry {
+            address: Ipv6Addr::new(0xfe80, 0, 0, 0, 0x1234, 0x5678, 0x9abc, 0xdef0),
+            last_seen: time,
+        });
+
+        let mut devices = vec![device1.clone(), device2.clone()];
+
+        // Should NOT merge - vendor conflict blocks the merge
+        DeviceInfo::dedup_vec(&mut devices);
+
+        assert_eq!(
+            devices.len(),
+            2,
+            "Vendor conflict should block merge even with IPv6 overlap"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_all_entry_timestamps() {
+        // Comprehensive test: merge should preserve individual timestamps for all entry types
+        let t1 = Utc.with_ymd_and_hms(2023, 1, 1, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2023, 1, 1, 11, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        let t4 = Utc.with_ymd_and_hms(2023, 1, 1, 13, 0, 0).unwrap();
+
+        let mut device1 = DeviceInfo::new(None);
+        device1.ip_addresses_v4.clear();
+        device1.ip_addresses_v6.clear();
+        device1.mac_addresses.clear();
+        device1.mdns_services.clear();
+        device1.is_local = true;
+
+        // Device 1: older entries
+        device1.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), t1);
+        device1.add_ipv6_entry(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), t1);
+        device1.add_mac_entry(MacAddr6::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA), t1);
+        device1.add_mdns_entry("_http._tcp.local".to_string(), t1);
+        device1.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        device1.last_seen = t2;
+
+        let mut device2 = DeviceInfo::new(None);
+        device2.ip_addresses_v4.clear();
+        device2.ip_addresses_v6.clear();
+        device2.mac_addresses.clear();
+        device2.mdns_services.clear();
+        device2.is_local = true;
+
+        // Device 2: newer entries for some, same for others
+        device2.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), t3); // Same IP, newer timestamp
+        device2.add_ipv6_entry(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2), t3); // New IPv6
+        device2.add_mac_entry(MacAddr6::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA), t3); // Same MAC, newer
+        device2.add_mdns_entry("_ssh._tcp.local".to_string(), t4); // New service
+        device2.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        device2.last_seen = t4;
+
+        DeviceInfo::merge(&mut device1, &device2);
+
+        // Check IPv4: same IP should have updated timestamp
+        let ipv4_entry = device1
+            .ip_addresses_v4
+            .iter()
+            .find(|e| e.address == Ipv4Addr::new(192, 168, 1, 10));
+        assert!(ipv4_entry.is_some());
+        assert_eq!(
+            ipv4_entry.unwrap().last_seen,
+            t3,
+            "IPv4 timestamp should be updated to newer"
+        );
+
+        // Check IPv6: should have both entries
+        assert_eq!(
+            device1.ip_addresses_v6.len(),
+            2,
+            "Should have both IPv6 entries"
+        );
+
+        // Check MAC: should have updated timestamp
+        let mac_entry = device1
+            .mac_addresses
+            .iter()
+            .find(|e| e.address == MacAddr6::new(0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA));
+        assert!(mac_entry.is_some());
+        assert_eq!(
+            mac_entry.unwrap().last_seen,
+            t3,
+            "MAC timestamp should be updated to newer"
+        );
+
+        // Check mDNS: should have both services
+        assert_eq!(
+            device1.mdns_services.len(),
+            2,
+            "Should have both mDNS services"
+        );
+    }
+
+    #[test]
+    fn test_community_timestamp_validation_on_merge() {
+        // Test that validate_timestamps is effective before merge
+        let now = Utc::now();
+        let future_time = now + chrono::Duration::hours(24);
+
+        let mut local_device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        local_device.last_seen = now;
+        local_device.is_local = true;
+
+        // Malicious/broken community device with future timestamps
+        let mut community_device = DeviceInfo::new(None);
+        community_device.ip_addresses_v4.clear();
+        community_device.add_ipv4_entry(Ipv4Addr::new(192, 168, 1, 10), future_time);
+        community_device.ip_address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        community_device.last_seen = future_time;
+        community_device.first_seen = future_time;
+        community_device.is_local = false;
+
+        // Validate before merge (this is what community_lan.rs does)
+        community_device.validate_timestamps();
+
+        // Now merge
+        DeviceInfo::merge(&mut local_device, &community_device);
+
+        // Local device should not have future timestamps
+        assert!(
+            local_device.last_seen <= now + chrono::Duration::seconds(1),
+            "last_seen should not be in the future after merge"
         );
     }
 }

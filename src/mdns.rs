@@ -1,10 +1,11 @@
+use crate::device_info::{IpAddressEntry, MacAddressEntry, MdnsServiceEntry};
 use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use macaddr::MacAddr6;
 use regex::Regex;
 use sorted_vec::SortedVec;
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::IpAddr, sync::Arc};
 use tokio::sync::Mutex;
@@ -23,10 +24,12 @@ lazy_static! {
 #[derive(Debug, Clone)]
 #[allow(non_camel_case_types)]
 pub struct mDNSInfo {
-    pub ip_addr: Option<IpAddr>,
-    pub ipv6_addr: Vec<IpAddr>,
-    pub mac_address: MacAddr6,
-    pub services: SortedVec<String>,
+    // Timestamped entries for proper granularity
+    pub ipv4_addresses: Vec<IpAddressEntry<Ipv4Addr>>,
+    pub ipv6_addresses: Vec<IpAddressEntry<Ipv6Addr>>,
+    pub mac_addresses: Vec<MacAddressEntry>,
+    pub services: Vec<MdnsServiceEntry>,
+    // Non-timestamped metadata
     pub hostname: String,
     pub instances: SortedVec<String>,
     pub first_seen: DateTime<Utc>,
@@ -59,9 +62,30 @@ pub async fn mdns_flush() {
 pub async fn mdns_get_by_ip(ip: &IpAddr) -> Option<mDNSInfo> {
     let locked_devices = DEVICES.lock().await;
     locked_devices.iter().find_map(|(_hostname, mdns_info)| {
-        if let Some(ip_addr) = &mdns_info.ip_addr {
-            if ip_addr == ip {
-                trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
+        let found = match ip {
+            IpAddr::V4(ipv4) => mdns_info.ipv4_addresses.iter().any(|e| e.address == *ipv4),
+            IpAddr::V6(ipv6) => mdns_info.ipv6_addresses.iter().any(|e| e.address == *ipv6),
+        };
+
+        if found {
+            trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
+            Some(mdns_info.clone())
+        } else {
+            None
+        }
+    })
+}
+
+pub async fn mdns_get_by_ipv6(ipv6: &IpAddr) -> Option<mDNSInfo> {
+    let locked_devices = DEVICES.lock().await;
+    locked_devices.iter().find_map(|(_hostname, mdns_info)| {
+        if let IpAddr::V6(ipv6_addr) = ipv6 {
+            if mdns_info
+                .ipv6_addresses
+                .iter()
+                .any(|e| e.address == *ipv6_addr)
+            {
+                trace!("Found mDNS entry for {}: {:?}", ipv6, mdns_info);
                 Some(mdns_info.clone())
             } else {
                 None
@@ -72,22 +96,15 @@ pub async fn mdns_get_by_ip(ip: &IpAddr) -> Option<mDNSInfo> {
     })
 }
 
-pub async fn mdns_get_by_ipv6(ipv6: &IpAddr) -> Option<mDNSInfo> {
-    let locked_devices = DEVICES.lock().await;
-    locked_devices.iter().find_map(|(_hostname, mdns_info)| {
-        if mdns_info.ipv6_addr.contains(ipv6) {
-            trace!("Found mDNS entry for {}: {:?}", ipv6, mdns_info);
-            Some(mdns_info.clone())
-        } else {
-            None
-        }
-    })
-}
-
 pub async fn mdns_get_hostname_by_ip(ip: &IpAddr) -> Option<String> {
     let locked_devices = DEVICES.lock().await;
     locked_devices.iter().find_map(|(_hostname, mdns_info)| {
-        if mdns_info.ip_addr == Some(*ip) {
+        let found = match ip {
+            IpAddr::V4(ipv4) => mdns_info.ipv4_addresses.iter().any(|e| e.address == *ipv4),
+            IpAddr::V6(ipv6) => mdns_info.ipv6_addresses.iter().any(|e| e.address == *ipv6),
+        };
+
+        if found {
             trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
             if !mdns_info.hostname.is_empty() {
                 Some(mdns_info.hostname.clone())
@@ -171,46 +188,83 @@ async fn process_host(host: Host, service_name: String) {
             );
             // Fill in the info for this host
             let mut locked_devices = DEVICES.lock().await;
+            let now = Utc::now();
             let mdns_info = locked_devices.entry(hostname.clone()).or_insert(mDNSInfo {
-                ip_addr: None,
-                ipv6_addr: Vec::new(),
-                mac_address: MacAddr6::nil(),
-                services: SortedVec::new(),
+                ipv4_addresses: Vec::new(),
+                ipv6_addresses: Vec::new(),
+                mac_addresses: Vec::new(),
+                services: Vec::new(),
                 hostname: hostname.clone(),
                 instances: SortedVec::new(),
-                // Initialize the first seen to now
-                first_seen: Utc::now(),
-                // Initialize the last seen to UNIX_EPOCH (will be updated later)
-                last_seen: DateTime::from_timestamp(0, 0).unwrap(),
+                first_seen: now,
+                last_seen: now,
             });
 
             // Update the last detected time
-            mdns_info.last_seen = Utc::now();
+            mdns_info.last_seen = now;
 
-            // Process the ip addresses
+            // Process IP addresses with individual timestamps
             for ip in ip_addresses {
-                // Get the IPv4 address
-                if ip.is_ipv4() {
-                    // Keep only one IPv4 address
-                    mdns_info.ip_addr = Some(ip);
-                }
-                // Get the IPv6 addresses
-                if ip.is_ipv6() && !mdns_info.ipv6_addr.contains(&ip) {
-                    mdns_info.ipv6_addr.push(ip);
-                    // Convert the IPv6 address to a MAC address
-                    if mdns_info.mac_address.is_nil() {
-                        if let Some(mac) = v6_to_mac(&ip.to_string()) {
-                            info!("Found MAC address {} for IPv6 address {}", mac, ip);
-                            mdns_info.mac_address = mac.parse().unwrap_or(MacAddr6::nil());
-                            // Don't push in instances to keep them clean of PII
+                match ip {
+                    IpAddr::V4(ipv4) => {
+                        // Add or update IPv4 with current timestamp
+                        if let Some(entry) = mdns_info
+                            .ipv4_addresses
+                            .iter_mut()
+                            .find(|e| e.address == ipv4)
+                        {
+                            entry.last_seen = now;
+                        } else {
+                            mdns_info.ipv4_addresses.push(IpAddressEntry {
+                                address: ipv4,
+                                last_seen: now,
+                            });
+                        }
+                    }
+                    IpAddr::V6(ipv6) => {
+                        // Add or update IPv6 with current timestamp
+                        if let Some(entry) = mdns_info
+                            .ipv6_addresses
+                            .iter_mut()
+                            .find(|e| e.address == ipv6)
+                        {
+                            entry.last_seen = now;
+                        } else {
+                            mdns_info.ipv6_addresses.push(IpAddressEntry {
+                                address: ipv6,
+                                last_seen: now,
+                            });
+
+                            // Try to extract MAC from link-local IPv6
+                            if mdns_info.mac_addresses.is_empty() {
+                                if let Some(mac_str) = v6_to_mac(&ip.to_string()) {
+                                    if let Ok(mac) = mac_str.parse::<MacAddr6>() {
+                                        info!("Found MAC {} from IPv6 {}", mac, ip);
+                                        mdns_info.mac_addresses.push(MacAddressEntry {
+                                            address: mac,
+                                            last_seen: now,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-            // Process the service and instance names
-            if !mdns_info.services.contains(&service_name) {
+
+            // Process services with individual timestamps
+            if let Some(entry) = mdns_info
+                .services
+                .iter_mut()
+                .find(|e| e.service == service_name)
+            {
+                entry.last_seen = now;
+            } else {
                 debug!("Found service {} for host {}", service_name, hostname);
-                mdns_info.services.push(service_name.clone());
+                mdns_info.services.push(MdnsServiceEntry {
+                    service: service_name.clone(),
+                    last_seen: now,
+                });
             }
 
             // Filter out the instances limited to the host name
@@ -219,24 +273,24 @@ async fn process_host(host: Host, service_name: String) {
                 mdns_info.instances.push(host.name.clone());
             }
 
-            // Check if the instance name is containing a MAC address using a regex
-            match extract_mac_address(&instance) {
-                Some(mac_address) => {
-                    info!(
-                        "Extracted MAC Address {} from instance {}",
-                        mac_address, instance
-                    );
-                    let mac_address = mac_address.parse().unwrap_or(MacAddr6::nil());
-                    if mdns_info.mac_address.is_nil() {
-                        mdns_info.mac_address = mac_address;
-                    } else if mdns_info.mac_address != mac_address {
-                        warn!("MAC Address {} from instance {} is different from the one already found {}, using the one from instance", mac_address, instance, mdns_info.mac_address);
-                        mdns_info.mac_address = mac_address;
-                        // Don't push in instances to keep them clean of PII
+            // Check if the instance name contains a MAC address
+            if let Some(mac_str) = extract_mac_address(&instance) {
+                if let Ok(mac) = mac_str.parse::<MacAddr6>() {
+                    info!("Extracted MAC {} from instance {}", mac, instance);
+
+                    // Add or update MAC with current timestamp
+                    if let Some(entry) = mdns_info
+                        .mac_addresses
+                        .iter_mut()
+                        .find(|e| e.address == mac)
+                    {
+                        entry.last_seen = now;
+                    } else {
+                        mdns_info.mac_addresses.push(MacAddressEntry {
+                            address: mac,
+                            last_seen: now,
+                        });
                     }
-                }
-                None => {
-                    trace!("No MAC Address found in the service");
                 }
             }
         }
