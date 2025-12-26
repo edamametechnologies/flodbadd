@@ -273,9 +273,14 @@ lazy_static! {
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             // Filter local ranges for default/embedded blacklists
             Ok(Blacklists::new_from_json(blacklist_info_json, true))
-        })
-        .expect("Failed to initialize CloudModel");
-        model
+        });
+        match model {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("FATAL: Failed to initialize CloudModel for blacklists: {:?}", e);
+                panic!("Failed to initialize CloudModel for blacklists: {:?}", e);
+            }
+        }
     };
 
     // Cache: IP -> Vec<matching list names>

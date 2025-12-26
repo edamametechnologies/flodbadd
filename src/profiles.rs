@@ -88,9 +88,14 @@ lazy_static! {
             let profiles_list: DeviceTypeListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(DeviceTypeList::new_from_json(profiles_list))
-        })
-        .expect("Failed to initialize CloudModel");
-        model
+        });
+        match model {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("FATAL: Failed to initialize CloudModel for profiles: {:?}", e);
+                panic!("Failed to initialize CloudModel for profiles: {:?}", e);
+            }
+        }
     };
 }
 

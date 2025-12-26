@@ -83,9 +83,14 @@ lazy_static! {
             let vuln_info_json: VulnerabilityVendorInfoListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(VulnerabilityInfoList::new_from_json(&vuln_info_json))
-        })
-        .expect("Failed to initialize CloudModel");
-        model
+        });
+        match model {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("FATAL: Failed to initialize CloudModel for vendor vulns: {:?}", e);
+                panic!("Failed to initialize CloudModel for vendor vulns: {:?}", e);
+            }
+        }
     };
 
     // Cache for vendor list (we only need one since it's cleared on update)
