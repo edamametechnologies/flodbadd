@@ -92,7 +92,10 @@ lazy_static! {
         match model {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("FATAL: Failed to initialize CloudModel for profiles: {:?}", e);
+                eprintln!(
+                    "FATAL: Failed to initialize CloudModel for profiles: {:?}",
+                    e
+                );
                 panic!("Failed to initialize CloudModel for profiles: {:?}", e);
             }
         }
