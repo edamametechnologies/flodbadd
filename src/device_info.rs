@@ -3249,8 +3249,11 @@ mod tests {
     fn test_ipv6_truncation_keeps_most_recent() {
         // Test that IPv6 addresses are truncated to keep only the last 10 most recently added
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let base_time = Utc::now();
 
         // Add 15 IPv6 addresses (should keep only last 10)
+        // Use explicit timestamps to ensure deterministic ordering
+        // (on fast machines, Utc::now() can return identical timestamps for all entries)
         let mut old_addresses = Vec::new();
         for i in 0..5 {
             old_addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
@@ -3261,10 +3264,12 @@ mod tests {
             new_addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
         }
 
-        // Add old addresses first
-        device.add_ip_addresses(vec![], old_addresses.clone());
-        // Add new addresses (these should be kept)
-        device.add_ip_addresses(vec![], new_addresses.clone());
+        // Add old addresses first with earlier timestamp
+        let old_timestamp = base_time;
+        device.add_ip_addresses_with_timestamp(vec![], old_addresses.clone(), old_timestamp);
+        // Add new addresses with later timestamp (these should be kept)
+        let new_timestamp = base_time + chrono::Duration::seconds(10);
+        device.add_ip_addresses_with_timestamp(vec![], new_addresses.clone(), new_timestamp);
 
         // Should have exactly 10 addresses
         assert_eq!(
@@ -3296,16 +3301,25 @@ mod tests {
     fn test_mdns_truncation_keeps_most_recent() {
         // Test that mDNS services are truncated to keep only the last 20 most recently added
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let base_time = Utc::now();
 
         // Add 25 mDNS services (should keep only last 20)
+        // Use explicit timestamps to ensure deterministic ordering
+        // (on fast machines, Utc::now() can return identical timestamps for all entries)
         let mut old_services = Vec::new();
         for i in 0..5 {
-            old_services.push(mdns_entry(&format!("_service{}.local", i)));
+            old_services.push(MdnsServiceEntry {
+                service: format!("_service{}.local", i),
+                last_seen: base_time + chrono::Duration::seconds(i as i64),
+            });
         }
 
         let mut new_services = Vec::new();
         for i in 5..25 {
-            new_services.push(mdns_entry(&format!("_service{}.local", i)));
+            new_services.push(MdnsServiceEntry {
+                service: format!("_service{}.local", i),
+                last_seen: base_time + chrono::Duration::seconds(i as i64),
+            });
         }
 
         // Add old services first
@@ -3461,15 +3475,17 @@ mod tests {
     fn test_ipv6_truncation_before_add() {
         // Test that truncation happens before adding new items
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let base_time = Utc::now();
 
-        // Fill up to 10 addresses
+        // Fill up to 10 addresses with earlier timestamp
+        // (on fast machines, Utc::now() can return identical timestamps for all entries)
         let mut addresses = Vec::new();
         for i in 0..10 {
             addresses.push(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
         }
-        device.add_ip_addresses(vec![], addresses);
+        device.add_ip_addresses_with_timestamp(vec![], addresses, base_time);
 
-        // Now add 5 more addresses
+        // Now add 5 more addresses with later timestamp
         let new_addresses = vec![
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 10),
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 11),
@@ -3477,7 +3493,8 @@ mod tests {
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 13),
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 14),
         ];
-        device.add_ip_addresses(vec![], new_addresses.clone());
+        let new_timestamp = base_time + chrono::Duration::seconds(10);
+        device.add_ip_addresses_with_timestamp(vec![], new_addresses.clone(), new_timestamp);
 
         // Should still have exactly 10 addresses
         assert_eq!(
@@ -3500,17 +3517,23 @@ mod tests {
     fn test_mdns_truncation_before_add() {
         // Test that truncation happens before adding new items
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let base_time = Utc::now();
 
-        // Fill up to 20 services
+        // Fill up to 20 services with explicit timestamps
+        // (on fast machines, Utc::now() can return identical timestamps for all entries)
         for i in 0..20 {
-            device
-                .mdns_services
-                .push(mdns_entry(&format!("_service{}.local", i)));
+            device.mdns_services.push(MdnsServiceEntry {
+                service: format!("_service{}.local", i),
+                last_seen: base_time + chrono::Duration::seconds(i as i64),
+            });
         }
 
-        // Now add 5 more services
+        // Now add 5 more services with later timestamps
         let new_services: Vec<MdnsServiceEntry> = (20..25)
-            .map(|i| mdns_entry(&format!("_service{}.local", i)))
+            .map(|i| MdnsServiceEntry {
+                service: format!("_service{}.local", i),
+                last_seen: base_time + chrono::Duration::seconds(i as i64),
+            })
             .collect();
 
         // Add new services (truncation will happen automatically)
@@ -3625,8 +3648,11 @@ mod tests {
     fn test_mac_truncation_keeps_most_recent() {
         // Test that MAC addresses are truncated to keep only the last 10 most recently added
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let base_time = Utc::now();
 
         // Add 15 MAC addresses (should keep only last 10)
+        // Use explicit timestamps to ensure deterministic ordering
+        // (on fast machines, Utc::now() can return identical timestamps for all entries)
         let mut old_macs = Vec::new();
         for i in 0..5 {
             old_macs.push(MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, i));
@@ -3637,10 +3663,12 @@ mod tests {
             new_macs.push(MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, i));
         }
 
-        // Add old MACs first
-        device.set_mac_address(old_macs[0], old_macs[1..].to_vec());
-        // Add new MACs (these should be kept)
-        device.set_mac_address(new_macs[0], new_macs[1..].to_vec());
+        // Add old MACs first with earlier timestamp
+        let old_timestamp = base_time;
+        device.set_mac_address_with_timestamp(old_macs[0], old_macs[1..].to_vec(), old_timestamp);
+        // Add new MACs with later timestamp (these should be kept)
+        let new_timestamp = base_time + chrono::Duration::seconds(10);
+        device.set_mac_address_with_timestamp(new_macs[0], new_macs[1..].to_vec(), new_timestamp);
 
         // Should have exactly 10 addresses
         assert_eq!(
