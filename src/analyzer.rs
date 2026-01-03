@@ -1827,7 +1827,7 @@ impl SessionAnalyzer {
             } else {
                 info!(
                     "Analyzer: Regular operation (warm-up not active, elapsed since startup: {}s).",
-                    now.timestamp() - self.warm_up_start_time.load(Ordering::Relaxed) as i64
+                    now.timestamp().saturating_sub(self.warm_up_start_time.load(Ordering::Relaxed) as i64)
                 );
             }
 
@@ -2224,7 +2224,7 @@ impl SessionAnalyzer {
             // Warm-up progress snapshot
             let warm_up_start_timestamp = self.warm_up_start_time.load(Ordering::SeqCst);
             let warm_up_elapsed = if warm_up_start_timestamp > 0 {
-                now.timestamp() as u64 - warm_up_start_timestamp
+                (now.timestamp() as u64).saturating_sub(warm_up_start_timestamp)
             } else {
                 0
             };

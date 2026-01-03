@@ -96,7 +96,8 @@ impl PacketStatsInternal {
 
     pub fn log_and_reset(&self) {
         if self.last_log_time.load(Ordering::Relaxed) == 0
-            || Utc::now().timestamp_millis() as u64 - self.last_log_time.load(Ordering::Relaxed)
+            || (Utc::now().timestamp_millis() as u64)
+                .saturating_sub(self.last_log_time.load(Ordering::Relaxed))
                 > 30000
         {
             self.last_log_time
