@@ -263,25 +263,26 @@ impl Whitelists {
             #[cfg(not(feature = "packetcapture"))]
             let domain_is_reverse_pattern = false;
 
-            // For CDN providers, we need either:
-            // - Forward DNS (from captured DNS queries) - reliable
-            // - SNI (from TLS ClientHello) - reliable
-            // Reverse DNS is unreliable for CDNs as it often shows infrastructure names
-            let domain_unreliable_for_cdn = domain_unresolved
-                || domain_is_reverse_pattern
-                || (session.dst_domain_type == DomainResolutionType::Reverse);
-
-            // If domain is unresolved or unreliable, check if this is a CDN/cloud provider
-            // CDN IPs are shared across many domains, so we must require reliable domain resolution
-            // to prevent false positives (e.g., whitelisting one Fastly POP allows all Fastly domains)
-            if domain_unreliable_for_cdn {
+            // For CDN providers, Forward DNS or SNI is preferred for reliable domain resolution.
+            // However, we must support environments without eBPF (Windows, macOS, containers):
+            // - Without eBPF, we can't capture forward DNS queries from the kernel
+            // - These environments rely on reverse DNS lookups which may not resolve
+            // - Skipping all unresolved CDN sessions would break whitelist generation entirely
+            //
+            // Strategy:
+            // - If we have Forward DNS or SNI: use that domain (reliable, eBPF/SNI available)
+            // - If we have reverse DNS with infrastructure pattern: skip (unreliable for CDNs)
+            // - If domain is unresolved: allow IP-only whitelisting (supports non-eBPF setups)
+            //
+            // This way, we filter out known unreliable reverse DNS patterns (like cdn-X-X-X-X.example.com)
+            // while still allowing whitelist generation on platforms without precise DNS capture.
+            let should_skip_cdn_session = if domain_is_reverse_pattern {
+                // Reverse DNS pattern detected (e.g., "cdn-185-199-111-133.github.com")
+                // These are unreliable for CDNs - skip them
                 if let Some(ref asn) = session.dst_asn {
                     if is_cdn_provider(&asn.owner, CDN_PROVIDERS) {
-                        // Skip CDN sessions without reliable domain - they need domain-based whitelisting
-                        // CDN sessions with Forward DNS or SNI will continue past this point
                         warn!(
-                            "Skipping CDN session without reliable domain (resolution: {:?}): {}:{} -> {}:{} (AS owner: {}, domain: {:?})",
-                            session.dst_domain_type,
+                            "Skipping CDN session with reverse DNS pattern: {}:{} -> {}:{} (AS owner: {}, domain: {:?})",
                             session.session.src_ip,
                             session.session.src_port,
                             session.session.dst_ip,
@@ -289,9 +290,23 @@ impl Whitelists {
                             asn.owner,
                             session.dst_domain
                         );
-                        continue;
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
+            } else {
+                // Domain is either:
+                // - Resolved via Forward DNS or SNI (reliable) - include
+                // - Resolved via reverse DNS but NOT a pattern - include with domain
+                // - Unresolved ("Unknown", "Resolving", or None) - include with IP only
+                false
+            };
+
+            if should_skip_cdn_session {
+                continue;
             }
 
             // When include_process is enabled, we need a valid process name.
@@ -2960,13 +2975,15 @@ mod tests {
 
         let now = Utc::now();
 
-        // Test case 1: CDN (Fastly) session with unresolved domain - should be SKIPPED
-        let cdn_unresolved = SessionInfo {
+        // Test case 1: CDN (Fastly) session with reverse DNS PATTERN - should be SKIPPED
+        // Reverse DNS patterns like "cdn-185-199-111-133.github.com" are unreliable for CDNs
+        // GitHub CDN is actually served by Fastly infrastructure
+        let cdn_reverse_pattern = SessionInfo {
             session: Session {
                 protocol: Protocol::TCP,
                 src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
                 src_port: 50000,
-                dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 110, 133)), // Fastly IP
+                dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 110, 133)), // Fastly IP (serves GitHub CDN)
                 dst_port: 443,
             },
             status: SessionStatus::default(),
@@ -2976,13 +2993,13 @@ mod tests {
             is_self_src: false,
             is_self_dst: false,
             src_domain: None,
-            dst_domain: Some("Unknown".to_string()), // Unresolved domain
+            dst_domain: Some("cdn-185-199-110-133.github.com".to_string()), // Reverse DNS pattern
             dst_service: Some("https".to_string()),
             l7: None,
             src_asn: None,
             dst_asn: Some(Record {
                 as_number: 54113,
-                owner: "FASTLY".to_string(),
+                owner: "FASTLY".to_string(), // Fastly is the actual CDN provider
                 country: "US".to_string(),
             }),
             is_whitelisted: WhitelistState::Unknown,
@@ -2990,7 +3007,7 @@ mod tests {
             dismissed: false,
             whitelist_reason: None,
             src_domain_type: DomainResolutionType::None,
-            dst_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::Reverse, // Reverse DNS
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         };
@@ -3131,7 +3148,10 @@ mod tests {
             last_modified: now,
         };
 
-        // Test case 6: Cloudflare CDN with unresolved domain - should be SKIPPED
+        // Test case 6: Cloudflare CDN with unresolved domain - should be INCLUDED
+        // CDN sessions with unresolved domains are included to support non-eBPF environments
+        // (Windows, macOS, containers) where forward DNS capture isn't available
+        // Only CDN sessions with reverse DNS patterns are skipped
         let cloudflare_unresolved = SessionInfo {
             session: Session {
                 protocol: Protocol::TCP,
@@ -3167,7 +3187,7 @@ mod tests {
         };
 
         let sessions = vec![
-            cdn_unresolved,
+            cdn_reverse_pattern,
             cdn_resolved,
             non_cdn_unresolved,
             non_cdn_resolved,
@@ -3178,11 +3198,13 @@ mod tests {
         let whitelist = Whitelists::new_from_sessions(&sessions);
         let whitelist_json = WhitelistsJSON::from(whitelist);
 
-        // Should have 4 endpoints (CDN unresolved sessions should be skipped):
+        // Should have 5 endpoints (only CDN reverse DNS pattern sessions are skipped):
         // 1. cdn_resolved (gist.githubusercontent.com)
         // 2. non_cdn_unresolved (10.0.0.1:8080 - IP-only)
         // 3. non_cdn_resolved (example.com)
         // 4. no_asn_unresolved (192.168.1.200:22 - IP-only)
+        // 5. cloudflare_unresolved (104.16.0.1:443 - IP-only, CDN with unresolved domain is now included)
+        // NOT included: cdn_reverse_pattern (CDN with reverse DNS pattern - skipped)
         assert_eq!(
             whitelist_json.whitelists.len(),
             1,
@@ -3191,8 +3213,8 @@ mod tests {
         let endpoints = &whitelist_json.whitelists[0].endpoints;
         assert_eq!(
             endpoints.len(),
-            4,
-            "Should have 4 endpoints (CDN unresolved sessions skipped)"
+            5,
+            "Should have 5 endpoints (only CDN reverse DNS pattern sessions skipped)"
         );
 
         // Verify cdn_resolved is included with domain
@@ -3229,24 +3251,29 @@ mod tests {
             "Session with no ASN and unresolved domain should be included (backwards compatibility)"
         );
 
-        // Verify CDN unresolved sessions are NOT included
+        // Verify CDN session with reverse DNS pattern is NOT included
         assert!(
             !endpoints
                 .iter()
                 .any(|ep| ep.ip == Some("185.199.110.133".to_string())),
-            "CDN session (Fastly) without resolved domain should be skipped"
+            "CDN session with reverse DNS pattern should be skipped"
         );
+
+        // Verify CDN session with unresolved domain IS included (supports non-eBPF environments)
         assert!(
-            !endpoints
+            endpoints
                 .iter()
                 .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
-            "CDN session (Cloudflare) without resolved domain should be skipped"
+            "CDN session with unresolved domain should be included (non-eBPF support)"
         );
     }
 
-    /// Test that all CDN providers are detected correctly
+    /// Test that CDN reverse DNS patterns are detected and skipped correctly
+    /// CDN sessions with unresolved domains ("Unknown") are INCLUDED to support non-eBPF environments
+    /// Only CDN sessions with reverse DNS patterns (like "cdn-185-199-111-133.github.com") are skipped
     #[test]
-    fn test_cdn_provider_detection() {
+    #[cfg(feature = "packetcapture")]
+    fn test_cdn_reverse_dns_pattern_detection() {
         use crate::asn_db::Record;
         use crate::sessions::{
             Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
@@ -3257,40 +3284,40 @@ mod tests {
         let now = Utc::now();
         let mut sessions = Vec::new();
 
-        // Test all CDN providers with unresolved domains - all should be skipped
-        // Automatically adapts to changes in CDN_PROVIDERS const
-        use std::collections::HashMap;
+        // Test CDN sessions with reverse DNS patterns - these should be SKIPPED
+        // Reverse DNS patterns are unreliable for CDNs as they show infrastructure names
+        // Using actual CDN provider names from CDN_PROVIDERS
+        // IMPORTANT: Each IP must be unique across all test sessions in this test
+        let reverse_dns_patterns = vec![
+            // Fastly serves GitHub CDN
+            ("cdn-185-199-111-133.github.com", "FASTLY", "185.199.111.133"),
+            // Cloudflare with a reverse pattern (different IP from cloudflare_unresolved)
+            (
+                "cdn-104-16-100-1.cloudflare.com",
+                "CLOUDFLARE",
+                "104.16.100.1",
+            ),
+            // Google Cloud reverse DNS pattern
+            (
+                "51.241.186.35.bc.googleusercontent.com",
+                "Google Cloud",
+                "35.186.241.51",
+            ),
+            // AWS EC2 reverse DNS pattern
+            (
+                "ec2-54-171-230-55.eu-west-1.compute.amazonaws.com",
+                "Amazon Technologies Inc.",
+                "54.171.230.55",
+            ),
+            // Azure reverse DNS pattern
+            (
+                "lb-20-150-82-228-azure.microsoft.com",
+                "Microsoft Azure",
+                "20.150.82.228",
+            ),
+        ];
 
-        // Build HashMap from const test data for efficient lookup
-        let known_provider_test_data: HashMap<&str, (&str, &str)> = CDN_PROVIDER_TEST_DATA
-            .iter()
-            .map(|(provider, owner, ip)| (*provider, (*owner, *ip)))
-            .collect();
-
-        // Build test data from CDN_PROVIDERS const - automatically includes all providers
-        // Uses known test data if available, otherwise generates default test data
-        let cdn_provider_test_data: Vec<(String, String)> = CDN_PROVIDERS
-            .iter()
-            .map(|provider| {
-                if let Some((owner_name, ip)) = known_provider_test_data.get(provider) {
-                    (owner_name.to_string(), ip.to_string())
-                } else {
-                    // Auto-generate test data for new providers not in the known list
-                    // Capitalize provider name and use a default IP pattern
-                    let owner_name = if provider.len() > 1 {
-                        format!("{}{}", provider[..1].to_uppercase(), &provider[1..])
-                    } else {
-                        provider.to_uppercase()
-                    };
-                    // Generate a unique test IP based on provider name hash
-                    let ip_octet = (provider.len() % 255) as u8;
-                    let ip = format!("192.168.1.{}", ip_octet);
-                    (owner_name, ip)
-                }
-            })
-            .collect();
-
-        for (owner, ip_str) in &cdn_provider_test_data {
+        for (domain, owner, ip_str) in &reverse_dns_patterns {
             let ip: IpAddr = ip_str.parse().unwrap();
             sessions.push(SessionInfo {
                 session: Session {
@@ -3307,13 +3334,13 @@ mod tests {
                 is_self_src: false,
                 is_self_dst: false,
                 src_domain: None,
-                dst_domain: Some("Unknown".to_string()),
+                dst_domain: Some(domain.to_string()),
                 dst_service: Some("https".to_string()),
                 l7: None,
                 src_asn: None,
                 dst_asn: Some(Record {
                     as_number: 12345,
-                    owner: owner.clone(),
+                    owner: owner.to_string(),
                     country: "US".to_string(),
                 }),
                 is_whitelisted: WhitelistState::Unknown,
@@ -3321,18 +3348,53 @@ mod tests {
                 dismissed: false,
                 whitelist_reason: None,
                 src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::Reverse, // Reverse DNS
                 uid: Uuid::new_v4().to_string(),
                 last_modified: now,
             });
         }
 
-        // Add one resolved CDN session - should be included
+        // Add CDN session with unresolved domain - should be INCLUDED (supports non-eBPF environments)
         sessions.push(SessionInfo {
             session: Session {
                 protocol: Protocol::TCP,
                 src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
                 src_port: 50001,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)), // Cloudflare IP
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: Some("Unknown".to_string()), // Unresolved
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 13335,
+                owner: "CLOUDFLARE".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None, // No resolution type
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        });
+
+        // Add CDN session with resolved domain (Forward DNS) - should be INCLUDED
+        sessions.push(SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port: 50002,
                 dst_ip: IpAddr::V4(Ipv4Addr::new(185, 199, 108, 133)),
                 dst_port: 443,
             },
@@ -3343,7 +3405,7 @@ mod tests {
             is_self_src: false,
             is_self_dst: false,
             src_domain: None,
-            dst_domain: Some("example.com".to_string()), // Resolved!
+            dst_domain: Some("gist.githubusercontent.com".to_string()), // Forward DNS resolved
             dst_service: Some("https".to_string()),
             l7: None,
             src_asn: None,
@@ -3357,7 +3419,7 @@ mod tests {
             dismissed: false,
             whitelist_reason: None,
             src_domain_type: DomainResolutionType::None,
-            dst_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::Forward, // Forward DNS
             uid: Uuid::new_v4().to_string(),
             last_modified: now,
         });
@@ -3365,7 +3427,10 @@ mod tests {
         let whitelist = Whitelists::new_from_sessions(&sessions);
         let whitelist_json = WhitelistsJSON::from(whitelist);
 
-        // Should only have 1 endpoint (the resolved CDN session)
+        // Should have 2 endpoints:
+        // 1. Cloudflare unresolved (included for non-eBPF support)
+        // 2. Fastly resolved (included with domain)
+        // NOT included: 5 reverse DNS pattern sessions (skipped)
         assert_eq!(
             whitelist_json.whitelists.len(),
             1,
@@ -3374,24 +3439,32 @@ mod tests {
         let endpoints = &whitelist_json.whitelists[0].endpoints;
         assert_eq!(
             endpoints.len(),
-            1,
-            "Should have only 1 endpoint (resolved CDN), all unresolved CDNs should be skipped"
+            2,
+            "Should have 2 endpoints (CDN reverse DNS pattern sessions skipped)"
         );
 
-        // Verify the resolved CDN session is included
+        // Verify the resolved CDN session is included with domain
         assert!(
             endpoints
                 .iter()
-                .any(|ep| ep.domain == Some("example.com".to_string())
+                .any(|ep| ep.domain == Some("gist.githubusercontent.com".to_string())
                     && ep.ip == Some("185.199.108.133".to_string())),
-            "Resolved CDN session should be included"
+            "Forward DNS resolved CDN session should be included with domain"
         );
 
-        // Verify all unresolved CDN sessions are skipped
-        for (_, ip_str) in &cdn_provider_test_data {
+        // Verify the unresolved CDN session is included (IP-only)
+        assert!(
+            endpoints
+                .iter()
+                .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
+            "CDN session with unresolved domain should be included (IP-only) for non-eBPF support"
+        );
+
+        // Verify reverse DNS pattern sessions are NOT included
+        for (_, _, ip_str) in &reverse_dns_patterns {
             assert!(
-                !endpoints.iter().any(|ep| ep.ip == Some(ip_str.clone())),
-                "CDN session from {} without resolved domain should be skipped",
+                !endpoints.iter().any(|ep| ep.ip == Some(ip_str.to_string())),
+                "CDN session with reverse DNS pattern from {} should be skipped",
                 ip_str
             );
         }
