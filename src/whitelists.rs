@@ -3290,7 +3290,11 @@ mod tests {
         // IMPORTANT: Each IP must be unique across all test sessions in this test
         let reverse_dns_patterns = vec![
             // Fastly serves GitHub CDN
-            ("cdn-185-199-111-133.github.com", "FASTLY", "185.199.111.133"),
+            (
+                "cdn-185-199-111-133.github.com",
+                "FASTLY",
+                "185.199.111.133",
+            ),
             // Cloudflare with a reverse pattern (different IP from cloudflare_unresolved)
             (
                 "cdn-104-16-100-1.cloudflare.com",
@@ -3445,10 +3449,10 @@ mod tests {
 
         // Verify the resolved CDN session is included with domain
         assert!(
-            endpoints
-                .iter()
-                .any(|ep| ep.domain == Some("gist.githubusercontent.com".to_string())
-                    && ep.ip == Some("185.199.108.133".to_string())),
+            endpoints.iter().any(
+                |ep| ep.domain == Some("gist.githubusercontent.com".to_string())
+                    && ep.ip == Some("185.199.108.133".to_string())
+            ),
             "Forward DNS resolved CDN session should be included with domain"
         );
 
