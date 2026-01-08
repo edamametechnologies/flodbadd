@@ -1012,7 +1012,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#a67ab03c95d395198699eec9b07753765e15996f"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#03ccaa692df6fa5a9ac82661e2d090c23edeb41a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1936,9 +1936,9 @@ checksum = "2c4a545a15244c7d945065b5d392b2d2d7f21526fba56ce51467b06ed445e8f7"
 
 [[package]]
 name = "libc"
-version = "0.2.179"
+version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
+checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 
 [[package]]
 name = "libloading"
