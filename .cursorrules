@@ -1,0 +1,38 @@
+# Flodbadd - Network Visibility Library
+
+## Documentation (Read First)
+Before making changes, consult these files:
+- **CLAUDE.md** - Build commands, testing, architecture overview
+- **ARCHITECTURE.md** - Module structure, data flow, session tracking
+- **ANALYZER.md** - ML anomaly detection (iForest) deep dive
+- **EBPF.md** - Linux eBPF process attribution
+- **WHITELISTS.md** - Whitelist system design
+
+## Project Context
+Flodbadd is the network visibility engine for EDAMAME Security. It provides:
+- Packet capture (pcap/Npcap/eBPF)
+- Session tracking with Zeek-style history
+- ML anomaly detection (Extended Isolation Forest, 12D features)
+- Process attribution (eBPF on Linux, netstat fallback)
+- Whitelist/blacklist matching
+
+## Key Files
+- `src/capture.rs` - Main orchestration (FlodbaddCapture)
+- `src/analyzer.rs` - ML anomaly detection
+- `src/sessions.rs` - Session data structures
+- `src/l7_ebpf.rs` - eBPF process attribution
+
+## Build & Test
+```bash
+cargo build --features packetcapture,asyncpacketcapture
+sudo -E cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+```
+
+## Part of EDAMAME Ecosystem
+This library is used by `edamame_core` and `edamame_foundation`. See `../edamame_core/CLAUDE.md` for the full ecosystem.
+
+## Code Patterns
+- All async operations use `tokio`
+- Session storage uses `DashMap` for lock-free concurrency
+- Feature flags control capabilities (packetcapture, ebpf)
+- Platform-specific code uses `#[cfg(target_os = "...")]`
