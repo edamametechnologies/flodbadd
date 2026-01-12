@@ -8,6 +8,18 @@ Flodbadd is a network visibility and traffic analysis library powering the EDAMA
 
 Part of the EDAMAME ecosystem - see `../edamame_core/CLAUDE.md` for full ecosystem documentation.
 
+## Documentation Index
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Module structure, data flow, session tracking
+- **[README.md](README.md)** - Overview, installation, usage examples
+- **[ANALYZER.md](ANALYZER.md)** - ML anomaly detection (iForest, features, thresholds)
+- **[EBPF.md](EBPF.md)** - Linux eBPF process attribution architecture
+- **[WHITELISTS.md](WHITELISTS.md)** - Whitelist system design and rules
+- **[PROFILES.md](PROFILES.md)** - Device profiling and identification
+- **[CDN.md](CDN.md)** - Threat intelligence CDN
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history
+- **[ebpf/l7_ebpf_program/README.md](ebpf/l7_ebpf_program/README.md)** - eBPF program build
+
 ## Build Commands
 
 ```bash
