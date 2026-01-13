@@ -1256,13 +1256,18 @@ impl DeviceInfo {
                 let mut found = false;
                 for existing_port in device.open_ports.iter_mut() {
                     if existing_port.port == new_port.port {
-                        // Preserve the existing dismissed flag
-                        let dismissed = existing_port.dismissed;
+                        // Preserve the dismissed flag from the more recently modified device
+                        // This ensures user choices (dismiss/undismiss) are preserved based on
+                        // which device was last modified
+                        let dismissed = if device.last_modified >= new_device.last_modified {
+                            existing_port.dismissed
+                        } else {
+                            new_port.dismissed
+                        };
                         // Use the latest info
                         *existing_port = new_port.clone();
-                        if dismissed {
-                            existing_port.dismissed = true;
-                        }
+                        // Restore the dismissed flag from the more recent source
+                        existing_port.dismissed = dismissed;
                         found = true;
                         break;
                     }
@@ -1970,12 +1975,15 @@ mod tests {
     #[test]
     fn test_merge_preserves_dismissed_ports() {
         // Test that a user-dismissed port stays dismissed after fresh scan data arrives
+        // The existing device has a newer last_modified (user dismissed after scan)
         use chrono::{TimeZone, Utc};
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut existing_device =
             DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
         existing_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        // User dismissed the port at 12:30, so last_modified is newer
+        existing_device.last_modified = Utc.with_ymd_and_hms(2023, 1, 1, 12, 30, 0).unwrap();
         existing_device.is_local = true;
         existing_device.open_ports.push(PortInfo {
             port: 8443,
@@ -1989,6 +1997,8 @@ mod tests {
         let mut refreshed_device =
             DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
         refreshed_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 15, 0).unwrap();
+        // Scan data has older last_modified than user's dismissal
+        refreshed_device.last_modified = Utc.with_ymd_and_hms(2023, 1, 1, 12, 15, 0).unwrap();
         refreshed_device.is_local = true;
         refreshed_device.open_ports.push(PortInfo {
             port: 8443,
@@ -2009,10 +2019,67 @@ mod tests {
         // Metadata should be refreshed from the latest scan
         assert_eq!(merged_port.service, "https-alt");
         assert_eq!(merged_port.banner, "new-banner");
-        // User dismissal must be preserved
+        // User dismissal must be preserved (existing device was modified more recently)
         assert!(
             merged_port.dismissed,
-            "Dismissed flag should not be cleared by new scan data"
+            "Dismissed flag should not be cleared by older scan data"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_undismissed_ports() {
+        // Test that a user-undismissed port stays undismissed after merge with old data
+        // This tests the scenario where:
+        // 1. User dismisses a port
+        // 2. Background task clones devices (with dismissed=true)
+        // 3. User undismisses the port (updates last_modified)
+        // 4. Merge happens with old clone data
+        // 5. Port should remain undismissed (user's latest choice based on last_modified)
+        use chrono::{TimeZone, Utc};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Existing device where user has UNDISMISSED the port
+        let mut existing_device =
+            DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
+        existing_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 15, 0).unwrap();
+        // User undismissed at 12:30, so last_modified is newer than old data
+        existing_device.last_modified = Utc.with_ymd_and_hms(2023, 1, 1, 12, 30, 0).unwrap();
+        existing_device.is_local = true;
+        existing_device.open_ports.push(PortInfo {
+            port: 8443,
+            protocol: "tcp".to_string(),
+            service: "https-alt".to_string(),
+            banner: "new-banner".to_string(),
+            dismissed: false, // User explicitly undismissed this port
+        });
+
+        // Old data (e.g., from a background task clone) where the port was still dismissed
+        let mut old_data_device =
+            DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
+        old_data_device.last_seen = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        // Old clone has earlier last_modified
+        old_data_device.last_modified = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
+        old_data_device.is_local = true;
+        old_data_device.open_ports.push(PortInfo {
+            port: 8443,
+            protocol: "tcp".to_string(),
+            service: "custom-admin".to_string(),
+            banner: "old-banner".to_string(),
+            dismissed: true, // Old state where port was dismissed
+        });
+
+        DeviceInfo::merge(&mut existing_device, &old_data_device);
+
+        let merged_port = existing_device
+            .open_ports
+            .iter()
+            .find(|p| p.port == 8443)
+            .expect("Port 8443 should still exist after merge");
+
+        // User's undismissed choice must be preserved (existing device has newer last_modified)
+        assert!(
+            !merged_port.dismissed,
+            "Undismissed flag should not be overwritten by older data (based on last_modified)"
         );
     }
 
