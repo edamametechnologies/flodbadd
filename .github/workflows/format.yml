@@ -25,6 +25,7 @@ jobs:
       - name: Check code format
         run: |
           cargo fmt --all -- --check
+          cd ebpf && cargo fmt --all -- --check
 
       - name: Install cargo-hack
         run: |
