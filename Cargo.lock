@@ -1018,7 +1018,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#04b6e23b93911989128725374f3d0e401d0bd679"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#14f65293cd42688169a00bc24693bfd4e0347446"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3742,7 +3742,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "undeadlock"
 version = "0.9.83"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#ed1a456b05f2d670d3af0ab38c53eaf9bf4178c8"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#8956b5d53e75c5fa21f87218b447bfd75471859c"
 dependencies = [
  "dashmap",
  "futures",
