@@ -82,7 +82,7 @@ mod test_init {
                 );
             }
             Err(e) => {
-                println!("[Test Init] ⚠ Warning: Failed to configure Npcap: {}", e);
+                println!("[Test Init] [WARN] Warning: Failed to configure Npcap: {}", e);
                 println!("[Test Init] Tests may fail with STATUS_DLL_NOT_FOUND");
             }
         }

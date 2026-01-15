@@ -731,7 +731,7 @@ impl IsolationForestModel {
                     // ------------------------------------------------------------------------------------------------
 
                     let is_unusual = if std_dev <= 1e-6 {
-                        // Zero (or near-zero) variance → current value differs from the constant mean? ✅ unusual
+                        // Zero (or near-zero) variance → current value differs from the constant mean? [OK] unusual
                         let deviation = (features[i] - mean).abs();
                         debug!(
                             "Categorical feature {} const deviation: {}",

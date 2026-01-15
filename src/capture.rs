@@ -95,7 +95,7 @@ pub struct FlodbaddCapture {
 impl FlodbaddCapture {
     /// Attempt to automatically download and install Npcap (Windows only)
     ///
-    /// ⚠️ **WARNING**: This function attempts to silently install system software.
+    /// [WARN] **WARNING**: This function attempts to silently install system software.
     /// - Requires administrator privileges
     /// - Downloads and installs Npcap 0.96 (older version)
     /// - Users should generally install Npcap manually from https://npcap.com
@@ -6007,7 +6007,7 @@ mod tests {
             post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
         );
         println!(
-            "✅ First start: Captured {} sessions successfully, {} packets processed",
+            "[OK] First start: Captured {} sessions successfully, {} packets processed",
             first_start_sessions,
             post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
         );
@@ -6074,7 +6074,7 @@ mod tests {
             post_restart_stats.total_processed - pre_restart_stats.total_processed
         );
         println!(
-            "✅ Restart: Captured {} new sessions successfully, {} packets processed",
+            "[OK] Restart: Captured {} new sessions successfully, {} packets processed",
             restart_sessions,
             post_restart_stats.total_processed - pre_restart_stats.total_processed
         );
@@ -6250,13 +6250,13 @@ mod tests {
                     sleep(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
-                    println!("❌ Request failed: {}", e);
+                    println!("[FAIL] Request failed: {}", e);
                 }
             }
         }
 
         if successful_requests == 0 {
-            println!("⚠️  No HTTP requests succeeded, trying DNS queries...");
+            println!("[WARN] No HTTP requests succeeded, trying DNS queries...");
 
             // Fallback: generate DNS traffic
             let resolver = match tokio::net::lookup_host("google.com:80").await {
@@ -6268,7 +6268,7 @@ mod tests {
                     true
                 }
                 Err(e) => {
-                    println!("❌ DNS lookup failed: {}", e);
+                    println!("[FAIL] DNS lookup failed: {}", e);
                     false
                 }
             };
