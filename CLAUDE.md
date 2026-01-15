@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Master Repository:** `edamame_app` - See `../edamame_app/CLAUDE.md` for workspace-wide rules and cross-repository guidance.
+
 ## Project Overview
 
 Flodbadd is a network visibility and traffic analysis library powering the EDAMAME security platform. It provides real-time packet capture, session tracking, ML-based anomaly detection, and network discovery across Linux, macOS, and Windows.
-
-Part of the EDAMAME ecosystem - see `../edamame_core/CLAUDE.md` for full ecosystem documentation.
 
 ## Documentation Index
 
