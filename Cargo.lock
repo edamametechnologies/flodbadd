@@ -1061,11 +1061,12 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#8973afc5ed129e8f9d74f74520fbf7070de69141"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#b61a849c7993ec71adebbfdd9843942a019a943e"
 dependencies = [
  "anyhow",
  "chrono",
  "reqwest",
+ "rustls",
  "serial_test",
  "tokio",
  "tracing",
@@ -1292,6 +1293,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "serial_test",
@@ -3141,7 +3143,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c665f33d38cea657d9614f766881e4d510e0eda4239891eea56b4cadcf01801b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -3876,7 +3880,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "undeadlock"
 version = "0.9.84"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#f83b53039b1e29d01737cb69245e83988a2c1902"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#f615b611883a42b45e370aa87526adc2415af666"
 dependencies = [
  "dashmap",
  "futures",
