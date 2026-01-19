@@ -1061,7 +1061,7 @@ dependencies = [
 [[package]]
 name = "edamame_models"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#b61a849c7993ec71adebbfdd9843942a019a943e"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#f3bc1ed7ce909cd5317c31cb2a71dc312ef1ce37"
 dependencies = [
  "anyhow",
  "chrono",
