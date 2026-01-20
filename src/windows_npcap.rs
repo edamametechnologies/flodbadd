@@ -44,7 +44,7 @@ pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response
     let mut attempts = 0;
     let max_attempts = 10;
     let max_wait_secs = 300; // 5 minutes
-    let mut last_error = String::new();
+    let mut last_error = String::from("unknown error");
     loop {
         match reqwest::blocking::get(url) {
             Ok(response) => {
@@ -125,7 +125,8 @@ pub fn configure_dll_directory(npcap_dir: &Path) -> bool {
 pub fn add_npcap_to_path(npcap_dir: &Path) -> bool {
     if let Ok(current_path) = env::var("PATH") {
         let npcap_path_str = npcap_dir.to_string_lossy();
-        if current_path.contains(npcap_path_str.as_ref()) {
+        // Explicitly convert to &str to avoid type ambiguity with Cow<str>::as_ref()
+        if current_path.contains(&*npcap_path_str) {
             return true;
         }
         let new_path = format!("{};{}", npcap_path_str, current_path);
