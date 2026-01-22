@@ -101,6 +101,28 @@ impl DnsPacketProcessor {
         self.dns_resolutions.len()
     }
 
+    /// Insert a DNS resolution directly (for testing or manual injection)
+    pub fn insert_dns_resolution(&self, ip: IpAddr, domain: String) {
+        self.dns_resolutions.insert(
+            ip,
+            DnsResolutionEntry {
+                domain: domain.clone(),
+                inserted_at: Instant::now(),
+            },
+        );
+        self.dns_resolutions_with_process.insert(
+            ip,
+            DnsResolutionWithProcessEntry {
+                resolution: DnsResolution {
+                    domain,
+                    pid: None,
+                    process_name: None,
+                },
+                inserted_at: Instant::now(),
+            },
+        );
+    }
+
     /// Check if eBPF DNS tracking is enabled
     pub fn is_ebpf_enabled(&self) -> bool {
         self.ebpf_available

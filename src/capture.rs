@@ -2835,7 +2835,7 @@ mod tests {
         let dns_processor = DnsPacketProcessor::new();
 
         // Insert a DNS resolution into dns_resolutions
-        dns_processor.get_dns_resolutions().insert(
+        dns_processor.insert_dns_resolution(
             IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             "dns.google".to_string(),
         );
