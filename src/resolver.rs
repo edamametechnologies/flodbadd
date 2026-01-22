@@ -6,18 +6,31 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, trace, warn};
 use undeadlock::*;
 
-// Add constant for resolution retry parameters
+// Resolution retry parameters
 const MAX_RESOLUTION_ATTEMPTS: usize = 3;
 const RESOLUTION_RETRY_DELAY_MS: u64 = 500;
+
+// Cache size limits
+const REVERSE_DNS_CACHE_MAX_ENTRIES: usize = 50_000;
+const REVERSE_DNS_CACHE_EVICT_COUNT: usize = 5_000;
+const RESOLVER_QUEUE_MAX_SIZE: usize = 10_000;
+
+/// Reverse DNS cache entry with timestamp for LRU eviction
+#[derive(Debug, Clone)]
+struct ReverseDnsEntry {
+    domain: String,
+    inserted_at: Instant,
+}
 
 #[derive(Debug)]
 pub struct FlodbaddResolver {
     resolvers: Arc<CustomRwLock<Vec<TokioResolver>>>,
-    reverse_dns: Arc<CustomDashMap<IpAddr, String>>,
+    reverse_dns: Arc<CustomDashMap<IpAddr, ReverseDnsEntry>>,
     resolver_queue: Arc<CustomRwLock<VecDeque<IpAddr>>>,
     resolver_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
 }
@@ -68,12 +81,12 @@ impl FlodbaddResolver {
 
     async fn perform_reverse_dns_lookup(
         ip_addr: IpAddr,
-        reverse_dns: Arc<CustomDashMap<IpAddr, String>>,
+        reverse_dns: Arc<CustomDashMap<IpAddr, ReverseDnsEntry>>,
         resolvers: Vec<TokioResolver>,
     ) {
         // Skip if already resolved
         if let Some(entry) = reverse_dns.get(&ip_addr) {
-            if entry.value() != "Resolving" {
+            if entry.value().domain != "Resolving" {
                 return;
             }
         }
@@ -91,7 +104,13 @@ impl FlodbaddResolver {
                                 ip_addr,
                                 domain
                             );
-                            reverse_dns.insert(ip_addr, domain);
+                            reverse_dns.insert(
+                                ip_addr,
+                                ReverseDnsEntry {
+                                    domain,
+                                    inserted_at: Instant::now(),
+                                },
+                            );
                             return;
                         }
                     }
@@ -115,7 +134,13 @@ impl FlodbaddResolver {
 
         // All resolvers failed
         debug!("All resolvers failed for {}. Marking as Unknown.", ip_addr);
-        reverse_dns.insert(ip_addr, "Unknown".to_string());
+        reverse_dns.insert(
+            ip_addr,
+            ReverseDnsEntry {
+                domain: "Unknown".to_string(),
+                inserted_at: Instant::now(),
+            },
+        );
     }
 
     pub async fn start(&self) {
@@ -138,6 +163,7 @@ impl FlodbaddResolver {
 
             let resolver_handle = tokio::spawn(async move {
                 info!("Starting resolver task");
+                let mut cleanup_counter = 0u32;
 
                 while !stop_flag_clone.load(Ordering::Relaxed)
                     || !resolver_queue.read().await.is_empty()
@@ -159,6 +185,33 @@ impl FlodbaddResolver {
                         .await;
 
                         info!("Resolved {} IPs", to_resolve_len);
+                    }
+
+                    // Periodic cache cleanup (every ~30 iterations = ~60 seconds)
+                    cleanup_counter += 1;
+                    if cleanup_counter >= 30 {
+                        cleanup_counter = 0;
+                        let cache_len = reverse_dns.len();
+                        if cache_len > REVERSE_DNS_CACHE_MAX_ENTRIES {
+                            info!(
+                                "Reverse DNS cache at {} entries, evicting {} oldest",
+                                cache_len, REVERSE_DNS_CACHE_EVICT_COUNT
+                            );
+
+                            // Collect entries with timestamps
+                            let mut entries: Vec<(IpAddr, Instant)> = reverse_dns
+                                .iter()
+                                .map(|e| (*e.key(), e.value().inserted_at))
+                                .collect();
+
+                            // Sort by timestamp (oldest first)
+                            entries.sort_by_key(|(_, ts)| *ts);
+
+                            // Remove the oldest entries
+                            for (ip, _) in entries.into_iter().take(REVERSE_DNS_CACHE_EVICT_COUNT) {
+                                reverse_dns.remove(&ip);
+                            }
+                        }
                     }
 
                     // Sleep briefly before checking queue again
@@ -191,16 +244,39 @@ impl FlodbaddResolver {
             return;
         }
 
+        // Check queue size limit
+        {
+            let queue = self.resolver_queue.read().await;
+            if queue.len() >= RESOLVER_QUEUE_MAX_SIZE {
+                debug!(
+                    "Resolver queue full ({} entries), dropping IP: {}",
+                    queue.len(),
+                    ip_addr
+                );
+                return;
+            }
+        }
+
         // Add the IP to the resolver queue
         self.resolver_queue.write().await.push_back(*ip_addr);
         debug!("Added IP to resolver queue: {}", ip_addr);
         // Mark the IP as resolving
-        self.reverse_dns.insert(*ip_addr, "Resolving".to_string());
+        self.reverse_dns.insert(
+            *ip_addr,
+            ReverseDnsEntry {
+                domain: "Resolving".to_string(),
+                inserted_at: Instant::now(),
+            },
+        );
     }
 
     pub async fn get_resolved_ip(&self, ip_addr: &IpAddr) -> Option<String> {
         // Check if the IP is already resolved
-        match self.reverse_dns.get(ip_addr).map(|s| s.value().clone()) {
+        match self
+            .reverse_dns
+            .get(ip_addr)
+            .map(|e| e.value().domain.clone())
+        {
             Some(domain) => match domain.as_str() {
                 "Resolving" => None,
                 _ => Some(domain),
@@ -212,6 +288,7 @@ impl FlodbaddResolver {
     // Add a new method to integrate DNS resolutions from packet capture
     pub fn add_dns_resolutions(&self, dns_resolutions: &CustomDashMap<IpAddr, String>) -> usize {
         let mut added_count = 0;
+        let now = Instant::now();
 
         for entry in dns_resolutions.iter() {
             let ip = *entry.key();
@@ -222,17 +299,17 @@ impl FlodbaddResolver {
             if domain.contains('.') && !domain.ends_with(".local") && !domain.ends_with(".arpa") {
                 let should_update = match self.reverse_dns.get(&ip) {
                     Some(existing) => {
-                        let existing_value = existing.value();
+                        let existing_domain = &existing.value().domain;
                         // Always update if current value is "Unknown" or "Resolving"
-                        if existing_value == "Unknown" || existing_value == "Resolving" {
+                        if existing_domain == "Unknown" || existing_domain == "Resolving" {
                             true
                         } else {
-                            if domain != existing_value.as_str() {
+                            if domain != existing_domain.as_str() {
                                 // For other values (likely from reverse DNS), prefer forward DNS
                                 // but log that we're replacing the value
                                 debug!(
                                     "Replacing reverse DNS {} with forward DNS {} for IP {}",
-                                    existing_value, domain, ip
+                                    existing_domain, domain, ip
                                 );
                                 true
                             } else {
@@ -248,7 +325,13 @@ impl FlodbaddResolver {
                         "Adding forward DNS resolution to resolver cache: {} -> {}",
                         ip, domain
                     );
-                    self.reverse_dns.insert(ip, domain);
+                    self.reverse_dns.insert(
+                        ip,
+                        ReverseDnsEntry {
+                            domain,
+                            inserted_at: now,
+                        },
+                    );
                     added_count += 1;
                 }
             }
@@ -270,6 +353,7 @@ impl FlodbaddResolver {
         dns_resolutions: &Arc<CustomDashMap<IpAddr, String>>,
     ) -> usize {
         let mut added_count = 0;
+        let now = Instant::now();
 
         for entry in dns_resolutions.iter() {
             let ip = *entry.key();
@@ -280,17 +364,17 @@ impl FlodbaddResolver {
             if domain.contains('.') && !domain.ends_with(".local") && !domain.ends_with(".arpa") {
                 let should_update = match self.reverse_dns.get(&ip) {
                     Some(existing) => {
-                        let existing_value = existing.value();
+                        let existing_domain = &existing.value().domain;
                         // Always update if current value is "Unknown" or "Resolving"
-                        if existing_value == "Unknown" || existing_value == "Resolving" {
+                        if existing_domain == "Unknown" || existing_domain == "Resolving" {
                             true
                         } else {
-                            if domain != existing_value.as_str() {
+                            if domain != existing_domain.as_str() {
                                 // For other values (likely from reverse DNS), prefer forward DNS
                                 // but log that we're replacing the value
                                 debug!(
                                     "Replacing reverse DNS {} with forward DNS {} for IP {}",
-                                    existing_value, domain, ip
+                                    existing_domain, domain, ip
                                 );
                                 true
                             } else {
@@ -306,7 +390,13 @@ impl FlodbaddResolver {
                         "Adding forward DNS resolution to resolver cache: {} -> {}",
                         ip, domain
                     );
-                    self.reverse_dns.insert(ip, domain);
+                    self.reverse_dns.insert(
+                        ip,
+                        ReverseDnsEntry {
+                            domain,
+                            inserted_at: now,
+                        },
+                    );
                     added_count += 1;
                 }
             }
@@ -346,6 +436,16 @@ impl FlodbaddResolver {
                 });
             }
         }
+    }
+
+    /// Get the number of cached reverse DNS entries
+    pub fn reverse_dns_cache_size(&self) -> usize {
+        self.reverse_dns.len()
+    }
+
+    /// Get the current resolver queue size
+    pub async fn resolver_queue_size(&self) -> usize {
+        self.resolver_queue.read().await.len()
     }
 }
 

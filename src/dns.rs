@@ -9,6 +9,11 @@ use tokio::time::interval;
 use tracing::{debug, info, trace, warn};
 use undeadlock::*;
 
+/// Maximum number of entries in DNS resolution caches before eviction
+const DNS_CACHE_MAX_ENTRIES: usize = 50_000;
+/// Number of oldest entries to evict when cache is full (10% of max)
+const DNS_CACHE_EVICT_COUNT: usize = 5_000;
+
 /// DNS query with optional process attribution
 struct PendingQuery {
     domain_name: String,
@@ -17,6 +22,13 @@ struct PendingQuery {
     pid: Option<u32>,
     /// Process name that made this query (from eBPF, if available)
     process_name: Option<String>,
+}
+
+/// DNS resolution entry with timestamp for LRU eviction
+#[derive(Debug, Clone)]
+struct DnsResolutionEntry {
+    domain: String,
+    inserted_at: Instant,
 }
 
 /// DNS resolution with optional process attribution
@@ -29,11 +41,18 @@ pub struct DnsResolution {
     pub process_name: Option<String>,
 }
 
+/// DNS resolution entry with process info and timestamp for LRU eviction
+#[derive(Debug, Clone)]
+struct DnsResolutionWithProcessEntry {
+    resolution: DnsResolution,
+    inserted_at: Instant,
+}
+
 pub struct DnsPacketProcessor {
     pending_dns_queries: Arc<CustomDashMap<u16, PendingQuery>>,
-    dns_resolutions: Arc<CustomDashMap<IpAddr, String>>,
+    dns_resolutions: Arc<CustomDashMap<IpAddr, DnsResolutionEntry>>,
     /// Enhanced resolutions with process attribution (from eBPF)
-    dns_resolutions_with_process: Arc<CustomDashMap<IpAddr, DnsResolution>>,
+    dns_resolutions_with_process: Arc<CustomDashMap<IpAddr, DnsResolutionWithProcessEntry>>,
     dns_query_cleanup_handle: Option<TaskHandle>,
     /// Whether eBPF DNS tracking is available
     ebpf_available: bool,
@@ -59,13 +78,27 @@ impl DnsPacketProcessor {
         }
     }
 
+    /// Get DNS resolutions as a simple IP -> domain map (for external use)
     pub fn get_dns_resolutions(&self) -> Arc<CustomDashMap<IpAddr, String>> {
-        self.dns_resolutions.clone()
+        let result = CustomDashMap::new("dns_resolutions_export");
+        for entry in self.dns_resolutions.iter() {
+            result.insert(*entry.key(), entry.value().domain.clone());
+        }
+        Arc::new(result)
     }
 
     /// Get DNS resolutions with process attribution (from eBPF if available)
     pub fn get_dns_resolutions_with_process(&self) -> Arc<CustomDashMap<IpAddr, DnsResolution>> {
-        self.dns_resolutions_with_process.clone()
+        let result = CustomDashMap::new("dns_resolutions_with_process_export");
+        for entry in self.dns_resolutions_with_process.iter() {
+            result.insert(*entry.key(), entry.value().resolution.clone());
+        }
+        Arc::new(result)
+    }
+
+    /// Get the number of cached DNS resolutions
+    pub fn dns_cache_size(&self) -> usize {
+        self.dns_resolutions.len()
     }
 
     /// Check if eBPF DNS tracking is enabled
@@ -158,33 +191,52 @@ impl DnsPacketProcessor {
                         }
 
                         // Collect IP addresses from the answer section
+                        let now = Instant::now();
                         for answer in dns_packet.answers {
                             match answer.data {
                                 dns_parser::rdata::RData::A(ipv4_addr) => {
                                     let ip_addr = IpAddr::V4(ipv4_addr.0);
-                                    self.dns_resolutions.insert(ip_addr, domain_name.clone());
+                                    self.dns_resolutions.insert(
+                                        ip_addr,
+                                        DnsResolutionEntry {
+                                            domain: domain_name.clone(),
+                                            inserted_at: now,
+                                        },
+                                    );
 
                                     // Store enhanced resolution with process info
                                     self.dns_resolutions_with_process.insert(
                                         ip_addr,
-                                        DnsResolution {
-                                            domain: domain_name.clone(),
-                                            pid,
-                                            process_name: process_name.clone(),
+                                        DnsResolutionWithProcessEntry {
+                                            resolution: DnsResolution {
+                                                domain: domain_name.clone(),
+                                                pid,
+                                                process_name: process_name.clone(),
+                                            },
+                                            inserted_at: now,
                                         },
                                     );
                                 }
                                 dns_parser::rdata::RData::AAAA(ipv6_addr) => {
                                     let ip_addr = IpAddr::V6(ipv6_addr.0);
-                                    self.dns_resolutions.insert(ip_addr, domain_name.clone());
+                                    self.dns_resolutions.insert(
+                                        ip_addr,
+                                        DnsResolutionEntry {
+                                            domain: domain_name.clone(),
+                                            inserted_at: now,
+                                        },
+                                    );
 
                                     // Store enhanced resolution with process info
                                     self.dns_resolutions_with_process.insert(
                                         ip_addr,
-                                        DnsResolution {
-                                            domain: domain_name.clone(),
-                                            pid,
-                                            process_name: process_name.clone(),
+                                        DnsResolutionWithProcessEntry {
+                                            resolution: DnsResolution {
+                                                domain: domain_name.clone(),
+                                                pid,
+                                                process_name: process_name.clone(),
+                                            },
+                                            inserted_at: now,
                                         },
                                     );
                                 }
@@ -209,6 +261,8 @@ impl DnsPacketProcessor {
 
     pub async fn start(&mut self) {
         let pending_dns_queries = self.pending_dns_queries.clone();
+        let dns_resolutions = self.dns_resolutions.clone();
+        let dns_resolutions_with_process = self.dns_resolutions_with_process.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
 
@@ -220,10 +274,57 @@ impl DnsPacketProcessor {
                     break;
                 }
                 let now = Instant::now();
-                // Clean up expired DNS queries
+
+                // Clean up expired DNS queries (30s TTL)
                 pending_dns_queries.retain(|_, pending_query| {
                     now.duration_since(pending_query.timestamp) < Duration::from_secs(30)
                 });
+
+                // Evict oldest entries from dns_resolutions if over capacity
+                let dns_cache_len = dns_resolutions.len();
+                if dns_cache_len > DNS_CACHE_MAX_ENTRIES {
+                    info!(
+                        "DNS resolution cache at {} entries, evicting {} oldest",
+                        dns_cache_len, DNS_CACHE_EVICT_COUNT
+                    );
+
+                    // Collect entries with timestamps
+                    let mut entries: Vec<(IpAddr, Instant)> = dns_resolutions
+                        .iter()
+                        .map(|e| (*e.key(), e.value().inserted_at))
+                        .collect();
+
+                    // Sort by timestamp (oldest first)
+                    entries.sort_by_key(|(_, ts)| *ts);
+
+                    // Remove the oldest entries
+                    for (ip, _) in entries.into_iter().take(DNS_CACHE_EVICT_COUNT) {
+                        dns_resolutions.remove(&ip);
+                    }
+                }
+
+                // Evict oldest entries from dns_resolutions_with_process if over capacity
+                let dns_with_process_len = dns_resolutions_with_process.len();
+                if dns_with_process_len > DNS_CACHE_MAX_ENTRIES {
+                    info!(
+                        "DNS resolution with process cache at {} entries, evicting {} oldest",
+                        dns_with_process_len, DNS_CACHE_EVICT_COUNT
+                    );
+
+                    // Collect entries with timestamps
+                    let mut entries: Vec<(IpAddr, Instant)> = dns_resolutions_with_process
+                        .iter()
+                        .map(|e| (*e.key(), e.value().inserted_at))
+                        .collect();
+
+                    // Sort by timestamp (oldest first)
+                    entries.sort_by_key(|(_, ts)| *ts);
+
+                    // Remove the oldest entries
+                    for (ip, _) in entries.into_iter().take(DNS_CACHE_EVICT_COUNT) {
+                        dns_resolutions_with_process.remove(&ip);
+                    }
+                }
             }
             info!("DNS query cleanup task terminated");
         });

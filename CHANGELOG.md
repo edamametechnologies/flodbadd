@@ -1,3 +1,11 @@
+## 22/01/2026
+    - Memory: added `MAX_HISTORY_LENGTH = 1000` cap on TCP history string in `packets.rs` to prevent unbounded memory growth on long-lived high-traffic connections.
+    - Memory: added bounded DNS caches in `dns.rs` with `DNS_CACHE_MAX_ENTRIES = 50,000` and LRU eviction (oldest 10% evicted when over capacity).
+    - Memory: added bounded reverse DNS cache in `resolver.rs` with `REVERSE_DNS_CACHE_MAX_ENTRIES = 50,000` and LRU eviction.
+    - Memory: added `RESOLVER_QUEUE_MAX_SIZE = 10,000` limit on resolver queue in `resolver.rs`.
+    - Docs: added Memory Management section to `ARCHITECTURE.md` documenting retention policies and bounded data structures.
+    - Docs: created `GAPS.md` to track known limitations and planned improvements.
+
 ## 18/08/2025
     - Port vulns: replaced hot-path reads of `VULNS.data` with lock-free `ArcSwap` pointers for `port_vulns`, `http_ports`, and `https_ports`; writer atomically publishes new maps on update; readers bypass the `RwLock` entirely.
     - Contention: eliminated "Read lock ... took too long to acquire" warnings during updates under high concurrency.

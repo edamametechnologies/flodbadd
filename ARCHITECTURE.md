@@ -73,7 +73,7 @@ struct SessionInfo {
         inbound_bytes, outbound_bytes,
         orig_pkts, resp_pkts,
         segment_count, segment_interarrival,
-        history: String,  // Zeek-style: "ShADaFf"
+        history: String,  // Zeek-style: "ShADaFf" (capped at 1000 chars)
         conn_state: String,  // "SF", "S0", "REJ"
     },
     l7: Option<SessionL7> { pid, process_name, process_path, cmd, memory },
@@ -83,6 +83,50 @@ struct SessionInfo {
     criticality: String,  // "anomaly:abnormal,blacklist:malware_c2"
 }
 ```
+
+## Memory Management and Retention
+
+### Session Retention
+
+Sessions are managed with time-based retention policies defined in `sessions.rs`:
+
+| Timeout | Duration | Purpose |
+|---------|----------|---------|
+| `CONNECTION_ACTIVITY_TIMEOUT` | 60s | Session considered "active" if activity within this window |
+| `CONNECTION_CURRENT_TIMEOUT` | 180s | Session included in "current sessions" list |
+| `CONNECTION_RETENTION_TIMEOUT` | 8 hours | Session pruned after no activity for this duration |
+
+**Key behavior:**
+- Active sessions (receiving packets) are never pruned - this is correct behavior
+- Inactive sessions are pruned after 8 hours of no activity
+- The `update_sessions_status()` function in `capture.rs` handles pruning
+
+### Bounded Data Structures
+
+To prevent unbounded memory growth on high-activity devices:
+
+| Structure | Location | Limit | Notes |
+|-----------|----------|-------|-------|
+| `history` string | `SessionStats` | 1000 chars | TCP flag sequence, capped to prevent growth on long-lived connections |
+| `dns_resolutions` | `dns.rs` | 50,000 entries | LRU eviction (oldest 10%) when exceeded |
+| `dns_resolutions_with_process` | `dns.rs` | 50,000 entries | LRU eviction (oldest 10%) when exceeded |
+| `reverse_dns` | `resolver.rs` | 50,000 entries | LRU eviction (oldest 10%) when exceeded |
+| `resolver_queue` | `resolver.rs` | 10,000 entries | New entries dropped when full |
+| `per_flow_downsample` | `analyzer.rs` | 200,000 entries | Cleared when exceeded |
+| `recent_data` buffer | `analyzer.rs` | 800 samples | Training data sliding window |
+| `port_process_cache` | `l7.rs` | 10,000 entries | L7 resolution cache |
+
+### Analyzer Caches
+
+The anomaly detection system maintains several caches with TTL-based eviction:
+
+| Cache | TTL | Purpose |
+|-------|-----|---------|
+| Score cache | 1 hour | Recent anomaly scores by session UID |
+| Anomalous sessions | 24 hours | Sessions flagged as suspicious/abnormal |
+| Blacklisted sessions | 24 hours | Sessions matching blacklist rules |
+
+See [GAPS.md](GAPS.md) for known limitations and planned improvements.
 
 ## Anomaly Detection
 
@@ -152,6 +196,7 @@ See [EBPF.md](EBPF.md) for complete documentation.
 - [WHITELISTS.md](WHITELISTS.md) - Whitelist system design
 - [PROFILES.md](PROFILES.md) - Device profiling system
 - [CDN.md](CDN.md) - Threat intelligence CDN
+- [GAPS.md](GAPS.md) - Known limitations and planned improvements
 - [CHANGELOG.md](CHANGELOG.md) - Version history
 
 ## Dependencies

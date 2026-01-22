@@ -26,6 +26,11 @@ use uuid::Uuid;
 
 const TCP_PSH: u8 = 0x08; // PSH (push) flag in TCP
 
+// Maximum history string length - prevents unbounded memory growth for long-lived connections
+// 1000 chars is enough for TCP flag analysis while keeping memory usage reasonable
+// A high-traffic connection (60k packets/10s) would fill this in ~0.17 seconds
+const MAX_HISTORY_LENGTH: usize = 1000;
+
 #[derive(Debug, PartialEq)]
 pub enum ParsedPacket {
     SessionPacket(SessionPacketData),
@@ -138,7 +143,10 @@ fn update_session_stats(
     // History & connection state -----------------------------------------
     if let Some(flags) = parsed_packet.flags {
         let c = map_tcp_flags(flags, parsed_packet.packet_length, is_originator);
-        stats.history.push(c);
+        // Cap history length to prevent unbounded memory growth for long-lived connections
+        if stats.history.len() < MAX_HISTORY_LENGTH {
+            stats.history.push(c);
+        }
         if (flags & (TcpFlags::FIN | TcpFlags::RST)) != 0 && stats.end_time.is_none() {
             stats.end_time = Some(now);
             stats.conn_state = Some(determine_conn_state(&stats.history));
