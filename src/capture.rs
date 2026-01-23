@@ -3096,28 +3096,40 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
 
         // 4. Perform second incremental fetch immediately
-        // It should STILL return the session modified since the LAST FULL FETCH
+        // With the fix, incremental fetches now update the timestamp, so this should return 0
+        // (no modifications since the first incremental fetch)
         let incremental_sessions2 = capture.get_sessions(true).await;
         assert_eq!(
             incremental_sessions2.len(),
-            1, // <<< EXPECT 1, NOT 0
-            "Second immediate incremental fetch should still return 1 session"
-        );
-        assert_eq!(
-            incremental_sessions2[0].session, session1,
-            "Second fetch should be same session"
+            0,
+            "Second immediate incremental fetch should return 0 (timestamp updated after first incremental)"
         );
 
-        // 5. Perform another full fetch (updates the timestamp)
-        let _ = capture.get_sessions(false).await;
-
-        // Add a small delay before the final incremental fetch
+        // 5. Modify session2 to verify incremental still works after previous incremental
+        let modification_time2 = Utc::now();
+        if let Some(mut entry) = capture.sessions.get_mut(&session2) {
+            entry.value_mut().last_modified = modification_time2;
+        }
         sleep(Duration::from_millis(50)).await;
 
-        // 6. Perform incremental fetch after full fetch (should return 0)
+        // 6. Third incremental fetch should return the newly modified session
         let incremental_sessions3 = capture.get_sessions(true).await;
         assert_eq!(
             incremental_sessions3.len(),
+            1,
+            "Third incremental fetch should return 1 newly modified session"
+        );
+        assert_eq!(
+            incremental_sessions3[0].session, session2,
+            "Third fetch should return session2"
+        );
+
+        // 7. Full fetch followed by incremental should return 0
+        let _ = capture.get_sessions(false).await;
+        sleep(Duration::from_millis(50)).await;
+        let incremental_sessions4 = capture.get_sessions(true).await;
+        assert_eq!(
+            incremental_sessions4.len(),
             0,
             "Incremental fetch after full fetch should return 0 sessions"
         );
@@ -3252,28 +3264,40 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
 
         // 4. Perform second incremental fetch immediately
-        // It should STILL return the session modified since the LAST FULL FETCH
+        // With the fix, incremental fetches now update the timestamp, so this should return 0
+        // (no modifications since the first incremental fetch)
         let incremental_current2 = capture.get_current_sessions(true).await;
         assert_eq!(
             incremental_current2.len(),
-            1, // <<< EXPECT 1, NOT 0
-            "Second immediate incremental current fetch should still return 1 session"
-        );
-        assert_eq!(
-            incremental_current2[0].session, session1,
-            "Second fetch should be same session"
+            0,
+            "Second immediate incremental current fetch should return 0 (timestamp updated after first incremental)"
         );
 
-        // 5. Perform another full fetch (updates the timestamp)
-        let _ = capture.get_current_sessions(false).await;
-
-        // Add a small delay before the final incremental fetch
+        // 5. Modify session2 to verify incremental still works after previous incremental
+        let modification_time2 = Utc::now();
+        if let Some(mut entry) = capture.sessions.get_mut(&session2) {
+            entry.value_mut().last_modified = modification_time2;
+        }
         sleep(Duration::from_millis(50)).await;
 
-        // 6. Perform incremental fetch after full fetch (should return 0)
+        // 6. Third incremental fetch should return the newly modified session
         let incremental_current3 = capture.get_current_sessions(true).await;
         assert_eq!(
             incremental_current3.len(),
+            1,
+            "Third incremental current fetch should return 1 newly modified session"
+        );
+        assert_eq!(
+            incremental_current3[0].session, session2,
+            "Third fetch should return session2"
+        );
+
+        // 7. Full fetch followed by incremental should return 0
+        let _ = capture.get_current_sessions(false).await;
+        sleep(Duration::from_millis(50)).await;
+        let incremental_current4 = capture.get_current_sessions(true).await;
+        assert_eq!(
+            incremental_current4.len(),
             0,
             "Incremental current fetch after full fetch should return 0 sessions"
         );
@@ -3398,26 +3422,41 @@ mod tests {
 
         sleep(Duration::from_millis(50)).await; // Delay before second fetch
 
-        // 4. Perform second incremental fetch immediately - SHOULD STILL RETURN 1
+        // 4. Perform second incremental fetch immediately
+        // With the fix, incremental fetches now update the timestamp, so this should return 0
+        // (no modifications since the first incremental fetch)
         let incremental_blacklisted2 = capture.get_blacklisted_sessions(true).await;
         assert_eq!(
             incremental_blacklisted2.len(),
-            1, // <<< EXPECT 1, NOT 0
-            "Second immediate incremental blacklist fetch should still return 1 session"
-        );
-        assert_eq!(
-            incremental_blacklisted2[0].session, blacklisted_session,
-            "Second fetch should be same session"
+            0,
+            "Second immediate incremental blacklist fetch should return 0 (timestamp updated after first incremental)"
         );
 
-        // 5. Perform another full fetch (updates the timestamp)
-        let _ = capture.get_blacklisted_sessions(false).await;
-        sleep(Duration::from_millis(50)).await; // Delay after full fetch
+        // 5. Modify the blacklisted session again to verify incremental still works
+        let modification_time2 = Utc::now();
+        if let Some(mut entry) = capture.sessions.get_mut(&blacklisted_session) {
+            entry.value_mut().last_modified = modification_time2;
+        }
+        sleep(Duration::from_millis(50)).await;
 
-        // 6. Perform incremental fetch after full fetch (should return 0)
+        // 6. Third incremental fetch should return the newly modified session
         let incremental_blacklisted3 = capture.get_blacklisted_sessions(true).await;
         assert_eq!(
             incremental_blacklisted3.len(),
+            1,
+            "Third incremental blacklist fetch should return 1 newly modified session"
+        );
+        assert_eq!(
+            incremental_blacklisted3[0].session, blacklisted_session,
+            "Third fetch should return blacklisted_session"
+        );
+
+        // 7. Full fetch followed by incremental should return 0
+        let _ = capture.get_blacklisted_sessions(false).await;
+        sleep(Duration::from_millis(50)).await;
+        let incremental_blacklisted4 = capture.get_blacklisted_sessions(true).await;
+        assert_eq!(
+            incremental_blacklisted4.len(),
             0,
             "Incremental blacklist fetch after full fetch should return 0 sessions"
         );
