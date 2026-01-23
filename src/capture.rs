@@ -1972,11 +1972,12 @@ impl FlodbaddCapture {
     }
 
     pub async fn update_sessions(&self) {
-        // Skip if not capturing and not running in test mode
-        if !self.is_capturing().await && !cfg!(test) {
-            debug!("update_sessions skipped - not capturing");
-            return;
-        }
+        // Always run update_sessions_internal regardless of capture state.
+        // This ensures session metadata (DNS, whitelist/blacklist matching) stays current
+        // for existing sessions even when capture is stopped. The internal method safely
+        // handles empty session maps. Removing the previous is_capturing() check also
+        // eliminates a race condition on Windows where the capture state could change
+        // between the caller's check and this method's check.
 
         // Pass the flag to the internal method, which will now handle all logic
         Self::update_sessions_internal(
