@@ -1164,7 +1164,7 @@ impl FlodbaddCapture {
         } else {
             warn!(
                 "Passed interfaces {:?} did not return any capture devices",
-                interfaces
+                *interfaces
             );
             false
         };
