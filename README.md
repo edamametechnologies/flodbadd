@@ -223,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
     // Let it capture for 30 seconds
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     
+    // get_sessions(incremental): false = full fetch, true = only sessions modified since last fetch
     let sessions = capture.get_sessions(false).await;
     println!("Captured {} sessions", sessions.len());
     

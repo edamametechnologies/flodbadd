@@ -84,6 +84,50 @@ struct SessionInfo {
 }
 ```
 
+## Session Fetching API
+
+Sessions can be retrieved with either full or incremental fetching:
+
+```rust
+// Full fetch - returns all sessions (useful on startup/restart)
+let all_sessions = capture.get_sessions(false).await;
+
+// Incremental fetch - returns only sessions modified since last fetch
+let new_sessions = capture.get_sessions(true).await;
+```
+
+**API methods supporting incremental mode:**
+
+| Method | Description |
+|--------|-------------|
+| `get_sessions(incremental)` | All historical sessions |
+| `get_current_sessions(incremental)` | Active sessions (within `CONNECTION_CURRENT_TIMEOUT`) |
+| `get_blacklisted_sessions(incremental)` | Sessions matching blacklist rules |
+| `get_whitelist_exceptions(incremental)` | Sessions not matching whitelist |
+
+**Incremental fetch behavior:**
+- Each method tracks its own `last_fetch_timestamp`
+- When `incremental=true`: returns sessions where `last_modified > last_fetch_timestamp`
+- Timestamp is updated after **every** fetch (both full and incremental)
+- Sessions are only returned once unless they are modified again
+- Use `incremental=false` on startup to establish baseline, then `true` for polling
+
+**Typical usage pattern:**
+```rust
+// Initial full fetch to get current state
+let sessions = capture.get_sessions(false).await;
+analyzer.analyze_sessions(&mut sessions).await;
+
+// Subsequent polls - only get new/modified sessions
+loop {
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let new_sessions = capture.get_sessions(true).await;
+    if !new_sessions.is_empty() {
+        analyzer.analyze_sessions(&mut new_sessions).await;
+    }
+}
+```
+
 ## Memory Management and Retention
 
 ### Session Retention

@@ -2034,10 +2034,9 @@ impl FlodbaddCapture {
             }
         }
 
-        // Update timestamp only on a full fetch
-        if !incremental {
-            *self.last_get_sessions_fetch_timestamp.write().await = now;
-        }
+        // Always update timestamp after fetch to enable true incremental fetching
+        // This ensures sessions are only returned once unless they are modified again
+        *self.last_get_sessions_fetch_timestamp.write().await = now;
 
         sessions_vec
     }
@@ -2083,10 +2082,8 @@ impl FlodbaddCapture {
             }
         }
 
-        // Update timestamp only on a full fetch
-        if !incremental {
-            *self.last_get_current_sessions_fetch_timestamp.write().await = now;
-        }
+        // Always update timestamp after fetch to enable true incremental fetching
+        *self.last_get_current_sessions_fetch_timestamp.write().await = now;
 
         current_sessions_vec
     }
@@ -2129,13 +2126,11 @@ impl FlodbaddCapture {
             }
         }
 
-        // Update timestamp only on a full fetch
-        if !incremental {
-            *self
-                .last_get_blacklisted_sessions_fetch_timestamp
-                .write()
-                .await = now;
-        }
+        // Always update timestamp after fetch to enable true incremental fetching
+        *self
+            .last_get_blacklisted_sessions_fetch_timestamp
+            .write()
+            .await = now;
 
         blacklisted_sessions_vec
     }
@@ -2170,13 +2165,11 @@ impl FlodbaddCapture {
             }
         }
 
-        // Update timestamp only on a full fetch
-        if !incremental {
-            *self
-                .last_get_whitelist_exceptions_fetch_timestamp
-                .write()
-                .await = now;
-        }
+        // Always update timestamp after fetch to enable true incremental fetching
+        *self
+            .last_get_whitelist_exceptions_fetch_timestamp
+            .write()
+            .await = now;
 
         whitelist_exceptions_vec
     }

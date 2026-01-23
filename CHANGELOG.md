@@ -1,3 +1,6 @@
+## 23/01/2026
+    - Incremental Fetch: fixed `get_sessions()`, `get_current_sessions()`, `get_blacklisted_sessions()`, and `get_whitelist_exceptions()` to always update the fetch timestamp after returning results. Previously, the timestamp was only updated on full fetches (`incremental=false`), causing the same sessions to be returned repeatedly on incremental fetches. Now sessions are only returned once unless they are modified again, reducing redundant data transfer and memory churn.
+
 ## 22/01/2026
     - Memory: added `MAX_HISTORY_LENGTH = 1000` cap on TCP history string in `packets.rs` to prevent unbounded memory growth on long-lived high-traffic connections.
     - Memory: added bounded DNS caches in `dns.rs` with `DNS_CACHE_MAX_ENTRIES = 50,000` and LRU eviction (oldest 10% evicted when over capacity).
