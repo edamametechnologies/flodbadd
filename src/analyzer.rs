@@ -87,6 +87,8 @@ static ALL_SESSION_TIMEOUT: i64 = CONNECTION_RETENTION_TIMEOUT.num_seconds() as 
 
 // Cap size of per-flow downsample state to bound memory usage
 static PER_FLOW_DOWNSAMPLE_MAX_ENTRIES: usize = 200000;
+// Minimum interval between cleanup passes to reduce DashMap contention
+static CLEANUP_MIN_INTERVAL_SECS: i64 = 10;
 
 // Define percentile thresholds used to compute dynamic thresholds
 pub const DEFAULT_SUSPICIOUS_PERCENTILE: f64 = 0.995;
@@ -366,27 +368,23 @@ impl IsolationForestModel {
     /// Roughly estimate the heap memory used by the model's internal buffers and caches.
     /// This excludes the isolation forest trees which are opaque here.
     pub fn estimate_memory_usage_bytes(&self) -> u64 {
+        const SESSION_CACHE_EST_ENTRY_BYTES: u64 = 256;
+        const PER_FLOW_DOWNSAMPLE_EST_ENTRY_BYTES: u64 = 16;
         let mut bytes: u64 = 0;
         // recent_data buffer: use capacity to reflect reserved space
         bytes = bytes.saturating_add(
             (self.recent_data.capacity() as u64)
                 .saturating_mul(std::mem::size_of::<[f64; NUM_FEATURES]>() as u64),
         );
-        // session_cache: key String capacity + value tuple sizes
-        for entry in self.session_cache.iter() {
-            let (uid, (score, features, ts)) = entry.pair();
-            bytes = bytes.saturating_add(uid.capacity() as u64);
-            bytes = bytes
-                .saturating_add(std::mem::size_of_val(score) as u64)
-                .saturating_add(std::mem::size_of_val(features) as u64)
-                .saturating_add(std::mem::size_of_val(ts) as u64);
-        }
-        // per_flow_downsample: approximate per entry
-        for _entry in self.per_flow_downsample.iter() {
-            bytes = bytes
-                .saturating_add(std::mem::size_of::<u64>() as u64)
-                .saturating_add(std::mem::size_of::<u32>() as u64);
-        }
+        // session_cache: approximate per entry to avoid long DashMap iterators
+        bytes = bytes.saturating_add(
+            (self.session_cache.len() as u64).saturating_mul(SESSION_CACHE_EST_ENTRY_BYTES),
+        );
+        // per_flow_downsample: approximate per entry to avoid long DashMap iterators
+        bytes = bytes.saturating_add(
+            (self.per_flow_downsample.len() as u64)
+                .saturating_mul(PER_FLOW_DOWNSAMPLE_EST_ENTRY_BYTES),
+        );
         bytes
     }
 
@@ -1386,6 +1384,8 @@ pub struct SessionAnalyzer {
     /// Track the wall-clock time when we last ran a **real** analysis for every UID.
     /// This lets us enforce the `ANALYSIS_DELAY` guard without touching the core caches.
     last_analysis_times: CustomDashMap<String, DateTime<Utc>>, // uid -> last analysis timestamp
+    /// Throttle cleanup scans to reduce DashMap contention.
+    last_cleanup_epoch: AtomicU64,
     // Warm-up related fields
     warm_up_active: Arc<AtomicBool>,
     warm_up_start_time: AtomicU64, // Timestamp when warm-up started (seconds since UNIX epoch)
@@ -1419,6 +1419,7 @@ impl SessionAnalyzer {
             blacklisted_sessions: CustomDashMap::new("blacklisted_sessions"),
             all_sessions: CustomDashMap::new("all_sessions"),
             last_analysis_times: CustomDashMap::new("last_analysis_times"),
+            last_cleanup_epoch: AtomicU64::new(0),
             // Warm-up defaults - increase to ensure enough time for training
             warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
@@ -2551,6 +2552,12 @@ impl SessionAnalyzer {
     /// Also cleans up expired entries from last_analysis_times to prevent unbounded growth.
     fn cleanup_tracked_sessions(&self) {
         let now = Utc::now();
+        let now_ts = now.timestamp();
+        let last_cleanup = self.last_cleanup_epoch.load(Ordering::Relaxed) as i64;
+        if last_cleanup != 0 && now_ts - last_cleanup < CLEANUP_MIN_INTERVAL_SECS {
+            return;
+        }
+        self.last_cleanup_epoch.store(now_ts as u64, Ordering::Relaxed);
         let anomalous_timeout = Duration::seconds(ANOMALOUS_SESSION_TIMEOUT);
         let blacklisted_timeout = Duration::seconds(BLACKLISTED_SESSION_TIMEOUT);
         let all_session_timeout = Duration::seconds(ALL_SESSION_TIMEOUT);

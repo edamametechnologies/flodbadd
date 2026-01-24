@@ -168,7 +168,8 @@ lazy_static! {
     static ref HTTPS_PORT_LIST_CACHE: Arc<CustomRwLock<Vec<u16>>> = Arc::new(CustomRwLock::new(Vec::new()));
 
     // Cache for device criticality computations – key is a comma-separated sorted list of ports
-    static ref CRITICALITY_CACHE_PTR: ArcSwap<CustomDashMap<String, String>> = ArcSwap::from_pointee(CustomDashMap::new("port_vulns_criticality_cache"));
+    // Stored as a lock-free snapshot to avoid DashMap shard contention on hot reads.
+    static ref CRITICALITY_CACHE_PTR: ArcSwap<HashMap<String, String>> = ArcSwap::from_pointee(HashMap::new());
 
     // Lock-free pointers to current maps for hot-path readers
     static ref PORT_VULNS_PTR: ArcSwap<HashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(HashMap::new());
@@ -197,8 +198,8 @@ async fn clear_caches() {
     https_list.clear();
     drop(https_list); // Explicitly release the lock
 
-    // Swap-on-clear to avoid per-shard stalls on DashMap::clear
-    CRITICALITY_CACHE_PTR.store(Arc::new(CustomDashMap::new("port_vulns_criticality_cache")));
+    // Swap-on-clear to avoid blocking readers on a shared lock.
+    CRITICALITY_CACHE_PTR.store(Arc::new(HashMap::new()));
 }
 
 pub async fn get_ports() -> Vec<u16> {
@@ -355,9 +356,10 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
         "Low".to_string()
     };
 
-    // Insert into the current cache instance; a concurrent swap will just mean we seed the new map on-demand later
-    let criticality_cache = CRITICALITY_CACHE_PTR.load();
-    criticality_cache.insert(key, criticality.clone());
+    // Update the cache snapshot; concurrent writers can overwrite each other, which is fine for a cache.
+    let mut updated_cache: HashMap<String, String> = (*CRITICALITY_CACHE_PTR.load()).clone();
+    updated_cache.insert(key, criticality.clone());
+    CRITICALITY_CACHE_PTR.store(Arc::new(updated_cache));
     criticality
 }
 
