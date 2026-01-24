@@ -2557,7 +2557,8 @@ impl SessionAnalyzer {
         if last_cleanup != 0 && now_ts - last_cleanup < CLEANUP_MIN_INTERVAL_SECS {
             return;
         }
-        self.last_cleanup_epoch.store(now_ts as u64, Ordering::Relaxed);
+        self.last_cleanup_epoch
+            .store(now_ts as u64, Ordering::Relaxed);
         let anomalous_timeout = Duration::seconds(ANOMALOUS_SESSION_TIMEOUT);
         let blacklisted_timeout = Duration::seconds(BLACKLISTED_SESSION_TIMEOUT);
         let all_session_timeout = Duration::seconds(ALL_SESSION_TIMEOUT);

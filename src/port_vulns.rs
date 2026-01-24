@@ -357,7 +357,7 @@ pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
     };
 
     // Update the cache snapshot; concurrent writers can overwrite each other, which is fine for a cache.
-    let mut updated_cache: HashMap<String, String> = (*CRITICALITY_CACHE_PTR.load()).clone();
+    let mut updated_cache: HashMap<String, String> = CRITICALITY_CACHE_PTR.load().as_ref().clone();
     updated_cache.insert(key, criticality.clone());
     CRITICALITY_CACHE_PTR.store(Arc::new(updated_cache));
     criticality
