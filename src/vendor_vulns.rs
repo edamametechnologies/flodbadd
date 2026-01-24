@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 use undeadlock::*;
@@ -28,7 +29,7 @@ pub struct VulnerabilityVendorInfoListJSON {
 pub struct VulnerabilityInfoList {
     pub date: String,
     pub signature: String,
-    pub vendor_vulns: Arc<CustomDashMap<String, VulnerabilityVendorInfo>>,
+    pub vendor_vulns: Arc<HashMap<String, VulnerabilityVendorInfo>>,
 }
 
 impl CloudSignature for VulnerabilityInfoList {
@@ -44,7 +45,7 @@ impl VulnerabilityInfoList {
     pub fn new_from_json(vuln_info: &VulnerabilityVendorInfoListJSON) -> Self {
         info!("Loading vendor info list from JSON");
 
-        let vendor_vulns = Arc::new(CustomDashMap::new("vendor_vulns"));
+        let mut vendor_vulns: HashMap<String, VulnerabilityVendorInfo> = HashMap::new();
         let mut vendor_vec: Vec<String> = Vec::new();
 
         for vendor_info in &vuln_info.vulnerabilities {
@@ -72,7 +73,7 @@ impl VulnerabilityInfoList {
         VulnerabilityInfoList {
             date: vuln_info.date.clone(),
             signature: vuln_info.signature.clone(),
-            vendor_vulns,
+            vendor_vulns: Arc::new(vendor_vulns),
         }
     }
 }
@@ -125,12 +126,8 @@ pub async fn get_vendors() -> Vec<String> {
     } // Release the read lock
 
     // If not in cache, regenerate and cache it
-    let data = VULNS.data.read().await;
-    let mut vendor_vec: Vec<String> = data
-        .vendor_vulns
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect();
+    let vendors_map = VULNS.data.read().await.vendor_vulns.clone();
+    let mut vendor_vec: Vec<String> = vendors_map.keys().cloned().collect();
 
     vendor_vec.sort();
 
@@ -159,8 +156,8 @@ pub async fn get_vulns_of_vendor(vendor: &str) -> Vec<VulnerabilityInfo> {
         }
 
         // If not in cache, check if we have this vendor in our data
-        let store = VULNS.data.read().await;
-        if let Some(vendor_data) = store.vendor_vulns.get(&vendor_name) {
+        let vendors_map = VULNS.data.read().await.vendor_vulns.clone();
+        if let Some(vendor_data) = vendors_map.get(&vendor_name) {
             let mut vulns_sorted = vendor_data.vulnerabilities.clone();
             vulns_sorted.sort_by(|a, b| b.name.cmp(&a.name));
 
@@ -189,8 +186,8 @@ pub async fn get_vulns_names_of_vendor(vendor: &str) -> Vec<String> {
         }
 
         // If not in cache, check if we have this vendor in our data
-        let store = VULNS.data.read().await;
-        if let Some(vendor_data) = store.vendor_vulns.get(&vendor_name) {
+        let vendors_map = VULNS.data.read().await.vendor_vulns.clone();
+        if let Some(vendor_data) = vendors_map.get(&vendor_name) {
             let mut vulns_sorted = vendor_data.vulnerabilities.clone();
             vulns_sorted.sort_by(|a, b| b.name.cmp(&a.name));
 

@@ -46,21 +46,6 @@ const CDN_PROVIDERS: &[&str] = &[
     "cdn",
 ];
 
-// Test data for known CDN providers (AS owner name, test IP address)
-#[cfg(test)]
-const CDN_PROVIDER_TEST_DATA: &[(&str, &str, &str)] = &[
-    ("fastly", "FASTLY", "185.199.110.133"),
-    ("cloudflare", "Cloudflare", "104.16.0.1"),
-    ("amazon", "Amazon Technologies Inc.", "52.84.0.1"),
-    ("aws", "AWS", "3.5.0.1"),
-    ("google", "Google LLC", "8.8.8.8"),
-    ("microsoft", "Microsoft Corporation", "20.190.0.1"),
-    ("azure", "Microsoft Azure", "40.76.0.1"),
-    ("akamai", "Akamai Technologies", "23.185.0.1"),
-    ("cloudfront", "Amazon CloudFront", "13.32.0.1"),
-    ("cdn", "Some CDN Provider", "1.2.3.4"),
-];
-
 /// Endpoint rule supporting domain(s), IPs and ports with list/range semantics.
 ///
 /// Notes:

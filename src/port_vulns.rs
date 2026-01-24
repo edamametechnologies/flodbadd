@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -43,18 +44,18 @@ impl CloudSignature for VulnerabilityPortInfoList {
 pub struct VulnerabilityPortInfoList {
     pub date: String,
     pub signature: String,
-    pub port_vulns: Arc<CustomDashMap<u16, VulnerabilityPortInfo>>,
-    pub http_ports: Arc<CustomDashMap<u16, VulnerabilityPortInfo>>,
-    pub https_ports: Arc<CustomDashMap<u16, VulnerabilityPortInfo>>,
+    pub port_vulns: Arc<HashMap<u16, VulnerabilityPortInfo>>,
+    pub http_ports: Arc<HashMap<u16, VulnerabilityPortInfo>>,
+    pub https_ports: Arc<HashMap<u16, VulnerabilityPortInfo>>,
 }
 
 impl VulnerabilityPortInfoList {
     pub fn new_from_json(vuln_info: VulnerabilityPortInfoListJSON) -> Self {
         info!("Loading port info list from JSON");
 
-        let port_vulns = Arc::new(CustomDashMap::new("port_vulns"));
-        let http_ports = Arc::new(CustomDashMap::new("http_ports"));
-        let https_ports = Arc::new(CustomDashMap::new("https_ports"));
+        let mut port_vulns: HashMap<u16, VulnerabilityPortInfo> = HashMap::new();
+        let mut http_ports: HashMap<u16, VulnerabilityPortInfo> = HashMap::new();
+        let mut https_ports: HashMap<u16, VulnerabilityPortInfo> = HashMap::new();
 
         let mut http_vec: Vec<u16> = Vec::new();
         let mut https_vec: Vec<u16> = Vec::new();
@@ -69,8 +70,6 @@ impl VulnerabilityPortInfoList {
             }
             port_vulns.insert(port_info.port, port_info.clone());
 
-            PORT_NAMES_CACHE.insert(port_info.port, port_info.name.clone());
-            PORT_DESCRIPTIONS_CACHE.insert(port_info.port, port_info.description.clone());
             PORT_VULN_LISTS_CACHE
                 .insert(port_info.port, Arc::new(port_info.vulnerabilities.clone()));
             PORT_COUNTS_CACHE.insert(port_info.port, port_info.count);
@@ -81,6 +80,10 @@ impl VulnerabilityPortInfoList {
 
         // We don't try to update the cache here because this is called from a non-async context
         // The HTTP/HTTPS port lists will be populated on first access instead
+
+        let port_vulns = Arc::new(port_vulns);
+        let http_ports = Arc::new(http_ports);
+        let https_ports = Arc::new(https_ports);
 
         info!(
             "Loaded {} ports, {} HTTP ports, {} HTTPS ports",
@@ -152,12 +155,6 @@ lazy_static! {
         model
     };
 
-    // Cache for port names by port
-    static ref PORT_NAMES_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("port_names_cache");
-
-    // Cache for port descriptions by port
-    static ref PORT_DESCRIPTIONS_CACHE: CustomDashMap<u16, String> = CustomDashMap::new("port_descriptions_cache");
-
     // Cache for port vulnerability lists by port
     static ref PORT_VULN_LISTS_CACHE: CustomDashMap<u16, Arc<Vec<VulnerabilityInfo>>> = CustomDashMap::new("port_vulnerability_lists_cache");
 
@@ -174,9 +171,9 @@ lazy_static! {
     static ref CRITICALITY_CACHE_PTR: ArcSwap<CustomDashMap<String, String>> = ArcSwap::from_pointee(CustomDashMap::new("port_vulns_criticality_cache"));
 
     // Lock-free pointers to current maps for hot-path readers
-    static ref PORT_VULNS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("port_vulns_init"));
-    static ref HTTP_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("http_ports_init"));
-    static ref HTTPS_PORTS_PTR: ArcSwap<CustomDashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(CustomDashMap::new("https_ports_init"));
+    static ref PORT_VULNS_PTR: ArcSwap<HashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(HashMap::new());
+    static ref HTTP_PORTS_PTR: ArcSwap<HashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(HashMap::new());
+    static ref HTTPS_PORTS_PTR: ArcSwap<HashMap<u16, VulnerabilityPortInfo>> = ArcSwap::from_pointee(HashMap::new());
 }
 
 #[inline]
@@ -187,8 +184,6 @@ fn ensure_port_vulns_initialized() {
 
 // Clear all caches
 async fn clear_caches() {
-    PORT_NAMES_CACHE.clear();
-    PORT_DESCRIPTIONS_CACHE.clear();
     PORT_VULN_LISTS_CACHE.clear();
     PORT_COUNTS_CACHE.clear();
 
@@ -210,7 +205,7 @@ pub async fn get_ports() -> Vec<u16> {
     ensure_port_vulns_initialized();
     // Load the current map without touching the model lock
     let ports_map = PORT_VULNS_PTR.load();
-    ports_map.iter().map(|entry| *entry.key()).collect()
+    ports_map.keys().copied().collect()
 }
 
 pub fn get_deep_ports() -> Vec<u16> {
@@ -219,17 +214,10 @@ pub fn get_deep_ports() -> Vec<u16> {
 
 pub async fn get_description_from_port(port: u16) -> String {
     ensure_port_vulns_initialized();
-    // Try cache first
-    if let Some(cached) = PORT_DESCRIPTIONS_CACHE.get(&port) {
-        return cached.clone();
-    }
-
-    // If not in cache, read from the lock-free pointer
+    // Read from the lock-free pointer
     let port_vulns = PORT_VULNS_PTR.load();
     if let Some(port_info) = port_vulns.get(&port) {
-        let description = port_info.description.clone();
-        PORT_DESCRIPTIONS_CACHE.insert(port, description.clone());
-        return description;
+        return port_info.description.clone();
     }
 
     "".to_string()
@@ -237,17 +225,10 @@ pub async fn get_description_from_port(port: u16) -> String {
 
 pub async fn get_name_from_port(port: u16) -> String {
     ensure_port_vulns_initialized();
-    // Try cache first
-    if let Some(cached) = PORT_NAMES_CACHE.get(&port) {
-        return cached.clone();
-    }
-
-    // If not in cache, read from the lock-free pointer
+    // Read from the lock-free pointer
     let port_vulns = PORT_VULNS_PTR.load();
     if let Some(port_info) = port_vulns.get(&port) {
-        let name = port_info.name.clone();
-        PORT_NAMES_CACHE.insert(port, name.clone());
-        return name;
+        return port_info.name.clone();
     }
 
     "".to_string()
@@ -265,7 +246,7 @@ pub async fn get_http_ports() -> Vec<u16> {
 
     // If not in cache, generate and cache it from the lock-free pointer
     let http_ports = HTTP_PORTS_PTR.load();
-    let mut http_vec: Vec<u16> = http_ports.iter().map(|entry| *entry.key()).collect();
+    let mut http_vec: Vec<u16> = http_ports.keys().copied().collect();
     http_vec.sort_unstable();
 
     // Update the cache
@@ -289,7 +270,7 @@ pub async fn get_https_ports() -> Vec<u16> {
 
     // If not in cache, generate and cache it from the lock-free pointer
     let https_ports = HTTPS_PORTS_PTR.load();
-    let mut https_vec: Vec<u16> = https_ports.iter().map(|entry| *entry.key()).collect();
+    let mut https_vec: Vec<u16> = https_ports.keys().copied().collect();
     https_vec.sort_unstable();
 
     // Update the cache

@@ -2558,21 +2558,70 @@ impl SessionAnalyzer {
         // This prevents unbounded growth while keeping recent analysis timestamps
         let analysis_times_timeout = Duration::seconds(ANALYSIS_DELAY * 2);
 
-        self.anomalous_sessions.retain(|_, session| {
-            now.signed_duration_since(session.last_modified) < anomalous_timeout
-        });
+        let anomalous_cutoff = now - anomalous_timeout;
+        let blacklisted_cutoff = now - blacklisted_timeout;
+        let all_sessions_cutoff = now - all_session_timeout;
+        let analysis_cutoff = now - analysis_times_timeout;
 
-        self.blacklisted_sessions.retain(|_, session| {
-            now.signed_duration_since(session.last_modified) < blacklisted_timeout
-        });
+        let stale_anomalous: Vec<String> = self
+            .anomalous_sessions
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().last_modified < anomalous_cutoff {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for key in stale_anomalous {
+            self.anomalous_sessions.remove(&key);
+        }
 
-        self.all_sessions.retain(|_, session| {
-            now.signed_duration_since(session.last_modified) < all_session_timeout
-        });
+        let stale_blacklisted: Vec<String> = self
+            .blacklisted_sessions
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().last_modified < blacklisted_cutoff {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for key in stale_blacklisted {
+            self.blacklisted_sessions.remove(&key);
+        }
 
-        // Clean up old analysis timestamps to prevent unbounded growth
-        self.last_analysis_times
-            .retain(|_, timestamp| now.signed_duration_since(*timestamp) < analysis_times_timeout);
+        let stale_all_sessions: Vec<String> = self
+            .all_sessions
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().last_modified < all_sessions_cutoff {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for key in stale_all_sessions {
+            self.all_sessions.remove(&key);
+        }
+
+        let stale_analysis: Vec<String> = self
+            .last_analysis_times
+            .iter()
+            .filter_map(|entry| {
+                if *entry.value() < analysis_cutoff {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for key in stale_analysis {
+            self.last_analysis_times.remove(&key);
+        }
     }
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.

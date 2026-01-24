@@ -1474,13 +1474,6 @@ mod tests {
         }
     }
 
-    fn ipv6_entry(addr: Ipv6Addr) -> IpAddressEntry<Ipv6Addr> {
-        IpAddressEntry {
-            address: addr,
-            last_seen: Utc::now(),
-        }
-    }
-
     fn mdns_entry(service: &str) -> MdnsServiceEntry {
         MdnsServiceEntry {
             service: service.to_string(),

@@ -39,9 +39,9 @@ pub struct BlacklistsJSON {
 pub struct Blacklists {
     pub date: String,
     pub signature: String,
-    pub blacklists: Arc<CustomDashMap<String, BlacklistInfo>>,
+    pub blacklists: Arc<HashMap<String, BlacklistInfo>>,
     // Cache for parsed IP ranges for performance
-    pub parsed_ranges: Arc<CustomDashMap<String, Vec<IpNet>>>,
+    pub parsed_ranges: Arc<HashMap<String, Vec<IpNet>>>,
 }
 
 impl From<Blacklists> for BlacklistsJSON {
@@ -49,11 +49,7 @@ impl From<Blacklists> for BlacklistsJSON {
         BlacklistsJSON {
             date: blacklists.date,
             signature: blacklists.signature,
-            blacklists: blacklists
-                .blacklists
-                .iter()
-                .map(|r| r.value().clone())
-                .collect(),
+            blacklists: blacklists.blacklists.values().cloned().collect(),
         }
     }
 }
@@ -115,8 +111,8 @@ impl Blacklists {
             info!("Loading blacklists from JSON without filtering local/private ranges (custom blacklist).");
         }
 
-        let blacklists_map = Arc::new(CustomDashMap::new("blacklists"));
-        let parsed_ranges_map = Arc::new(CustomDashMap::new("parsed_ranges"));
+        let mut blacklists_map: HashMap<String, BlacklistInfo> = HashMap::new();
+        let mut parsed_ranges_map: HashMap<String, Vec<IpNet>> = HashMap::new();
 
         for info_orig in blacklist_info_json.blacklists {
             let list_name = info_orig.name.clone();
@@ -179,8 +175,8 @@ impl Blacklists {
         Blacklists {
             date: blacklist_info_json.date,
             signature: blacklist_info_json.signature,
-            blacklists: blacklists_map,
-            parsed_ranges: parsed_ranges_map,
+            blacklists: Arc::new(blacklists_map),
+            parsed_ranges: Arc::new(parsed_ranges_map),
         }
     }
 
@@ -193,10 +189,11 @@ impl Blacklists {
             .ok_or_else(|| anyhow!("Blacklist not found: {}", blacklist_name))?;
 
         // Get the parsed ranges for this blacklist
-        let ip_ranges = match self.parsed_ranges.get(blacklist_name) {
-            Some(ranges) => ranges.clone(),
-            None => Vec::new(),
-        };
+        let ip_ranges = self
+            .parsed_ranges
+            .get(blacklist_name)
+            .cloned()
+            .unwrap_or_default();
 
         Ok(ip_ranges)
     }
@@ -310,8 +307,12 @@ fn clear_ip_cache() {
 
 /// Checks if a blacklist name exists in the current model (default or custom).
 pub async fn is_valid_blacklist(blacklist_name: &str) -> bool {
-    let blacklists_map = LISTS.data.read().await.blacklists.clone();
-    blacklists_map.contains_key(blacklist_name)
+    LISTS
+        .data
+        .read()
+        .await
+        .blacklists
+        .contains_key(blacklist_name)
 }
 
 /// Checks if a given IP is blacklisted.
@@ -335,11 +336,7 @@ pub async fn is_ip_blacklisted(ip: &str) -> (bool, Vec<String>) {
     // Take a snapshot of the current blacklist names to avoid holding any DashMap
     // iterator guards while performing the (potentially expensive) per-list checks.
     let list_data = LISTS.data.read().await;
-    let blacklist_names: Vec<String> = list_data
-        .blacklists
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect();
+    let blacklist_names: Vec<String> = list_data.blacklists.keys().cloned().collect();
     let list_data_instance = list_data.clone();
     // Drop the original read lock *and* the iterator guard before iterating again.
     drop(list_data);
@@ -494,11 +491,7 @@ pub async fn recompute_blacklist_for_sessions(
 
         // 1a. Get all current blacklist names and create working sets
         let list_data = LISTS.data.read().await.clone(); // Take a clone to avoid holding the lock
-        let blacklist_names: Vec<String> = list_data
-            .blacklists
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
+        let blacklist_names: Vec<String> = list_data.blacklists.keys().cloned().collect();
 
         // 1b. Collect existing blacklisted sessions (with filtering)
         let existing_blacklisted = {
