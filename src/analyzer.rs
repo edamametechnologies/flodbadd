@@ -298,6 +298,10 @@ impl SessionCache {
             None
         }
     }
+
+    fn get_full_session_snapshot(&self) -> Option<SessionInfo> {
+        self.full_session.as_ref().map(|full| (**full).clone())
+    }
 }
 
 // Define the internal analyzer that handles the Isolation Forest model
@@ -1378,14 +1382,16 @@ pub struct AnalysisResult {
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
 pub struct SessionAnalyzer {
     model: CustomRwLock<Option<CustomRwLock<IsolationForestModel>>>,
-    anomalous_sessions: CustomDashMap<String, SessionCache>,
-    blacklisted_sessions: CustomDashMap<String, SessionCache>,
-    all_sessions: CustomDashMap<String, SessionCache>, // Store all processed sessions
+    anomalous_sessions: Arc<CustomDashMap<String, SessionCache>>,
+    blacklisted_sessions: Arc<CustomDashMap<String, SessionCache>>,
+    all_sessions: Arc<CustomDashMap<String, SessionCache>>, // Store all processed sessions
     /// Track the wall-clock time when we last ran a **real** analysis for every UID.
     /// This lets us enforce the `ANALYSIS_DELAY` guard without touching the core caches.
-    last_analysis_times: CustomDashMap<String, DateTime<Utc>>, // uid -> last analysis timestamp
+    last_analysis_times: Arc<CustomDashMap<String, DateTime<Utc>>>, // uid -> last analysis timestamp
     /// Throttle cleanup scans to reduce DashMap contention.
-    last_cleanup_epoch: AtomicU64,
+    last_cleanup_epoch: Arc<AtomicU64>,
+    /// Background cleanup task handle (to avoid overlapping tasks).
+    cleanup_task_handle: Arc<CustomRwLock<Option<tokio::task::JoinHandle<()>>>>,
     // Warm-up related fields
     warm_up_active: Arc<AtomicBool>,
     warm_up_start_time: AtomicU64, // Timestamp when warm-up started (seconds since UNIX epoch)
@@ -1415,11 +1421,12 @@ impl SessionAnalyzer {
         );
         Self {
             model: CustomRwLock::new(None),
-            anomalous_sessions: CustomDashMap::new("anomalous_sessions"),
-            blacklisted_sessions: CustomDashMap::new("blacklisted_sessions"),
-            all_sessions: CustomDashMap::new("all_sessions"),
-            last_analysis_times: CustomDashMap::new("last_analysis_times"),
-            last_cleanup_epoch: AtomicU64::new(0),
+            anomalous_sessions: Arc::new(CustomDashMap::new("anomalous_sessions")),
+            blacklisted_sessions: Arc::new(CustomDashMap::new("blacklisted_sessions")),
+            all_sessions: Arc::new(CustomDashMap::new("all_sessions")),
+            last_analysis_times: Arc::new(CustomDashMap::new("last_analysis_times")),
+            last_cleanup_epoch: Arc::new(AtomicU64::new(0)),
+            cleanup_task_handle: Arc::new(CustomRwLock::new(None)),
             // Warm-up defaults - increase to ensure enough time for training
             warm_up_active: Arc::new(AtomicBool::new(true)),
             // Initialize with 0 (will be set on first analyze_sessions call)
@@ -1485,10 +1492,6 @@ impl SessionAnalyzer {
     /// This will train/update the model and then score each session.
     /// Returns information about what was found during analysis.
     pub async fn analyze_sessions(&self, sessions: &mut [SessionInfo]) -> AnalysisResult {
-        // Proactively prune any expired tracked sessions to limit retention
-        // of cloned `SessionInfo` in internal caches before doing any new work.
-        self.cleanup_tracked_sessions();
-
         // Clean up expired session_cache entries before analysis
         self.cleanup_session_cache().await;
 
@@ -2533,16 +2536,16 @@ impl SessionAnalyzer {
     /// Prioritizes anomalous and blacklisted versions to preserve historical criticality
     pub async fn get_session_by_uid(&self, uid: &str) -> Option<SessionInfo> {
         // Check blacklisted sessions first (highest priority for criticality preservation)
-        if let Some(mut entry) = self.blacklisted_sessions.get_mut(uid) {
-            return entry.value_mut().get_full_session(None);
+        if let Some(entry) = self.blacklisted_sessions.get(uid) {
+            return entry.value().get_full_session_snapshot();
         }
         // Then check anomalous sessions
-        if let Some(mut entry) = self.anomalous_sessions.get_mut(uid) {
-            return entry.value_mut().get_full_session(None);
+        if let Some(entry) = self.anomalous_sessions.get(uid) {
+            return entry.value().get_full_session_snapshot();
         }
         // Finally fallback to all sessions (may have different criticality state)
-        if let Some(mut entry) = self.all_sessions.get_mut(uid) {
-            return entry.value_mut().get_full_session(None);
+        if let Some(entry) = self.all_sessions.get(uid) {
+            return entry.value().get_full_session_snapshot();
         }
         // If not found in any, return None
         None
@@ -2551,14 +2554,29 @@ impl SessionAnalyzer {
     /// Cleans up old entries from the anomalous, blacklisted, and all session maps.
     /// Also cleans up expired entries from last_analysis_times to prevent unbounded growth.
     fn cleanup_tracked_sessions(&self) {
+        Self::cleanup_tracked_sessions_inner(
+            self.anomalous_sessions.as_ref(),
+            self.blacklisted_sessions.as_ref(),
+            self.all_sessions.as_ref(),
+            self.last_analysis_times.as_ref(),
+            self.last_cleanup_epoch.as_ref(),
+        );
+    }
+
+    fn cleanup_tracked_sessions_inner(
+        anomalous_sessions: &CustomDashMap<String, SessionCache>,
+        blacklisted_sessions: &CustomDashMap<String, SessionCache>,
+        all_sessions: &CustomDashMap<String, SessionCache>,
+        last_analysis_times: &CustomDashMap<String, DateTime<Utc>>,
+        last_cleanup_epoch: &AtomicU64,
+    ) {
         let now = Utc::now();
         let now_ts = now.timestamp();
-        let last_cleanup = self.last_cleanup_epoch.load(Ordering::Relaxed) as i64;
+        let last_cleanup = last_cleanup_epoch.load(Ordering::Relaxed) as i64;
         if last_cleanup != 0 && now_ts - last_cleanup < CLEANUP_MIN_INTERVAL_SECS {
             return;
         }
-        self.last_cleanup_epoch
-            .store(now_ts as u64, Ordering::Relaxed);
+        last_cleanup_epoch.store(now_ts as u64, Ordering::Relaxed);
         let anomalous_timeout = Duration::seconds(ANOMALOUS_SESSION_TIMEOUT);
         let blacklisted_timeout = Duration::seconds(BLACKLISTED_SESSION_TIMEOUT);
         let all_session_timeout = Duration::seconds(ALL_SESSION_TIMEOUT);
@@ -2571,8 +2589,7 @@ impl SessionAnalyzer {
         let all_sessions_cutoff = now - all_session_timeout;
         let analysis_cutoff = now - analysis_times_timeout;
 
-        let stale_anomalous: Vec<String> = self
-            .anomalous_sessions
+        let stale_anomalous: Vec<String> = anomalous_sessions
             .iter()
             .filter_map(|entry| {
                 if entry.value().last_modified < anomalous_cutoff {
@@ -2583,11 +2600,10 @@ impl SessionAnalyzer {
             })
             .collect();
         for key in stale_anomalous {
-            self.anomalous_sessions.remove(&key);
+            anomalous_sessions.remove(&key);
         }
 
-        let stale_blacklisted: Vec<String> = self
-            .blacklisted_sessions
+        let stale_blacklisted: Vec<String> = blacklisted_sessions
             .iter()
             .filter_map(|entry| {
                 if entry.value().last_modified < blacklisted_cutoff {
@@ -2598,11 +2614,10 @@ impl SessionAnalyzer {
             })
             .collect();
         for key in stale_blacklisted {
-            self.blacklisted_sessions.remove(&key);
+            blacklisted_sessions.remove(&key);
         }
 
-        let stale_all_sessions: Vec<String> = self
-            .all_sessions
+        let stale_all_sessions: Vec<String> = all_sessions
             .iter()
             .filter_map(|entry| {
                 if entry.value().last_modified < all_sessions_cutoff {
@@ -2613,11 +2628,10 @@ impl SessionAnalyzer {
             })
             .collect();
         for key in stale_all_sessions {
-            self.all_sessions.remove(&key);
+            all_sessions.remove(&key);
         }
 
-        let stale_analysis: Vec<String> = self
-            .last_analysis_times
+        let stale_analysis: Vec<String> = last_analysis_times
             .iter()
             .filter_map(|entry| {
                 if *entry.value() < analysis_cutoff {
@@ -2628,14 +2642,12 @@ impl SessionAnalyzer {
             })
             .collect();
         for key in stale_analysis {
-            self.last_analysis_times.remove(&key);
+            last_analysis_times.remove(&key);
         }
     }
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.
-    /// Also cleans up old entries.
     pub async fn get_anomalous_sessions(&self) -> Vec<SessionInfo> {
-        self.cleanup_tracked_sessions();
         self.anomalous_sessions
             .iter()
             .filter_map(|entry| {
@@ -2646,23 +2658,17 @@ impl SessionAnalyzer {
     }
 
     /// Gets the current count of anomalous sessions.
-    /// Also cleans up old entries.
     pub async fn get_anomalous_status(&self) -> usize {
-        self.cleanup_tracked_sessions();
         self.anomalous_sessions.len()
     }
 
     /// Retrieves a snapshot of currently tracked blacklisted sessions.
-    /// Also cleans up old entries.
     ///
     /// Note: Cache consistency is maintained by `update_session_caches()` which is called
     /// whenever sessions are stored in `all_sessions`. This ensures that specialized caches
     /// (anomalous_sessions, blacklisted_sessions) are always synchronized with `all_sessions`,
     /// eliminating the need for expensive scans at retrieval time.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
-        // Remove expired entries first.
-        self.cleanup_tracked_sessions();
-
         self.blacklisted_sessions
             .iter()
             .filter_map(|entry| {
@@ -2675,9 +2681,7 @@ impl SessionAnalyzer {
     /// Retrieves all sessions that have been processed by the analyzer.
     /// This includes sessions from all states: normal, suspicious, abnormal, and blacklisted.
     /// Sessions are available even during warmup period.
-    /// Also cleans up old entries.
     pub async fn get_sessions(&self) -> Vec<SessionInfo> {
-        self.cleanup_tracked_sessions();
         let mut sessions: Vec<SessionInfo> = self
             .all_sessions
             .iter()
@@ -2694,9 +2698,7 @@ impl SessionAnalyzer {
 
     /// Retrieves all current sessions that have been processed by the analyzer.
     /// Sessions are available even during warmup period.
-    /// Also cleans up old entries.
     pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
-        self.cleanup_tracked_sessions();
         let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
         let now = Utc::now();
         let mut current_sessions: Vec<SessionInfo> = self
@@ -2721,6 +2723,51 @@ impl SessionAnalyzer {
         let model_lock = self.model.read().await;
         if let Some(model) = &*model_lock {
             model.read().await.cleanup_session_cache();
+        }
+    }
+
+    async fn start_cleanup_task(&self) {
+        let mut handle_guard = self.cleanup_task_handle.write().await;
+        if let Some(handle) = handle_guard.take() {
+            handle.abort();
+        }
+
+        let running = self.running.clone();
+        let anomalous_sessions = self.anomalous_sessions.clone();
+        let blacklisted_sessions = self.blacklisted_sessions.clone();
+        let all_sessions = self.all_sessions.clone();
+        let last_analysis_times = self.last_analysis_times.clone();
+        let last_cleanup_epoch = self.last_cleanup_epoch.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                CLEANUP_MIN_INTERVAL_SECS as u64,
+            ));
+            loop {
+                interval.tick().await;
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+                SessionAnalyzer::cleanup_tracked_sessions_inner(
+                    anomalous_sessions.as_ref(),
+                    blacklisted_sessions.as_ref(),
+                    all_sessions.as_ref(),
+                    last_analysis_times.as_ref(),
+                    last_cleanup_epoch.as_ref(),
+                );
+            }
+        });
+
+        *handle_guard = Some(handle);
+    }
+
+    async fn stop_cleanup_task(&self) {
+        let handle = {
+            let mut handle_guard = self.cleanup_task_handle.write().await;
+            handle_guard.take()
+        };
+        if let Some(handle) = handle {
+            handle.abort();
         }
     }
 
@@ -2764,6 +2811,8 @@ impl SessionAnalyzer {
         } else {
             debug!("Analyzer start: reusing existing model and thresholds");
         }
+
+        self.start_cleanup_task().await;
     }
 
     /// Stop the analyzer (clear running flag, stop background tasks if any)
@@ -2774,6 +2823,8 @@ impl SessionAnalyzer {
             return;
         }
         info!("Analyzer stopped - preserving security findings");
+
+        self.stop_cleanup_task().await;
 
         // First abort any training task
         let abort_result = {
@@ -3020,7 +3071,6 @@ impl SessionAnalyzer {
     /// ```
     pub async fn get_analyzer_stats(&self) -> AnalyzerStats {
         // Return the latest snapshot built during analyze_sessions(), with minimal locking.
-        self.cleanup_tracked_sessions();
         if let Some(stats) = self.analyzer_stats.read().await.clone() {
             stats
         } else {
