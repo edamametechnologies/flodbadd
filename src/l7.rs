@@ -411,9 +411,9 @@ impl FlodbaddL7 {
                             continue;
                         }
 
-                        // Use a scope to ensure system_read_for_cache is dropped before immediate retry
+                        // Try to resolve L7 data - reuse the existing system_read instead of acquiring a nested lock
+                        // (acquiring a nested read lock can cause deadlock with write-preferring RwLock)
                         let (l7_data_and_time, cache_source) = {
-                            let system_read_for_cache = system.read().await;
                             let result = Self::resolve_l7_data(
                                 &connection,
                                 &socket_info,
@@ -430,10 +430,11 @@ impl FlodbaddL7 {
                                     l7_data_and_time = Some((l7_data, process_start_time));
                                 }
                                 Err(_) => {
+                                    // Use the existing system_read instead of acquiring a new lock
                                     if let Some((l7_data, source)) = Self::try_resolve_from_cache(
                                         &connection,
                                         &port_process_cache,
-                                        &*system_read_for_cache,
+                                        &*system_read,
                                     )
                                     .await
                                     {
@@ -444,7 +445,6 @@ impl FlodbaddL7 {
                                     }
                                 }
                             }
-                            // Return tuple - system_read_for_cache is dropped here
                             (l7_data_and_time, cache_source)
                         };
 
@@ -480,6 +480,7 @@ impl FlodbaddL7 {
 
                             // Immediate retry for first-time failures: retry with fresh socket data (no system refresh to avoid deadlock)
                             // The system refresh will happen in the next batch cycle
+                            // NOTE: We add a timeout here to prevent blocking indefinitely while holding system/users read locks
                             if current_retry_count == 0 {
                                 trace!(
                                     "First-time resolution failure for {:?}, attempting immediate retry with fresh socket data",
@@ -487,24 +488,37 @@ impl FlodbaddL7 {
                                 );
 
                                 // Refresh socket info only (this doesn't require system lock)
-                                let fresh_socket_info = match tokio::task::spawn_blocking(
-                                    move || {
+                                // Use a timeout to prevent blocking while holding read locks - if the blocking pool is saturated,
+                                // we'll skip the immediate retry and use normal retry logic instead
+                                let fresh_socket_info = match tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    tokio::task::spawn_blocking(move || {
                                         get_sockets_info(
                                             AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
                                             ProtocolFlags::TCP | ProtocolFlags::UDP,
                                         )
-                                    },
+                                    }),
                                 )
                                 .await
                                 {
-                                    Ok(Ok(info)) => info,
-                                    Ok(Err(e)) => {
+                                    Ok(Ok(Ok(info))) => info,
+                                    Ok(Ok(Err(e))) => {
                                         error!("Failed to get fresh socket info for immediate retry: {:?}", e);
                                         Vec::new()
                                     }
-                                    Err(join_err) => {
+                                    Ok(Err(join_err)) => {
                                         error!("spawn_blocking join error during immediate retry: {:?}", join_err);
                                         Vec::new()
+                                    }
+                                    Err(_timeout) => {
+                                        // Timeout - blocking pool may be saturated, skip immediate retry to avoid deadlock
+                                        warn!("Timeout waiting for socket info during immediate retry - skipping to avoid lock contention");
+                                        // Skip immediate retry, proceed to normal retry logic
+                                        resolution_entry.retry_count += 1;
+                                        resolution_entry.last_retry = Some(Instant::now());
+                                        resolver_queue.insert(connection.clone(), ());
+                                        failed_and_will_retry_count += 1;
+                                        continue;
                                     }
                                 };
 
