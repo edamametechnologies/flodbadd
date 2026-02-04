@@ -516,7 +516,8 @@ impl FlodbaddL7 {
                                         // Timeout - blocking pool may be saturated, skip immediate retry to avoid deadlock
                                         warn!("Timeout waiting for socket info during immediate retry - skipping to avoid lock contention");
                                         if let Some(mut resolution_entry) =
-                                            l7_map.get_mut(&connection) {
+                                            l7_map.get_mut(&connection)
+                                        {
                                             resolution_entry.retry_count += 1;
                                             resolution_entry.last_retry = Some(Instant::now());
                                         } else {
@@ -572,8 +573,8 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
-                                    if let Some(mut resolution_entry) =
-                                        l7_map.get_mut(&connection) {
+                                    if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
+                                    {
                                         resolution_entry.l7 = Some(l7_data);
                                         resolution_entry.retry_count = 0;
                                         resolution_entry.last_retry = None;
@@ -605,8 +606,8 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
-                                    if let Some(mut resolution_entry) =
-                                        l7_map.get_mut(&connection) {
+                                    if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
+                                    {
                                         resolution_entry.l7 = Some(l7_data);
                                         resolution_entry.retry_count = 0;
                                         resolution_entry.last_retry = None;
