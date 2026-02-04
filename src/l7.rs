@@ -475,9 +475,11 @@ impl FlodbaddL7 {
                             continue;
                         }
                         // All resolution attempts for 'connection' in this cycle failed.
-                        if let Some(mut resolution_entry) = l7_map.get_mut(&connection) {
-                            let current_retry_count = resolution_entry.retry_count;
+                        // Avoid holding a l7_map write lock across awaits to prevent long-lived locks.
+                        let current_retry_count =
+                            l7_map.get(&connection).map(|entry| entry.retry_count);
 
+                        if let Some(current_retry_count) = current_retry_count {
                             // Immediate retry for first-time failures: retry with fresh socket data (no system refresh to avoid deadlock)
                             // The system refresh will happen in the next batch cycle
                             // NOTE: We add a timeout here to prevent blocking indefinitely while holding system/users read locks
@@ -513,9 +515,22 @@ impl FlodbaddL7 {
                                     Err(_timeout) => {
                                         // Timeout - blocking pool may be saturated, skip immediate retry to avoid deadlock
                                         warn!("Timeout waiting for socket info during immediate retry - skipping to avoid lock contention");
-                                        // Skip immediate retry, proceed to normal retry logic
-                                        resolution_entry.retry_count += 1;
-                                        resolution_entry.last_retry = Some(Instant::now());
+                                        if let Some(mut resolution_entry) =
+                                            l7_map.get_mut(&connection) {
+                                            resolution_entry.retry_count += 1;
+                                            resolution_entry.last_retry = Some(Instant::now());
+                                        } else {
+                                            l7_map.insert(
+                                                connection.clone(),
+                                                L7Resolution {
+                                                    l7: None,
+                                                    date: Utc::now(),
+                                                    retry_count: 1,
+                                                    last_retry: Some(Instant::now()),
+                                                    source: L7ResolutionSource::Unknown,
+                                                },
+                                            );
+                                        }
                                         resolver_queue.insert(connection.clone(), ());
                                         failed_and_will_retry_count += 1;
                                         continue;
@@ -557,10 +572,24 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
-                                    resolution_entry.l7 = Some(l7_data);
-                                    resolution_entry.retry_count = 0;
-                                    resolution_entry.last_retry = None;
-                                    resolution_entry.source = L7ResolutionSource::ExactMatch;
+                                    if let Some(mut resolution_entry) =
+                                        l7_map.get_mut(&connection) {
+                                        resolution_entry.l7 = Some(l7_data);
+                                        resolution_entry.retry_count = 0;
+                                        resolution_entry.last_retry = None;
+                                        resolution_entry.source = L7ResolutionSource::ExactMatch;
+                                    } else {
+                                        l7_map.insert(
+                                            connection.clone(),
+                                            L7Resolution {
+                                                l7: Some(l7_data),
+                                                date: Utc::now(),
+                                                retry_count: 0,
+                                                last_retry: None,
+                                                source: L7ResolutionSource::ExactMatch,
+                                            },
+                                        );
+                                    }
                                     successfully_resolved_count += 1;
                                     continue; // Success, move to next connection
                                 } else if let Some((l7_data, source)) = cache_retry_result {
@@ -576,10 +605,24 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
-                                    resolution_entry.l7 = Some(l7_data);
-                                    resolution_entry.retry_count = 0;
-                                    resolution_entry.last_retry = None;
-                                    resolution_entry.source = source;
+                                    if let Some(mut resolution_entry) =
+                                        l7_map.get_mut(&connection) {
+                                        resolution_entry.l7 = Some(l7_data);
+                                        resolution_entry.retry_count = 0;
+                                        resolution_entry.last_retry = None;
+                                        resolution_entry.source = source;
+                                    } else {
+                                        l7_map.insert(
+                                            connection.clone(),
+                                            L7Resolution {
+                                                l7: Some(l7_data),
+                                                date: Utc::now(),
+                                                retry_count: 0,
+                                                last_retry: None,
+                                                source,
+                                            },
+                                        );
+                                    }
                                     successfully_resolved_count += 1;
                                     continue; // Success, move to next connection
                                 } else {
@@ -592,29 +635,49 @@ impl FlodbaddL7 {
                             }
 
                             // Normal retry logic (increment retry_count and re-queue)
-                            resolution_entry.retry_count += 1;
-                            resolution_entry.last_retry = Some(Instant::now());
+                            if let Some(mut resolution_entry) = l7_map.get_mut(&connection) {
+                                resolution_entry.retry_count += 1;
+                                resolution_entry.last_retry = Some(Instant::now());
 
-                            if resolution_entry.retry_count > *MAX_L7_RETRIES_DYNAMIC {
-                                resolution_entry.l7 = None; // Ensure l7 is None
-                                resolution_entry.source = L7ResolutionSource::FailedMaxRetries;
-                                failed_max_retries_count += 1;
-                                trace!(
-                                    "Session {:?} failed max L7 retries ({}). Source: {:?}.",
-                                    connection,
-                                    resolution_entry.retry_count,
-                                    resolution_entry.source
-                                );
-                                // Do not re-queue if max retries hit
+                                if resolution_entry.retry_count > *MAX_L7_RETRIES_DYNAMIC {
+                                    resolution_entry.l7 = None; // Ensure l7 is None
+                                    resolution_entry.source = L7ResolutionSource::FailedMaxRetries;
+                                    failed_max_retries_count += 1;
+                                    trace!(
+                                        "Session {:?} failed max L7 retries ({}). Source: {:?}.",
+                                        connection,
+                                        resolution_entry.retry_count,
+                                        resolution_entry.source
+                                    );
+                                    // Do not re-queue if max retries hit
+                                } else {
+                                    // Re-queue for another attempt
+                                    resolver_queue.insert(connection.clone(), ());
+                                    failed_and_will_retry_count += 1;
+                                    trace!(
+                                        "Re-queued session {:?} for L7 resolution (retry {}).",
+                                        connection,
+                                        resolution_entry.retry_count
+                                    );
+                                }
                             } else {
-                                // Re-queue for another attempt
-                                resolver_queue.insert(connection.clone(), ());
-                                failed_and_will_retry_count += 1;
-                                trace!(
-                                    "Re-queued session {:?} for L7 resolution (retry {}).",
-                                    connection,
-                                    resolution_entry.retry_count
+                                warn!(
+                                    "L7: Connection {:?} processed but no entry in l7_map for failure handling. Re-initializing and re-queueing.",
+                                    connection
                                 );
+                                // Re-initialize in l7_map and add to queue as if it's a new connection
+                                l7_map.insert(
+                                    connection.clone(),
+                                    L7Resolution {
+                                        l7: None,
+                                        date: Utc::now(),
+                                        retry_count: 0, // Start retries from 0
+                                        last_retry: Some(Instant::now()), // Mark a retry attempt
+                                        source: L7ResolutionSource::Unknown,
+                                    },
+                                );
+                                resolver_queue.insert(connection.clone(), ());
+                                failed_and_will_retry_count += 1; // Count it as a failed attempt that will be retried
                             }
                         } else {
                             warn!(
