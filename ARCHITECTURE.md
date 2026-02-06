@@ -203,11 +203,11 @@ Kernel-level process attribution via Aya framework:
 
 ```
 User Space                    Kernel Space (eBPF)
-+---------------+            +------------------------+
-| Query session |--peek----->| kprobe: tcp_v4_connect |
-|               |            | kprobe: tcp_set_state  |
-| Get ProcessInfo|<--map-----| l7_connections map     |
-+---------------+            +------------------------+
++-----------------+          +------------------------+
+| Query session   |--peek--->| kprobe: tcp_v4_connect |
+|                 |          | kprobe: tcp_set_state  |
+| Get ProcessInfo |<--map----| l7_connections map     |
++-----------------+          +------------------------+
 ```
 
 **Requirements**: Linux kernel 5.3+, CAP_SYS_ADMIN or root
