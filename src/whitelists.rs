@@ -1496,7 +1496,7 @@ pub async fn recompute_whitelist_for_sessions(
 
     info!("Processing {} sessions", sessions_to_evaluate.len());
 
-    for session_key in &sessions_to_evaluate {
+    for (wl_idx, session_key) in sessions_to_evaluate.iter().enumerate() {
         // Skip if we don't have a snapshot (might have been removed)
         if let Some(snapshot) = session_snapshots.get(session_key) {
             // Egress-only whitelist policy: only evaluate sessions where traffic originates from us/local
@@ -1533,6 +1533,11 @@ pub async fn recompute_whitelist_for_sessions(
                 new_exceptions.retain(|s| s != session_key);
             }
         }
+
+        // Yield periodically to avoid starving the tokio runtime
+        if (wl_idx + 1) % 200 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
 
     // Apply all results with minimal lock time
@@ -1548,7 +1553,9 @@ pub async fn recompute_whitelist_for_sessions(
     new_exceptions.dedup();
 
     // Fast bulk update of session status - very brief locks per session
-    for (session_key, is_conforming, reason) in evaluation_results {
+    for (apply_idx, (session_key, is_conforming, reason)) in
+        evaluation_results.into_iter().enumerate()
+    {
         // Re-acquire a write lock briefly to update just this session
         // This minimizes lock contention by holding the lock for the absolute minimum time
         if let Some(mut entry) = sessions.get_mut(&session_key) {
@@ -1576,6 +1583,12 @@ pub async fn recompute_whitelist_for_sessions(
                 info_mut.whitelist_reason = new_reason;
                 info_mut.last_modified = Utc::now();
             }
+        }
+        // entry is dropped here, releasing the shard lock
+
+        // Yield periodically to avoid starving the tokio runtime
+        if (apply_idx + 1) % 500 == 0 {
+            tokio::task::yield_now().await;
         }
     }
 

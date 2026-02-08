@@ -86,6 +86,7 @@ pub struct FlodbaddCapture {
     edamame_model_update_task_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
     update_in_progress: Arc<AtomicBool>,
     update_pending: Arc<AtomicBool>,
+    last_update_completed: Arc<CustomRwLock<Instant>>,
     last_get_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_current_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_blacklisted_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
@@ -240,6 +241,9 @@ impl FlodbaddCapture {
             edamame_model_update_task_handle: Arc::new(CustomRwLock::new(None)),
             update_in_progress: Arc::new(AtomicBool::new(false)),
             update_pending: Arc::new(AtomicBool::new(false)),
+            last_update_completed: Arc::new(CustomRwLock::new(
+                Instant::now() - Duration::from_secs(60),
+            )),
             last_get_sessions_fetch_timestamp: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
                 std::time::UNIX_EPOCH,
             ))),
@@ -1728,10 +1732,12 @@ impl FlodbaddCapture {
                 sessions_to_resolve.push(session.clone());
             }
         }
+        // Yield after scanning the full sessions map
+        tokio::task::yield_now().await;
 
         let total_sessions_to_resolve = sessions_to_resolve.len();
         let mut update_count = 0;
-        for session in sessions_to_resolve {
+        for (resolve_idx, session) in sessions_to_resolve.into_iter().enumerate() {
             // Determine if this is an important service based on port numbers
             let is_important_dst = match session.dst_port {
                 // Common server ports that should be prioritized
@@ -1819,6 +1825,11 @@ impl FlodbaddCapture {
                     }
                 }
             }
+
+            // Yield periodically to avoid starving the tokio runtime
+            if (resolve_idx + 1) % 200 == 0 {
+                tokio::task::yield_now().await;
+            }
         }
 
         debug!(
@@ -1850,7 +1861,7 @@ impl FlodbaddCapture {
             );
 
             let mut update_count = 0;
-            for key in current_sessions_clone.iter() {
+            for (l7_idx, key) in current_sessions_clone.iter().enumerate() {
                 // Clone necessary data
                 let read_start = Instant::now();
                 let session_info_opt = sessions.get(key).map(|s| s.clone());
@@ -1904,6 +1915,11 @@ impl FlodbaddCapture {
                         }
                     }
                 }
+
+                // Yield periodically to avoid starving the tokio runtime
+                if (l7_idx + 1) % 200 == 0 {
+                    tokio::task::yield_now().await;
+                }
             }
 
             debug!(
@@ -1922,40 +1938,55 @@ impl FlodbaddCapture {
         let mut updated_current_sessions = Vec::new();
         let mut sessions_to_remove = Vec::new();
 
-        // Iterate over mutable references to session entries
-        for mut entry in sessions.iter_mut() {
-            let key = entry.key().clone();
-            let session_info = entry.value_mut();
+        // Collect keys first so we can yield between individual entry accesses.
+        // The DashMap iter_mut() holds shard write locks across the entire iteration
+        // which blocks the tokio runtime on machines with few cores.
+        let keys: Vec<Session> = sessions.iter().map(|entry| entry.key().clone()).collect();
+        // Yield after the key-collection scan
+        tokio::task::yield_now().await;
 
-            // Previous status
-            let previous_status = session_info.status.clone();
+        let now = Utc::now();
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(mut entry) = sessions.get_mut(key) {
+                let session_info = entry.value_mut();
 
-            // New status
-            let now = Utc::now();
-            let active = session_info.stats.last_activity >= now - CONNECTION_ACTIVITY_TIMEOUT;
-            let added = session_info.stats.start_time >= now - CONNECTION_ACTIVITY_TIMEOUT;
-            // If the session was not added and is now active, it was activated
-            let activated = !previous_status.active && active;
-            // If the session was active and is no longer active, it was deactivated
-            let deactivated = previous_status.active && !active;
+                // Previous status
+                let previous_status = session_info.status.clone();
 
-            // Create new status with updated previous status
-            let new_status = SessionStatus {
-                active,
-                added,
-                activated,
-                deactivated,
-            };
-            session_info.status = new_status;
+                // New status
+                let active =
+                    session_info.stats.last_activity >= now - CONNECTION_ACTIVITY_TIMEOUT;
+                let added =
+                    session_info.stats.start_time >= now - CONNECTION_ACTIVITY_TIMEOUT;
+                // If the session was not added and is now active, it was activated
+                let activated = !previous_status.active && active;
+                // If the session was active and is no longer active, it was deactivated
+                let deactivated = previous_status.active && !active;
 
-            // Only include sessions that are within the current time frame
-            if now < session_info.stats.last_activity + CONNECTION_CURRENT_TIMEOUT {
-                updated_current_sessions.push(session_info.session.clone());
+                // Create new status with updated previous status
+                let new_status = SessionStatus {
+                    active,
+                    added,
+                    activated,
+                    deactivated,
+                };
+                session_info.status = new_status;
+
+                // Only include sessions that are within the current time frame
+                if now < session_info.stats.last_activity + CONNECTION_CURRENT_TIMEOUT {
+                    updated_current_sessions.push(session_info.session.clone());
+                }
+
+                // Flag sessions that are older than the retention timeout
+                if now > session_info.stats.last_activity + CONNECTION_RETENTION_TIMEOUT {
+                    sessions_to_remove.push(key.clone());
+                }
             }
+            // entry is dropped here, releasing the shard lock
 
-            // Flag sessions that are older than the retention timeout
-            if now > session_info.stats.last_activity + CONNECTION_RETENTION_TIMEOUT {
-                sessions_to_remove.push(key.clone());
+            // Yield periodically to avoid starving the tokio runtime
+            if (i + 1) % 500 == 0 {
+                tokio::task::yield_now().await;
             }
         }
 
@@ -1979,6 +2010,22 @@ impl FlodbaddCapture {
         // eliminates a race condition on Windows where the capture state could change
         // between the caller's check and this method's check.
 
+        // Cooldown: skip if the last full update completed less than 5 seconds ago.
+        // This prevents repeated heavy iterations when the app polls get_whitelist_*,
+        // get_sessions, etc. in quick succession, which can starve the tokio runtime
+        // on machines with few CPU cores.
+        const UPDATE_COOLDOWN: Duration = Duration::from_secs(5);
+        {
+            let last = self.last_update_completed.read().await;
+            if last.elapsed() < UPDATE_COOLDOWN {
+                trace!(
+                    "update_sessions: skipping, last update was {:?} ago",
+                    last.elapsed()
+                );
+                return;
+            }
+        }
+
         // Pass the flag to the internal method, which will now handle all logic
         Self::update_sessions_internal(
             self.sessions.clone(),
@@ -1993,6 +2040,7 @@ impl FlodbaddCapture {
             self.blacklisted_sessions.clone(),
             self.update_in_progress.clone(),
             self.update_pending.clone(),
+            self.last_update_completed.clone(),
         )
         .await;
     }
@@ -2212,6 +2260,7 @@ impl FlodbaddCapture {
         blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
         update_in_progress: Arc<AtomicBool>,
         update_pending: Arc<AtomicBool>,
+        last_update_completed: Arc<CustomRwLock<Instant>>,
     ) {
         if update_in_progress.swap(true, Ordering::AcqRel) {
             // Another thread is already doing the heavy work – just mark that
@@ -2281,8 +2330,8 @@ impl FlodbaddCapture {
 
             // After blacklist computation, update whitelist status for blacklisted sessions
             // Use the cloned vector instead of holding a lock on the original
-            for blacklisted_session in blacklisted_sessions_vec {
-                if let Some(mut entry) = sessions.get_mut(&blacklisted_session) {
+            for (i, blacklisted_session) in blacklisted_sessions_vec.iter().enumerate() {
+                if let Some(mut entry) = sessions.get_mut(blacklisted_session) {
                     if entry.is_whitelisted == WhitelistState::Unknown {
                         entry.is_whitelisted = WhitelistState::NonConforming;
                         if entry.whitelist_reason.is_none() {
@@ -2291,6 +2340,10 @@ impl FlodbaddCapture {
                         // Update last_modified since the whitelist state/reason changed due to blacklist
                         entry.last_modified = Utc::now();
                     }
+                }
+                // Yield periodically to avoid starving the tokio runtime
+                if (i + 1) % 500 == 0 {
+                    tokio::task::yield_now().await;
                 }
             }
 
@@ -2317,6 +2370,9 @@ impl FlodbaddCapture {
             }
 
             debug!("update_sessions finished");
+
+            // Record completion time for the cooldown check
+            *last_update_completed.write().await = Instant::now();
 
             // If another thread queued work while we were busy we loop once more.
             // Keep the in-progress flag set across iterations to avoid a window

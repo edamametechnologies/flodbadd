@@ -596,6 +596,9 @@ pub async fn recompute_blacklist_for_sessions(
             ip_blacklist_results.len()
         );
 
+        // Yield after rayon parallel work to let other async tasks run
+        tokio::task::yield_now().await;
+
         // Now process all sessions in parallel using cached IP results
         let session_results: Vec<(Session, String, bool)> = sessions_to_evaluate
             .par_iter() // Parallel processing of sessions
@@ -656,6 +659,9 @@ pub async fn recompute_blacklist_for_sessions(
             })
             .collect();
 
+        // Yield after rayon parallel work to let other async tasks run
+        tokio::task::yield_now().await;
+
         // Process parallel results and build the final updates and blacklisted sessions list
         let mut updates: Vec<SessionUpdate> = Vec::new();
         for (session_key, new_criticality, is_blacklisted) in session_results {
@@ -692,7 +698,7 @@ pub async fn recompute_blacklist_for_sessions(
 
         // Apply updates to sessions - very brief locks per session
         let now = Utc::now();
-        for update in updates {
+        for (bl_apply_idx, update) in updates.into_iter().enumerate() {
             // Very brief write lock just for the update
             if let Some(mut entry) = sessions.get_mut(&update.key) {
                 let info_mut = entry.value_mut();
@@ -702,6 +708,12 @@ pub async fn recompute_blacklist_for_sessions(
                     info_mut.criticality = update.new_criticality;
                     info_mut.last_modified = now;
                 }
+            }
+            // entry is dropped here, releasing the shard lock
+
+            // Yield periodically to avoid starving the tokio runtime
+            if (bl_apply_idx + 1) % 500 == 0 {
+                tokio::task::yield_now().await;
             }
         }
 
