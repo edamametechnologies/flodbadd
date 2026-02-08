@@ -1954,10 +1954,8 @@ impl FlodbaddCapture {
                 let previous_status = session_info.status.clone();
 
                 // New status
-                let active =
-                    session_info.stats.last_activity >= now - CONNECTION_ACTIVITY_TIMEOUT;
-                let added =
-                    session_info.stats.start_time >= now - CONNECTION_ACTIVITY_TIMEOUT;
+                let active = session_info.stats.last_activity >= now - CONNECTION_ACTIVITY_TIMEOUT;
+                let added = session_info.stats.start_time >= now - CONNECTION_ACTIVITY_TIMEOUT;
                 // If the session was not added and is now active, it was activated
                 let activated = !previous_status.active && active;
                 // If the session was active and is no longer active, it was deactivated
