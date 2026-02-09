@@ -263,6 +263,13 @@ impl FlodbaddCapture {
         }
     }
 
+    /// Reset the update cooldown so the next `update_sessions()` call runs immediately.
+    /// Must be called whenever whitelist/blacklist configuration changes.
+    pub async fn invalidate_update_cooldown(&self) {
+        *self.last_update_completed.write().await =
+            Instant::now() - Duration::from_secs(60);
+    }
+
     pub async fn reset_whitelist(&self) {
         // Reset the conformance flag
         self.whitelist_conformance.store(true, Ordering::Relaxed);
@@ -281,6 +288,7 @@ impl FlodbaddCapture {
             session_entry.value_mut().is_whitelisted = WhitelistState::Unknown;
         }
         info!("Whitelist exceptions cleared and session states reset to Unknown.");
+        self.invalidate_update_cooldown().await;
     }
 
     pub async fn set_whitelist(&self, whitelist_name: &str) -> Result<()> {
@@ -2008,22 +2016,6 @@ impl FlodbaddCapture {
         // eliminates a race condition on Windows where the capture state could change
         // between the caller's check and this method's check.
 
-        // Cooldown: skip if the last full update completed less than 5 seconds ago.
-        // This prevents repeated heavy iterations when the app polls get_whitelist_*,
-        // get_sessions, etc. in quick succession, which can starve the tokio runtime
-        // on machines with few CPU cores.
-        const UPDATE_COOLDOWN: Duration = Duration::from_secs(5);
-        {
-            let last = self.last_update_completed.read().await;
-            if last.elapsed() < UPDATE_COOLDOWN {
-                trace!(
-                    "update_sessions: skipping, last update was {:?} ago",
-                    last.elapsed()
-                );
-                return;
-            }
-        }
-
         // Pass the flag to the internal method, which will now handle all logic
         Self::update_sessions_internal(
             self.sessions.clone(),
@@ -2043,11 +2035,29 @@ impl FlodbaddCapture {
         .await;
     }
 
+    /// Like `update_sessions`, but skips the work if the previous update completed
+    /// less than 5 seconds ago.  Used by `get_*` polling methods to avoid
+    /// re-running the heavy session pipeline on every RPC call.
+    async fn update_sessions_if_stale(&self) {
+        const UPDATE_COOLDOWN: Duration = Duration::from_secs(5);
+        {
+            let last = self.last_update_completed.read().await;
+            if last.elapsed() < UPDATE_COOLDOWN {
+                trace!(
+                    "update_sessions_if_stale: skipping, last update was {:?} ago",
+                    last.elapsed()
+                );
+                return;
+            }
+        }
+        self.update_sessions().await;
+    }
+
     // Get historical sessions as a vector of SessionInfo
     pub async fn get_sessions(&self, incremental: bool) -> Vec<SessionInfo> {
         debug!("get_sessions called (incremental: {})", incremental);
 
-        self.update_sessions().await; // Ensure data is up-to-date
+        self.update_sessions_if_stale().await; // Ensure data is up-to-date
 
         let last_fetch_ts = *self.last_get_sessions_fetch_timestamp.read().await;
         let now = Utc::now();
@@ -2092,7 +2102,7 @@ impl FlodbaddCapture {
     pub async fn get_current_sessions(&self, incremental: bool) -> Vec<SessionInfo> {
         debug!("get_current_sessions called (incremental: {})", incremental);
 
-        self.update_sessions().await; // Ensure data is up-to-date
+        self.update_sessions_if_stale().await; // Ensure data is up-to-date
 
         let last_fetch_ts = *self.last_get_current_sessions_fetch_timestamp.read().await;
         let now = Utc::now();
@@ -2136,8 +2146,21 @@ impl FlodbaddCapture {
     }
 
     pub async fn get_whitelist_conformance(&self) -> bool {
-        // Force update sessions before getting them
-        self.update_sessions().await;
+        // Update sessions if stale before getting them
+        self.update_sessions_if_stale().await;
+
+        // Lightweight reconciliation: if the flag says non-conforming but no sessions
+        // are actually NonConforming (e.g. because sessions were removed between full
+        // updates), reset the flag.  This is much cheaper than a full update_sessions.
+        if !self.whitelist_conformance.load(Ordering::Relaxed) {
+            let has_non_conforming = self
+                .sessions
+                .iter()
+                .any(|entry| entry.value().is_whitelisted == WhitelistState::NonConforming);
+            if !has_non_conforming {
+                self.whitelist_conformance.store(true, Ordering::Relaxed);
+            }
+        }
 
         debug!("get_whitelist_conformance called");
         self.whitelist_conformance.load(Ordering::Relaxed)
@@ -2149,7 +2172,7 @@ impl FlodbaddCapture {
             incremental
         );
 
-        self.update_sessions().await; // Ensure data is up-to-date
+        self.update_sessions_if_stale().await; // Ensure data is up-to-date
 
         let last_fetch_ts = *self
             .last_get_blacklisted_sessions_fetch_timestamp
@@ -2188,7 +2211,7 @@ impl FlodbaddCapture {
             incremental
         );
 
-        self.update_sessions().await; // Ensure data is up-to-date
+        self.update_sessions_if_stale().await; // Ensure data is up-to-date
 
         let last_fetch_ts = *self
             .last_get_whitelist_exceptions_fetch_timestamp
@@ -2224,8 +2247,8 @@ impl FlodbaddCapture {
     pub async fn get_blacklisted_status(&self) -> bool {
         debug!("get_blacklisted_status called");
 
-        // Force update sessions before getting them
-        self.update_sessions().await;
+        // Update sessions if stale before getting them
+        self.update_sessions_if_stale().await;
 
         // Return true if there are any blacklisted sessions
         !self.blacklisted_sessions.read().await.is_empty()
@@ -2237,6 +2260,7 @@ impl FlodbaddCapture {
         // Force immediate blacklist recomputation after setting custom blacklists
         // This ensures that existing sessions are immediately re-evaluated against the new blacklist
         if result.is_ok() {
+            self.invalidate_update_cooldown().await;
             info!("Custom blacklists set successfully (session update will be triggered by orchestrator)");
         }
 
