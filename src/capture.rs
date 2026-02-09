@@ -266,8 +266,7 @@ impl FlodbaddCapture {
     /// Reset the update cooldown so the next `update_sessions()` call runs immediately.
     /// Must be called whenever whitelist/blacklist configuration changes.
     pub async fn invalidate_update_cooldown(&self) {
-        *self.last_update_completed.write().await =
-            Instant::now() - Duration::from_secs(60);
+        *self.last_update_completed.write().await = Instant::now() - Duration::from_secs(60);
     }
 
     pub async fn reset_whitelist(&self) {
