@@ -204,8 +204,7 @@ impl FlodbaddL7 {
             let refresh_kind = RefreshKind::nothing().with_processes(
                 ProcessRefreshKind::everything()
                     .without_cpu()
-                    .without_disk_usage()
-                    .without_memory(),
+                    .without_disk_usage(),
             );
 
             while !stop_flag_clone.load(Ordering::Relaxed) {
