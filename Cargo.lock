@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "flodbadd"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "arc-swap",
