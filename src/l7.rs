@@ -201,8 +201,9 @@ impl FlodbaddL7 {
 
         let resolver_handle = tokio::spawn(async move {
             info!("Starting L7 resolver task");
-            let refresh_kind =
-                RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
+            let refresh_kind = RefreshKind::nothing().with_processes(
+                ProcessRefreshKind::everything().without_cpu(),
+            );
 
             while !stop_flag_clone.load(Ordering::Relaxed) {
                 let mut to_process_this_cycle: Vec<Session> = Vec::new();
@@ -1404,8 +1405,16 @@ impl FlodbaddL7 {
                     .filter(|p| !p.is_empty());
                 let memory = process.memory();
                 let run_time = process.run_time();
-                let cpu_usage = (process.cpu_usage() * 100.0).round() as u32;
                 let accumulated_cpu_time = process.accumulated_cpu_time();
+                // Compute average CPU% from accumulated time (CPU-ms) and run time (s).
+                // This avoids the sysinfo delta-based cpu_usage() which returns 0 when
+                // refreshed faster than MINIMUM_CPU_UPDATE_INTERVAL (~200ms).
+                // Stored as percentage * 100 (e.g., 5.3% CPU → 530).
+                let cpu_usage = if run_time > 0 {
+                    ((accumulated_cpu_time as f64 * 10.0) / run_time as f64).round() as u32
+                } else {
+                    0
+                };
                 let disk_stats = process.disk_usage();
                 let disk_usage = SessionProcessDiskUsage {
                     total_written_bytes: disk_stats.total_written_bytes,
