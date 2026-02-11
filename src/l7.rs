@@ -201,9 +201,8 @@ impl FlodbaddL7 {
 
         let resolver_handle = tokio::spawn(async move {
             info!("Starting L7 resolver task");
-            let refresh_kind = RefreshKind::nothing().with_processes(
-                ProcessRefreshKind::everything().without_cpu(),
-            );
+            let refresh_kind = RefreshKind::nothing()
+                .with_processes(ProcessRefreshKind::everything().without_cpu());
 
             while !stop_flag_clone.load(Ordering::Relaxed) {
                 let mut to_process_this_cycle: Vec<Session> = Vec::new();
