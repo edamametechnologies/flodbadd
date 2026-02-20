@@ -184,9 +184,7 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
     }
 
     let fd_size = mem::size_of::<proc_fdinfo>() as i32;
-    let buf_size = unsafe {
-        proc_pidinfo(pid as i32, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0)
-    };
+    let buf_size = unsafe { proc_pidinfo(pid as i32, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     if buf_size <= 0 {
         return Vec::new();
     }
@@ -228,7 +226,10 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
             continue;
         }
         let path_bytes = &vpath.pvip.vip_path;
-        let nul_pos = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+        let nul_pos = path_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(path_bytes.len());
         let s = String::from_utf8_lossy(&path_bytes[..nul_pos]).to_string();
         if s.starts_with('/') && !s.starts_with("/dev/") {
             paths.push(s);
