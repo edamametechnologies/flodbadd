@@ -83,7 +83,7 @@ pub struct SessionL7 {
     pub cpu_usage: u32,
     pub accumulated_cpu_time: u64,
     pub disk_usage: SessionProcessDiskUsage,
-    pub open_files: Option<u64>,
+    pub open_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

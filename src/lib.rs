@@ -34,6 +34,7 @@ pub mod neighbors;
 pub mod windows_npcap;
 #[cfg(target_os = "windows")]
 pub use windows_npcap as npcap_utils; // backward-compatible re-export
+pub mod open_files;
 pub mod oui;
 pub mod oui_db;
 #[cfg(all(

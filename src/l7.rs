@@ -98,10 +98,10 @@ static EPHEMERAL_RETRY_MS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
 });
 
 // Add a new constant for TTL of cached entries that come from high-range (likely client) ephemeral ports
-const EPHEMERAL_PORT_CACHE_TTL_SECS: u64 = 30; // Keep for 30 s only
+const EPHEMERAL_PORT_CACHE_TTL_SECS: u64 = 300; // Keep for 5 min
 
 // Extended TTL for server ports (< 1024) which rarely change
-const SERVER_PORT_CACHE_TTL_SECS: u64 = 3600; // Keep for 1 hour
+const SERVER_PORT_CACHE_TTL_SECS: u64 = 300; // Keep for 5 min
 
 // Maximum size of port→process cache
 const PORT_CACHE_MAX_ENTRIES: usize = 10_000;
@@ -770,7 +770,7 @@ impl FlodbaddL7 {
                         age <= Duration::from_secs(SERVER_PORT_CACHE_TTL_SECS)
                     } else {
                         // Regular ports: keep entries unless they've aged out with low hit count
-                        !(age > Duration::from_secs(3600) && entry.hit_count < 10)
+                        !(age > Duration::from_secs(300) && entry.hit_count < 10)
                     }
                 });
                 debug!(
@@ -820,9 +820,9 @@ impl FlodbaddL7 {
                 }
 
                 // ------------------------------------------------------------------
-                // TTL eviction for session→L7 map (30-minute default)
+                // TTL eviction for session→L7 map (5-minute aligned with agentic loop)
                 // ------------------------------------------------------------------
-                let ttl = ChronoDuration::minutes(30);
+                let ttl = ChronoDuration::minutes(5);
                 let now = Utc::now();
 
                 // Collect keys to remove first to avoid deadlock
@@ -1421,7 +1421,9 @@ impl FlodbaddL7 {
                     total_read_bytes: disk_stats.total_read_bytes,
                     read_bytes: disk_stats.read_bytes,
                 };
-                let open_files = process.open_files().map(|count| count as u64);
+                let open_files = crate::open_files::aggregate_open_files(
+                    crate::open_files::get_open_file_paths(socket_pid),
+                );
                 return Some((
                     SessionL7 {
                         pid: socket_pid,
