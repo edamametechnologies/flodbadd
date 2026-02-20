@@ -1424,6 +1424,29 @@ impl FlodbaddL7 {
                 let open_files = crate::open_files::aggregate_open_files(
                     crate::open_files::get_open_file_paths(socket_pid),
                 );
+                let (parent_pid, parent_process_name, parent_process_path, parent_cmd) =
+                    if let Some(parent_sysinfo_pid) = process.parent() {
+                        let ppid = parent_sysinfo_pid.as_u32();
+                        if let Some(parent_proc) = pid_to_process.get(&ppid) {
+                            (
+                                Some(ppid),
+                                parent_proc.name().to_string_lossy().to_string(),
+                                parent_proc
+                                    .exe()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                parent_proc
+                                    .cmd()
+                                    .iter()
+                                    .map(|e| e.to_string_lossy().to_string())
+                                    .collect(),
+                            )
+                        } else {
+                            (Some(ppid), String::new(), String::new(), Vec::new())
+                        }
+                    } else {
+                        (None, String::new(), String::new(), Vec::new())
+                    };
                 return Some((
                     SessionL7 {
                         pid: socket_pid,
@@ -1439,6 +1462,10 @@ impl FlodbaddL7 {
                         accumulated_cpu_time,
                         disk_usage,
                         open_files,
+                        parent_pid,
+                        parent_process_name,
+                        parent_process_path,
+                        parent_cmd,
                     },
                     process_start_time,
                 ));

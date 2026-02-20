@@ -1,11 +1,11 @@
 use crate::vendor_vulns_db::*;
 use crate::vulnerability_info::*;
 use anyhow::{Context, Result};
-use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use threatmodels_rs::*;
 use tracing::{info, warn};
 use undeadlock::*;
 

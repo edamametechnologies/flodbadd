@@ -1,11 +1,11 @@
 use crate::port_info::*;
 use crate::profiles_db::*;
 use anyhow::{Context, Result};
-use edamame_models::*;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+use threatmodels_rs::*;
 use tracing::{info, trace, warn};
 use undeadlock::*;
 
@@ -340,9 +340,9 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edamame_models::UpdateStatus;
     use serial_test::serial;
     use std::sync::Once;
+    use threatmodels_rs::UpdateStatus;
 
     // Initialize logging or other necessary setup here
     static INIT: Once = Once::new();

@@ -84,6 +84,10 @@ pub struct SessionL7 {
     pub accumulated_cpu_time: u64,
     pub disk_usage: SessionProcessDiskUsage,
     pub open_files: Vec<String>,
+    pub parent_pid: Option<u32>,
+    pub parent_process_name: String,
+    pub parent_process_path: String,
+    pub parent_cmd: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

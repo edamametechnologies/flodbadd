@@ -6,7 +6,6 @@ use anyhow::{anyhow, Context, Result};
 use chrono;
 use chrono::{DateTime, Utc};
 use dashmap::DashSet;
-use edamame_models::*;
 use ipnet::IpNet;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -15,6 +14,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use threatmodels_rs::*;
 use tracing::{error, info, trace, warn};
 use undeadlock::*;
 

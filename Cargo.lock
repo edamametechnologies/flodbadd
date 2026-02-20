@@ -984,7 +984,6 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 [[package]]
 name = "edamame_backend"
 version = "0.3.5"
-source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#8f2e9f40e7926a0ffb883aa2065f1bf08e6fa62f"
 dependencies = [
  "anyhow",
  "blake3",
@@ -996,9 +995,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "edamame_models"
+name = "threatmodels-rs"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#0562a967bfa7b308c5292689a64b21fd51734e9b"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1125,7 +1123,6 @@ dependencies = [
 [[package]]
 name = "extended-isolation-forest"
 version = "0.2.3"
-source = "git+https://github.com/edamametechnologies/extended-isolation-forest?branch=main#b373e9dd5681447d5fff50c106a73ec2ee0f4377"
 dependencies = [
  "num-traits",
  "rand 0.8.5",
@@ -1203,7 +1200,7 @@ dependencies = [
  "dashmap",
  "dns-parser",
  "edamame_backend",
- "edamame_models",
+ "threatmodels-rs",
  "encoding_rs",
  "eui48",
  "extended-isolation-forest",
@@ -3760,7 +3757,6 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "undeadlock"
 version = "1.0.2"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#ea07d8e0de735f8a61cd187d3aa2d19bb90a36b7"
 dependencies = [
  "dashmap",
  "futures",

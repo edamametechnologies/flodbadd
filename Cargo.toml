@@ -29,8 +29,8 @@ edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backen
 #undeadlock = { path = "../undeadlock" }
 undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 # Local copy in order to allow rapid development/debug
-#edamame_models = { path = "../edamame_models" }
-edamame_models = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
+#threatmodels_rs = { path = "../threatmodels-rs" }
+threatmodels_rs = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
 
 # Global statics w/ mutex
 lazy_static = "1.5"

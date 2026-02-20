@@ -2,7 +2,6 @@ use crate::blacklists_db::BLACKLISTS;
 use crate::sessions::{Session, SessionInfo};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use edamame_models::*;
 use ipnet::IpNet;
 use lazy_static::lazy_static;
 use rayon::prelude::*;
@@ -11,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use threatmodels_rs::*;
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*;
 
