@@ -4,27 +4,33 @@ use std::process::Command;
 
 fn main() {
     // Debug: confirm this build.rs is running - use eprintln for visibility
-    eprintln!("[l7_ebpf_program build.rs] Running on {}", std::env::consts::OS);
-    
+    eprintln!(
+        "[l7_ebpf_program build.rs] Running on {}",
+        std::env::consts::OS
+    );
+
     // Only build eBPF program on Linux with ebpf feature
     // NOTE: cfg!(feature = "...") doesn't work in build.rs - must use env var
     let has_ebpf_feature = env::var("CARGO_FEATURE_EBPF").is_ok();
     let is_linux = std::env::consts::OS == "linux";
-    
-    eprintln!("[l7_ebpf_program build.rs] is_linux={}, has_ebpf_feature={}", is_linux, has_ebpf_feature);
-    
+
+    eprintln!(
+        "[l7_ebpf_program build.rs] is_linux={}, has_ebpf_feature={}",
+        is_linux, has_ebpf_feature
+    );
+
     // Also print all CARGO_FEATURE_* env vars for debugging
     for (key, value) in env::vars() {
         if key.starts_with("CARGO_FEATURE_") {
             eprintln!("[l7_ebpf_program build.rs] {}={}", key, value);
         }
     }
-    
+
     if !is_linux || !has_ebpf_feature {
         eprintln!("[l7_ebpf_program build.rs] Skipping: not linux or no ebpf feature");
         return;
     }
-    
+
     eprintln!("[l7_ebpf_program build.rs] Proceeding with eBPF compilation");
 
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -33,7 +39,10 @@ fn main() {
     // Create eBPF output directory
     let ebpf_dir = PathBuf::from(&out_dir).join("ebpf");
     if let Err(e) = std::fs::create_dir_all(&ebpf_dir) {
-        println!("cargo:warning=Failed to create eBPF output directory: {}", e);
+        println!(
+            "cargo:warning=Failed to create eBPF output directory: {}",
+            e
+        );
         return;
     }
 
