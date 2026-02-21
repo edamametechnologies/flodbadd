@@ -356,12 +356,7 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
         fn GetCurrentProcess() -> HANDLE;
         fn CloseHandle(h: HANDLE) -> i32;
         fn GetFileType(h: HANDLE) -> u32;
-        fn GetFinalPathNameByHandleW(
-            h: HANDLE,
-            buf: *mut u16,
-            buf_len: u32,
-            flags: u32,
-        ) -> u32;
+        fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, buf_len: u32, flags: u32) -> u32;
     }
 
     let proc_handle = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
@@ -446,9 +441,7 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
         }
 
         let mut name_buf = [0u16; 1024];
-        let len = unsafe {
-            GetFinalPathNameByHandleW(dup, name_buf.as_mut_ptr(), 1024, 0)
-        };
+        let len = unsafe { GetFinalPathNameByHandleW(dup, name_buf.as_mut_ptr(), 1024, 0) };
         unsafe { CloseHandle(dup) };
 
         if len == 0 || len as usize >= name_buf.len() {
@@ -547,7 +540,11 @@ mod tests {
         for p in &paths {
             assert!(!p.starts_with("/dev/"), "should filter /dev/ paths: {}", p);
             #[cfg(target_os = "linux")]
-            assert!(!p.starts_with("/proc/"), "should filter /proc/ paths: {}", p);
+            assert!(
+                !p.starts_with("/proc/"),
+                "should filter /proc/ paths: {}",
+                p
+            );
             #[cfg(target_os = "windows")]
             assert!(!p.starts_with('\\'), "should filter device paths: {}", p);
         }
@@ -557,7 +554,11 @@ mod tests {
     fn test_get_open_file_paths_dead_pid() {
         // PID 4_000_000 is far above typical OS ranges; should fail gracefully.
         let paths = get_open_file_paths(4_000_000);
-        assert!(paths.is_empty(), "dead PID should return empty, got: {:?}", paths);
+        assert!(
+            paths.is_empty(),
+            "dead PID should return empty, got: {:?}",
+            paths
+        );
     }
 
     #[test]
@@ -592,7 +593,9 @@ mod tests {
             let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
             let canon_str = canonical.to_string_lossy().to_string();
             assert!(
-                paths.iter().any(|p| p == canon_str.as_str() || p == file_path.to_string_lossy().as_ref()),
+                paths
+                    .iter()
+                    .any(|p| p == canon_str.as_str() || p == file_path.to_string_lossy().as_ref()),
                 "sentinel {} not found in open files: {:?}",
                 canon_str,
                 paths,
@@ -622,7 +625,11 @@ mod tests {
 
         // Spawn a process that exits immediately
         let child = Command::new(if cfg!(windows) { "cmd" } else { "true" })
-            .args(if cfg!(windows) { vec!["/C", "exit"] } else { vec![] })
+            .args(if cfg!(windows) {
+                vec!["/C", "exit"]
+            } else {
+                vec![]
+            })
             .spawn()
             .expect("spawn short-lived process");
 
@@ -661,7 +668,11 @@ mod tests {
         let raw = get_open_file_paths(pid);
         let aggregated = aggregate_open_files(raw.clone());
 
-        eprintln!("raw count: {}, aggregated count: {}", raw.len(), aggregated.len());
+        eprintln!(
+            "raw count: {}, aggregated count: {}",
+            raw.len(),
+            aggregated.len()
+        );
         assert!(aggregated.len() <= MAX_OPEN_FILES);
         // Aggregated output must be sorted and deduplicated
         for w in aggregated.windows(2) {

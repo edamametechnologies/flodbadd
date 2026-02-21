@@ -406,7 +406,11 @@ impl FlodbaddL7 {
                             .await;
 
                             let mut session_l7_data = session_l7_data;
-                            Self::merge_previous_sensitive(&l7_map, &connection, &mut session_l7_data);
+                            Self::merge_previous_sensitive(
+                                &l7_map,
+                                &connection,
+                                &mut session_l7_data,
+                            );
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
@@ -586,7 +590,11 @@ impl FlodbaddL7 {
                                     )
                                     .await;
                                     let mut l7_data = l7_data;
-                                    Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
+                                    Self::merge_previous_sensitive(
+                                        &l7_map,
+                                        &connection,
+                                        &mut l7_data,
+                                    );
                                     if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
                                     {
                                         resolution_entry.l7 = Some(l7_data);
@@ -621,7 +629,11 @@ impl FlodbaddL7 {
                                     )
                                     .await;
                                     let mut l7_data = l7_data;
-                                    Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
+                                    Self::merge_previous_sensitive(
+                                        &l7_map,
+                                        &connection,
+                                        &mut l7_data,
+                                    );
                                     if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
                                     {
                                         resolution_entry.l7 = Some(l7_data);
@@ -940,8 +952,7 @@ impl FlodbaddL7 {
                     targets
                         .into_iter()
                         .filter_map(|(session, pid)| {
-                            let sensitive =
-                                crate::open_files::get_sensitive_open_file_paths(pid);
+                            let sensitive = crate::open_files::get_sensitive_open_file_paths(pid);
                             if sensitive.is_empty() {
                                 None
                             } else {
@@ -983,10 +994,7 @@ impl FlodbaddL7 {
             info!("Sensitive file scan task completed");
         });
 
-        self.sensitive_scan_handle = Some(TaskHandle {
-            handle,
-            stop_flag,
-        });
+        self.sensitive_scan_handle = Some(TaskHandle { handle, stop_flag });
     }
 
     async fn update_port_process_cache(
@@ -1621,9 +1629,25 @@ impl FlodbaddL7 {
     }
 
     const INTERPRETER_BASENAMES: &[&str] = &[
-        "bash", "sh", "dash", "zsh", "fish", "ksh", "csh", "tcsh",
-        "python3", "python", "python3.10", "python3.11", "python3.12", "python3.13",
-        "perl", "ruby", "node", "deno", "bun",
+        "bash",
+        "sh",
+        "dash",
+        "zsh",
+        "fish",
+        "ksh",
+        "csh",
+        "tcsh",
+        "python3",
+        "python",
+        "python3.10",
+        "python3.11",
+        "python3.12",
+        "python3.13",
+        "perl",
+        "ruby",
+        "node",
+        "deno",
+        "bun",
     ];
 
     const TMP_PREFIXES: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/"];
