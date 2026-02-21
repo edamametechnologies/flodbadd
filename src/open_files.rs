@@ -592,12 +592,15 @@ mod tests {
         if !paths.is_empty() {
             let canonical = file_path.canonicalize().unwrap_or(file_path.clone());
             let canon_str = canonical.to_string_lossy().to_string();
+            // On Windows, canonicalize() returns \\?\… but get_open_file_paths strips that prefix
+            let canon_stripped = canon_str.strip_prefix("\\\\?\\").unwrap_or(&canon_str);
+            let plain_str = file_path.to_string_lossy();
             assert!(
                 paths
                     .iter()
-                    .any(|p| p == canon_str.as_str() || p == file_path.to_string_lossy().as_ref()),
+                    .any(|p| p == canon_stripped || p == canon_str.as_str() || p == plain_str.as_ref()),
                 "sentinel {} not found in open files: {:?}",
-                canon_str,
+                canon_stripped,
                 paths,
             );
         }
