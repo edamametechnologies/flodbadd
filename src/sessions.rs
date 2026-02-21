@@ -88,6 +88,15 @@ pub struct SessionL7 {
     pub parent_process_name: String,
     pub parent_process_path: String,
     pub parent_cmd: Vec<String>,
+    /// For script-spawned parents (bash, python, etc.), the script path
+    /// extracted from `parent_cmd[1]`. `None` when the parent is a
+    /// compiled binary or when `parent_cmd` has fewer than 2 elements.
+    #[serde(default)]
+    pub parent_script_path: Option<String>,
+    /// True when the process or its parent originates from a writable
+    /// temporary directory (`/tmp/`, `/var/tmp/`, `/dev/shm/`).
+    #[serde(default)]
+    pub spawned_from_tmp: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

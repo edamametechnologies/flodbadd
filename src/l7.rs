@@ -144,6 +144,7 @@ pub struct FlodbaddL7 {
     users: Arc<CustomRwLock<Users>>,
     port_process_cache: Arc<CustomDashMap<(u16, Protocol), ProcessCacheEntry>>,
     cache_cleanup_handle: Option<TaskHandle>,
+    sensitive_scan_handle: Option<TaskHandle>,
     host_service_cache: Arc<CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>>,
 }
 
@@ -157,6 +158,7 @@ impl FlodbaddL7 {
             users: Arc::new(CustomRwLock::new(Users::new())),
             port_process_cache: Arc::new(CustomDashMap::new("port_process_cache")),
             cache_cleanup_handle: None,
+            sensitive_scan_handle: None,
             host_service_cache: Arc::new(CustomDashMap::new("host_service_cache")),
         }
     }
@@ -170,6 +172,8 @@ impl FlodbaddL7 {
         self.start_resolver_task().await;
 
         self.start_cache_cleanup_task().await;
+
+        self.start_sensitive_scan_task().await;
     }
 
     pub async fn stop(&mut self) {
@@ -185,6 +189,12 @@ impl FlodbaddL7 {
             task_handle.stop_flag.store(true, Ordering::Relaxed);
             let _ = task_handle.handle.await;
             info!("Stopped L7 cache cleanup task");
+        }
+
+        if let Some(task_handle) = self.sensitive_scan_handle.take() {
+            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.handle.await;
+            info!("Stopped sensitive file scan task");
         }
     }
 
@@ -337,6 +347,8 @@ impl FlodbaddL7 {
                                 &port_process_cache,
                             )
                             .await;
+                            let mut l7_fast = l7_fast;
+                            Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_fast);
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
@@ -387,20 +399,22 @@ impl FlodbaddL7 {
 
                             Self::update_port_process_cache(
                                 &connection,
-                                &session_l7_data, // Pass the SessionL7 part
-                                0,                // No start_time available from host_service_cache
+                                &session_l7_data,
+                                0,
                                 &port_process_cache,
                             )
                             .await;
 
+                            let mut session_l7_data = session_l7_data;
+                            Self::merge_previous_sensitive(&l7_map, &connection, &mut session_l7_data);
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
-                                    l7: Some(session_l7_data), // Pass the SessionL7 part
+                                    l7: Some(session_l7_data),
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
-                                    source, // Use the determined source here
+                                    source,
                                 },
                             );
                             successfully_resolved_count += 1;
@@ -457,6 +471,8 @@ impl FlodbaddL7 {
                                 &port_process_cache,
                             )
                             .await;
+                            let mut l7_data = l7_data;
+                            Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
@@ -569,6 +585,8 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
+                                    let mut l7_data = l7_data;
+                                    Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
                                     if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
                                     {
                                         resolution_entry.l7 = Some(l7_data);
@@ -602,6 +620,8 @@ impl FlodbaddL7 {
                                         &port_process_cache,
                                     )
                                     .await;
+                                    let mut l7_data = l7_data;
+                                    Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
                                     if let Some(mut resolution_entry) = l7_map.get_mut(&connection)
                                     {
                                         resolution_entry.l7 = Some(l7_data);
@@ -852,6 +872,119 @@ impl FlodbaddL7 {
 
         self.cache_cleanup_handle = Some(TaskHandle {
             handle: cleanup_handle,
+            stop_flag,
+        });
+    }
+
+    /// Lightweight task that periodically scans open files for resolved
+    /// sessions, looking only for sensitive paths (credentials, keys, etc.).
+    ///
+    /// Interval is platform-tuned:
+    ///   Linux  – 30 s  (procfs readlinks are RAM-backed, near-zero cost)
+    ///   macOS  – 60 s  (proc_pidfdinfo syscalls are costlier per FD)
+    ///   Windows – 120 s (NtQuerySystemInformation enumerates ALL handles system-wide)
+    async fn start_sensitive_scan_task(&mut self) {
+        #[cfg(target_os = "linux")]
+        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 30;
+        #[cfg(target_os = "macos")]
+        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 60;
+        #[cfg(target_os = "windows")]
+        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 120;
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 120;
+
+        /// Cap the number of PIDs scanned per cycle to bound worst-case CPU.
+        /// On Windows/macOS each PID is significantly more expensive than Linux.
+        #[cfg(target_os = "linux")]
+        const MAX_PIDS_PER_CYCLE: usize = 500;
+        #[cfg(not(target_os = "linux"))]
+        const MAX_PIDS_PER_CYCLE: usize = 50;
+
+        let l7_map = self.l7_map.clone();
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = stop_flag.clone();
+
+        let handle = tokio::spawn(async move {
+            info!(
+                "Starting sensitive file scan task ({}s interval, max {} PIDs/cycle)",
+                SENSITIVE_SCAN_INTERVAL_SECS, MAX_PIDS_PER_CYCLE
+            );
+
+            while !stop_flag_clone.load(Ordering::Relaxed) {
+                sleep(Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS)).await;
+
+                // Collect (session_key, pid) for resolved entries, dedup by PID
+                // so we don't scan the same process twice when it has multiple sessions
+                let mut seen_pids = std::collections::HashSet::new();
+                let targets: Vec<(Session, u32)> = l7_map
+                    .iter()
+                    .filter_map(|entry| {
+                        entry.value().l7.as_ref().and_then(|l7| {
+                            if seen_pids.insert(l7.pid) {
+                                Some((entry.key().clone(), l7.pid))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .take(MAX_PIDS_PER_CYCLE)
+                    .collect();
+
+                if targets.is_empty() {
+                    continue;
+                }
+
+                // Scan FDs on a blocking thread (I/O varies by platform)
+                let scan_results = tokio::task::spawn_blocking(move || {
+                    targets
+                        .into_iter()
+                        .filter_map(|(session, pid)| {
+                            let sensitive =
+                                crate::open_files::get_sensitive_open_file_paths(pid);
+                            if sensitive.is_empty() {
+                                None
+                            } else {
+                                Some((session, sensitive))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+
+                let mut updated_sessions = 0u32;
+                for (session, sensitive_files) in scan_results {
+                    if let Some(mut entry) = l7_map.get_mut(&session) {
+                        if let Some(l7) = &mut entry.l7 {
+                            let before = l7.open_files.len();
+                            for f in &sensitive_files {
+                                if !l7.open_files.contains(f) {
+                                    l7.open_files.push(f.clone());
+                                }
+                            }
+                            if l7.open_files.len() != before {
+                                l7.open_files.sort();
+                                l7.open_files.dedup();
+                                updated_sessions += 1;
+                            }
+                        }
+                    }
+                }
+
+                if updated_sessions > 0 {
+                    debug!(
+                        "Sensitive file scan: updated {} session(s) with newly detected files",
+                        updated_sessions
+                    );
+                }
+            }
+
+            info!("Sensitive file scan task completed");
+        });
+
+        self.sensitive_scan_handle = Some(TaskHandle {
+            handle,
             stop_flag,
         });
     }
@@ -1447,6 +1580,17 @@ impl FlodbaddL7 {
                     } else {
                         (None, String::new(), String::new(), Vec::new())
                     };
+
+                let parent_script_path =
+                    Self::extract_script_path(&parent_process_path, &parent_cmd);
+
+                let spawned_from_tmp = Self::originates_from_tmp(
+                    &process_path,
+                    &parent_process_path,
+                    parent_script_path.as_deref(),
+                    &cmd,
+                );
+
                 return Some((
                     SessionL7 {
                         pid: socket_pid,
@@ -1466,12 +1610,87 @@ impl FlodbaddL7 {
                         parent_process_name,
                         parent_process_path,
                         parent_cmd,
+                        parent_script_path,
+                        spawned_from_tmp,
                     },
                     process_start_time,
                 ));
             }
         }
         None
+    }
+
+    const INTERPRETER_BASENAMES: &[&str] = &[
+        "bash", "sh", "dash", "zsh", "fish", "ksh", "csh", "tcsh",
+        "python3", "python", "python3.10", "python3.11", "python3.12", "python3.13",
+        "perl", "ruby", "node", "deno", "bun",
+    ];
+
+    const TMP_PREFIXES: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/"];
+
+    fn extract_script_path(exe_path: &str, cmd: &[String]) -> Option<String> {
+        if cmd.len() < 2 || exe_path.is_empty() {
+            return None;
+        }
+        let base = std::path::Path::new(exe_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if Self::INTERPRETER_BASENAMES
+            .iter()
+            .any(|i| base == *i || base.starts_with(&format!("{i}.")))
+        {
+            let candidate = &cmd[1];
+            if !candidate.starts_with('-') {
+                return Some(candidate.clone());
+            }
+            if cmd.len() > 2 && !cmd[2].starts_with('-') {
+                return Some(cmd[2].clone());
+            }
+        }
+        None
+    }
+
+    fn originates_from_tmp(
+        process_path: &str,
+        parent_process_path: &str,
+        parent_script_path: Option<&str>,
+        cmd: &[String],
+    ) -> bool {
+        let check = |p: &str| Self::TMP_PREFIXES.iter().any(|pfx| p.starts_with(pfx));
+        if check(process_path) || check(parent_process_path) {
+            return true;
+        }
+        if let Some(script) = parent_script_path {
+            if check(script) {
+                return true;
+            }
+        }
+        // Also check the process's own cmd[0] and cmd[1] for script-in-tmp
+        for arg in cmd.iter().take(2) {
+            if check(arg) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Merge sensitive open_files from a previous L7 resolution into `l7_data`.
+    /// Call this before inserting into l7_map so that sensitive files observed in
+    /// a prior refresh cycle remain visible even if the process closed them.
+    fn merge_previous_sensitive(
+        l7_map: &CustomDashMap<Session, L7Resolution>,
+        connection: &Session,
+        l7_data: &mut SessionL7,
+    ) {
+        if let Some(prev) = l7_map.get(connection) {
+            if let Some(prev_l7) = &prev.l7 {
+                l7_data.open_files = crate::open_files::merge_sensitive_open_files(
+                    std::mem::take(&mut l7_data.open_files),
+                    &prev_l7.open_files,
+                );
+            }
+        }
     }
 
     fn is_likely_ephemeral(connection: &Session) -> bool {
