@@ -37,15 +37,7 @@ const WEB_DESTINATIONS: &[(u8, u8, u8, u8)] = &[
 ];
 
 const PROCESS_NAMES: &[&str] = &[
-    "chrome",
-    "firefox",
-    "Safari",
-    "curl",
-    "python3",
-    "node",
-    "Slack",
-    "Teams",
-    "Spotify",
+    "chrome", "firefox", "Safari", "curl", "python3", "node", "Slack", "Teams", "Spotify",
     "zoom.us",
 ];
 
@@ -281,7 +273,9 @@ fn generate_exfiltration_traffic(outbound_bytes: u64) -> Vec<SessionInfo> {
 fn generate_port_scan_traffic() -> Vec<SessionInfo> {
     let base = Utc::now() - Duration::minutes(5);
     let target = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200));
-    let ports: &[u16] = &[21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 5432, 8080, 8443];
+    let ports: &[u16] = &[
+        21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 5432, 8080, 8443,
+    ];
 
     ports
         .iter()
@@ -341,9 +335,9 @@ fn generate_dns_tunnel_traffic(count: usize) -> Vec<SessionInfo> {
         s.stats.orig_pkts = rng.random_range(150..250);
         s.stats.resp_pkts = rng.random_range(150..250);
 
-            let seg = rng.random_range(20..60u32);
-            s.stats.segment_count = seg;
-            s.stats.segment_interarrival = duration_s as f64 / (seg - 1) as f64;
+        let seg = rng.random_range(20..60u32);
+        s.stats.segment_count = seg;
+        s.stats.segment_interarrival = duration_s as f64 / (seg - 1) as f64;
 
         s.dst_service = Some("dns".to_string());
         s.l7 = Some(SessionL7 {
@@ -481,8 +475,7 @@ async fn classify_and_measure(
     let mut normal_total = 0;
 
     for s in sessions.iter() {
-        let flagged =
-            s.criticality.contains("suspicious") || s.criticality.contains("abnormal");
+        let flagged = s.criticality.contains("suspicious") || s.criticality.contains("abnormal");
         if is_attack(s) {
             attack_total += 1;
             if flagged {
@@ -690,11 +683,10 @@ async fn test_port_scan_score_separation() {
     let mut scan_scores = Vec::new();
     for s in &mixed {
         if let Some((score, _, _)) = analyzer.debug_score_and_thresholds(s).await {
-            let is_scan = s
-                .l7
-                .as_ref()
-                .map(|l7| l7.process_name == "nmap")
-                .unwrap_or(false);
+            let is_scan =
+                s.l7.as_ref()
+                    .map(|l7| l7.process_name == "nmap")
+                    .unwrap_or(false);
             if is_scan {
                 scan_scores.push(score);
             } else {
@@ -841,11 +833,10 @@ async fn test_cryptomining_score_separation() {
     let mut mining_scores = Vec::new();
     for s in &mixed {
         if let Some((score, _, _)) = analyzer.debug_score_and_thresholds(s).await {
-            let is_mining = s
-                .l7
-                .as_ref()
-                .map(|l7| l7.process_name == "xmrig")
-                .unwrap_or(false);
+            let is_mining =
+                s.l7.as_ref()
+                    .map(|l7| l7.process_name == "xmrig")
+                    .unwrap_or(false);
             if is_mining {
                 mining_scores.push(score);
             } else {
@@ -854,10 +845,7 @@ async fn test_cryptomining_score_separation() {
         }
     }
 
-    assert!(
-        !mining_scores.is_empty(),
-        "Mining sessions must be scored"
-    );
+    assert!(!mining_scores.is_empty(), "Mining sessions must be scored");
 
     normal_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
     mining_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -918,11 +906,7 @@ async fn test_mixed_anomaly_detection() {
     mixed.shuffle(&mut rand::rng());
 
     let r = classify_and_measure(&analyzer, &mut mixed, |s| {
-        let proc = s
-            .l7
-            .as_ref()
-            .map(|l| l.process_name.as_str())
-            .unwrap_or("");
+        let proc = s.l7.as_ref().map(|l| l.process_name.as_str()).unwrap_or("");
         matches!(proc, "svchost" | "nmap" | "iodine" | "xmrig")
             || s.stats.outbound_bytes > 1_000_000_000
     })
@@ -936,11 +920,7 @@ async fn test_mixed_anomaly_detection() {
     );
 
     let fp_pct = r.normal_false_positives as f64 / r.normal_total.max(1) as f64;
-    assert!(
-        fp_pct < 0.15,
-        "FP rate {:.1}% exceeds 15%",
-        fp_pct * 100.0
-    );
+    assert!(fp_pct < 0.15, "FP rate {:.1}% exceeds 15%", fp_pct * 100.0);
 
     analyzer.stop().await;
 }

@@ -44,8 +44,7 @@ async fn spawn_short_lived_tcp_connection() -> Option<(u32, u16, std::net::IpAdd
     let child_pid = child.id();
 
     // Accept the connection on the server side
-    let accept_result =
-        tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+    let accept_result = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
 
     let (stream, peer_addr) = match accept_result {
         Ok(Ok((s, a))) => (s, a),
@@ -86,7 +85,10 @@ async fn spawn_short_lived_tcp_connection() -> Option<(u32, u16, std::net::IpAdd
 #[serial]
 async fn test_ebpf_eager_resolution_short_lived_python() {
     if !l7_ebpf::is_fully_functional() {
-        println!("Skipping -- eBPF not fully functional: {}", l7_ebpf::ebpf_support());
+        println!(
+            "Skipping -- eBPF not fully functional: {}",
+            l7_ebpf::ebpf_support()
+        );
         return;
     }
 
@@ -306,9 +308,7 @@ async fn test_add_connection_does_not_create_none_placeholder_when_ebpf_availabl
                 "Expected eBPF source when eBPF is available"
             );
         } else {
-            println!(
-                "l7 is None -- eBPF may not have captured localhost connection"
-            );
+            println!("l7 is None -- eBPF may not have captured localhost connection");
         }
     }
 

@@ -328,16 +328,10 @@ impl FlodbaddL7 {
                         // Try eBPF first -- cheapest and most accurate for
                         // short-lived processes that may be gone by the time
                         // netstat runs.
-                        if let Some(mut l7_ebpf_data) =
-                            l7_ebpf::get_l7_for_session(&connection)
-                        {
+                        if let Some(mut l7_ebpf_data) = l7_ebpf::get_l7_for_session(&connection) {
                             FlodbaddL7::enrich_ebpf_l7_from_proc(&mut l7_ebpf_data);
                             let mut l7_ebpf_data = l7_ebpf_data;
-                            Self::merge_previous_sensitive(
-                                &l7_map,
-                                &connection,
-                                &mut l7_ebpf_data,
-                            );
+                            Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_ebpf_data);
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
@@ -1764,12 +1758,10 @@ impl FlodbaddL7 {
             }
         }
 
-        l7.open_files = crate::open_files::aggregate_open_files(
-            crate::open_files::get_open_file_paths(pid),
-        );
+        l7.open_files =
+            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
 
-        l7.parent_script_path =
-            Self::extract_script_path(&l7.parent_process_path, &l7.parent_cmd);
+        l7.parent_script_path = Self::extract_script_path(&l7.parent_process_path, &l7.parent_cmd);
         l7.spawned_from_tmp = Self::originates_from_tmp(
             &l7.process_path,
             &l7.parent_process_path,

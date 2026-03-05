@@ -541,7 +541,9 @@ impl IsolationForestModel {
                     None => {
                         self.training_timeouts_count =
                             self.training_timeouts_count.saturating_add(1);
-                        warn!("train_model: Background training timed out. Keeping previous forest.");
+                        warn!(
+                            "train_model: Background training timed out. Keeping previous forest."
+                        );
                     }
                 }
 
@@ -711,18 +713,18 @@ impl IsolationForestModel {
         // Define features with their names and categorical flag
         // Format: (name, is_categorical)
         const FEATURE_DEFS: [(&'static str, bool); NUM_FEATURES] = [
-            ("ProcessPrevalence", false),      // 0 - Process frequency in training window (continuous)
-            ("Duration", false),               // 1 - Duration (s)
-            ("Bytes", false),                  // 2 - Total bytes
-            ("Packets", false),                // 3 - Total packets
-            ("SegmentInterarrival", false),    // 4 - Avg segment interarrival
-            ("InOutRatio", false),             // 5 - Inbound/Outbound ratio
-            ("AvgPacketSize", false),          // 6 - Average packet size
+            ("ProcessPrevalence", false), // 0 - Process frequency in training window (continuous)
+            ("Duration", false),          // 1 - Duration (s)
+            ("Bytes", false),             // 2 - Total bytes
+            ("Packets", false),           // 3 - Total packets
+            ("SegmentInterarrival", false), // 4 - Avg segment interarrival
+            ("InOutRatio", false),        // 5 - Inbound/Outbound ratio
+            ("AvgPacketSize", false),     // 6 - Average packet size
             ("InterarrivalRegularity", false), // 7 - Regularity of interarrival (0..1)
-            ("PacketRate", false),             // 8 - Packets per second
-            ("MissedData", false),             // 9 - Missed bytes
-            ("Segments", false),               // 10 - Total segment count
-            ("DstPort", true),                 // 11 - Destination port (categorical-ish)
+            ("PacketRate", false),        // 8 - Packets per second
+            ("MissedData", false),        // 9 - Missed bytes
+            ("Segments", false),          // 10 - Total segment count
+            ("DstPort", true),            // 11 - Destination port (categorical-ish)
         ];
 
         let mut diagnostics = Vec::new();
@@ -1065,8 +1067,7 @@ impl IsolationForestModel {
     }
 
     fn count_unique_samples(&self) -> usize {
-        let mut seen: HashSet<[u64; NUM_FEATURES]> =
-            HashSet::with_capacity(self.recent_data.len());
+        let mut seen: HashSet<[u64; NUM_FEATURES]> = HashSet::with_capacity(self.recent_data.len());
         for feats in &self.recent_data {
             let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
             seen.insert(bits);
@@ -2028,8 +2029,7 @@ impl SessionAnalyzer {
                                         })
                                         .map(|s| s.trim().to_string())
                                         .collect();
-                                    final_tags
-                                        .push("anomaly:normal/analysis_timeout".to_string());
+                                    final_tags.push("anomaly:normal/analysis_timeout".to_string());
                                     final_tags.sort_unstable();
                                     final_tags.dedup();
                                     session.criticality = final_tags.join(",");
@@ -4043,8 +4043,7 @@ pub(crate) mod tests {
         let mut model = IsolationForestModel::new();
 
         for i in 0..50 {
-            let feats: [f64; NUM_FEATURES] =
-                std::array::from_fn(|j| (i * NUM_FEATURES + j) as f64);
+            let feats: [f64; NUM_FEATURES] = std::array::from_fn(|j| (i * NUM_FEATURES + j) as f64);
             model.recent_data.push_back(feats);
         }
         model.train_model(true).await;
@@ -4247,18 +4246,15 @@ pub(crate) mod tests {
             Utc::now(),
         );
 
-        analyzer.all_sessions.insert(
-            uid.clone(),
-            SessionCache::with_full_session(&session),
-        );
-        analyzer.anomalous_sessions.insert(
-            uid.clone(),
-            SessionCache::with_full_session(&session),
-        );
-        analyzer.blacklisted_sessions.insert(
-            uid.clone(),
-            SessionCache::with_full_session(&session),
-        );
+        analyzer
+            .all_sessions
+            .insert(uid.clone(), SessionCache::with_full_session(&session));
+        analyzer
+            .anomalous_sessions
+            .insert(uid.clone(), SessionCache::with_full_session(&session));
+        analyzer
+            .blacklisted_sessions
+            .insert(uid.clone(), SessionCache::with_full_session(&session));
 
         let normal_count = analyzer
             .all_sessions
@@ -4289,10 +4285,9 @@ pub(crate) mod tests {
             "anomaly:normal".to_string(),
             Utc::now(),
         );
-        analyzer.all_sessions.insert(
-            normal_uid,
-            SessionCache::with_full_session(&normal_session),
-        );
+        analyzer
+            .all_sessions
+            .insert(normal_uid, SessionCache::with_full_session(&normal_session));
 
         let normal_count_2 = analyzer
             .all_sessions
@@ -4302,10 +4297,7 @@ pub(crate) mod tests {
                     && !analyzer.blacklisted_sessions.contains_key(e.key())
             })
             .count();
-        assert_eq!(
-            normal_count_2, 1,
-            "One normal session should be counted"
-        );
+        assert_eq!(normal_count_2, 1, "One normal session should be counted");
 
         println!("Normal sessions count verified");
     }

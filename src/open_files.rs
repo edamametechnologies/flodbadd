@@ -29,17 +29,11 @@ const COMMON_SENSITIVE_PATTERNS: &[&str] = &[
 ];
 
 #[cfg(target_os = "macos")]
-const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
-    "/Library/Keychains/",
-    "/MobileSyncBackup/",
-];
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &["/Library/Keychains/", "/MobileSyncBackup/"];
 
 #[cfg(target_os = "linux")]
-const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
-    "/etc/shadow",
-    "/etc/gshadow",
-    "/etc/security/opasswd",
-];
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] =
+    &["/etc/shadow", "/etc/gshadow", "/etc/security/opasswd"];
 
 #[cfg(target_os = "windows")]
 const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
