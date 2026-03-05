@@ -92,11 +92,22 @@ async fn test_ebpf_eager_resolution_short_lived_python() {
         return;
     }
 
+    // Alpine and other minimal containers may not ship python3.
+    let python_ok = std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !python_ok {
+        println!("Skipping -- python3 not available on this platform");
+        return;
+    }
+
     let mut l7 = FlodbaddL7::new();
     l7.start().await;
 
-    // Run multiple iterations to catch intermittent failures
     let iterations = 5;
+    let mut connected_count = 0;
     let mut resolved_count = 0;
     let mut total_with_process_name = 0;
 
@@ -110,6 +121,7 @@ async fn test_ebpf_eager_resolution_short_lived_python() {
                 continue;
             }
         };
+        connected_count += 1;
 
         let (_child_pid, client_port, remote_ip, remote_port) = conn;
 
@@ -121,9 +133,6 @@ async fn test_ebpf_eager_resolution_short_lived_python() {
             dst_port: remote_port,
         };
 
-        // The process is already dead. Exercise the full L7 resolution path.
-        // With our fix, add_connection_to_resolver should try eBPF eagerly,
-        // and get_resolved_l7 should retry eBPF for unresolved entries.
         l7.add_connection_to_resolver(&session).await;
         let resolution = l7.get_resolved_l7(&session).await;
 
@@ -165,18 +174,25 @@ async fn test_ebpf_eager_resolution_short_lived_python() {
     l7.stop().await;
 
     println!(
-        "\nResults: {}/{} resolved, {}/{} had process_name",
-        resolved_count, iterations, total_with_process_name, iterations
+        "\nResults: {}/{} connected, {}/{} resolved, {}/{} had process_name",
+        connected_count, iterations, resolved_count, connected_count, total_with_process_name,
+        connected_count
+    );
+
+    assert!(
+        connected_count > 0,
+        "All {} connection attempts failed despite python3 being available",
+        iterations
     );
 
     // With eBPF eager resolution, we expect most iterations to succeed.
     // Allow some slack for localhost connections that may bypass tcp_set_state.
     assert!(
-        total_with_process_name >= iterations / 2,
-        "Expected at least half of iterations to have process_name, \
+        total_with_process_name >= connected_count / 2,
+        "Expected at least half of connected iterations to have process_name, \
          got {}/{}. eBPF eager resolution may not be working.",
         total_with_process_name,
-        iterations
+        connected_count
     );
 }
 
