@@ -325,7 +325,34 @@ impl FlodbaddL7 {
                     }
 
                     for connection in to_process_this_cycle {
-                        // First, quick exact match via index
+                        // Try eBPF first -- cheapest and most accurate for
+                        // short-lived processes that may be gone by the time
+                        // netstat runs.
+                        if let Some(mut l7_ebpf_data) =
+                            l7_ebpf::get_l7_for_session(&connection)
+                        {
+                            FlodbaddL7::enrich_ebpf_l7_from_proc(&mut l7_ebpf_data);
+                            let mut l7_ebpf_data = l7_ebpf_data;
+                            Self::merge_previous_sensitive(
+                                &l7_map,
+                                &connection,
+                                &mut l7_ebpf_data,
+                            );
+                            l7_map.insert(
+                                connection.clone(),
+                                L7Resolution {
+                                    l7: Some(l7_ebpf_data),
+                                    date: Utc::now(),
+                                    retry_count: 0,
+                                    last_retry: None,
+                                    source: L7ResolutionSource::Ebpf,
+                                },
+                            );
+                            successfully_resolved_count += 1;
+                            continue;
+                        }
+
+                        // Exact match via socket index
                         // Note: pid_to_process borrows from system_read, so we need to be careful about lifetimes
                         if let Some((l7_fast, start_time_fast)) = Self::try_exact_match_from_index(
                             &connection,
@@ -1263,6 +1290,28 @@ impl FlodbaddL7 {
             return;
         }
 
+        // Try eBPF eagerly: if the kernel already captured this connection we can
+        // resolve it immediately, including /proc/<pid>/fd for open_files, before
+        // the process exits. This is critical for short-lived processes.
+        if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
+            Self::enrich_ebpf_l7_from_proc(&mut l7_data);
+            self.l7_map.insert(
+                connection.clone(),
+                L7Resolution {
+                    l7: Some(l7_data),
+                    date: Utc::now(),
+                    retry_count: 0,
+                    last_retry: None,
+                    source: L7ResolutionSource::Ebpf,
+                },
+            );
+            trace!(
+                "eBPF eager resolution for {:?} in add_connection_to_resolver",
+                connection
+            );
+            return;
+        }
+
         self.l7_map.insert(
             connection.clone(),
             L7Resolution {
@@ -1270,7 +1319,7 @@ impl FlodbaddL7 {
                 date: Utc::now(),
                 retry_count: 0,
                 last_retry: None,
-                source: L7ResolutionSource::Unknown, // Initialize source
+                source: L7ResolutionSource::Unknown,
             },
         );
 
@@ -1282,11 +1331,30 @@ impl FlodbaddL7 {
     pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {
         // Check cached result first
         if let Some(l7) = self.l7_map.get(connection).map(|s| s.value().clone()) {
+            if l7.l7.is_some() {
+                return Some(l7);
+            }
+            // Cached entry exists but L7 is still unresolved -- try eBPF before
+            // returning None-like data. The eBPF map may have been populated
+            // after the placeholder was inserted by add_connection_to_resolver.
+            if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
+                Self::enrich_ebpf_l7_from_proc(&mut l7_data);
+                let resolution = L7Resolution {
+                    l7: Some(l7_data),
+                    date: Utc::now(),
+                    retry_count: 0,
+                    last_retry: None,
+                    source: L7ResolutionSource::Ebpf,
+                };
+                self.l7_map.insert(connection.clone(), resolution.clone());
+                return Some(resolution);
+            }
             return Some(l7);
         }
 
-        // Try eBPF helper (will be a fast lookup when running on Linux)
-        if let Some(l7_data) = l7_ebpf::get_l7_for_session(connection) {
+        // No cached entry at all -- try eBPF first (fast lookup on Linux)
+        if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
+            Self::enrich_ebpf_l7_from_proc(&mut l7_data);
             let resolution = L7Resolution {
                 l7: Some(l7_data),
                 date: Utc::now(),
@@ -1294,7 +1362,6 @@ impl FlodbaddL7 {
                 last_retry: None,
                 source: L7ResolutionSource::Ebpf,
             };
-            // Insert into cache for future queries
             self.l7_map.insert(connection.clone(), resolution.clone());
             return Some(resolution);
         }
@@ -1627,6 +1694,92 @@ impl FlodbaddL7 {
         }
         None
     }
+
+    /// Enrich an eBPF-produced SessionL7 with parent lineage, open_files,
+    /// cwd, and spawned_from_tmp using /proc on Linux. On other platforms
+    /// this is a no-op since eBPF is Linux-only.
+    #[cfg(target_os = "linux")]
+    fn enrich_ebpf_l7_from_proc(l7: &mut SessionL7) {
+        use std::fs;
+        use std::path::Path;
+
+        let pid = l7.pid;
+        if pid == 0 {
+            return;
+        }
+        let proc_dir = format!("/proc/{}", pid);
+        if !Path::new(&proc_dir).exists() {
+            return;
+        }
+
+        if l7.cwd.is_none() {
+            if let Ok(cwd) = fs::read_link(format!("{}/cwd", proc_dir)) {
+                let s = cwd.to_string_lossy().to_string();
+                if !s.is_empty() {
+                    l7.cwd = Some(s);
+                }
+            }
+        }
+
+        if l7.cmd.is_empty() {
+            if let Ok(cmdline) = fs::read(format!("{}/cmdline", proc_dir)) {
+                l7.cmd = cmdline
+                    .split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).to_string())
+                    .collect();
+            }
+        }
+
+        if l7.process_path.is_empty() {
+            if let Ok(exe) = fs::read_link(format!("{}/exe", proc_dir)) {
+                l7.process_path = exe.to_string_lossy().to_string();
+            }
+        }
+
+        if let Ok(status) = fs::read_to_string(format!("{}/status", proc_dir)) {
+            for line in status.lines() {
+                if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
+                    if let Ok(ppid) = ppid_str.trim().parse::<u32>() {
+                        l7.parent_pid = Some(ppid);
+                        let parent_proc = format!("/proc/{}", ppid);
+                        if Path::new(&parent_proc).exists() {
+                            if let Ok(comm) = fs::read_to_string(format!("{}/comm", parent_proc)) {
+                                l7.parent_process_name = comm.trim().to_string();
+                            }
+                            if let Ok(exe) = fs::read_link(format!("{}/exe", parent_proc)) {
+                                l7.parent_process_path = exe.to_string_lossy().to_string();
+                            }
+                            if let Ok(cmdline) = fs::read(format!("{}/cmdline", parent_proc)) {
+                                l7.parent_cmd = cmdline
+                                    .split(|&b| b == 0)
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| String::from_utf8_lossy(s).to_string())
+                                    .collect();
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        l7.open_files = crate::open_files::aggregate_open_files(
+            crate::open_files::get_open_file_paths(pid),
+        );
+
+        l7.parent_script_path =
+            Self::extract_script_path(&l7.parent_process_path, &l7.parent_cmd);
+        l7.spawned_from_tmp = Self::originates_from_tmp(
+            &l7.process_path,
+            &l7.parent_process_path,
+            l7.parent_script_path.as_deref(),
+            &l7.cmd,
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn enrich_ebpf_l7_from_proc(_l7: &mut SessionL7) {}
 
     const INTERPRETER_BASENAMES: &[&str] = &[
         "bash",

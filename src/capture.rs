@@ -2345,29 +2345,6 @@ impl FlodbaddCapture {
             blacklists::recompute_blacklist_for_sessions(&sessions, &blacklisted_sessions).await;
             debug!("recompute_blacklist_for_sessions done");
 
-            // Get just the vector of blacklisted sessions once, without holding the lock
-            // and then use it for processing. This avoids holding the read lock while updating sessions.
-            let blacklisted_sessions_vec = blacklisted_sessions.read().await.clone();
-
-            // After blacklist computation, update whitelist status for blacklisted sessions
-            // Use the cloned vector instead of holding a lock on the original
-            for (i, blacklisted_session) in blacklisted_sessions_vec.iter().enumerate() {
-                if let Some(mut entry) = sessions.get_mut(blacklisted_session) {
-                    if entry.is_whitelisted == WhitelistState::Unknown {
-                        entry.is_whitelisted = WhitelistState::NonConforming;
-                        if entry.whitelist_reason.is_none() {
-                            entry.whitelist_reason = Some("Session is blacklisted".to_string());
-                        }
-                        // Update last_modified since the whitelist state/reason changed due to blacklist
-                        entry.last_modified = Utc::now();
-                    }
-                }
-                // Yield periodically to avoid starving the tokio runtime
-                if (i + 1) % 500 == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-
             // Update whitelist information incrementally
             whitelists::recompute_whitelist_for_sessions(
                 &whitelist_name,

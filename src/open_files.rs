@@ -3,33 +3,77 @@ use std::path::Path;
 
 pub const MAX_OPEN_FILES: usize = 100;
 
-/// Substrings that identify credential / secret files.
-/// Matched case-sensitively against the full path.
-const SENSITIVE_PATH_PATTERNS: &[&str] = &[
+/// Cross-platform credential patterns in forward-slash canonical form.
+/// `is_sensitive_path()` normalizes backslashes before matching so these
+/// work transparently on Windows where paths use `\`.
+const COMMON_SENSITIVE_PATTERNS: &[&str] = &[
     "/.ssh/",
+    "/.gnupg/",
     "/.aws/credentials",
     "/.aws/config",
-    "/.gnupg/",
     "/.kube/config",
     "/.docker/config.json",
     "/.npmrc",
     "/.env",
-    "/Library/Keychains/",
-    "/Login Data",
-    "/Cookies",
-    "/Web Data",
-    "/credentials.json",
     "/.netrc",
     "/.pgpass",
+    "/.pypirc",
+    "/credentials.json",
     "/id_rsa",
     "/id_ed25519",
     "/id_ecdsa",
     "/id_dsa",
+    "/Login Data",
+    "/Cookies",
+    "/Web Data",
 ];
 
+#[cfg(target_os = "macos")]
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
+    "/Library/Keychains/",
+    "/MobileSyncBackup/",
+];
+
+#[cfg(target_os = "linux")]
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/security/opasswd",
+];
+
+#[cfg(target_os = "windows")]
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[
+    "/AppData/Roaming/Microsoft/Credentials/",
+    "/AppData/Roaming/Microsoft/Protect/",
+    "/Windows/System32/config/SAM",
+    "/Windows/System32/config/SECURITY",
+    "/Windows/NTDS/ntds.dit",
+    "/AppData/Local/Google/Chrome/User Data/",
+    "/AppData/Roaming/Mozilla/Firefox/Profiles/",
+];
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const PLATFORM_SENSITIVE_PATTERNS: &[&str] = &[];
+
 /// Returns true if `path` matches a known credential / secret pattern.
+/// Normalizes backslashes to forward slashes so Windows paths match the
+/// canonical forward-slash patterns.
 pub fn is_sensitive_path(path: &str) -> bool {
-    SENSITIVE_PATH_PATTERNS.iter().any(|pat| path.contains(pat))
+    let normalized = path.replace('\\', "/");
+    COMMON_SENSITIVE_PATTERNS
+        .iter()
+        .any(|pat| normalized.contains(pat))
+        || PLATFORM_SENSITIVE_PATTERNS
+            .iter()
+            .any(|pat| normalized.contains(pat))
+}
+
+/// Returns the combined list of sensitive patterns (common + platform).
+/// Useful for external consumers that need the raw pattern list.
+pub fn sensitive_patterns() -> Vec<&'static str> {
+    let mut patterns = COMMON_SENSITIVE_PATTERNS.to_vec();
+    patterns.extend_from_slice(PLATFORM_SENSITIVE_PATTERNS);
+    patterns
 }
 
 /// Aggregate file paths when the list exceeds MAX_OPEN_FILES.

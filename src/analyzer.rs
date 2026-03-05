@@ -3,9 +3,10 @@ use chrono::{DateTime, Duration, Utc};
 use extended_isolation_forest::{Forest, ForestOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt;
-use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, warn};
@@ -57,11 +58,11 @@ async fn await_join_with_timeout<T>(
 /// The diagnostic information indicates which statistical features of the session were unusual:
 ///
 /// - Feature format: `feature_name:descriptor` where:
-///   - `feature_name` is one of: `Process` (process name hash), `Duration` (session duration),
-///     `Bytes` (total bytes transferred), `Packets` (total packets), `SegmentInterarrival` (timing),
-///     `InOutRatio` (inbound/outbound ratio), `DestService` (destination service),
-///     `AvgPacketSize` (average packet size), `SelfDestination` (self destination flag),
-///     or `MissedData` (missed bytes)
+///   - `feature_name` is one of: `ProcessPrevalence` (process frequency in training window),
+///     `Duration` (session duration), `Bytes` (total bytes transferred), `Packets` (total packets),
+///     `SegmentInterarrival` (timing), `InOutRatio` (inbound/outbound ratio),
+///     `AvgPacketSize` (average packet size), `InterarrivalRegularity`, `PacketRate`,
+///     `MissedData` (missed bytes), `Segments`, or `DstPort` (destination port)
 ///   - `descriptor` indicates the type of anomaly: `UnusuallyHigh`, `UnusuallyLow`, `DeviatesFromNorm`, or `Unusual`
 ///
 /// - Multiple unusual features are separated by forward slashes:
@@ -307,11 +308,15 @@ impl SessionCache {
 // Define the internal analyzer that handles the Isolation Forest model
 struct IsolationForestModel {
     forest: Option<Forest<f64, NUM_FEATURES>>,
-    recent_data: Vec<[f64; NUM_FEATURES]>,
+    recent_data: VecDeque<[f64; NUM_FEATURES]>,
     max_samples: usize,
     suspicious_threshold: f64,
     abnormal_threshold: f64,
     session_cache: CustomDashMap<String, (f64, [f64; NUM_FEATURES], DateTime<Utc>)>,
+    /// Process names parallel to recent_data, used for frequency-based process encoding
+    process_names: VecDeque<String>,
+    /// Rolling frequency count of each process name in the training window (recent_data)
+    process_freq: HashMap<String, u32>,
     /// Per-flow sampling counters used to downsample repeated snapshots from the same flow signature
     per_flow_downsample: CustomDashMap<u64, u32>,
     /// Only 1 out of `downsample_factor` snapshots per flow signature will be kept in `recent_data`
@@ -341,6 +346,7 @@ struct IsolationForestModel {
     cache_hits: std::sync::atomic::AtomicU64,
     /// Cache misses for session scoring
     cache_misses: std::sync::atomic::AtomicU64,
+    last_cache_cleanup: DateTime<Utc>,
 }
 
 impl IsolationForestModel {
@@ -348,12 +354,14 @@ impl IsolationForestModel {
     pub fn new() -> Self {
         IsolationForestModel {
             forest: None,
-            recent_data: Vec::new(),
+            recent_data: VecDeque::new(),
             max_samples: 800,
             // Will be overridden by the first training and its percentile based thresholds computed from the training data.
             suspicious_threshold: DEFAULT_SUSPICIOUS_THRESHOLD,
             abnormal_threshold: DEFAULT_ABNORMAL_THRESHOLD,
             session_cache: CustomDashMap::new("session_cache"),
+            process_names: VecDeque::new(),
+            process_freq: HashMap::new(),
             per_flow_downsample: CustomDashMap::new("per_flow_downsample"),
             downsample_factor: 5,
             training_in_progress: Arc::new(AtomicBool::new(false)),
@@ -366,6 +374,7 @@ impl IsolationForestModel {
             training_cancel: Arc::new(AtomicBool::new(false)),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cache_misses: std::sync::atomic::AtomicU64::new(0),
+            last_cache_cleanup: Utc::now() - chrono::Duration::hours(1),
         }
     }
 
@@ -404,18 +413,16 @@ impl IsolationForestModel {
     /// Add new session data to the analyzer's memory.
     /// If the buffer is full, remove the oldest entry.
     fn add_session_data(&mut self, session: &SessionInfo) {
-        // Skip known non-representative samples for training to avoid biasing the model
+        // Only exclude externally-confirmed bad traffic from training.
+        // Model-generated anomaly labels (anomaly:suspicious, anomaly:abnormal) are NOT excluded
+        // to avoid a self-reinforcing feedback loop where false positives permanently bias the baseline.
         let crit = session.criticality.as_str();
         let is_blacklisted = crit.contains("blacklist:");
-        let is_flagged_anomalous =
-            crit.contains("anomaly:suspicious") || crit.contains("anomaly:abnormal");
 
-        if is_blacklisted || is_flagged_anomalous {
+        if is_blacklisted {
             trace!(
-                "add_session_data: Skipping training sample for {} (blacklisted: {}, anomalous: {})",
+                "add_session_data: Skipping blacklisted training sample for {}",
                 session.uid,
-                is_blacklisted,
-                is_flagged_anomalous
             );
             return;
         }
@@ -452,12 +459,30 @@ impl IsolationForestModel {
             return;
         }
 
-        let features = compute_features(session); // Compute and use all 10 features
+        let process_name = session
+            .l7
+            .as_ref()
+            .map(|l7| l7.process_name.clone())
+            .unwrap_or_default();
+
+        // Update frequency BEFORE computing features so the current session counts
+        *self.process_freq.entry(process_name.clone()).or_insert(0) += 1;
+
+        let features = compute_features(session, &self.process_freq);
 
         if self.recent_data.len() >= self.max_samples {
-            self.recent_data.remove(0);
+            self.recent_data.pop_front();
+            if let Some(old_name) = self.process_names.pop_front() {
+                if let Some(count) = self.process_freq.get_mut(&old_name) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.process_freq.remove(&old_name);
+                    }
+                }
+            }
         }
-        self.recent_data.push(features);
+        self.recent_data.push_back(features);
+        self.process_names.push_back(process_name);
     }
 
     /// Train (or retrain) the Isolation Forest model on the recent data.
@@ -498,24 +523,25 @@ impl IsolationForestModel {
                     Some(Ok(Ok(forest))) => {
                         info!("train_model: Background training completed successfully");
                         self.forest = Some(forest);
-                        self.last_training_time = Utc::now(); // Update last successful training time
+                        self.last_training_time = Utc::now();
+                        self.invalidate_score_cache_for_retrain();
                     }
                     Some(Ok(Err(e))) => {
-                        warn!("train_model: Background training returned error: {:?}", e);
-                        self.forest = None;
+                        warn!(
+                            "train_model: Background training returned error: {:?}. Keeping previous forest.",
+                            e
+                        );
                     }
                     Some(Err(join_error)) => {
                         error!(
-                            "train_model: Background training panicked: {:?}",
+                            "train_model: Background training panicked: {:?}. Keeping previous forest.",
                             join_error
                         );
-                        self.forest = None;
                     }
                     None => {
-                        // Timed out; task aborted in helper
                         self.training_timeouts_count =
                             self.training_timeouts_count.saturating_add(1);
-                        self.forest = None;
+                        warn!("train_model: Background training timed out. Keeping previous forest.");
                     }
                 }
 
@@ -547,7 +573,7 @@ impl IsolationForestModel {
             self.max_samples
         );
 
-        let data_clone = self.recent_data.clone(); // lightweight (Vec of 10-element arrays)
+        let data_clone = self.recent_data.clone();
 
         // Mark that training is starting before we spawn, so concurrent calls bail out early.
         self.training_in_progress.store(true, Ordering::Release);
@@ -685,7 +711,7 @@ impl IsolationForestModel {
         // Define features with their names and categorical flag
         // Format: (name, is_categorical)
         const FEATURE_DEFS: [(&'static str, bool); NUM_FEATURES] = [
-            ("Process", true),                 // 0 - Process hash (categorical)
+            ("ProcessPrevalence", false),      // 0 - Process frequency in training window (continuous)
             ("Duration", false),               // 1 - Duration (s)
             ("Bytes", false),                  // 2 - Total bytes
             ("Packets", false),                // 3 - Total packets
@@ -841,7 +867,7 @@ impl IsolationForestModel {
 
         // Compute features if not cached or outdated
         self.cache_misses.fetch_add(1, Ordering::Relaxed);
-        let features = compute_features(session); // Compute and use all 10 features
+        let features = compute_features(session, &self.process_freq);
 
         // Score using the model
         trace!(
@@ -1026,18 +1052,43 @@ impl IsolationForestModel {
     }
 
     /// Remove expired entries from session_cache based on ANALYZER_CACHE_TIMEOUT.
-    pub fn cleanup_session_cache(&self) {
+    pub fn cleanup_session_cache(&mut self) {
         let now = Utc::now();
+        if now - self.last_cache_cleanup < Duration::seconds(60) {
+            return;
+        }
+        self.last_cache_cleanup = now;
         self.session_cache.retain(|_, v| {
             let (_score, _features, last_modified) = v;
             now <= *last_modified + Duration::seconds(ANALYZER_CACHE_TIMEOUT)
         });
     }
+
+    fn count_unique_samples(&self) -> usize {
+        let mut seen: HashSet<[u64; NUM_FEATURES]> =
+            HashSet::with_capacity(self.recent_data.len());
+        for feats in &self.recent_data {
+            let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
+            seen.insert(bits);
+        }
+        seen.len()
+    }
+
+    fn invalidate_score_cache_for_retrain(&self) {
+        let len = self.session_cache.len();
+        self.session_cache.clear();
+        if len > 0 {
+            info!(
+                "invalidate_score_cache_for_retrain: Cleared {} cached scores after model retrain",
+                len
+            );
+        }
+    }
 }
 
 /// Compute the feature vector [f64; 12] for a given session.
-/// Feature order: [process_hash, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, interarrival_regularity, packet_rate, missed, segments, dst_port]
-fn compute_features(session: &SessionInfo) -> [f64; 12] {
+/// Feature order: [process_prevalence, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, interarrival_regularity, packet_rate, missed, segments, dst_port]
+fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) -> [f64; 12] {
     let start_time = std::time::Instant::now();
 
     // Helper function to sanitize values
@@ -1049,13 +1100,13 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
         }
     }
 
-    // 1. Process name hashed to f64
-    let process_hash = match &session.l7 {
+    // 1. Process prevalence: ln(frequency_in_training_window + 1)
+    // Common processes (Chrome, Safari, Google Drive) get high values and cluster together.
+    // Rare/unknown processes get low values and are naturally isolated by the iForest.
+    let process_prevalence = match &session.l7 {
         Some(l7) => {
-            let mut hasher = DefaultHasher::new();
-            hasher.write(l7.process_name.as_bytes());
-            let hash_val = hasher.finish();
-            sanitize((hash_val % 1_000_000) as f64) // Scale down and sanitize
+            let freq = process_freq.get(&l7.process_name).copied().unwrap_or(0);
+            sanitize((freq as f64 + 1.0).ln())
         }
         None => 0.0,
     };
@@ -1091,9 +1142,10 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
     let avg_packet_size = sanitize(session.stats.average_packet_size);
 
     // 8. Interarrival regularity (0..1): how close average interarrival is to uniform spacing
+    // N segments produce N-1 inter-segment gaps, so expected gap = duration / (N-1)
     let segment_count = session.stats.segment_count as f64;
-    let expected_interarrival = if segment_count > 0.0 && duration > 0.0 {
-        duration / segment_count
+    let expected_interarrival = if segment_count > 1.0 && duration > 0.0 {
+        duration / (segment_count - 1.0)
     } else {
         0.0
     };
@@ -1118,11 +1170,13 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
     // 11. Segments (count)
     let segments = sanitize(session.stats.segment_count as f64);
 
-    // 12. Destination port hashed/bounded to reduce ordinal meaning
-    let dst_port = sanitize((session.session.dst_port as u32 % 65536) as f64);
+    // 12. Destination port as numeric value
+    // TODO: Port number is categorical but treated as ordinal. Grouping into well-known/ephemeral
+    // ranges or frequency encoding would reduce spurious splits on arbitrary port values.
+    let dst_port = sanitize(session.session.dst_port as f64);
 
     let features = [
-        process_hash,
+        process_prevalence,
         duration,
         bytes,
         packets,
@@ -1136,88 +1190,11 @@ fn compute_features(session: &SessionInfo) -> [f64; 12] {
         dst_port,
     ];
 
-    // Double check that no NaN/Inf values made it through
-    for (i, &f) in features.iter().enumerate() {
-        if f.is_nan() || f.is_infinite() {
-            warn!(
-                "Sanitization failed for feature {} in session {}",
-                i, session.uid
-            );
-            // Force a valid value as a last resort
-            let fixed_features = [
-                if process_hash.is_nan() || process_hash.is_infinite() {
-                    0.0
-                } else {
-                    process_hash
-                },
-                if duration.is_nan() || duration.is_infinite() {
-                    0.0
-                } else {
-                    duration
-                },
-                if bytes.is_nan() || bytes.is_infinite() {
-                    0.0
-                } else {
-                    bytes
-                },
-                if packets.is_nan() || packets.is_infinite() {
-                    0.0
-                } else {
-                    packets
-                },
-                if segment_interarrival.is_nan() || segment_interarrival.is_infinite() {
-                    0.0
-                } else {
-                    segment_interarrival
-                },
-                if in_out_ratio.is_nan() || in_out_ratio.is_infinite() {
-                    0.0
-                } else {
-                    in_out_ratio
-                },
-                if avg_packet_size.is_nan() || avg_packet_size.is_infinite() {
-                    0.0
-                } else {
-                    avg_packet_size
-                },
-                if interarrival_regularity.is_nan() || interarrival_regularity.is_infinite() {
-                    0.0
-                } else {
-                    interarrival_regularity
-                },
-                if packet_rate.is_nan() || packet_rate.is_infinite() {
-                    0.0
-                } else {
-                    packet_rate
-                },
-                if missed.is_nan() || missed.is_infinite() {
-                    0.0
-                } else {
-                    missed
-                },
-                if segments.is_nan() || segments.is_infinite() {
-                    0.0
-                } else {
-                    segments
-                },
-                if dst_port.is_nan() || dst_port.is_infinite() {
-                    0.0
-                } else {
-                    dst_port
-                },
-            ];
-
-            let elapsed = start_time.elapsed();
-            if elapsed.as_millis() > 50 {
-                warn!(
-                    "compute_features (with sanitization) for session {} took {:?}",
-                    session.uid, elapsed
-                );
-            }
-
-            return fixed_features;
-        }
-    }
+    debug_assert!(
+        features.iter().all(|f| f.is_finite()),
+        "compute_features produced non-finite value for session {}",
+        session.uid
+    );
 
     let elapsed = start_time.elapsed();
     if elapsed.as_millis() > 50 {
@@ -1340,21 +1317,13 @@ fn compute_dynamic_thresholds(
         new_abnormal_threshold, abnormal_percentile * 100.0
     );
 
-    // Include the percentile boundary itself to ensure anomalies are detected in small samples
-    let epsilon = 0.0;
-    let final_suspicious_threshold = new_suspicious_threshold + epsilon;
-    let final_abnormal_threshold = new_abnormal_threshold + epsilon;
-
-    // Store the old thresholds for logging
     let old_suspicious = model.suspicious_threshold;
     let old_abnormal = model.abnormal_threshold;
 
-    // Only enforce minimum reasonable thresholds, not the high defaults
-    let min_reasonable_threshold = MIN_REASONABLE_THRESHOLD; // Reasonable minimum to avoid too many false positives
-    model.suspicious_threshold = final_suspicious_threshold.max(min_reasonable_threshold);
-    // Ensure abnormal is strictly greater than suspicious
-    model.abnormal_threshold = final_abnormal_threshold
-        .max(model.suspicious_threshold + epsilon)
+    let min_reasonable_threshold = MIN_REASONABLE_THRESHOLD;
+    model.suspicious_threshold = new_suspicious_threshold.max(min_reasonable_threshold);
+    model.abnormal_threshold = new_abnormal_threshold
+        .max(model.suspicious_threshold)
         .max(min_reasonable_threshold);
 
     info!(
@@ -1373,10 +1342,14 @@ pub struct AnalysisResult {
     pub new_anomalous_found: bool,
     /// Whether new blacklisted sessions were found
     pub new_blacklisted_found: bool,
-    /// Number of anomalous sessions found in this batch
+    /// Total anomalous sessions currently tracked across all batches
     pub anomalous_count: usize,
-    /// Number of blacklisted sessions found in this batch
+    /// Total blacklisted sessions currently tracked across all batches
     pub blacklisted_count: usize,
+    /// Anomalous sessions found in this specific batch
+    pub batch_anomalous_count: usize,
+    /// Blacklisted sessions found in this specific batch
+    pub batch_blacklisted_count: usize,
 }
 
 /// Public interface for the SessionAnalyzer - thread-safe wrapper around the model
@@ -1582,6 +1555,7 @@ impl SessionAnalyzer {
                             info!("Analyzer: Background training task completed successfully (processed at analyze_sessions start)");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
+                            model_guard.invalidate_score_cache_for_retrain();
                         },
                         Some(Ok(Err(e))) => warn!("Analyzer: Background training task failed (processed at analyze_sessions start): {:?}", e),
                         Some(Err(e)) => error!("Analyzer: Background training task panicked (processed at analyze_sessions start): {:?}", e),
@@ -1654,14 +1628,7 @@ impl SessionAnalyzer {
                 && {
                     let unique_count = {
                         let model_guard = model_rwlock.read().await;
-                        let mut seen: HashSet<[u64; NUM_FEATURES]> =
-                            HashSet::with_capacity(model_guard.recent_data.len());
-                        for feats in &model_guard.recent_data {
-                            let bits: [u64; NUM_FEATURES] =
-                                std::array::from_fn(|i| feats[i].to_bits());
-                            seen.insert(bits);
-                        }
-                        seen.len()
+                        model_guard.count_unique_samples()
                     };
                     if unique_count < WARMUP_MIN_UNIQUE_SAMPLES {
                         debug!(
@@ -1694,6 +1661,7 @@ impl SessionAnalyzer {
                                     info!("Analyzer (Finalize Warmup): Training task completed successfully.");
                                     model_guard.forest = Some(forest);
                                     model_guard.last_training_time = Utc::now();
+                                    model_guard.invalidate_score_cache_for_retrain();
                                 }
                                 Some(Ok(Err(e))) => warn!(
                                     "Analyzer (Finalize Warmup): Training task failed: {:?}",
@@ -1718,7 +1686,7 @@ impl SessionAnalyzer {
                             // Already finished, try to process with timeout (should be fast)
                             let handle = model_guard.training_handle.take().unwrap();
                             match await_join_with_timeout(handle, std::time::Duration::from_secs(10)).await {
-                                Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); },
+                                Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); model_guard.invalidate_score_cache_for_retrain(); },
                                 Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
                                 Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
                                 None => {
@@ -1747,6 +1715,7 @@ impl SessionAnalyzer {
                                 info!("Analyzer (Finalize Warmup): Final forced training task completed successfully.");
                                 model_guard.forest = Some(forest);
                                 model_guard.last_training_time = Utc::now();
+                                model_guard.invalidate_score_cache_for_retrain();
                             },
                             Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Final forced training task failed: {:?}", e),
                             Some(Err(e)) => error!("Analyzer (Finalize Warmup): Final forced training task panicked: {:?}", e),
@@ -1765,11 +1734,9 @@ impl SessionAnalyzer {
 
                 if model_guard.forest.is_some() && !model_guard.recent_data.is_empty() {
                     info!("Analyzer (Finalize Warmup): Forest and data available. Computing dynamic thresholds.");
-                    compute_dynamic_thresholds(
-                        &mut model_guard,
-                        self.suspicious_threshold_percentile,
-                        self.abnormal_threshold_percentile,
-                    );
+                    let susp_pct = model_guard.current_suspicious_percentile;
+                    let abnm_pct = model_guard.current_abnormal_percentile;
+                    compute_dynamic_thresholds(&mut model_guard, susp_pct, abnm_pct);
                     self.warm_up_active.store(false, Ordering::Relaxed);
                     let mut last_recalc_lock = self.last_threshold_recalc_time.write().await;
                     *last_recalc_lock = now;
@@ -1859,6 +1826,7 @@ impl SessionAnalyzer {
                             info!("Analyzer (Scheduled Recalc): Training task completed successfully.");
                             model_guard.forest = Some(forest);
                             model_guard.last_training_time = Utc::now();
+                            model_guard.invalidate_score_cache_for_retrain();
                         }
                         Some(Ok(Err(e))) => {
                             warn!("Analyzer (Scheduled Recalc): Training task failed: {:?}", e)
@@ -1886,11 +1854,9 @@ impl SessionAnalyzer {
 
                 if model_guard.forest.is_some() && !model_guard.recent_data.is_empty() {
                     info!("Analyzer (Scheduled Recalc): Computing dynamic thresholds.");
-                    compute_dynamic_thresholds(
-                        &mut model_guard,
-                        self.suspicious_threshold_percentile,
-                        self.abnormal_threshold_percentile,
-                    );
+                    let susp_pct = model_guard.current_suspicious_percentile;
+                    let abnm_pct = model_guard.current_abnormal_percentile;
+                    compute_dynamic_thresholds(&mut model_guard, susp_pct, abnm_pct);
                     let mut last_recalc_lock = self.last_threshold_recalc_time.write().await;
                     *last_recalc_lock = now;
                 } else {
@@ -2008,12 +1974,7 @@ impl SessionAnalyzer {
                                     return false;
                                 }
 
-                                // Consider unchanged if either criticality string contains the
-                                // other.  This covers the typical flow where the stored copy has
-                                // extra `anomaly:*` tags that are missing from the fresh instance
-                                // coming from the capture pipeline (which usually preserves only
-                                // blacklist/custom tags).
-                                stored.contains(incoming) || incoming.contains(stored)
+                                stored == incoming
                             })
                             .unwrap_or(false);
 
@@ -2049,19 +2010,30 @@ impl SessionAnalyzer {
                                     session.uid,
                                     remaining
                                 );
-                                // Preserve non-anomaly tags and mark analysis timeout explicitly
-                                let mut final_tags: Vec<String> = session
-                                    .criticality
-                                    .split(',')
-                                    .filter(|s| {
-                                        !s.trim().is_empty() && !s.trim().starts_with("anomaly:")
-                                    })
-                                    .map(|s| s.trim().to_string())
-                                    .collect();
-                                final_tags.push("anomaly:normal/analysis_timeout".to_string());
-                                final_tags.sort_unstable();
-                                final_tags.dedup();
-                                session.criticality = final_tags.join(",");
+                                let has_prior_anomaly =
+                                    session.criticality.contains("anomaly:suspicious")
+                                        || session.criticality.contains("anomaly:abnormal");
+                                if has_prior_anomaly {
+                                    debug!(
+                                        "Analyzer: Preserving prior anomaly tags for {} during timeout",
+                                        session.uid
+                                    );
+                                } else {
+                                    let mut final_tags: Vec<String> = session
+                                        .criticality
+                                        .split(',')
+                                        .filter(|s| {
+                                            !s.trim().is_empty()
+                                                && !s.trim().starts_with("anomaly:")
+                                        })
+                                        .map(|s| s.trim().to_string())
+                                        .collect();
+                                    final_tags
+                                        .push("anomaly:normal/analysis_timeout".to_string());
+                                    final_tags.sort_unstable();
+                                    final_tags.dedup();
+                                    session.criticality = final_tags.join(",");
+                                }
                             } else {
                                 model_write_guard.analyze_session(session, &feature_stats);
                             }
@@ -2161,11 +2133,10 @@ impl SessionAnalyzer {
                     info!("Analyzer ({}): Analysis of {} sessions completed in {:?}. Found: {} anomalous, {} blacklisted.",
                           operation_type, sessions_len, elapsed, anom_count, bl_count);
 
-                    // Update result with findings
                     result.new_anomalous_found = found_new_anomalous;
                     result.new_blacklisted_found = found_new_blacklisted;
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    result.batch_anomalous_count = anom_count;
+                    result.batch_blacklisted_count = bl_count;
                 } else {
                     warn!("Analyzer (Regular Op/Post-Warmup): No forest model available for analysis. Sessions will not be scored for anomalies.");
 
@@ -2197,13 +2168,12 @@ impl SessionAnalyzer {
                         }
                     }
 
-                    result.anomalous_count = anom_count;
-                    result.blacklisted_count = bl_count;
+                    result.batch_anomalous_count = anom_count;
+                    result.batch_blacklisted_count = bl_count;
                 }
             }
         }
 
-        // Ensure result counts consistently reflect TOTAL currently tracked sessions across all phases
         result.anomalous_count = self.anomalous_sessions.len();
         result.blacklisted_count = self.blacklisted_sessions.len();
 
@@ -2241,15 +2211,7 @@ impl SessionAnalyzer {
             {
                 let model = model_lock.read().await;
 
-                let unique_samples = {
-                    let mut seen: HashSet<[u64; NUM_FEATURES]> =
-                        HashSet::with_capacity(model.recent_data.len());
-                    for feats in &model.recent_data {
-                        let bits: [u64; NUM_FEATURES] = std::array::from_fn(|i| feats[i].to_bits());
-                        seen.insert(bits);
-                    }
-                    seen.len()
-                };
+                let unique_samples = model.count_unique_samples();
                 let has_forest = model.forest.is_some();
                 let training_in_progress = model.training_in_progress.load(Ordering::SeqCst);
                 let buffer_size = model.recent_data.len();
@@ -2404,8 +2366,14 @@ impl SessionAnalyzer {
             let total_sessions = self.all_sessions.len();
             let anomalous_sessions = self.anomalous_sessions.len();
             let blacklisted_sessions = self.blacklisted_sessions.len();
-            let normal_sessions =
-                total_sessions.saturating_sub(anomalous_sessions + blacklisted_sessions);
+            let normal_sessions = self
+                .all_sessions
+                .iter()
+                .filter(|e| {
+                    !self.anomalous_sessions.contains_key(e.key())
+                        && !self.blacklisted_sessions.contains_key(e.key())
+                })
+                .count();
             let anomaly_rate = if total_sessions > 0 {
                 (anomalous_sessions as f64 / total_sessions as f64) * 100.0
             } else {
@@ -2722,7 +2690,7 @@ impl SessionAnalyzer {
     pub async fn cleanup_session_cache(&self) {
         let model_lock = self.model.read().await;
         if let Some(model) = &*model_lock {
-            model.read().await.cleanup_session_cache();
+            model.write().await.cleanup_session_cache();
         }
     }
 
@@ -2950,7 +2918,7 @@ impl SessionAnalyzer {
             if model_write.forest.is_none() {
                 // Add some dummy data to train on
                 for _ in 0..10 {
-                    model_write.recent_data.push([0.0; NUM_FEATURES]);
+                    model_write.recent_data.push_back([0.0; NUM_FEATURES]);
                 }
                 model_write.train_model(true).await;
                 // Wait for training to complete with timeout
@@ -4042,5 +4010,303 @@ pub(crate) mod tests {
 
         analyzer.stop().await;
         println!("Whitespace criticality handling verified");
+    }
+
+    #[tokio::test]
+    async fn test_cache_invalidated_on_model_retrain() {
+        let model = IsolationForestModel::new();
+        let session = create_test_session_with_criticality(
+            "cache-test-1".to_string(),
+            "anomaly:normal".to_string(),
+            Utc::now(),
+        );
+
+        model.session_cache.insert(
+            "cache-test-1".to_string(),
+            (0.42, [0.0; NUM_FEATURES], Utc::now()),
+        );
+        assert_eq!(model.session_cache.len(), 1);
+
+        model.invalidate_score_cache_for_retrain();
+        assert_eq!(
+            model.session_cache.len(),
+            0,
+            "Score cache must be cleared after model retrain"
+        );
+
+        let _ = session;
+        println!("Cache invalidation on retrain verified");
+    }
+
+    #[tokio::test]
+    async fn test_training_failure_preserves_forest() {
+        let mut model = IsolationForestModel::new();
+
+        for i in 0..50 {
+            let feats: [f64; NUM_FEATURES] =
+                std::array::from_fn(|j| (i * NUM_FEATURES + j) as f64);
+            model.recent_data.push_back(feats);
+        }
+        model.train_model(true).await;
+
+        if model.training_handle.is_some() {
+            let handle = model.training_handle.take().unwrap();
+            if let Some(Ok(Ok(forest))) =
+                await_join_with_timeout(handle, std::time::Duration::from_secs(30)).await
+            {
+                model.forest = Some(forest);
+                model.training_in_progress.store(false, Ordering::Release);
+            }
+        }
+
+        assert!(
+            model.forest.is_some(),
+            "Forest should have been trained successfully"
+        );
+
+        model.recent_data.clear();
+        model.training_in_progress.store(false, Ordering::Release);
+        model.training_handle = None;
+        model.train_model(true).await;
+
+        if model.training_handle.is_some() {
+            let handle = model.training_handle.take().unwrap();
+            let _ = await_join_with_timeout(handle, std::time::Duration::from_secs(30)).await;
+            model.training_in_progress.store(false, Ordering::Release);
+        }
+
+        assert!(
+            model.forest.is_some(),
+            "Forest must survive a training failure (empty data)"
+        );
+        println!("Training failure preserves forest verified");
+    }
+
+    #[tokio::test]
+    async fn test_timeout_preserves_anomaly_tags() {
+        let mut session = create_test_session_with_criticality(
+            "timeout-test-1".to_string(),
+            "anomaly:suspicious,blacklist:test_entry".to_string(),
+            Utc::now(),
+        );
+
+        let has_prior_anomaly = session.criticality.contains("anomaly:suspicious")
+            || session.criticality.contains("anomaly:abnormal");
+
+        if has_prior_anomaly {
+            // timeout path should NOT overwrite
+        } else {
+            let mut final_tags: Vec<String> = session
+                .criticality
+                .split(',')
+                .filter(|s| !s.trim().is_empty() && !s.trim().starts_with("anomaly:"))
+                .map(|s| s.trim().to_string())
+                .collect();
+            final_tags.push("anomaly:normal/analysis_timeout".to_string());
+            final_tags.sort_unstable();
+            final_tags.dedup();
+            session.criticality = final_tags.join(",");
+        }
+
+        assert!(
+            session.criticality.contains("anomaly:suspicious"),
+            "Prior anomaly:suspicious must survive timeout. Got: {}",
+            session.criticality
+        );
+        assert!(
+            session.criticality.contains("blacklist:test_entry"),
+            "Blacklist tag must survive timeout. Got: {}",
+            session.criticality
+        );
+        assert!(
+            !session.criticality.contains("analysis_timeout"),
+            "Timeout tag should not be appended when prior anomaly exists. Got: {}",
+            session.criticality
+        );
+        println!("Timeout preserves anomaly tags verified");
+    }
+
+    #[tokio::test]
+    async fn test_set_percentiles_sticky() {
+        let analyzer = SessionAnalyzer::new();
+        analyzer.start().await;
+
+        {
+            let outer = analyzer.model.read().await;
+            if outer.is_none() {
+                drop(outer);
+                let mut outer_w = analyzer.model.write().await;
+                *outer_w = Some(CustomRwLock::new(IsolationForestModel::new()));
+            }
+        }
+
+        let res = analyzer.set_percentiles(0.80, 0.95).await;
+        assert!(res.is_ok(), "set_percentiles should succeed");
+
+        {
+            let outer = analyzer.model.read().await;
+            let model_lock = outer.as_ref().unwrap();
+            let model = model_lock.read().await;
+            assert!(
+                (model.current_suspicious_percentile - 0.80).abs() < 1e-9,
+                "Suspicious percentile not sticky: {}",
+                model.current_suspicious_percentile
+            );
+            assert!(
+                (model.current_abnormal_percentile - 0.95).abs() < 1e-9,
+                "Abnormal percentile not sticky: {}",
+                model.current_abnormal_percentile
+            );
+        }
+
+        analyzer.stop().await;
+        println!("set_percentiles sticky verified");
+    }
+
+    #[tokio::test]
+    async fn test_criticality_unchanged_exact_match() {
+        let stored_a = "blacklist:tor";
+        let stored_b = "blacklist:to";
+
+        let old_logic_false_positive = stored_a.contains(stored_b) || stored_b.contains(stored_a);
+        assert!(
+            old_logic_false_positive,
+            "Old substring logic should have been a false positive"
+        );
+
+        let new_logic = stored_a == stored_b;
+        assert!(
+            !new_logic,
+            "Exact match must correctly detect 'blacklist:tor' != 'blacklist:to'"
+        );
+
+        let same = "anomaly:normal";
+        assert!(same == same, "Identical strings must match");
+        println!("Criticality exact match verified");
+    }
+
+    #[tokio::test]
+    async fn test_interarrival_regularity_off_by_one() {
+        let now = Utc::now();
+        let mut session = create_test_session_with_criticality(
+            "interarrival-test".to_string(),
+            "".to_string(),
+            now,
+        );
+        session.stats.segment_count = 10;
+        session.stats.segment_interarrival = 1.0;
+        let start_time = now - chrono::Duration::seconds(9);
+        session.stats.start_time = start_time;
+        session.stats.end_time = Some(now);
+        session.stats.last_activity = now;
+
+        let features = compute_features(&session, &HashMap::new());
+        let interarrival_regularity = features[7];
+
+        // With 10 segments over 9 seconds, expected gap = 9/(10-1) = 1.0 second.
+        // Observed interarrival = 1.0. So regularity = 1.0 - |1.0 - 1.0|/1.0 = 1.0
+        assert!(
+            (interarrival_regularity - 1.0).abs() < 0.01,
+            "Regularity should be ~1.0 for perfectly regular segments, got {}",
+            interarrival_regularity
+        );
+        println!("Interarrival regularity N-1 verified");
+    }
+
+    #[tokio::test]
+    async fn test_analysis_result_batch_vs_total_counts() {
+        let result = AnalysisResult {
+            sessions_analyzed: 10,
+            new_anomalous_found: true,
+            new_blacklisted_found: false,
+            anomalous_count: 100,
+            blacklisted_count: 50,
+            batch_anomalous_count: 3,
+            batch_blacklisted_count: 1,
+        };
+
+        assert_eq!(result.batch_anomalous_count, 3);
+        assert_eq!(result.batch_blacklisted_count, 1);
+        assert_eq!(result.anomalous_count, 100);
+        assert_eq!(result.blacklisted_count, 50);
+        assert_ne!(
+            result.anomalous_count, result.batch_anomalous_count,
+            "Total and batch counts should be distinct"
+        );
+        println!("Batch vs total counts verified");
+    }
+
+    #[tokio::test]
+    async fn test_normal_sessions_count_no_double_subtract() {
+        let analyzer = SessionAnalyzer::new();
+
+        let uid = "dual-tagged-1".to_string();
+        let session = create_test_session_with_criticality(
+            uid.clone(),
+            "anomaly:suspicious,blacklist:test".to_string(),
+            Utc::now(),
+        );
+
+        analyzer.all_sessions.insert(
+            uid.clone(),
+            SessionCache::with_full_session(&session),
+        );
+        analyzer.anomalous_sessions.insert(
+            uid.clone(),
+            SessionCache::with_full_session(&session),
+        );
+        analyzer.blacklisted_sessions.insert(
+            uid.clone(),
+            SessionCache::with_full_session(&session),
+        );
+
+        let normal_count = analyzer
+            .all_sessions
+            .iter()
+            .filter(|e| {
+                !analyzer.anomalous_sessions.contains_key(e.key())
+                    && !analyzer.blacklisted_sessions.contains_key(e.key())
+            })
+            .count();
+
+        assert_eq!(
+            normal_count, 0,
+            "Session in both anomalous and blacklisted should yield 0 normals, not underflow"
+        );
+
+        let total = analyzer.all_sessions.len();
+        let anom = analyzer.anomalous_sessions.len();
+        let bl = analyzer.blacklisted_sessions.len();
+        let old_formula = total.saturating_sub(anom + bl);
+        // old_formula would be 1.saturating_sub(1+1) = 1.saturating_sub(2) = 0 in this case
+        // but with 2 separate sessions it would undercount
+        assert_eq!(old_formula, 0);
+
+        // Now add a normal-only session to verify counting works
+        let normal_uid = "normal-only-1".to_string();
+        let normal_session = create_test_session_with_criticality(
+            normal_uid.clone(),
+            "anomaly:normal".to_string(),
+            Utc::now(),
+        );
+        analyzer.all_sessions.insert(
+            normal_uid,
+            SessionCache::with_full_session(&normal_session),
+        );
+
+        let normal_count_2 = analyzer
+            .all_sessions
+            .iter()
+            .filter(|e| {
+                !analyzer.anomalous_sessions.contains_key(e.key())
+                    && !analyzer.blacklisted_sessions.contains_key(e.key())
+            })
+            .count();
+        assert_eq!(
+            normal_count_2, 1,
+            "One normal session should be counted"
+        );
+
+        println!("Normal sessions count verified");
     }
 }

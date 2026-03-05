@@ -7,6 +7,12 @@ use std::net::{IpAddr, Ipv4Addr};
 use strum_macros::Display;
 use uuid::Uuid;
 
+// L7 behavioral anomaly detail fragments (PascalCase, matching iForest convention)
+pub const L7_DETAIL_TMP_SPAWN: &str = "ProcessBinaryRunsFromTempDirectory";
+pub const L7_DETAIL_CREDENTIAL_ACCESS: &str = "ProcessAccessesCredentialFiles";
+pub const L7_DETAIL_PARENT_MISMATCH: &str = "SuspiciousParentProcessPath";
+pub const L7_DETAIL_OUTBOUND: &str = "OutboundConnection";
+
 // A session is considered active if it has had activity in the last 60 seconds
 pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
 // A session is considered current if it has been active in the last 180 seconds
