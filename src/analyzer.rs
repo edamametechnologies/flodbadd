@@ -2557,71 +2557,23 @@ impl SessionAnalyzer {
         let all_sessions_cutoff = now - all_session_timeout;
         let analysis_cutoff = now - analysis_times_timeout;
 
-        let stale_anomalous: Vec<String> = anomalous_sessions
-            .iter()
-            .filter_map(|entry| {
-                if entry.value().last_modified < anomalous_cutoff {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in stale_anomalous {
-            anomalous_sessions.remove(&key);
-        }
-
-        let stale_blacklisted: Vec<String> = blacklisted_sessions
-            .iter()
-            .filter_map(|entry| {
-                if entry.value().last_modified < blacklisted_cutoff {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in stale_blacklisted {
-            blacklisted_sessions.remove(&key);
-        }
-
-        let stale_all_sessions: Vec<String> = all_sessions
-            .iter()
-            .filter_map(|entry| {
-                if entry.value().last_modified < all_sessions_cutoff {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in stale_all_sessions {
-            all_sessions.remove(&key);
-        }
-
-        let stale_analysis: Vec<String> = last_analysis_times
-            .iter()
-            .filter_map(|entry| {
-                if *entry.value() < analysis_cutoff {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in stale_analysis {
-            last_analysis_times.remove(&key);
-        }
+        anomalous_sessions.retain(|_, cache| cache.last_modified >= anomalous_cutoff);
+        blacklisted_sessions.retain(|_, cache| cache.last_modified >= blacklisted_cutoff);
+        all_sessions.retain(|_, cache| cache.last_modified >= all_sessions_cutoff);
+        last_analysis_times.retain(|_, last_seen| *last_seen >= analysis_cutoff);
     }
 
     /// Retrieves a snapshot of currently tracked anomalous sessions.
     pub async fn get_anomalous_sessions(&self) -> Vec<SessionInfo> {
-        self.anomalous_sessions
+        let cached_sessions: Vec<SessionCache> = self
+            .anomalous_sessions
             .iter()
-            .filter_map(|entry| {
-                let mut cache = entry.value().clone();
-                cache.get_full_session(None)
-            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        cached_sessions
+            .into_iter()
+            .filter_map(|mut cache| cache.get_full_session(None))
             .collect()
     }
 
@@ -2637,12 +2589,15 @@ impl SessionAnalyzer {
     /// (anomalous_sessions, blacklisted_sessions) are always synchronized with `all_sessions`,
     /// eliminating the need for expensive scans at retrieval time.
     pub async fn get_blacklisted_sessions(&self) -> Vec<SessionInfo> {
-        self.blacklisted_sessions
+        let cached_sessions: Vec<SessionCache> = self
+            .blacklisted_sessions
             .iter()
-            .filter_map(|entry| {
-                let mut cache = entry.value().clone();
-                cache.get_full_session(None)
-            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        cached_sessions
+            .into_iter()
+            .filter_map(|mut cache| cache.get_full_session(None))
             .collect()
     }
 
@@ -2650,13 +2605,15 @@ impl SessionAnalyzer {
     /// This includes sessions from all states: normal, suspicious, abnormal, and blacklisted.
     /// Sessions are available even during warmup period.
     pub async fn get_sessions(&self) -> Vec<SessionInfo> {
-        let mut sessions: Vec<SessionInfo> = self
+        let cached_sessions: Vec<SessionCache> = self
             .all_sessions
             .iter()
-            .filter_map(|entry| {
-                let mut cache = entry.value().clone();
-                cache.get_full_session(None)
-            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        let mut sessions: Vec<SessionInfo> = cached_sessions
+            .into_iter()
+            .filter_map(|mut cache| cache.get_full_session(None))
             .collect();
 
         // Newest first ensures callers see the most up-to-date copy when duplicates exist.
@@ -2669,13 +2626,15 @@ impl SessionAnalyzer {
     pub async fn get_current_sessions(&self) -> Vec<SessionInfo> {
         let current_session_timeout = CONNECTION_CURRENT_TIMEOUT;
         let now = Utc::now();
-        let mut current_sessions: Vec<SessionInfo> = self
+        let cached_sessions: Vec<SessionCache> = self
             .all_sessions
             .iter()
-            .filter_map(|entry| {
-                let mut cache = entry.value().clone();
-                cache.get_full_session(None)
-            })
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        let mut current_sessions: Vec<SessionInfo> = cached_sessions
+            .into_iter()
+            .filter_map(|mut cache| cache.get_full_session(None))
             .filter(|session| {
                 now.signed_duration_since(session.stats.last_activity) < current_session_timeout
             })

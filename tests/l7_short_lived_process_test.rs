@@ -175,7 +175,11 @@ async fn test_ebpf_eager_resolution_short_lived_python() {
 
     println!(
         "\nResults: {}/{} connected, {}/{} resolved, {}/{} had process_name",
-        connected_count, iterations, resolved_count, connected_count, total_with_process_name,
+        connected_count,
+        iterations,
+        resolved_count,
+        connected_count,
+        total_with_process_name,
         connected_count
     );
 

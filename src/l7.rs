@@ -46,6 +46,8 @@
 // by combining direct matching with caching, PID reuse protection, and retry mechanisms.
 
 use crate::l7_ebpf;
+#[cfg(target_os = "macos")]
+use crate::l7_macos;
 use crate::sessions::*;
 use crate::task::TaskHandle;
 use anyhow::Result;
@@ -116,6 +118,7 @@ pub enum L7ResolutionSource {
     HostCacheHitTerminated, // Within grace period
     FailedMaxRetries,       // Explicitly mark failures after retries
     Ebpf,                   // Obtained from eBPF helper on Linux
+    MacosLibproc,           // Obtained via PROC_PIDFDSOCKETINFO on macOS
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +268,22 @@ impl FlodbaddL7 {
                         users.refresh();
                     }
 
+                    // On macOS, use native libproc PROC_PIDFDSOCKETINFO for
+                    // direct socket-to-PID mapping (bypasses netstat2).
+                    #[cfg(target_os = "macos")]
+                    let (macos_session_map, macos_all_entries) =
+                        match tokio::task::spawn_blocking(|| {
+                            l7_macos::scan_all_process_sockets(None)
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(join_err) => {
+                                error!("macOS libproc spawn_blocking join error: {:?}", join_err);
+                                (HashMap::new(), Vec::new())
+                            }
+                        };
+
                     // Offload potentially blocking netstat scan to a blocking thread
                     let socket_info = match tokio::task::spawn_blocking(move || {
                         get_sockets_info(
@@ -344,6 +363,53 @@ impl FlodbaddL7 {
                             );
                             successfully_resolved_count += 1;
                             continue;
+                        }
+
+                        // macOS libproc: direct socket-to-PID lookup
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Some(pid) = l7_macos::lookup_session_pid(
+                                &connection,
+                                &macos_session_map,
+                                &macos_all_entries,
+                            ) {
+                                if let Some(process) = pid_to_process.get(&pid) {
+                                    if let Some((l7_data, start_time)) = Self::extract_l7_from_pid(
+                                        pid,
+                                        process,
+                                        &pid_to_process,
+                                        &uid_to_username,
+                                    )
+                                    .await
+                                    {
+                                        Self::update_port_process_cache(
+                                            &connection,
+                                            &l7_data,
+                                            start_time,
+                                            &port_process_cache,
+                                        )
+                                        .await;
+                                        let mut l7_data = l7_data;
+                                        Self::merge_previous_sensitive(
+                                            &l7_map,
+                                            &connection,
+                                            &mut l7_data,
+                                        );
+                                        l7_map.insert(
+                                            connection.clone(),
+                                            L7Resolution {
+                                                l7: Some(l7_data),
+                                                date: Utc::now(),
+                                                retry_count: 0,
+                                                last_retry: None,
+                                                source: L7ResolutionSource::MacosLibproc,
+                                            },
+                                        );
+                                        successfully_resolved_count += 1;
+                                        continue;
+                                    }
+                                }
+                            }
                         }
 
                         // Exact match via socket index
@@ -1650,13 +1716,24 @@ impl FlodbaddL7 {
                         (None, String::new(), String::new(), Vec::new())
                     };
 
+                let (
+                    grandparent_pid,
+                    grandparent_process_name,
+                    grandparent_process_path,
+                    grandparent_cmd,
+                ) = Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
+
                 let parent_script_path =
                     Self::extract_script_path(&parent_process_path, &parent_cmd);
+                let grandparent_script_path =
+                    Self::extract_script_path(&grandparent_process_path, &grandparent_cmd);
 
                 let spawned_from_tmp = Self::originates_from_tmp(
                     &process_path,
                     &parent_process_path,
                     parent_script_path.as_deref(),
+                    &grandparent_process_path,
+                    grandparent_script_path.as_deref(),
                     &cmd,
                 );
 
@@ -1680,6 +1757,11 @@ impl FlodbaddL7 {
                         parent_process_path,
                         parent_cmd,
                         parent_script_path,
+                        grandparent_pid,
+                        grandparent_process_name,
+                        grandparent_process_path,
+                        grandparent_cmd,
+                        grandparent_script_path,
                         spawned_from_tmp,
                     },
                     process_start_time,
@@ -1687,6 +1769,138 @@ impl FlodbaddL7 {
             }
         }
         None
+    }
+
+    /// Build SessionL7 directly from a known PID, skipping the socket-to-PID
+    /// lookup step. Used by the macOS libproc path where we already have a
+    /// definitive PID binding from PROC_PIDFDSOCKETINFO.
+    #[cfg(target_os = "macos")]
+    async fn extract_l7_from_pid(
+        pid: u32,
+        process: &Process,
+        pid_to_process: &HashMap<u32, &Process>,
+        uid_to_username: &HashMap<&Uid, &str>,
+    ) -> Option<(SessionL7, u64)> {
+        let username = if let Some(user_id) = process.user_id() {
+            match uid_to_username.get(&user_id).map(|s| s.to_string()) {
+                Some(username) => username,
+                None => {
+                    if let Some(user) = users::get_user_by_uid(**user_id) {
+                        user.name().to_string_lossy().to_string()
+                    } else {
+                        String::new()
+                    }
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        let process_name = process.name().to_string_lossy().to_string();
+        let process_path = process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let process_start_time = process.start_time();
+        let cmd: Vec<String> = process
+            .cmd()
+            .iter()
+            .map(|e| e.to_string_lossy().to_string())
+            .collect();
+        let cwd = process
+            .cwd()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|p| !p.is_empty());
+        let memory = process.memory();
+        let run_time = process.run_time();
+        let accumulated_cpu_time = process.accumulated_cpu_time();
+        let cpu_usage = if run_time > 0 {
+            ((accumulated_cpu_time as f64 * 10.0) / run_time as f64).round() as u32
+        } else {
+            0
+        };
+        let disk_stats = process.disk_usage();
+        let disk_usage = SessionProcessDiskUsage {
+            total_written_bytes: disk_stats.total_written_bytes,
+            written_bytes: disk_stats.written_bytes,
+            total_read_bytes: disk_stats.total_read_bytes,
+            read_bytes: disk_stats.read_bytes,
+        };
+        let open_files =
+            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
+
+        let (parent_pid, parent_process_name, parent_process_path, parent_cmd) =
+            if let Some(parent_sysinfo_pid) = process.parent() {
+                let ppid = parent_sysinfo_pid.as_u32();
+                if let Some(parent_proc) = pid_to_process.get(&ppid) {
+                    (
+                        Some(ppid),
+                        parent_proc.name().to_string_lossy().to_string(),
+                        parent_proc
+                            .exe()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        parent_proc
+                            .cmd()
+                            .iter()
+                            .map(|e| e.to_string_lossy().to_string())
+                            .collect(),
+                    )
+                } else {
+                    (Some(ppid), String::new(), String::new(), Vec::new())
+                }
+            } else {
+                (None, String::new(), String::new(), Vec::new())
+            };
+
+        let (
+            grandparent_pid,
+            grandparent_process_name,
+            grandparent_process_path,
+            grandparent_cmd,
+        ) = Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
+
+        let parent_script_path = Self::extract_script_path(&parent_process_path, &parent_cmd);
+        let grandparent_script_path =
+            Self::extract_script_path(&grandparent_process_path, &grandparent_cmd);
+        let spawned_from_tmp = Self::originates_from_tmp(
+            &process_path,
+            &parent_process_path,
+            parent_script_path.as_deref(),
+            &grandparent_process_path,
+            grandparent_script_path.as_deref(),
+            &cmd,
+        );
+
+        Some((
+            SessionL7 {
+                pid,
+                process_name,
+                process_path,
+                username,
+                cmd,
+                cwd,
+                memory,
+                start_time: process_start_time,
+                run_time,
+                cpu_usage,
+                accumulated_cpu_time,
+                disk_usage,
+                open_files,
+                parent_pid,
+                parent_process_name,
+                parent_process_path,
+                parent_cmd,
+                parent_script_path,
+                grandparent_pid,
+                grandparent_process_name,
+                grandparent_process_path,
+                grandparent_cmd,
+                grandparent_script_path,
+                spawned_from_tmp,
+            },
+            process_start_time,
+        ))
     }
 
     /// Enrich an eBPF-produced SessionL7 with parent lineage, open_files,
@@ -1751,6 +1965,8 @@ impl FlodbaddL7 {
                                     .map(|s| String::from_utf8_lossy(s).to_string())
                                     .collect();
                             }
+
+                            Self::enrich_grandparent_from_proc(l7, ppid);
                         }
                     }
                     break;
@@ -1762,16 +1978,88 @@ impl FlodbaddL7 {
             crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
 
         l7.parent_script_path = Self::extract_script_path(&l7.parent_process_path, &l7.parent_cmd);
+        l7.grandparent_script_path =
+            Self::extract_script_path(&l7.grandparent_process_path, &l7.grandparent_cmd);
         l7.spawned_from_tmp = Self::originates_from_tmp(
             &l7.process_path,
             &l7.parent_process_path,
             l7.parent_script_path.as_deref(),
+            &l7.grandparent_process_path,
+            l7.grandparent_script_path.as_deref(),
             &l7.cmd,
         );
     }
 
     #[cfg(not(target_os = "linux"))]
     fn enrich_ebpf_l7_from_proc(_l7: &mut SessionL7) {}
+
+    fn resolve_grandparent_sysinfo(
+        parent_pid: Option<u32>,
+        pid_to_process: &HashMap<u32, &Process>,
+    ) -> (Option<u32>, String, String, Vec<String>) {
+        let Some(ppid) = parent_pid else {
+            return (None, String::new(), String::new(), Vec::new());
+        };
+        let Some(parent_proc) = pid_to_process.get(&ppid) else {
+            return (None, String::new(), String::new(), Vec::new());
+        };
+        let Some(gp_sysinfo_pid) = parent_proc.parent() else {
+            return (None, String::new(), String::new(), Vec::new());
+        };
+        let gppid = gp_sysinfo_pid.as_u32();
+        if let Some(gp_proc) = pid_to_process.get(&gppid) {
+            (
+                Some(gppid),
+                gp_proc.name().to_string_lossy().to_string(),
+                gp_proc
+                    .exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                gp_proc
+                    .cmd()
+                    .iter()
+                    .map(|e| e.to_string_lossy().to_string())
+                    .collect(),
+            )
+        } else {
+            (Some(gppid), String::new(), String::new(), Vec::new())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enrich_grandparent_from_proc(l7: &mut SessionL7, parent_pid: u32) {
+        use std::fs;
+        use std::path::Path;
+
+        let parent_status_path = format!("/proc/{}/status", parent_pid);
+        let Ok(status) = fs::read_to_string(&parent_status_path) else {
+            return;
+        };
+        for line in status.lines() {
+            if let Some(gppid_str) = line.strip_prefix("PPid:\t") {
+                if let Ok(gppid) = gppid_str.trim().parse::<u32>() {
+                    l7.grandparent_pid = Some(gppid);
+                    let gp_proc = format!("/proc/{}", gppid);
+                    if Path::new(&gp_proc).exists() {
+                        if let Ok(comm) = fs::read_to_string(format!("{}/comm", gp_proc)) {
+                            l7.grandparent_process_name = comm.trim().to_string();
+                        }
+                        if let Ok(exe) = fs::read_link(format!("{}/exe", gp_proc)) {
+                            l7.grandparent_process_path = exe.to_string_lossy().to_string();
+                        }
+                        if let Ok(cmdline) = fs::read(format!("{}/cmdline", gp_proc)) {
+                            l7.grandparent_cmd = cmdline
+                                .split(|&b| b == 0)
+                                .filter(|s| !s.is_empty())
+                                .map(|s| String::from_utf8_lossy(s).to_string())
+                                .collect();
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 
     const INTERPRETER_BASENAMES: &[&str] = &[
         "bash",
@@ -1824,10 +2112,12 @@ impl FlodbaddL7 {
         process_path: &str,
         parent_process_path: &str,
         parent_script_path: Option<&str>,
+        grandparent_process_path: &str,
+        grandparent_script_path: Option<&str>,
         cmd: &[String],
     ) -> bool {
         let check = |p: &str| Self::TMP_PREFIXES.iter().any(|pfx| p.starts_with(pfx));
-        if check(process_path) || check(parent_process_path) {
+        if check(process_path) || check(parent_process_path) || check(grandparent_process_path) {
             return true;
         }
         if let Some(script) = parent_script_path {
@@ -1835,7 +2125,11 @@ impl FlodbaddL7 {
                 return true;
             }
         }
-        // Also check the process's own cmd[0] and cmd[1] for script-in-tmp
+        if let Some(script) = grandparent_script_path {
+            if check(script) {
+                return true;
+            }
+        }
         for arg in cmd.iter().take(2) {
             if check(arg) {
                 return true;

@@ -175,6 +175,20 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn test_get_ipv4_asn_notion() {
+        ASN_CACHE.clear();
+        // 208.103.161.1 belongs to AS33191 NOTION
+        let ipv4 = Ipv4Addr::new(208, 103, 161, 1);
+        let asn = get_ipv4_asn(&ipv4).await;
+        assert!(asn.is_some(), "208.103.161.1 should resolve to NOTION");
+        let asn = asn.unwrap();
+        assert_eq!(asn.as_number, 33191);
+        assert_eq!(asn.country, "US");
+        assert_eq!(asn.owner, "NOTION");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_concurrent_lookups() {
         // Clear the cache to isolate this test.
         ASN_CACHE.clear();

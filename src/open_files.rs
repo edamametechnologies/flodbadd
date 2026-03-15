@@ -70,10 +70,30 @@ pub fn sensitive_patterns() -> Vec<&'static str> {
     patterns
 }
 
+fn should_keep_open_file_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    normalized != "/"
+}
+
+fn directory_glob_entry(dir: &str) -> String {
+    let trimmed = dir.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/*".to_string()
+    } else {
+        format!("{}/*", trimmed)
+    }
+}
+
 /// Aggregate file paths when the list exceeds MAX_OPEN_FILES.
 /// Sensitive paths (credentials, keys, etc.) are always preserved individually;
 /// only non-sensitive paths are subject to directory-level aggregation.
 pub fn aggregate_open_files(mut paths: Vec<String>) -> Vec<String> {
+    paths.retain(|path| should_keep_open_file_path(path));
     paths.sort();
     paths.dedup();
 
@@ -120,7 +140,7 @@ fn aggregate_regular(paths: Vec<String>, budget: usize) -> Vec<String> {
             break;
         }
         if files.len() > 1 && result.len() + files.len() > budget {
-            let entry = format!("{}/*", dir);
+            let entry = directory_glob_entry(dir);
             if !result.contains(&entry) {
                 result.push(entry);
                 remaining = remaining.saturating_sub(1);
@@ -128,7 +148,7 @@ fn aggregate_regular(paths: Vec<String>, budget: usize) -> Vec<String> {
         } else {
             for f in files {
                 if remaining == 0 {
-                    let entry = format!("{}/*", dir);
+                    let entry = directory_glob_entry(dir);
                     if !result.contains(&entry) {
                         result.push(entry);
                     }
@@ -182,7 +202,11 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
     for entry in entries.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             let s = target.to_string_lossy().to_string();
-            if s.starts_with('/') && !s.starts_with("/dev/") && !s.starts_with("/proc/") {
+            if s.starts_with('/')
+                && !s.starts_with("/dev/")
+                && !s.starts_with("/proc/")
+                && should_keep_open_file_path(&s)
+            {
                 paths.push(s);
             }
         }
@@ -335,7 +359,7 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
             .position(|&b| b == 0)
             .unwrap_or(path_bytes.len());
         let s = String::from_utf8_lossy(&path_bytes[..nul_pos]).to_string();
-        if s.starts_with('/') && !s.starts_with("/dev/") {
+        if s.starts_with('/') && !s.starts_with("/dev/") && should_keep_open_file_path(&s) {
             paths.push(s);
         }
     }
@@ -566,6 +590,21 @@ mod tests {
         let paths = vec!["/tmp/a.txt".to_string(); 50];
         let result = aggregate_open_files(paths);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_aggregate_filters_root_noise() {
+        let result =
+            aggregate_open_files(vec!["/".to_string(), "/home/user/.ssh/id_rsa".to_string()]);
+        assert_eq!(result, vec!["/home/user/.ssh/id_rsa".to_string()]);
+    }
+
+    #[test]
+    fn test_aggregate_root_directory_glob_is_canonical() {
+        let paths: Vec<String> = (0..150).map(|i| format!("/root_file_{}", i)).collect();
+        let result = aggregate_open_files(paths);
+        assert!(result.iter().any(|entry| entry == "/*"));
+        assert!(!result.iter().any(|entry| entry == "//*"));
     }
 
     // --- get_open_file_paths tests ---

@@ -99,8 +99,18 @@ pub struct SessionL7 {
     /// compiled binary or when `parent_cmd` has fewer than 2 elements.
     #[serde(default)]
     pub parent_script_path: Option<String>,
-    /// True when the process or its parent originates from a writable
-    /// temporary directory (`/tmp/`, `/var/tmp/`, `/dev/shm/`).
+    #[serde(default)]
+    pub grandparent_pid: Option<u32>,
+    #[serde(default)]
+    pub grandparent_process_name: String,
+    #[serde(default)]
+    pub grandparent_process_path: String,
+    #[serde(default)]
+    pub grandparent_cmd: Vec<String>,
+    #[serde(default)]
+    pub grandparent_script_path: Option<String>,
+    /// True when the process, its parent, or its grandparent originates
+    /// from a writable temporary directory (`/tmp/`, `/var/tmp/`, `/dev/shm/`).
     #[serde(default)]
     pub spawned_from_tmp: bool,
 }
