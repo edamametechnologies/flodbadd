@@ -1853,12 +1853,8 @@ impl FlodbaddL7 {
                 (None, String::new(), String::new(), Vec::new())
             };
 
-        let (
-            grandparent_pid,
-            grandparent_process_name,
-            grandparent_process_path,
-            grandparent_cmd,
-        ) = Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
+        let (grandparent_pid, grandparent_process_name, grandparent_process_path, grandparent_cmd) =
+            Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
 
         let parent_script_path = Self::extract_script_path(&parent_process_path, &parent_cmd);
         let grandparent_script_path =
