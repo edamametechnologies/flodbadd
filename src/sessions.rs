@@ -97,21 +97,14 @@ pub struct SessionL7 {
     /// For script-spawned parents (bash, python, etc.), the script path
     /// extracted from `parent_cmd[1]`. `None` when the parent is a
     /// compiled binary or when `parent_cmd` has fewer than 2 elements.
-    #[serde(default)]
     pub parent_script_path: Option<String>,
-    #[serde(default)]
     pub grandparent_pid: Option<u32>,
-    #[serde(default)]
     pub grandparent_process_name: String,
-    #[serde(default)]
     pub grandparent_process_path: String,
-    #[serde(default)]
     pub grandparent_cmd: Vec<String>,
-    #[serde(default)]
     pub grandparent_script_path: Option<String>,
     /// True when the process, its parent, or its grandparent originates
     /// from a writable temporary directory (`/tmp/`, `/var/tmp/`, `/dev/shm/`).
-    #[serde(default)]
     pub spawned_from_tmp: bool,
 }
 
@@ -127,10 +120,8 @@ pub struct SessionInfo {
     pub src_domain: Option<String>,
     pub dst_domain: Option<String>,
     /// How src_domain was resolved (Forward DNS, Reverse DNS, SNI, or None)
-    #[serde(default)]
     pub src_domain_type: DomainResolutionType,
     /// How dst_domain was resolved (Forward DNS, Reverse DNS, SNI, or None)
-    #[serde(default)]
     pub dst_domain_type: DomainResolutionType,
     pub dst_service: Option<String>,
     pub l7: Option<SessionL7>,
