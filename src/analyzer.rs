@@ -285,13 +285,15 @@ impl SessionCache {
     }
 
     fn get_full_session(&mut self, source_session: Option<&SessionInfo>) -> Option<SessionInfo> {
+        let now = Utc::now();
         if let Some(ref full) = self.full_session {
-            Some((**full).clone())
+            Some((**full).clone().with_refreshed_status(now))
         } else if let Some(source) = source_session {
             // If we have a source session and it's the same UID, use it to populate
             if source.uid == self.uid {
-                self.full_session = Some(Arc::new(source.clone()));
-                Some(source.clone())
+                let refreshed = source.clone().with_refreshed_status(now);
+                self.full_session = Some(Arc::new(refreshed.clone()));
+                Some(refreshed)
             } else {
                 None
             }
@@ -301,7 +303,10 @@ impl SessionCache {
     }
 
     fn get_full_session_snapshot(&self) -> Option<SessionInfo> {
-        self.full_session.as_ref().map(|full| (**full).clone())
+        let now = Utc::now();
+        self.full_session
+            .as_ref()
+            .map(|full| (**full).clone().with_refreshed_status(now))
     }
 }
 
@@ -3571,6 +3576,85 @@ pub(crate) mod tests {
         analyzer.stop().await;
 
         println!("Session tracking during warmup verified");
+    }
+
+    #[tokio::test]
+    async fn test_cached_session_reads_refresh_liveness_status() {
+        let analyzer = SessionAnalyzer::new();
+        let stale_time = Utc::now() - CONNECTION_CURRENT_TIMEOUT - Duration::seconds(5);
+
+        let blacklisted_uid = Uuid::new_v4().to_string();
+        let mut blacklisted_session = create_test_session_with_criticality(
+            blacklisted_uid.clone(),
+            "blacklist:test_dns".to_string(),
+            stale_time,
+        );
+        blacklisted_session.stats.start_time = stale_time;
+        blacklisted_session.stats.last_activity = stale_time;
+        blacklisted_session.status = SessionStatus {
+            active: true,
+            added: true,
+            activated: false,
+            deactivated: false,
+        };
+
+        let anomalous_uid = Uuid::new_v4().to_string();
+        let mut anomalous_session = create_test_session_with_criticality(
+            anomalous_uid.clone(),
+            "anomaly:suspicious".to_string(),
+            stale_time,
+        );
+        anomalous_session.stats.start_time = stale_time;
+        anomalous_session.stats.last_activity = stale_time;
+        anomalous_session.status = SessionStatus {
+            active: true,
+            added: true,
+            activated: false,
+            deactivated: false,
+        };
+
+        analyzer
+            .blacklisted_sessions
+            .insert(blacklisted_uid.clone(), SessionCache::with_full_session(&blacklisted_session));
+        analyzer
+            .anomalous_sessions
+            .insert(anomalous_uid.clone(), SessionCache::with_full_session(&anomalous_session));
+        analyzer
+            .all_sessions
+            .insert(blacklisted_uid.clone(), SessionCache::with_full_session(&blacklisted_session));
+        analyzer
+            .all_sessions
+            .insert(anomalous_uid.clone(), SessionCache::with_full_session(&anomalous_session));
+
+        let blacklisted = analyzer.get_blacklisted_sessions().await;
+        assert_eq!(blacklisted.len(), 1);
+        assert!(!blacklisted[0].status.active);
+
+        let anomalous = analyzer.get_anomalous_sessions().await;
+        assert_eq!(anomalous.len(), 1);
+        assert!(!anomalous[0].status.active);
+
+        let by_uid_blacklisted = analyzer
+            .get_session_by_uid(&blacklisted_uid)
+            .await
+            .expect("blacklisted session should be retrievable by uid");
+        assert!(!by_uid_blacklisted.status.active);
+
+        let by_uid_anomalous = analyzer
+            .get_session_by_uid(&anomalous_uid)
+            .await
+            .expect("anomalous session should be retrievable by uid");
+        assert!(!by_uid_anomalous.status.active);
+
+        let all_sessions = analyzer.get_sessions().await;
+        assert_eq!(all_sessions.len(), 2);
+        assert!(all_sessions.iter().all(|session| !session.status.active));
+
+        let current_sessions = analyzer.get_current_sessions().await;
+        assert!(
+            current_sessions.is_empty(),
+            "stale sessions should not appear in current_sessions"
+        );
     }
 
     /// Helper function to create a test session with specific parameters

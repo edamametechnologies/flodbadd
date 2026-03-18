@@ -211,6 +211,28 @@ impl Default for SessionStatus {
     }
 }
 
+impl SessionInfo {
+    /// Refresh status flags from timestamps so cached snapshots do not report
+    /// stale liveliness long after network activity stopped.
+    pub fn refresh_status_from_activity(&mut self, now: DateTime<Utc>) {
+        let previous_status = self.status.clone();
+        let active = self.stats.last_activity >= now - CONNECTION_ACTIVITY_TIMEOUT;
+        let added = self.stats.start_time >= now - CONNECTION_ACTIVITY_TIMEOUT;
+
+        self.status = SessionStatus {
+            active,
+            added,
+            activated: !previous_status.active && active,
+            deactivated: previous_status.active && !active,
+        };
+    }
+
+    pub fn with_refreshed_status(mut self, now: DateTime<Utc>) -> Self {
+        self.refresh_status_from_activity(now);
+        self
+    }
+}
+
 // Implementation of Default for SessionInfo
 impl Default for SessionInfo {
     fn default() -> Self {
