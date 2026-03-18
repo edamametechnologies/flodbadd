@@ -3613,18 +3613,22 @@ pub(crate) mod tests {
             deactivated: false,
         };
 
-        analyzer
-            .blacklisted_sessions
-            .insert(blacklisted_uid.clone(), SessionCache::with_full_session(&blacklisted_session));
-        analyzer
-            .anomalous_sessions
-            .insert(anomalous_uid.clone(), SessionCache::with_full_session(&anomalous_session));
-        analyzer
-            .all_sessions
-            .insert(blacklisted_uid.clone(), SessionCache::with_full_session(&blacklisted_session));
-        analyzer
-            .all_sessions
-            .insert(anomalous_uid.clone(), SessionCache::with_full_session(&anomalous_session));
+        analyzer.blacklisted_sessions.insert(
+            blacklisted_uid.clone(),
+            SessionCache::with_full_session(&blacklisted_session),
+        );
+        analyzer.anomalous_sessions.insert(
+            anomalous_uid.clone(),
+            SessionCache::with_full_session(&anomalous_session),
+        );
+        analyzer.all_sessions.insert(
+            blacklisted_uid.clone(),
+            SessionCache::with_full_session(&blacklisted_session),
+        );
+        analyzer.all_sessions.insert(
+            anomalous_uid.clone(),
+            SessionCache::with_full_session(&anomalous_session),
+        );
 
         let blacklisted = analyzer.get_blacklisted_sessions().await;
         assert_eq!(blacklisted.len(), 1);
