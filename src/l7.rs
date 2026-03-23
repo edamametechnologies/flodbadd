@@ -1378,10 +1378,8 @@ impl FlodbaddL7 {
         #[cfg(target_os = "macos")]
         {
             let conn = connection.clone();
-            let eager_result = tokio::task::spawn_blocking(move || {
-                Self::eager_macos_resolve(&conn)
-            })
-            .await;
+            let eager_result =
+                tokio::task::spawn_blocking(move || Self::eager_macos_resolve(&conn)).await;
             if let Ok(Some(l7_data)) = eager_result {
                 self.l7_map.insert(
                     connection.clone(),

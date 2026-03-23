@@ -33,8 +33,7 @@ const FALLBACK_COMMON: &[&str] = &[
 const FALLBACK_PLATFORM: &[&str] = &["/Library/Keychains/", "/MobileSyncBackup/"];
 
 #[cfg(target_os = "linux")]
-const FALLBACK_PLATFORM: &[&str] =
-    &["/etc/shadow", "/etc/gshadow", "/etc/security/opasswd"];
+const FALLBACK_PLATFORM: &[&str] = &["/etc/shadow", "/etc/gshadow", "/etc/security/opasswd"];
 
 #[cfg(target_os = "windows")]
 const FALLBACK_PLATFORM: &[&str] = &[

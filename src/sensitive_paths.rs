@@ -81,10 +81,7 @@ impl SensitivePathsDB {
                 continue;
             }
             for (label, patterns) in &self.labels {
-                if patterns
-                    .iter()
-                    .any(|pat| normalized.contains(pat.as_str()))
-                {
+                if patterns.iter().any(|pat| normalized.contains(pat.as_str())) {
                     result.insert(label.clone());
                 }
             }
@@ -95,12 +92,15 @@ impl SensitivePathsDB {
 
 lazy_static! {
     pub static ref SENSITIVE_PATHS: CloudModel<SensitivePathsDB> = {
-        let model =
-            CloudModel::initialize(SENSITIVE_PATHS_NAME.to_string(), SENSITIVE_PATHS_DB, |data| {
-                let json: SensitivePathsJSON =
-                    serde_json::from_str(data).with_context(|| "Failed to parse sensitive paths JSON")?;
+        let model = CloudModel::initialize(
+            SENSITIVE_PATHS_NAME.to_string(),
+            SENSITIVE_PATHS_DB,
+            |data| {
+                let json: SensitivePathsJSON = serde_json::from_str(data)
+                    .with_context(|| "Failed to parse sensitive paths JSON")?;
                 Ok(SensitivePathsDB::new_from_json(&json))
-            });
+            },
+        );
         match model {
             Ok(m) => m,
             Err(e) => {
@@ -145,10 +145,7 @@ pub fn classify_sensitive_path_labels_sync(paths: &[String]) -> Vec<String> {
             continue;
         }
         for (label, patterns) in labels.as_ref() {
-            if patterns
-                .iter()
-                .any(|pat| normalized.contains(pat.as_str()))
-            {
+            if patterns.iter().any(|pat| normalized.contains(pat.as_str())) {
                 result.insert(label.clone());
             }
         }
@@ -219,10 +216,7 @@ mod tests {
             !db.common_patterns.is_empty(),
             "Common patterns should not be empty"
         );
-        assert!(
-            !db.labels.is_empty(),
-            "Labels should not be empty"
-        );
+        assert!(!db.labels.is_empty(), "Labels should not be empty");
     }
 
     #[tokio::test]

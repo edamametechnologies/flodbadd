@@ -63,8 +63,11 @@ fn build_scenarios() -> Vec<TestScenario> {
             label: "curl/short-http",
             process: "curl",
             args: vec![
-                "-s".into(), "-o".into(), "/dev/null".into(),
-                "--max-time".into(), "5".into(),
+                "-s".into(),
+                "-o".into(),
+                "/dev/null".into(),
+                "--max-time".into(),
+                "5".into(),
                 "http://1.1.1.1/".into(),
             ],
             dst_ip: target_ip,
@@ -75,8 +78,11 @@ fn build_scenarios() -> Vec<TestScenario> {
             label: "curl/short-https",
             process: "curl",
             args: vec![
-                "-s".into(), "-o".into(), "/dev/null".into(),
-                "--max-time".into(), "5".into(),
+                "-s".into(),
+                "-o".into(),
+                "/dev/null".into(),
+                "--max-time".into(),
+                "5".into(),
                 "https://1.1.1.1/".into(),
             ],
             dst_ip: target_ip,
@@ -87,9 +93,13 @@ fn build_scenarios() -> Vec<TestScenario> {
             label: "curl/medium-slow",
             process: "curl",
             args: vec![
-                "-s".into(), "-o".into(), "/dev/null".into(),
-                "--limit-rate".into(), "100".into(),
-                "--max-time".into(), "5".into(),
+                "-s".into(),
+                "-o".into(),
+                "/dev/null".into(),
+                "--limit-rate".into(),
+                "100".into(),
+                "--max-time".into(),
+                "5".into(),
                 "http://1.1.1.1/".into(),
             ],
             dst_ip: target_ip,
@@ -166,10 +176,7 @@ async fn find_client_port(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u1
     None
 }
 
-async fn run_scenario_iteration(
-    l7: &FlodbaddL7,
-    scenario: &TestScenario,
-) -> (bool, bool, u64) {
+async fn run_scenario_iteration(l7: &FlodbaddL7, scenario: &TestScenario) -> (bool, bool, u64) {
     let mut child = match Command::new(scenario.process)
         .args(&scenario.args)
         .stdout(std::process::Stdio::null())
@@ -221,7 +228,11 @@ async fn run_scenario_iteration(
                 } else {
                     println!(
                         "    MISMATCH: expected='{}' got='{}' path='{}' pid={} source={:?}",
-                        scenario.process, l7_data.process_name, l7_data.process_path, l7_data.pid, resolution.source
+                        scenario.process,
+                        l7_data.process_name,
+                        l7_data.process_path,
+                        l7_data.pid,
+                        resolution.source
                     );
                 }
                 break;
@@ -232,7 +243,10 @@ async fn run_scenario_iteration(
 
     if !resolved {
         latency_ms = poll_start.elapsed().as_millis() as u64;
-        println!("    UNRESOLVED after {}ms (port={})", latency_ms, client_port);
+        println!(
+            "    UNRESOLVED after {}ms (port={})",
+            latency_ms, client_port
+        );
     }
 
     let _ = child.kill();
@@ -263,7 +277,11 @@ async fn l7_accuracy_matrix() {
     l7.start().await;
     sleep(Duration::from_millis(500)).await;
 
-    println!("\nL7 Accuracy Test - {} scenarios x {} iterations", scenarios.len(), iterations);
+    println!(
+        "\nL7 Accuracy Test - {} scenarios x {} iterations",
+        scenarios.len(),
+        iterations
+    );
     println!("Local IP: {}", get_default_local_ip());
     println!();
 
@@ -283,7 +301,12 @@ async fn l7_accuracy_matrix() {
             }
             println!(
                 "  [{}/{}] {}: resolved={} correct={} latency={}ms",
-                i + 1, iterations, scenario.label, resolved, correct, latency_ms
+                i + 1,
+                iterations,
+                scenario.label,
+                resolved,
+                correct,
+                latency_ms
             );
             sleep(Duration::from_millis(300)).await;
         }
