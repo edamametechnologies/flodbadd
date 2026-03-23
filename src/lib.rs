@@ -38,6 +38,8 @@ pub mod windows_npcap;
 pub use windows_npcap as npcap_utils; // backward-compatible re-export
 pub mod open_files;
 pub mod oui;
+pub mod sensitive_paths;
+pub mod sensitive_paths_db;
 pub mod oui_db;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),

@@ -420,6 +420,36 @@ pub fn lookup_session_pid(
     None
 }
 
+/// Fast single-session PID lookup: scans all PIDs but short-circuits when
+/// the matching socket is found. Cheaper than building a full session map
+/// when only one session needs attribution.
+pub fn quick_lookup_session_pid(session: &Session) -> Option<u32> {
+    let pids = list_all_pids();
+    let reverse = Session {
+        protocol: session.protocol.clone(),
+        src_ip: session.dst_ip,
+        src_port: session.dst_port,
+        dst_ip: session.src_ip,
+        dst_port: session.src_port,
+    };
+    for pid in pids {
+        let entries = scan_process_sockets(pid);
+        for entry in entries {
+            let entry_session = Session {
+                protocol: entry.protocol.clone(),
+                src_ip: entry.local_ip,
+                src_port: entry.local_port,
+                dst_ip: entry.remote_ip,
+                dst_port: entry.remote_port,
+            };
+            if entry_session == *session || entry_session == reverse {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

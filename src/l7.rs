@@ -1372,6 +1372,35 @@ impl FlodbaddL7 {
             return;
         }
 
+        // macOS eager probe: use libproc to find the PID while the socket is
+        // still alive. Build a minimal SessionL7 so short-lived processes get
+        // attributed even if they exit before the background resolver runs.
+        #[cfg(target_os = "macos")]
+        {
+            let conn = connection.clone();
+            let eager_result = tokio::task::spawn_blocking(move || {
+                Self::eager_macos_resolve(&conn)
+            })
+            .await;
+            if let Ok(Some(l7_data)) = eager_result {
+                self.l7_map.insert(
+                    connection.clone(),
+                    L7Resolution {
+                        l7: Some(l7_data),
+                        date: Utc::now(),
+                        retry_count: 0,
+                        last_retry: None,
+                        source: L7ResolutionSource::MacosLibproc,
+                    },
+                );
+                trace!(
+                    "macOS eager libproc resolution for {:?} in add_connection_to_resolver",
+                    connection
+                );
+                return;
+            }
+        }
+
         self.l7_map.insert(
             connection.clone(),
             L7Resolution {
@@ -1386,6 +1415,60 @@ impl FlodbaddL7 {
         self.resolver_queue.insert(connection.clone(), ());
 
         trace!("Added connection to L7 resolver queue: {:?}", connection);
+    }
+
+    /// Perform a quick macOS libproc lookup to build a minimal SessionL7.
+    /// Called synchronously during add_connection_to_resolver for short-lived
+    /// process capture. Returns None if the session cannot be matched.
+    #[cfg(target_os = "macos")]
+    fn eager_macos_resolve(connection: &Session) -> Option<SessionL7> {
+        use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
+        let pid = l7_macos::quick_lookup_session_pid(connection)?;
+
+        let refresh_kind =
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu());
+        let mut sys = System::new();
+        sys.refresh_specifics(refresh_kind);
+        let process = sys.process(Pid::from_u32(pid))?;
+
+        let process_name = process.name().to_string_lossy().to_string();
+        let process_path = process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let cmd: Vec<String> = process
+            .cmd()
+            .iter()
+            .map(|e| e.to_string_lossy().to_string())
+            .collect();
+
+        Some(SessionL7 {
+            pid,
+            process_name,
+            process_path,
+            username: String::new(),
+            cmd,
+            cwd: None,
+            memory: 0,
+            start_time: process.start_time(),
+            run_time: process.run_time(),
+            cpu_usage: 0,
+            accumulated_cpu_time: 0,
+            disk_usage: Default::default(),
+            open_files: Default::default(),
+            parent_pid: process.parent().map(|p| p.as_u32()),
+            parent_process_name: String::new(),
+            parent_process_path: String::new(),
+            parent_cmd: Vec::new(),
+            parent_script_path: None,
+            grandparent_pid: None,
+            grandparent_process_name: String::new(),
+            grandparent_process_path: String::new(),
+            grandparent_cmd: Vec::new(),
+            grandparent_script_path: None,
+            spawned_from_tmp: false,
+        })
     }
 
     pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {

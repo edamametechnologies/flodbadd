@@ -177,6 +177,41 @@ update_blacklists_db() {
     echo -e $trailer >> "$target"
 }
 
+update_sensitive_paths_db() {
+    local is_local=${1:-false}
+    local target=./src/sensitive_paths_db.rs
+    local header="// Built in default sensitive paths db\npub static SENSITIVE_PATHS_DB: &str = r#\""
+    local trailer="\"#;"
+
+    echo "Updating sensitive paths db"
+
+    # Delete the file if it exists
+    if [ -f "$target" ]; then
+        rm "$target"
+    fi
+
+    if [ "$is_local" = true ]; then
+        echo "Using local sensitive paths db file"
+        local body="$(cat ../threatmodels/sensitive-paths-db.json)"
+    else
+        echo "Fetching sensitive paths db from GitHub"
+        local branch=$(git rev-parse --abbrev-ref HEAD)
+        # Only deal with main and dev branches, default to dev
+        if [ $branch != "dev" ] && [ $branch != "main" ]; then
+          branch=dev
+        fi
+        # Prevent bash parsing of escape chars
+        local body="$(wget --no-cache -qO- https://raw.githubusercontent.com/edamametechnologies/threatmodels/$branch/sensitive-paths-db.json)"
+    fi
+
+    # Interpret escape chars
+    echo -n -e "$header" > "$target"
+    # Preserve escape chars
+    echo -n "$body" >> "$target"
+    # Interpret escape chars
+    echo -e $trailer >> "$target"
+}
+
 # Parse command line arguments
 USE_LOCAL=false
 
@@ -194,3 +229,4 @@ update_flodbadd_port_vulns $USE_LOCAL
 update_flodbadd_vendor_vulns $USE_LOCAL
 update_whitelists_db $USE_LOCAL
 update_blacklists_db $USE_LOCAL
+update_sensitive_paths_db $USE_LOCAL
