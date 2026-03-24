@@ -1463,27 +1463,27 @@ impl FlodbaddL7 {
 
         let parent_pid = process.parent().map(|p| p.as_u32());
 
-        let (parent_process_name, parent_process_path, parent_cmd) =
-            if let Some(ppid) = parent_pid {
-                if let Some(parent_proc) = sys.process(Pid::from_u32(ppid)) {
-                    (
-                        parent_proc.name().to_string_lossy().to_string(),
-                        parent_proc
-                            .exe()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default(),
-                        parent_proc
-                            .cmd()
-                            .iter()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .collect(),
-                    )
-                } else {
-                    (String::new(), String::new(), Vec::new())
-                }
+        let (parent_process_name, parent_process_path, parent_cmd) = if let Some(ppid) = parent_pid
+        {
+            if let Some(parent_proc) = sys.process(Pid::from_u32(ppid)) {
+                (
+                    parent_proc.name().to_string_lossy().to_string(),
+                    parent_proc
+                        .exe()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    parent_proc
+                        .cmd()
+                        .iter()
+                        .map(|e| e.to_string_lossy().to_string())
+                        .collect(),
+                )
             } else {
                 (String::new(), String::new(), Vec::new())
-            };
+            }
+        } else {
+            (String::new(), String::new(), Vec::new())
+        };
 
         let (grandparent_pid, grandparent_process_name, grandparent_process_path, grandparent_cmd) =
             if let Some(ppid) = parent_pid {
