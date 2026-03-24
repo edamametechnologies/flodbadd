@@ -980,13 +980,13 @@ impl FlodbaddL7 {
     ///
     /// Interval is platform-tuned:
     ///   Linux  – 30 s  (procfs readlinks are RAM-backed, near-zero cost)
-    ///   macOS  – 60 s  (proc_pidfdinfo syscalls are costlier per FD)
+    ///   macOS  – 30 s  (keeps active-session open_files propagation responsive)
     ///   Windows – 120 s (NtQuerySystemInformation enumerates ALL handles system-wide)
     async fn start_sensitive_scan_task(&mut self) {
         #[cfg(target_os = "linux")]
         const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 30;
         #[cfg(target_os = "macos")]
-        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 60;
+        const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 30;
         #[cfg(target_os = "windows")]
         const SENSITIVE_SCAN_INTERVAL_SECS: u64 = 120;
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1013,15 +1013,20 @@ impl FlodbaddL7 {
             while !stop_flag_clone.load(Ordering::Relaxed) {
                 sleep(Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS)).await;
 
-                // Collect (session_key, pid) for resolved entries, dedup by PID
-                // so we don't scan the same process twice when it has multiple sessions
+                // Collect (pid, needs_full_scan) for resolved entries, dedup by
+                // PID so we scan each process at most once.  Entries with empty
+                // open_files get a full (unfiltered) scan so the vuln detector
+                // can see all open file paths -- this covers both eager macOS
+                // libproc entries and standard netstat/ExactMatch entries.
                 let mut seen_pids = std::collections::HashSet::new();
-                let targets: Vec<(Session, u32)> = l7_map
+                let targets: Vec<(u32, bool)> = l7_map
                     .iter()
                     .filter_map(|entry| {
-                        entry.value().l7.as_ref().and_then(|l7| {
+                        let resolution = entry.value();
+                        resolution.l7.as_ref().and_then(|l7| {
                             if seen_pids.insert(l7.pid) {
-                                Some((entry.key().clone(), l7.pid))
+                                let needs_full = l7.open_files.is_empty();
+                                Some((l7.pid, needs_full))
                             } else {
                                 None
                             }
@@ -1034,16 +1039,22 @@ impl FlodbaddL7 {
                     continue;
                 }
 
-                // Scan FDs on a blocking thread (I/O varies by platform)
+                // Scan FDs on a blocking thread (I/O varies by platform).
+                // Full scan for PIDs with empty open_files; sensitive-only for
+                // those already populated.
                 let scan_results = tokio::task::spawn_blocking(move || {
                     targets
                         .into_iter()
-                        .filter_map(|(session, pid)| {
-                            let sensitive = crate::open_files::get_sensitive_open_file_paths(pid);
-                            if sensitive.is_empty() {
+                        .filter_map(|(pid, needs_full)| {
+                            let files = if needs_full {
+                                crate::open_files::get_open_file_paths(pid)
+                            } else {
+                                crate::open_files::get_sensitive_open_file_paths(pid)
+                            };
+                            if files.is_empty() {
                                 None
                             } else {
-                                Some((session, sensitive))
+                                Some((pid, files))
                             }
                         })
                         .collect::<Vec<_>>()
@@ -1051,20 +1062,26 @@ impl FlodbaddL7 {
                 .await
                 .unwrap_or_default();
 
+                // Broadcast each PID's file list to ALL sessions sharing that
+                // PID, not just one representative.  Short-lived connections
+                // rotate sessions frequently; limiting the update to a single
+                // session key left active sessions without open_files data.
                 let mut updated_sessions = 0u32;
-                for (session, sensitive_files) in scan_results {
-                    if let Some(mut entry) = l7_map.get_mut(&session) {
-                        if let Some(l7) = &mut entry.l7 {
-                            let before = l7.open_files.len();
-                            for f in &sensitive_files {
-                                if !l7.open_files.contains(f) {
-                                    l7.open_files.push(f.clone());
+                for (pid, files) in &scan_results {
+                    for mut entry in l7_map.iter_mut() {
+                        if let Some(l7) = &mut entry.value_mut().l7 {
+                            if l7.pid == *pid {
+                                let before = l7.open_files.len();
+                                for f in files {
+                                    if !l7.open_files.contains(f) {
+                                        l7.open_files.push(f.clone());
+                                    }
                                 }
-                            }
-                            if l7.open_files.len() != before {
-                                l7.open_files.sort();
-                                l7.open_files.dedup();
-                                updated_sessions += 1;
+                                if l7.open_files.len() != before {
+                                    l7.open_files.sort();
+                                    l7.open_files.dedup();
+                                    updated_sessions += 1;
+                                }
                             }
                         }
                     }
@@ -1415,9 +1432,12 @@ impl FlodbaddL7 {
         trace!("Added connection to L7 resolver queue: {:?}", connection);
     }
 
-    /// Perform a quick macOS libproc lookup to build a minimal SessionL7.
+    /// Perform a quick macOS libproc lookup to build a SessionL7.
     /// Called synchronously during add_connection_to_resolver for short-lived
     /// process capture. Returns None if the session cannot be matched.
+    /// Populates parent/grandparent lineage from the same sysinfo snapshot
+    /// so that spawned_from_tmp and parent_process_path are available
+    /// immediately for vulnerability detectors.
     #[cfg(target_os = "macos")]
     fn eager_macos_resolve(connection: &Session) -> Option<SessionL7> {
         use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
@@ -1441,6 +1461,74 @@ impl FlodbaddL7 {
             .map(|e| e.to_string_lossy().to_string())
             .collect();
 
+        let parent_pid = process.parent().map(|p| p.as_u32());
+
+        let (parent_process_name, parent_process_path, parent_cmd) =
+            if let Some(ppid) = parent_pid {
+                if let Some(parent_proc) = sys.process(Pid::from_u32(ppid)) {
+                    (
+                        parent_proc.name().to_string_lossy().to_string(),
+                        parent_proc
+                            .exe()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        parent_proc
+                            .cmd()
+                            .iter()
+                            .map(|e| e.to_string_lossy().to_string())
+                            .collect(),
+                    )
+                } else {
+                    (String::new(), String::new(), Vec::new())
+                }
+            } else {
+                (String::new(), String::new(), Vec::new())
+            };
+
+        let (grandparent_pid, grandparent_process_name, grandparent_process_path, grandparent_cmd) =
+            if let Some(ppid) = parent_pid {
+                if let Some(parent_proc) = sys.process(Pid::from_u32(ppid)) {
+                    if let Some(gp_sysinfo_pid) = parent_proc.parent() {
+                        let gppid = gp_sysinfo_pid.as_u32();
+                        if let Some(gp_proc) = sys.process(Pid::from_u32(gppid)) {
+                            (
+                                Some(gppid),
+                                gp_proc.name().to_string_lossy().to_string(),
+                                gp_proc
+                                    .exe()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                gp_proc
+                                    .cmd()
+                                    .iter()
+                                    .map(|e| e.to_string_lossy().to_string())
+                                    .collect(),
+                            )
+                        } else {
+                            (Some(gppid), String::new(), String::new(), Vec::new())
+                        }
+                    } else {
+                        (None, String::new(), String::new(), Vec::new())
+                    }
+                } else {
+                    (None, String::new(), String::new(), Vec::new())
+                }
+            } else {
+                (None, String::new(), String::new(), Vec::new())
+            };
+
+        let parent_script_path = Self::extract_script_path(&parent_process_path, &parent_cmd);
+        let grandparent_script_path =
+            Self::extract_script_path(&grandparent_process_path, &grandparent_cmd);
+        let spawned_from_tmp = Self::originates_from_tmp(
+            &process_path,
+            &parent_process_path,
+            parent_script_path.as_deref(),
+            &grandparent_process_path,
+            grandparent_script_path.as_deref(),
+            &cmd,
+        );
+
         Some(SessionL7 {
             pid,
             process_name,
@@ -1455,17 +1543,17 @@ impl FlodbaddL7 {
             accumulated_cpu_time: 0,
             disk_usage: Default::default(),
             open_files: Default::default(),
-            parent_pid: process.parent().map(|p| p.as_u32()),
-            parent_process_name: String::new(),
-            parent_process_path: String::new(),
-            parent_cmd: Vec::new(),
-            parent_script_path: None,
-            grandparent_pid: None,
-            grandparent_process_name: String::new(),
-            grandparent_process_path: String::new(),
-            grandparent_cmd: Vec::new(),
-            grandparent_script_path: None,
-            spawned_from_tmp: false,
+            parent_pid,
+            parent_process_name,
+            parent_process_path,
+            parent_cmd,
+            parent_script_path,
+            grandparent_pid,
+            grandparent_process_name,
+            grandparent_process_path,
+            grandparent_cmd,
+            grandparent_script_path,
+            spawned_from_tmp,
         })
     }
 
