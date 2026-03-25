@@ -1062,25 +1062,43 @@ impl FlodbaddL7 {
                 .await
                 .unwrap_or_default();
 
-                // Broadcast each PID's file list to ALL sessions sharing that
-                // PID, not just one representative.  Short-lived connections
-                // rotate sessions frequently; limiting the update to a single
-                // session key left active sessions without open_files data.
+                // Build a PID -> [session_key] index with a single read-only
+                // pass so we can do targeted get_mut() lookups instead of
+                // iter_mut() which write-locks every shard for each PID.
+                let pids_of_interest: std::collections::HashSet<u32> =
+                    scan_results.iter().map(|(pid, _)| *pid).collect();
+                let mut pid_to_keys: std::collections::HashMap<u32, Vec<Session>> =
+                    std::collections::HashMap::new();
+                for entry in l7_map.iter() {
+                    if let Some(l7) = &entry.value().l7 {
+                        if pids_of_interest.contains(&l7.pid) {
+                            pid_to_keys
+                                .entry(l7.pid)
+                                .or_default()
+                                .push(entry.key().clone());
+                        }
+                    }
+                }
+
                 let mut updated_sessions = 0u32;
                 for (pid, files) in &scan_results {
-                    for mut entry in l7_map.iter_mut() {
-                        if let Some(l7) = &mut entry.value_mut().l7 {
-                            if l7.pid == *pid {
-                                let before = l7.open_files.len();
-                                for f in files {
-                                    if !l7.open_files.contains(f) {
-                                        l7.open_files.push(f.clone());
+                    if let Some(keys) = pid_to_keys.get(pid) {
+                        for key in keys {
+                            if let Some(mut entry) = l7_map.get_mut(key) {
+                                if let Some(l7) = &mut entry.value_mut().l7 {
+                                    if l7.pid == *pid {
+                                        let before = l7.open_files.len();
+                                        for f in files {
+                                            if !l7.open_files.contains(f) {
+                                                l7.open_files.push(f.clone());
+                                            }
+                                        }
+                                        if l7.open_files.len() != before {
+                                            l7.open_files.sort();
+                                            l7.open_files.dedup();
+                                            updated_sessions += 1;
+                                        }
                                     }
-                                }
-                                if l7.open_files.len() != before {
-                                    l7.open_files.sort();
-                                    l7.open_files.dedup();
-                                    updated_sessions += 1;
                                 }
                             }
                         }
@@ -1362,7 +1380,13 @@ impl FlodbaddL7 {
         None
     }
 
-    pub async fn add_connection_to_resolver(&self, connection: &Session) {
+    /// Queue a connection for L7 resolution.
+    ///
+    /// When `eager` is true (hot packet path), platform-specific probes run
+    /// inline to catch short-lived processes before they exit.  When false
+    /// (batch backfill from `populate_l7`), the heavyweight probes are skipped
+    /// so the caller does not stall the session pipeline for minutes.
+    pub async fn add_connection_to_resolver_ex(&self, connection: &Session, eager: bool) {
         if self.l7_map.contains_key(connection) {
             return;
         }
@@ -1370,30 +1394,32 @@ impl FlodbaddL7 {
         // Try eBPF eagerly: if the kernel already captured this connection we can
         // resolve it immediately, including /proc/<pid>/fd for open_files, before
         // the process exits. This is critical for short-lived processes.
-        if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
-            Self::enrich_ebpf_l7_from_proc(&mut l7_data);
-            self.l7_map.insert(
-                connection.clone(),
-                L7Resolution {
-                    l7: Some(l7_data),
-                    date: Utc::now(),
-                    retry_count: 0,
-                    last_retry: None,
-                    source: L7ResolutionSource::Ebpf,
-                },
-            );
-            trace!(
-                "eBPF eager resolution for {:?} in add_connection_to_resolver",
-                connection
-            );
-            return;
+        if eager {
+            if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
+                Self::enrich_ebpf_l7_from_proc(&mut l7_data);
+                self.l7_map.insert(
+                    connection.clone(),
+                    L7Resolution {
+                        l7: Some(l7_data),
+                        date: Utc::now(),
+                        retry_count: 0,
+                        last_retry: None,
+                        source: L7ResolutionSource::Ebpf,
+                    },
+                );
+                trace!(
+                    "eBPF eager resolution for {:?} in add_connection_to_resolver",
+                    connection
+                );
+                return;
+            }
         }
 
         // macOS eager probe: use libproc to find the PID while the socket is
         // still alive. Build a minimal SessionL7 so short-lived processes get
         // attributed even if they exit before the background resolver runs.
         #[cfg(target_os = "macos")]
-        {
+        if eager {
             let conn = connection.clone();
             let eager_result =
                 tokio::task::spawn_blocking(move || Self::eager_macos_resolve(&conn)).await;
@@ -1430,6 +1456,11 @@ impl FlodbaddL7 {
         self.resolver_queue.insert(connection.clone(), ());
 
         trace!("Added connection to L7 resolver queue: {:?}", connection);
+    }
+
+    /// Convenience wrapper -- hot-path callers that need eager probes.
+    pub async fn add_connection_to_resolver(&self, connection: &Session) {
+        self.add_connection_to_resolver_ex(connection, true).await;
     }
 
     /// Perform a quick macOS libproc lookup to build a SessionL7.

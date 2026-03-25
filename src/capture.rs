@@ -1887,9 +1887,12 @@ impl FlodbaddCapture {
                     }
                 };
 
-                // Queue for resolution if missing
+                // Queue for resolution if missing (non-eager: skip heavyweight
+                // per-connection probes during batch backfill to avoid stalling
+                // the session pipeline)
                 if session_info.l7.is_none() {
-                    l7.add_connection_to_resolver(&session_info.session).await;
+                    l7.add_connection_to_resolver_ex(&session_info.session, false)
+                        .await;
                 }
 
                 let l7_resolution = l7.get_resolved_l7(&session_info.session).await;

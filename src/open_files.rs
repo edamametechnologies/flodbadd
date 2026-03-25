@@ -27,10 +27,29 @@ const FALLBACK_COMMON: &[&str] = &[
     "/Login Data",
     "/Cookies",
     "/Web Data",
+    "/.git-credentials",
+    "/.vault-token",
+    "/.config/gcloud/application_default_credentials.json",
+    "/.azure/",
+    "/.my.cnf",
+    "/.bitcoin/",
+    "/.ethereum/keystore/",
+    "/.config/solana/id.json",
+    "/.bitmonero/",
+    "/.litecoin/",
+    "/.dogecoin/",
 ];
 
 #[cfg(target_os = "macos")]
-const FALLBACK_PLATFORM: &[&str] = &["/Library/Keychains/", "/MobileSyncBackup/"];
+const FALLBACK_PLATFORM: &[&str] = &[
+    "/Library/Keychains/",
+    "/MobileSyncBackup/",
+    "/Library/Application Support/Bitcoin/",
+    "/Library/Application Support/Ethereum/keystore/",
+    "/Library/Application Support/Litecoin/",
+    "/Library/Application Support/Dogecoin/",
+    "/Library/Application Support/Monero/",
+];
 
 #[cfg(target_os = "linux")]
 const FALLBACK_PLATFORM: &[&str] = &["/etc/shadow", "/etc/gshadow", "/etc/security/opasswd"];
@@ -44,6 +63,11 @@ const FALLBACK_PLATFORM: &[&str] = &[
     "/Windows/NTDS/ntds.dit",
     "/AppData/Local/Google/Chrome/User Data/",
     "/AppData/Roaming/Mozilla/Firefox/Profiles/",
+    "/AppData/Local/Bitcoin/",
+    "/AppData/Local/Ethereum/keystore/",
+    "/AppData/Roaming/Litecoin/",
+    "/AppData/Roaming/Dogecoin/",
+    "/AppData/Local/bitmonero/",
 ];
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
