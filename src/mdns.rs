@@ -411,6 +411,32 @@ async fn fetch_mdns_info_task() {
     }
 }
 
+/// Batch-resolve a list of IPs via mDNS, returning (ip, hostname, primary_mac, services).
+/// Primary MAC is chosen by most recent `last_seen` among the device's MAC entries.
+pub async fn mdns_resolve_batch(
+    addresses: &[IpAddr],
+) -> Vec<(IpAddr, String, MacAddr6, Vec<String>)> {
+    let mut results = Vec::new();
+    for address in addresses {
+        if let Some(mdns_info) = mdns_get_by_ip(address).await {
+            let mut services_instances = mdns_info.instances.to_vec();
+            services_instances.extend(mdns_info.services.iter().map(|e| e.service.clone()));
+            services_instances.sort();
+            services_instances.dedup();
+
+            let primary_mac = mdns_info
+                .mac_addresses
+                .iter()
+                .max_by_key(|e| e.last_seen)
+                .map(|e| e.address)
+                .unwrap_or(MacAddr6::nil());
+
+            results.push((*address, mdns_info.hostname, primary_mac, services_instances));
+        }
+    }
+    results
+}
+
 pub async fn get_mdns_by_hostname(hostname: &str) -> Option<mDNSInfo> {
     let locked_devices = DEVICES.lock().await;
     match locked_devices.get(hostname) {

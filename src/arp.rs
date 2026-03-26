@@ -163,3 +163,26 @@ pub use platform_impl::get_mac_address_from_ip;
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub use platform_impl::get_mac_address_from_ip;
+
+use tracing::warn;
+
+/// Batch-resolve a list of (interface, ipv4_str) pairs via ARP.
+/// Returns successfully resolved triples; failures are logged and skipped.
+pub async fn arp_resolve_batch(
+    addresses: &[(String, String)],
+) -> Vec<(String, String, MacAddr6)> {
+    let mut results = Vec::new();
+    for (iface, ip_str) in addresses {
+        match ip_str.parse::<Ipv4Addr>() {
+            Ok(ip_addr) => match get_mac_address_from_ip(iface, &ip_addr).await {
+                Ok(mac) => results.push((iface.clone(), ip_str.clone(), mac)),
+                Err(e) => warn!(
+                    "Error resolving MAC for IP {} on interface {}: {}",
+                    ip_str, iface, e
+                ),
+            },
+            Err(e) => warn!("Error parsing IP address {}: {}", ip_str, e),
+        }
+    }
+    results
+}

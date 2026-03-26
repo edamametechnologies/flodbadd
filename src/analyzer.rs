@@ -2371,14 +2371,9 @@ impl SessionAnalyzer {
             let total_sessions = self.all_sessions.len();
             let anomalous_sessions = self.anomalous_sessions.len();
             let blacklisted_sessions = self.blacklisted_sessions.len();
-            let normal_sessions = self
-                .all_sessions
-                .iter()
-                .filter(|e| {
-                    !self.anomalous_sessions.contains_key(e.key())
-                        && !self.blacklisted_sessions.contains_key(e.key())
-                })
-                .count();
+            let normal_sessions = total_sessions
+                .saturating_sub(anomalous_sessions)
+                .saturating_sub(blacklisted_sessions);
             let anomaly_rate = if total_sessions > 0 {
                 (anomalous_sessions as f64 / total_sessions as f64) * 100.0
             } else {
