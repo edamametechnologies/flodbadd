@@ -431,7 +431,12 @@ pub async fn mdns_resolve_batch(
                 .map(|e| e.address)
                 .unwrap_or(MacAddr6::nil());
 
-            results.push((*address, mdns_info.hostname, primary_mac, services_instances));
+            results.push((
+                *address,
+                mdns_info.hostname,
+                primary_mac,
+                services_instances,
+            ));
         }
     }
     results

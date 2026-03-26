@@ -168,9 +168,7 @@ use tracing::warn;
 
 /// Batch-resolve a list of (interface, ipv4_str) pairs via ARP.
 /// Returns successfully resolved triples; failures are logged and skipped.
-pub async fn arp_resolve_batch(
-    addresses: &[(String, String)],
-) -> Vec<(String, String, MacAddr6)> {
+pub async fn arp_resolve_batch(addresses: &[(String, String)]) -> Vec<(String, String, MacAddr6)> {
     let mut results = Vec::new();
     for (iface, ip_str) in addresses {
         match ip_str.parse::<Ipv4Addr>() {
