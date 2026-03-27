@@ -1472,10 +1472,7 @@ impl FlodbaddL7 {
                             source: L7ResolutionSource::MacosLibproc,
                         },
                     );
-                    trace!(
-                        "macOS eager coalesced resolution for {:?}",
-                        connection
-                    );
+                    trace!("macOS eager coalesced resolution for {:?}", connection);
                     return;
                 }
             }
@@ -1507,9 +1504,7 @@ impl FlodbaddL7 {
     /// sysinfo refresh for the entire batch, then matches each session
     /// against the resulting maps.
     #[cfg(target_os = "macos")]
-    fn eager_macos_resolve_batch(
-        sessions: &[Session],
-    ) -> Vec<(Session, Option<SessionL7>)> {
+    fn eager_macos_resolve_batch(sessions: &[Session]) -> Vec<(Session, Option<SessionL7>)> {
         use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
         let (session_map, _entries) = l7_macos::scan_all_process_sockets(None);
@@ -1566,33 +1561,32 @@ impl FlodbaddL7 {
 
         let parent_pid = process.parent().map(|p| p.as_u32());
 
-        let (parent_process_name, parent_process_path, parent_cmd) =
-            if let Some(ppid) = parent_pid {
-                if let Some(parent_proc) = pid_to_process.get(&ppid) {
-                    (
-                        parent_proc.name().to_string_lossy().to_string(),
-                        parent_proc
-                            .exe()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default(),
-                        parent_proc
-                            .cmd()
-                            .iter()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .collect(),
-                    )
-                } else {
-                    (String::new(), String::new(), Vec::new())
-                }
+        let (parent_process_name, parent_process_path, parent_cmd) = if let Some(ppid) = parent_pid
+        {
+            if let Some(parent_proc) = pid_to_process.get(&ppid) {
+                (
+                    parent_proc.name().to_string_lossy().to_string(),
+                    parent_proc
+                        .exe()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    parent_proc
+                        .cmd()
+                        .iter()
+                        .map(|e| e.to_string_lossy().to_string())
+                        .collect(),
+                )
             } else {
                 (String::new(), String::new(), Vec::new())
-            };
+            }
+        } else {
+            (String::new(), String::new(), Vec::new())
+        };
 
         let (grandparent_pid, grandparent_process_name, grandparent_process_path, grandparent_cmd) =
             Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
 
-        let parent_script_path =
-            Self::extract_script_path(&parent_process_path, &parent_cmd);
+        let parent_script_path = Self::extract_script_path(&parent_process_path, &parent_cmd);
         let grandparent_script_path =
             Self::extract_script_path(&grandparent_process_path, &grandparent_cmd);
         let spawned_from_tmp = Self::originates_from_tmp(
@@ -1652,7 +1646,10 @@ impl FlodbaddL7 {
         let stop_flag_clone = stop_flag.clone();
 
         let handle = tokio::spawn(async move {
-            info!("macOS eager coalescing task started ({}ms window)", COALESCE_WINDOW.as_millis());
+            info!(
+                "macOS eager coalescing task started ({}ms window)",
+                COALESCE_WINDOW.as_millis()
+            );
 
             while !stop_flag_clone.load(Ordering::Relaxed) {
                 let first = match eager_rx.recv().await {
@@ -1673,11 +1670,10 @@ impl FlodbaddL7 {
                 let sessions: Vec<Session> = batch.iter().map(|r| r.session.clone()).collect();
                 let batch_size = sessions.len();
 
-                let results = tokio::task::spawn_blocking(move || {
-                    Self::eager_macos_resolve_batch(&sessions)
-                })
-                .await
-                .unwrap_or_default();
+                let results =
+                    tokio::task::spawn_blocking(move || Self::eager_macos_resolve_batch(&sessions))
+                        .await
+                        .unwrap_or_default();
 
                 let mut resolved = 0usize;
                 for (req, (_session, l7_opt)) in batch.into_iter().zip(results.into_iter()) {
