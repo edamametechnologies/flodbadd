@@ -3827,8 +3827,8 @@ mod tests {
 
         // Check packet stats after traffic generation
         let post_traffic_stats = capture.get_packet_stats().await;
-        let packets_processed =
-            post_traffic_stats.total_processed_cumulative - initial_packet_stats.total_processed_cumulative;
+        let packets_processed = post_traffic_stats.total_processed_cumulative
+            - initial_packet_stats.total_processed_cumulative;
         println!(
             "After traffic generation - total_processed_cumulative: {} (delta: {})",
             post_traffic_stats.total_processed_cumulative, packets_processed
@@ -5182,7 +5182,8 @@ mod tests {
 
         // Check packet stats after traffic generation
         let post_traffic_stats = capture.get_packet_stats().await;
-        let packets_processed = post_traffic_stats.total_processed_cumulative - initial_stats.total_processed_cumulative;
+        let packets_processed = post_traffic_stats.total_processed_cumulative
+            - initial_stats.total_processed_cumulative;
         println!(
             "After traffic generation - total_processed_cumulative: {} (delta: {})",
             post_traffic_stats.total_processed_cumulative, packets_processed
@@ -6099,7 +6100,8 @@ mod tests {
         println!(
             "[OK] First start: Captured {} sessions successfully, {} packets processed",
             first_start_sessions,
-            post_first_traffic_stats.total_processed_cumulative - pre_first_traffic_stats.total_processed_cumulative
+            post_first_traffic_stats.total_processed_cumulative
+                - pre_first_traffic_stats.total_processed_cumulative
         );
 
         // Get initial session details for comparison
@@ -6166,7 +6168,8 @@ mod tests {
         println!(
             "[OK] Restart: Captured {} new sessions successfully, {} packets processed",
             restart_sessions,
-            post_restart_stats.total_processed_cumulative - pre_restart_stats.total_processed_cumulative
+            post_restart_stats.total_processed_cumulative
+                - pre_restart_stats.total_processed_cumulative
         );
 
         // Verify total session count has increased
@@ -6253,7 +6256,8 @@ mod tests {
             "Third cycle: {} -> {} sessions, {} packets processed",
             sessions_before_third_start,
             sessions_after_third_start,
-            post_third_stats.total_processed_cumulative - pre_third_stats.total_processed_cumulative
+            post_third_stats.total_processed_cumulative
+                - pre_third_stats.total_processed_cumulative
         );
 
         assert!(
@@ -6301,7 +6305,9 @@ mod tests {
         let initial_packet_stats = capture.get_packet_stats().await;
         println!(
             "{}: Initial packet stats - total_processed_cumulative: {}, new_sessions: {}",
-            phase, initial_packet_stats.total_processed_cumulative, initial_packet_stats.new_sessions
+            phase,
+            initial_packet_stats.total_processed_cumulative,
+            initial_packet_stats.new_sessions
         );
 
         // Generate HTTP traffic to a reliable endpoint
@@ -6390,8 +6396,8 @@ mod tests {
         let final_count = final_sessions.len();
         let new_sessions = final_count.saturating_sub(initial_count);
         let final_packet_stats = capture.get_packet_stats().await;
-        let packets_processed =
-            final_packet_stats.total_processed_cumulative - initial_packet_stats.total_processed_cumulative;
+        let packets_processed = final_packet_stats.total_processed_cumulative
+            - initial_packet_stats.total_processed_cumulative;
 
         println!(
             "{}: {} -> {} sessions (+{}), packets processed: {}",
