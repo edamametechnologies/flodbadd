@@ -996,13 +996,13 @@ impl FlodbaddL7 {
 
                 // Interruptible sleep -- check stop flag every 500ms so
                 // stop() doesn't have to wait up to 60s for this task.
-                let sleep_end =
-                    tokio::time::Instant::now() + Duration::from_secs(60);
+                let sleep_end = tokio::time::Instant::now() + Duration::from_secs(60);
                 loop {
                     if stop_flag_clone.load(Ordering::Relaxed) {
                         break;
                     }
-                    let remaining = sleep_end.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining =
+                        sleep_end.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
                         break;
                     }
