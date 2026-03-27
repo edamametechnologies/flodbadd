@@ -448,21 +448,20 @@ pub async fn process_parsed_packet(
         deactivated: false,
     };
 
-    let (dst_domain, dst_domain_type) =
-        if let Some(ref payload) = parsed_packet.tls_client_hello {
-            if let Some(sni_info) = sni::extract_sni(payload) {
-                trace!(
-                    "Extracted SNI hostname '{}' for session {:?}",
-                    sni_info.hostname,
-                    key
-                );
-                (Some(sni_info.hostname), DomainResolutionType::SNI)
-            } else {
-                (None, DomainResolutionType::None)
-            }
+    let (dst_domain, dst_domain_type) = if let Some(ref payload) = parsed_packet.tls_client_hello {
+        if let Some(sni_info) = sni::extract_sni(payload) {
+            trace!(
+                "Extracted SNI hostname '{}' for session {:?}",
+                sni_info.hostname,
+                key
+            );
+            (Some(sni_info.hostname), DomainResolutionType::SNI)
         } else {
             (None, DomainResolutionType::None)
-        };
+        }
+    } else {
+        (None, DomainResolutionType::None)
+    };
 
     let session_info = SessionInfo {
         session: key.clone(),
