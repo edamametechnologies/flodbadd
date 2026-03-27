@@ -994,8 +994,20 @@ impl FlodbaddL7 {
                     debug!("Evicted {} stale L7Resolution entries", evicted);
                 }
 
-                // Sleep for a while before the next cleanup
-                sleep(Duration::from_secs(60)).await;
+                // Interruptible sleep -- check stop flag every 500ms so
+                // stop() doesn't have to wait up to 60s for this task.
+                let sleep_end =
+                    tokio::time::Instant::now() + Duration::from_secs(60);
+                loop {
+                    if stop_flag_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let remaining = sleep_end.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    sleep(remaining.min(Duration::from_millis(500))).await;
+                }
             }
 
             info!("L7 cache cleanup task completed");
@@ -1043,7 +1055,26 @@ impl FlodbaddL7 {
             );
 
             while !stop_flag_clone.load(Ordering::Relaxed) {
-                sleep(Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS)).await;
+                // Interruptible sleep -- check stop flag every 500ms so
+                // stop() doesn't have to wait the full scan interval.
+                {
+                    let sleep_end = tokio::time::Instant::now()
+                        + Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS);
+                    loop {
+                        if stop_flag_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let remaining =
+                            sleep_end.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        sleep(remaining.min(Duration::from_millis(500))).await;
+                    }
+                    if stop_flag_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
 
                 // Collect (pid, needs_full_scan) for resolved entries, dedup by
                 // PID so we scan each process at most once.  Entries with empty
