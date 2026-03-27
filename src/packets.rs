@@ -310,238 +310,201 @@ pub async fn process_parsed_packet(
         return;
     }
 
-    // Use entry().or_insert_with() to atomically check and insert if not exists
-    let entry = sessions.entry(key.clone());
-    match entry {
-        Entry::Occupied(mut occ) => {
-            // --- Increment Update Counter (both windowed and cumulative) ---
-            PACKET_STATS
-                .updated_sessions
-                .fetch_add(1, Ordering::Relaxed);
-            PACKET_STATS
-                .updated_sessions_cumulative
-                .fetch_add(1, Ordering::Relaxed);
-            // --- End Increment Update Counter ---
+    // --- New session: perform all async lookups BEFORE touching the DashMap ---
+    // Another packet might create this session while we do lookups; we handle
+    // that race in the Entry::Occupied arm at the end.
 
+    PACKET_STATS.new_sessions.fetch_add(1, Ordering::Relaxed);
+    PACKET_STATS
+        .new_sessions_cumulative
+        .fetch_add(1, Ordering::Relaxed);
+
+    let uid = Uuid::new_v4().to_string();
+
+    let mut stats = SessionStats {
+        start_time: now,
+        end_time: None,
+        last_activity: now,
+        inbound_bytes: 0,
+        outbound_bytes: 0,
+        orig_pkts: 0,
+        resp_pkts: 0,
+        orig_ip_bytes: 0,
+        resp_ip_bytes: 0,
+        history: String::new(),
+        conn_state: None,
+        missed_bytes: 0,
+        average_packet_size: 0.0,
+        inbound_outbound_ratio: 0.0,
+        segment_count: 0,
+        current_segment_start: now,
+        last_segment_end: None,
+        segment_interarrival: 0.0,
+        total_segment_interarrival: 0.0,
+        in_segment: true,
+        segment_timeout: 5.0,
+    };
+
+    if is_originator {
+        stats.outbound_bytes += parsed_packet.packet_length as u64;
+        stats.orig_pkts += 1;
+        stats.orig_ip_bytes += parsed_packet.ip_packet_length as u64;
+    } else {
+        stats.inbound_bytes += parsed_packet.packet_length as u64;
+        stats.resp_pkts += 1;
+        stats.resp_ip_bytes += parsed_packet.ip_packet_length as u64;
+    }
+
+    let total_packets = stats.orig_pkts + stats.resp_pkts;
+    let total_bytes = stats.inbound_bytes + stats.outbound_bytes;
+    stats.average_packet_size = if total_packets > 0 {
+        total_bytes as f64 / total_packets as f64
+    } else {
+        0.0
+    };
+
+    stats.inbound_outbound_ratio = if stats.outbound_bytes > 0 {
+        stats.inbound_bytes as f64 / stats.outbound_bytes as f64
+    } else {
+        0.0
+    };
+
+    if let Some(flags) = parsed_packet.flags {
+        let c = map_tcp_flags(flags, parsed_packet.packet_length, is_originator);
+        stats.history.push(c);
+
+        if parsed_packet.session.protocol == Protocol::TCP && (flags & TCP_PSH) != 0 {
+            stats.segment_count = 1;
+            stats.in_segment = false;
+            stats.last_segment_end = Some(now);
+        }
+
+        if (flags & (TcpFlags::FIN | TcpFlags::RST)) != 0 {
+            stats.end_time = Some(now);
+            stats.conn_state = Some(determine_conn_state(&stats.history));
+        }
+    }
+
+    let is_local_src = is_lan_ip(&key.src_ip);
+    let is_local_dst = is_lan_ip(&key.dst_ip);
+    let is_self_src = own_ips.contains(&key.src_ip);
+    let is_self_dst = own_ips.contains(&key.dst_ip);
+
+    trace!("New session: {:?}. Performing lookups concurrently.", key);
+
+    let src_ip_lookup = key.src_ip;
+    let dst_ip_lookup = key.dst_ip;
+
+    let dst_service = if key.dst_port == parsed_packet.session.dst_port {
+        if !dst_service_name.is_empty() {
+            Some(dst_service_name)
+        } else {
+            None
+        }
+    } else if key.dst_port == parsed_packet.session.src_port {
+        if !src_service_name.is_empty() {
+            Some(src_service_name)
+        } else {
+            None
+        }
+    } else {
+        warn!("Unexpected port mismatch in session key. Will look up service name.");
+        let name = get_name_from_port(key.dst_port).await;
+        if !name.is_empty() {
+            Some(name)
+        } else {
+            None
+        }
+    };
+
+    let (src_asn_opt, dst_asn_opt) = tokio::join!(
+        async {
+            if !is_local_src {
+                get_asn(src_ip_lookup).await
+            } else {
+                None
+            }
+        },
+        async {
+            if !is_local_dst {
+                get_asn(dst_ip_lookup).await
+            } else {
+                None
+            }
+        },
+    );
+
+    trace!("Lookups completed for session: {:?}", key);
+
+    if let Some(l7) = l7 {
+        l7.add_connection_to_resolver(&key).await;
+        trace!("Added session {:?} to L7 resolver queue", key);
+    }
+
+    let status = SessionStatus {
+        active: true,
+        added: true,
+        activated: true,
+        deactivated: false,
+    };
+
+    let (dst_domain, dst_domain_type) =
+        if let Some(ref payload) = parsed_packet.tls_client_hello {
+            if let Some(sni_info) = sni::extract_sni(payload) {
+                trace!(
+                    "Extracted SNI hostname '{}' for session {:?}",
+                    sni_info.hostname,
+                    key
+                );
+                (Some(sni_info.hostname), DomainResolutionType::SNI)
+            } else {
+                (None, DomainResolutionType::None)
+            }
+        } else {
+            (None, DomainResolutionType::None)
+        };
+
+    let session_info = SessionInfo {
+        session: key.clone(),
+        stats,
+        status,
+        is_local_src,
+        is_local_dst,
+        is_self_src,
+        is_self_dst,
+        src_domain: None,
+        dst_domain,
+        dst_service,
+        l7: None,
+        src_asn: src_asn_opt,
+        dst_asn: dst_asn_opt,
+        is_whitelisted: WhitelistState::Unknown,
+        criticality: "".to_string(),
+        dismissed: false,
+        whitelist_reason: None,
+        src_domain_type: DomainResolutionType::None,
+        dst_domain_type,
+        uid,
+        last_modified: Utc::now(),
+    };
+
+    // All async work is done -- now do a quick atomic insert.
+    // Use entry() so we handle the race where another packet created
+    // this session while we were doing lookups.
+    match sessions.entry(key.clone()) {
+        Entry::Occupied(mut occ) => {
             let info = occ.get_mut();
             update_session_stats(&mut info.stats, &parsed_packet, now, is_originator);
-            // Update last_modified timestamp since stats changed
             info.last_modified = now;
         }
         Entry::Vacant(vacant) => {
-            // --- Increment New Session Counter (both windowed and cumulative) ---
-            PACKET_STATS.new_sessions.fetch_add(1, Ordering::Relaxed);
-            PACKET_STATS
-                .new_sessions_cumulative
-                .fetch_add(1, Ordering::Relaxed);
-            // --- End Increment New Session Counter ---
-
-            // New session
-            let uid = Uuid::new_v4().to_string();
-
-            let mut stats = SessionStats {
-                start_time: now,
-                end_time: None,
-                last_activity: now,
-                inbound_bytes: 0,
-                outbound_bytes: 0,
-                orig_pkts: 0,
-                resp_pkts: 0,
-                orig_ip_bytes: 0,
-                resp_ip_bytes: 0,
-                history: String::new(),
-                conn_state: None,
-                missed_bytes: 0,
-
-                // Initialize new traffic statistics
-                average_packet_size: 0.0, // Initialize to 0, will be updated after we add bytes
-                inbound_outbound_ratio: 0.0, // Will update after we add bytes
-
-                // Initialize segment tracking
-                segment_count: 0,
-                current_segment_start: now,
-                last_segment_end: None,
-                segment_interarrival: 0.0,
-                total_segment_interarrival: 0.0,
-                in_segment: true, // First packet starts a segment
-
-                // Default timeout for segment detection
-                segment_timeout: 5.0, // 5 seconds by default
-            };
-
-            // Update session stats based on the first packet
-            if is_originator {
-                stats.outbound_bytes += parsed_packet.packet_length as u64;
-                stats.orig_pkts += 1;
-                stats.orig_ip_bytes += parsed_packet.ip_packet_length as u64;
-            } else {
-                stats.inbound_bytes += parsed_packet.packet_length as u64;
-                stats.resp_pkts += 1;
-                stats.resp_ip_bytes += parsed_packet.ip_packet_length as u64;
-            }
-
-            // Calculate average packet size after adding bytes
-            let total_packets = stats.orig_pkts + stats.resp_pkts;
-            let total_bytes = stats.inbound_bytes + stats.outbound_bytes;
-            stats.average_packet_size = if total_packets > 0 {
-                total_bytes as f64 / total_packets as f64
-            } else {
-                0.0
-            };
-
-            // Calculate inbound/outbound ratio (might be 0.0 or infinity initially)
-            stats.inbound_outbound_ratio = if stats.outbound_bytes > 0 {
-                stats.inbound_bytes as f64 / stats.outbound_bytes as f64
-            } else {
-                0.0
-            };
-
-            // Update history with correct direction
-            if let Some(flags) = parsed_packet.flags {
-                let c = map_tcp_flags(flags, parsed_packet.packet_length, is_originator);
-                stats.history.push(c);
-
-                // Check for TCP PUSH flag for segment tracking
-                if parsed_packet.session.protocol == Protocol::TCP && (flags & TCP_PSH) != 0 {
-                    // This packet ends a segment
-                    stats.segment_count = 1;
-                    stats.in_segment = false;
-                    stats.last_segment_end = Some(now);
-                }
-
-                // Check for FIN or RST flags to properly set end_time for new sessions
-                if (flags & (TcpFlags::FIN | TcpFlags::RST)) != 0 {
-                    stats.end_time = Some(now);
-                    stats.conn_state = Some(determine_conn_state(&stats.history));
-                }
-            }
-
-            // Determine locality flags based on the session key (which might be swapped)
-            let is_local_src = is_lan_ip(&key.src_ip);
-            let is_local_dst = is_lan_ip(&key.dst_ip);
-
-            // Update self flags based on the session key (which might be swapped)
-            let is_self_src = own_ips.contains(&key.src_ip);
-            let is_self_dst = own_ips.contains(&key.dst_ip);
-
-            trace!("New session: {:?}. Performing lookups concurrently.", key);
-
-            let src_ip_lookup = key.src_ip;
-            let dst_ip_lookup = key.dst_ip;
-
-            // Get the service name for destination port
-            let dst_service = if key.dst_port == parsed_packet.session.dst_port {
-                // If we didn't swap, use the dst_service_name we already looked up
-                if !dst_service_name.is_empty() {
-                    Some(dst_service_name)
-                } else {
-                    None
-                }
-            } else if key.dst_port == parsed_packet.session.src_port {
-                // If we swapped, use the src_service_name we already looked up
-                if !src_service_name.is_empty() {
-                    Some(src_service_name)
-                } else {
-                    None
-                }
-            } else {
-                // This shouldn't happen, but just in case
-                warn!("Unexpected port mismatch in session key. Will look up service name.");
-                let name = get_name_from_port(key.dst_port).await;
-                if !name.is_empty() {
-                    Some(name)
-                } else {
-                    None
-                }
-            };
-
-            let (src_asn_opt, dst_asn_opt) = tokio::join!(
-                // Source ASN lookup (only if not local)
-                async {
-                    if !is_local_src {
-                        get_asn(src_ip_lookup).await
-                    } else {
-                        None
-                    }
-                },
-                // Destination ASN lookup (only if not local)
-                async {
-                    if !is_local_dst {
-                        get_asn(dst_ip_lookup).await
-                    } else {
-                        None
-                    }
-                },
-            );
-            // --- Lookups finished ---
-
-            trace!("Lookups completed for session: {:?}", key);
-
-            // Queue the new session for L7 resolution
-            if let Some(l7) = l7 {
-                l7.add_connection_to_resolver(&key).await;
-                trace!("Added session {:?} to L7 resolver queue", key);
-            }
-
-            // Set initial status
-            let status = SessionStatus {
-                active: true, // A new session is active by definition
-                added: true,
-                activated: true, // It's newly activated
-                deactivated: false,
-            };
-
-            // Try to extract SNI from TLS ClientHello if available
-            let (dst_domain, dst_domain_type) =
-                if let Some(ref payload) = parsed_packet.tls_client_hello {
-                    if let Some(sni_info) = sni::extract_sni(payload) {
-                        trace!(
-                            "Extracted SNI hostname '{}' for session {:?}",
-                            sni_info.hostname,
-                            key
-                        );
-                        (Some(sni_info.hostname), DomainResolutionType::SNI)
-                    } else {
-                        (None, DomainResolutionType::None)
-                    }
-                } else {
-                    (None, DomainResolutionType::None)
-                };
-
-            // Create the SessionInfo struct using the results from join!
-            let session_info = SessionInfo {
-                session: key.clone(),
-                stats,
-                status,
-                is_local_src,
-                is_local_dst,
-                is_self_src,
-                is_self_dst,
-                src_domain: None, // Domain resolution happens later
-                dst_domain,       // May be set from SNI extraction
-                dst_service: dst_service,
-                l7: None, // L7 resolution happens later
-                src_asn: src_asn_opt,
-                dst_asn: dst_asn_opt,
-                is_whitelisted: WhitelistState::Unknown, // Whitelist check happens later
-                criticality: "".to_string(),             // Blacklist check happens later
-                dismissed: false,
-                whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type, // Set from SNI extraction
-                uid: uid,
-                last_modified: Utc::now(),
-            };
-
-            // Insert the session info and maintain lock until insertion is complete
             vacant.insert(session_info);
             trace!("Inserted session info for {:?} into main map", key);
-
-            // Add the key to the current sessions vector
-            current_sessions.write().await.push(key.clone());
-            trace!("Added session key {:?} to current sessions vector", key);
         }
     }
+
+    current_sessions.write().await.push(key.clone());
+    trace!("Added session key {:?} to current sessions vector", key);
     PACKET_STATS.log_and_reset();
 }
 
