@@ -140,7 +140,7 @@ pub struct ProcessCacheEntry {
 }
 
 /// Pending eager resolution request submitted by the packet hot path.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
 struct EagerRequest {
     session: Session,
     tx: tokio::sync::oneshot::Sender<Option<SessionL7>>,
@@ -156,17 +156,17 @@ pub struct FlodbaddL7 {
     cache_cleanup_handle: Option<TaskHandle>,
     sensitive_scan_handle: Option<TaskHandle>,
     host_service_cache: Arc<CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     eager_tx: tokio::sync::mpsc::UnboundedSender<EagerRequest>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     eager_rx: Option<tokio::sync::mpsc::UnboundedReceiver<EagerRequest>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     eager_handle: Option<TaskHandle>,
 }
 
 impl FlodbaddL7 {
     pub fn new() -> Self {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
         let (eager_tx, eager_rx) = tokio::sync::mpsc::unbounded_channel::<EagerRequest>();
 
         Self {
@@ -179,11 +179,11 @@ impl FlodbaddL7 {
             cache_cleanup_handle: None,
             sensitive_scan_handle: None,
             host_service_cache: Arc::new(CustomDashMap::new("host_service_cache")),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
             eager_tx,
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
             eager_rx: Some(eager_rx),
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
             eager_handle: None,
         }
     }
@@ -200,7 +200,7 @@ impl FlodbaddL7 {
 
         self.start_sensitive_scan_task().await;
 
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
         self.start_eager_coalescing_task().await;
     }
 
@@ -225,7 +225,7 @@ impl FlodbaddL7 {
             info!("Stopped sensitive file scan task");
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
         if let Some(task_handle) = self.eager_handle.take() {
             task_handle.stop_flag.store(true, Ordering::Relaxed);
             let _ = task_handle.handle.await;
@@ -1481,7 +1481,7 @@ impl FlodbaddL7 {
         // macOS eager probe: submit to the coalescing task which batches
         // multiple sessions into a single scan_all_process_sockets + sysinfo
         // refresh, amortising the cost across concurrent arrivals.
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
         if eager {
             let (tx, rx) = tokio::sync::oneshot::channel();
             if self
@@ -1534,9 +1534,9 @@ impl FlodbaddL7 {
     /// Performs ONE scan_all_process_sockets (libproc PID scan) and ONE
     /// sysinfo refresh for the entire batch, then matches each session
     /// against the resulting maps.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     fn eager_macos_resolve_batch(sessions: &[Session]) -> Vec<(Session, Option<SessionL7>)> {
-        use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+        use sysinfo::{ProcessRefreshKind, RefreshKind, System, Users};
 
         let (session_map, _entries) = l7_macos::scan_all_process_sockets(None);
 
@@ -1561,23 +1561,46 @@ impl FlodbaddL7 {
             .map(|(pid, proc_ref)| (pid.as_u32(), proc_ref))
             .collect();
 
+        let mut sysinfo_users = Users::new();
+        sysinfo_users.refresh();
+        let uid_to_username: HashMap<&sysinfo::Uid, &str> = sysinfo_users
+            .iter()
+            .map(|user| (user.id(), user.name()))
+            .collect();
+
         let mut results: Vec<(Session, Option<SessionL7>)> =
             sessions.iter().map(|s| (s.clone(), None)).collect();
 
         for (idx, pid) in matched_pids {
-            results[idx].1 = Self::build_l7_from_pid(pid, &pid_to_process);
+            results[idx].1 = Self::build_l7_from_pid(pid, &pid_to_process, &uid_to_username);
         }
 
         results
     }
 
     /// Build a SessionL7 from a PID using a pre-populated pid_to_process map.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     fn build_l7_from_pid(
         pid: u32,
         pid_to_process: &HashMap<u32, &sysinfo::Process>,
+        uid_to_username: &HashMap<&sysinfo::Uid, &str>,
     ) -> Option<SessionL7> {
         let process = pid_to_process.get(&pid)?;
+
+        let username = if let Some(user_id) = process.user_id() {
+            match uid_to_username.get(&user_id).map(|s| s.to_string()) {
+                Some(name) => name,
+                None => {
+                    if let Some(user) = users::get_user_by_uid(**user_id) {
+                        user.name().to_string_lossy().to_string()
+                    } else {
+                        String::new()
+                    }
+                }
+            }
+        } else {
+            String::new()
+        };
 
         let process_name = process.name().to_string_lossy().to_string();
         let process_path = process
@@ -1589,6 +1612,27 @@ impl FlodbaddL7 {
             .iter()
             .map(|e| e.to_string_lossy().to_string())
             .collect();
+        let cwd = process
+            .cwd()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|p| !p.is_empty());
+        let memory = process.memory();
+        let run_time = process.run_time();
+        let accumulated_cpu_time = process.accumulated_cpu_time();
+        let cpu_usage = if run_time > 0 {
+            ((accumulated_cpu_time as f64 * 10.0) / run_time as f64).round() as u32
+        } else {
+            0
+        };
+        let disk_stats = process.disk_usage();
+        let disk_usage = SessionProcessDiskUsage {
+            total_written_bytes: disk_stats.total_written_bytes,
+            written_bytes: disk_stats.written_bytes,
+            total_read_bytes: disk_stats.total_read_bytes,
+            read_bytes: disk_stats.read_bytes,
+        };
+        let open_files =
+            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
 
         let parent_pid = process.parent().map(|p| p.as_u32());
 
@@ -1633,16 +1677,16 @@ impl FlodbaddL7 {
             pid,
             process_name,
             process_path,
-            username: String::new(),
+            username,
             cmd,
-            cwd: None,
-            memory: 0,
+            cwd,
+            memory,
             start_time: process.start_time(),
-            run_time: process.run_time(),
-            cpu_usage: 0,
-            accumulated_cpu_time: 0,
-            disk_usage: Default::default(),
-            open_files: Default::default(),
+            run_time,
+            cpu_usage,
+            accumulated_cpu_time,
+            disk_usage,
+            open_files,
             parent_pid,
             parent_process_name,
             parent_process_path,
@@ -1661,7 +1705,7 @@ impl FlodbaddL7 {
     /// in micro-batches: waits up to 50ms after the first request to
     /// accumulate more, then resolves the whole batch with a single system
     /// scan.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
     async fn start_eager_coalescing_task(&mut self) {
         const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 

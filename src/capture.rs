@@ -3770,11 +3770,11 @@ mod tests {
         whitelists::reset_to_default().await;
         blacklists::reset_to_default().await;
 
-        // Get initial packet stats
+        // Get initial packet stats (use cumulative counter -- windowed resets every 30s)
         let initial_packet_stats = capture.get_packet_stats().await;
         println!(
-            "Initial packet stats - total_processed: {}",
-            initial_packet_stats.total_processed
+            "Initial packet stats - total_processed_cumulative: {}",
+            initial_packet_stats.total_processed_cumulative
         );
 
         let default_interface = match get_default_interface() {
@@ -3828,10 +3828,10 @@ mod tests {
         // Check packet stats after traffic generation
         let post_traffic_stats = capture.get_packet_stats().await;
         let packets_processed =
-            post_traffic_stats.total_processed - initial_packet_stats.total_processed;
+            post_traffic_stats.total_processed_cumulative - initial_packet_stats.total_processed_cumulative;
         println!(
-            "After traffic generation - total_processed: {} (delta: {})",
-            post_traffic_stats.total_processed, packets_processed
+            "After traffic generation - total_processed_cumulative: {} (delta: {})",
+            post_traffic_stats.total_processed_cumulative, packets_processed
         );
 
         // --- Initial Session Check ---
@@ -5123,11 +5123,11 @@ mod tests {
         println!("--- Starting test_capture_start_stop ---");
         let capture = Arc::new(FlodbaddCapture::new());
 
-        // Get initial packet stats
+        // Get initial packet stats (use cumulative counter -- windowed resets every 30s)
         let initial_stats = capture.get_packet_stats().await;
         println!(
-            "Initial packet stats - total_processed: {}",
-            initial_stats.total_processed
+            "Initial packet stats - total_processed_cumulative: {}",
+            initial_stats.total_processed_cumulative
         );
 
         let default_interface = match get_default_interface() {
@@ -5182,10 +5182,10 @@ mod tests {
 
         // Check packet stats after traffic generation
         let post_traffic_stats = capture.get_packet_stats().await;
-        let packets_processed = post_traffic_stats.total_processed - initial_stats.total_processed;
+        let packets_processed = post_traffic_stats.total_processed_cumulative - initial_stats.total_processed_cumulative;
         println!(
-            "After traffic generation - total_processed: {} (delta: {})",
-            post_traffic_stats.total_processed, packets_processed
+            "After traffic generation - total_processed_cumulative: {} (delta: {})",
+            post_traffic_stats.total_processed_cumulative, packets_processed
         );
 
         // Check sessions
@@ -5193,15 +5193,15 @@ mod tests {
         let initial_sessions = capture.get_sessions(false).await;
         assert!(
             !initial_sessions.is_empty(),
-            "Capture should have sessions after traffic generation. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
-            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
+            "Capture should have sessions after traffic generation. Packet stats: total_processed_cumulative={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed_cumulative, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!("Found {} initial sessions.", initial_sessions.len());
         let initial_current_sessions = capture.get_current_sessions(false).await;
         assert!(
             !initial_current_sessions.is_empty(),
-            "Capture should have current sessions. Packet stats: total_processed={}, new_sessions={}, updated_sessions={}",
-            post_traffic_stats.total_processed, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
+            "Capture should have current sessions. Packet stats: total_processed_cumulative={}, new_sessions={}, updated_sessions={}",
+            post_traffic_stats.total_processed_cumulative, post_traffic_stats.new_sessions, post_traffic_stats.updated_sessions
         );
         println!(
             "Found {} initial current sessions.",
@@ -5217,9 +5217,9 @@ mod tests {
         // Final packet stats check
         let final_stats = capture.get_packet_stats().await;
         println!(
-            "Final packet stats - total_processed: {} (total test delta: {})",
-            final_stats.total_processed,
-            final_stats.total_processed - initial_stats.total_processed
+            "Final packet stats - total_processed_cumulative: {} (total test delta: {})",
+            final_stats.total_processed_cumulative,
+            final_stats.total_processed_cumulative - initial_stats.total_processed_cumulative
         );
 
         println!("--- test_capture_start_stop completed successfully ---");
@@ -6092,14 +6092,14 @@ mod tests {
 
         assert!(
             first_start_sessions > 0,
-            "Should have captured sessions after first start. Packet stats: total_processed={} -> {} (delta: {})",
-            pre_first_traffic_stats.total_processed, post_first_traffic_stats.total_processed,
-            post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
+            "Should have captured sessions after first start. Packet stats: total_processed_cumulative={} -> {} (delta: {})",
+            pre_first_traffic_stats.total_processed_cumulative, post_first_traffic_stats.total_processed_cumulative,
+            post_first_traffic_stats.total_processed_cumulative - pre_first_traffic_stats.total_processed_cumulative
         );
         println!(
             "[OK] First start: Captured {} sessions successfully, {} packets processed",
             first_start_sessions,
-            post_first_traffic_stats.total_processed - pre_first_traffic_stats.total_processed
+            post_first_traffic_stats.total_processed_cumulative - pre_first_traffic_stats.total_processed_cumulative
         );
 
         // Get initial session details for comparison
@@ -6159,14 +6159,14 @@ mod tests {
 
         assert!(
             restart_sessions > 0,
-            "Should have captured new sessions after restart. Packet stats: total_processed={} -> {} (delta: {})",
-            pre_restart_stats.total_processed, post_restart_stats.total_processed,
-            post_restart_stats.total_processed - pre_restart_stats.total_processed
+            "Should have captured new sessions after restart. Packet stats: total_processed_cumulative={} -> {} (delta: {})",
+            pre_restart_stats.total_processed_cumulative, post_restart_stats.total_processed_cumulative,
+            post_restart_stats.total_processed_cumulative - pre_restart_stats.total_processed_cumulative
         );
         println!(
             "[OK] Restart: Captured {} new sessions successfully, {} packets processed",
             restart_sessions,
-            post_restart_stats.total_processed - pre_restart_stats.total_processed
+            post_restart_stats.total_processed_cumulative - pre_restart_stats.total_processed_cumulative
         );
 
         // Verify total session count has increased
@@ -6253,14 +6253,14 @@ mod tests {
             "Third cycle: {} -> {} sessions, {} packets processed",
             sessions_before_third_start,
             sessions_after_third_start,
-            post_third_stats.total_processed - pre_third_stats.total_processed
+            post_third_stats.total_processed_cumulative - pre_third_stats.total_processed_cumulative
         );
 
         assert!(
             sessions_after_third_start >= sessions_before_third_start,
-            "Session count should not decrease in third cycle. Packet stats: total_processed={} -> {} (delta: {})",
-            pre_third_stats.total_processed, post_third_stats.total_processed,
-            post_third_stats.total_processed - pre_third_stats.total_processed
+            "Session count should not decrease in third cycle. Packet stats: total_processed_cumulative={} -> {} (delta: {})",
+            pre_third_stats.total_processed_cumulative, post_third_stats.total_processed_cumulative,
+            post_third_stats.total_processed_cumulative - pre_third_stats.total_processed_cumulative
         );
 
         // === CLEANUP ===
@@ -6300,8 +6300,8 @@ mod tests {
         let initial_count = initial_sessions.len();
         let initial_packet_stats = capture.get_packet_stats().await;
         println!(
-            "{}: Initial packet stats - total_processed: {}, new_sessions: {}",
-            phase, initial_packet_stats.total_processed, initial_packet_stats.new_sessions
+            "{}: Initial packet stats - total_processed_cumulative: {}, new_sessions: {}",
+            phase, initial_packet_stats.total_processed_cumulative, initial_packet_stats.new_sessions
         );
 
         // Generate HTTP traffic to a reliable endpoint
@@ -6391,7 +6391,7 @@ mod tests {
         let new_sessions = final_count.saturating_sub(initial_count);
         let final_packet_stats = capture.get_packet_stats().await;
         let packets_processed =
-            final_packet_stats.total_processed - initial_packet_stats.total_processed;
+            final_packet_stats.total_processed_cumulative - initial_packet_stats.total_processed_cumulative;
 
         println!(
             "{}: {} -> {} sessions (+{}), packets processed: {}",
@@ -6400,8 +6400,8 @@ mod tests {
 
         // Diagnostic check: if no sessions but packets were processed, log warning
         if new_sessions == 0 && packets_processed > 0 {
-            println!("WARNING [{}]: {} packets processed but no new sessions created. Final stats: total={}, new_sessions={}, updated_sessions={}", 
-                    phase, packets_processed, final_packet_stats.total_processed,
+            println!("WARNING [{}]: {} packets processed but no new sessions created. Final stats: total_cumulative={}, new_sessions={}, updated_sessions={}", 
+                    phase, packets_processed, final_packet_stats.total_processed_cumulative,
                     final_packet_stats.new_sessions, final_packet_stats.updated_sessions);
         } else if new_sessions > 0 && packets_processed == 0 {
             println!(

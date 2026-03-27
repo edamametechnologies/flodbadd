@@ -18,6 +18,7 @@ default = []
 asyncpacketcapture = []
 packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "sysinfo", "netstat2" ]
 ebpf = [ "aya", "bytemuck", "nix", "l7_ebpf_program" ]
+macoseagerl7 = []
 examples = ["clap", "tracing-subscriber"]
 
 [dependencies]
