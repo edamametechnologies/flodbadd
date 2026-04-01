@@ -348,6 +348,70 @@ mod macos {
             self.process_table.len()
         }
 
+        /// Targeted session resolution: iterate ES-known PIDs and probe their
+        /// sockets via libproc until the matching session is found.  Much faster
+        /// than a full `scan_all_process_sockets()` because we only visit PIDs
+        /// the kernel told us about and short-circuit on the first match.
+        #[cfg(target_os = "macos")]
+        pub fn get_l7_for_session(&self, session: &crate::sessions::Session) -> Option<SessionL7> {
+            use crate::l7_macos;
+
+            if !self.is_available() {
+                return None;
+            }
+
+            let reverse = crate::sessions::Session {
+                protocol: session.protocol.clone(),
+                src_ip: session.dst_ip,
+                src_port: session.dst_port,
+                dst_ip: session.src_ip,
+                dst_port: session.src_port,
+            };
+
+            for entry in self.process_table.iter() {
+                let pid = *entry.key();
+                let es_info = entry.value();
+                for sock in l7_macos::scan_process_sockets(pid) {
+                    let sock_session = crate::sessions::Session {
+                        protocol: sock.protocol.clone(),
+                        src_ip: sock.local_ip,
+                        src_port: sock.local_port,
+                        dst_ip: sock.remote_ip,
+                        dst_port: sock.remote_port,
+                    };
+                    if sock_session == *session || sock_session == reverse {
+                        let mut l7 = SessionL7 {
+                            pid,
+                            process_name: es_info.process_name.clone(),
+                            process_path: es_info.process_path.clone(),
+                            username: es_info.username.clone(),
+                            cmd: es_info.args.clone(),
+                            cwd: es_info.cwd.clone(),
+                            start_time: es_info.start_time,
+                            parent_pid: Some(es_info.ppid),
+                            parent_process_name: es_info.parent_process_name.clone(),
+                            parent_process_path: es_info.parent_process_path.clone(),
+                            parent_cmd: es_info.parent_args.clone(),
+                            grandparent_pid: es_info.grandparent_pid,
+                            grandparent_process_name: es_info.grandparent_process_name.clone(),
+                            grandparent_process_path: es_info.grandparent_process_path.clone(),
+                            grandparent_cmd: es_info.grandparent_args.clone(),
+                            ..Default::default()
+                        };
+                        fn path_is_tmp(p: &str) -> bool {
+                            let lp = p.to_lowercase();
+                            lp.starts_with("/tmp/") || lp.starts_with("/var/tmp/") || lp.starts_with("/dev/shm/")
+                        }
+                        l7.spawned_from_tmp = path_is_tmp(&l7.process_path)
+                            || path_is_tmp(&l7.parent_process_path)
+                            || path_is_tmp(&l7.grandparent_process_path);
+                        return Some(l7);
+                    }
+                }
+            }
+            None
+        }
+
         pub fn enrich_session_l7(&self, pid: u32, base_l7: &mut SessionL7) {
             if let Some(info) = self.process_table.get(&pid) {
                 let info = info.value();
@@ -409,6 +473,10 @@ mod macos {
     pub struct FlodbaddL7Es;
 
     impl FlodbaddL7Es {
+        pub fn get_l7_for_session(&self, _session: &crate::sessions::Session) -> Option<SessionL7> {
+            None
+        }
+
         pub fn get_process_info(&self, _pid: u32) -> Option<EsProcessInfo> {
             None
         }
@@ -439,6 +507,18 @@ mod macos {
 }
 
 pub use macos::EsProcessInfo;
+
+pub fn get_l7_for_session(session: &crate::sessions::Session) -> Option<SessionL7> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::global().get_l7_for_session(session)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = session;
+        None
+    }
+}
 
 pub fn get_process_info(pid: u32) -> Option<EsProcessInfo> {
     macos::global().get_process_info(pid)

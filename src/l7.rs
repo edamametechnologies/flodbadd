@@ -1450,9 +1450,8 @@ impl FlodbaddL7 {
             return;
         }
 
-        // Try eBPF eagerly: if the kernel already captured this connection we can
-        // resolve it immediately, including /proc/<pid>/fd for open_files, before
-        // the process exits. This is critical for short-lived processes.
+        // Try kernel-level sources eagerly: if a kernel table already has this
+        // connection we can resolve it immediately before the process exits.
         if eager {
             if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
                 Self::enrich_ebpf_l7_from_proc(&mut l7_data);
@@ -1466,10 +1465,38 @@ impl FlodbaddL7 {
                         source: L7ResolutionSource::Ebpf,
                     },
                 );
-                trace!(
-                    "eBPF eager resolution for {:?} in add_connection_to_resolver",
-                    connection
+                trace!("eBPF eager resolution for {:?}", connection);
+                return;
+            }
+
+            if let Some(mut l7_data) = l7_etw::get_l7_for_session(connection) {
+                l7_etw::enrich_session_l7(l7_data.pid, &mut l7_data);
+                self.l7_map.insert(
+                    connection.clone(),
+                    L7Resolution {
+                        l7: Some(l7_data),
+                        date: Utc::now(),
+                        retry_count: 0,
+                        last_retry: None,
+                        source: L7ResolutionSource::Etw,
+                    },
                 );
+                trace!("ETW eager resolution for {:?}", connection);
+                return;
+            }
+
+            if let Some(l7_data) = l7_es::get_l7_for_session(connection) {
+                self.l7_map.insert(
+                    connection.clone(),
+                    L7Resolution {
+                        l7: Some(l7_data),
+                        date: Utc::now(),
+                        retry_count: 0,
+                        last_retry: None,
+                        source: L7ResolutionSource::EndpointSecurity,
+                    },
+                );
+                trace!("ES+libproc eager resolution for {:?}", connection);
                 return;
             }
         }
@@ -1495,31 +1522,9 @@ impl FlodbaddL7 {
         self.add_connection_to_resolver_ex(connection, true).await;
     }
 
-    pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {
-        // Check cached result first
-        if let Some(l7) = self.l7_map.get(connection).map(|s| s.value().clone()) {
-            if l7.l7.is_some() {
-                return Some(l7);
-            }
-            // Cached entry exists but L7 is still unresolved -- try eBPF before
-            // returning None-like data. The eBPF map may have been populated
-            // after the placeholder was inserted by add_connection_to_resolver.
-            if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
-                Self::enrich_ebpf_l7_from_proc(&mut l7_data);
-                let resolution = L7Resolution {
-                    l7: Some(l7_data),
-                    date: Utc::now(),
-                    retry_count: 0,
-                    last_retry: None,
-                    source: L7ResolutionSource::Ebpf,
-                };
-                self.l7_map.insert(connection.clone(), resolution.clone());
-                return Some(resolution);
-            }
-            return Some(l7);
-        }
-
-        // No cached entry at all -- try eBPF first (fast lookup on Linux)
+    /// Try all kernel-level sources (eBPF, ETW, ES+libproc) in priority order.
+    /// Returns the first successful resolution and inserts it into `l7_map`.
+    fn try_kernel_resolve(&self, connection: &Session) -> Option<L7Resolution> {
         if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
             Self::enrich_ebpf_l7_from_proc(&mut l7_data);
             let resolution = L7Resolution {
@@ -1530,6 +1535,50 @@ impl FlodbaddL7 {
                 source: L7ResolutionSource::Ebpf,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
+            return Some(resolution);
+        }
+        if let Some(mut l7_data) = l7_etw::get_l7_for_session(connection) {
+            l7_etw::enrich_session_l7(l7_data.pid, &mut l7_data);
+            let resolution = L7Resolution {
+                l7: Some(l7_data),
+                date: Utc::now(),
+                retry_count: 0,
+                last_retry: None,
+                source: L7ResolutionSource::Etw,
+            };
+            self.l7_map.insert(connection.clone(), resolution.clone());
+            return Some(resolution);
+        }
+        if let Some(l7_data) = l7_es::get_l7_for_session(connection) {
+            let resolution = L7Resolution {
+                l7: Some(l7_data),
+                date: Utc::now(),
+                retry_count: 0,
+                last_retry: None,
+                source: L7ResolutionSource::EndpointSecurity,
+            };
+            self.l7_map.insert(connection.clone(), resolution.clone());
+            return Some(resolution);
+        }
+        None
+    }
+
+    pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {
+        // Check cached result first
+        if let Some(l7) = self.l7_map.get(connection).map(|s| s.value().clone()) {
+            if l7.l7.is_some() {
+                return Some(l7);
+            }
+            // Cached entry exists but L7 is still unresolved -- try kernel
+            // sources before returning None-like data.
+            if let Some(resolution) = self.try_kernel_resolve(connection) {
+                return Some(resolution);
+            }
+            return Some(l7);
+        }
+
+        // No cached entry at all -- try kernel sources first
+        if let Some(resolution) = self.try_kernel_resolve(connection) {
             return Some(resolution);
         }
 
