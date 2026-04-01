@@ -59,7 +59,7 @@ jobs:
           set -e
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
-          sudo apt-get install -y protobuf-compiler libpcap-dev clang llvm libbpf-dev
+          sudo apt-get install -y protobuf-compiler libpcap-dev clang llvm libbpf-dev lsof
           sudo apt-get install -y "linux-headers-$(uname -r)" || true
 
       - name: eBPF environment setup
@@ -152,12 +152,34 @@ jobs:
         shell: bash
         run: brew install protobuf
 
+      - name: Build and codesign benchmark binary with ES entitlement
+        shell: bash
+        continue-on-error: true
+        run: |
+          sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test --no-run 2>&1
+          cat > /tmp/es_bench.entitlements << 'ENTEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.endpoint-security.client</key>
+            <true/>
+          </dict>
+          </plist>
+          ENTEOF
+          for binary in target/debug/deps/l7_benchmark_test-*; do
+            if [ -x "$binary" ] && [[ ! "$binary" == *.d ]] && [[ ! "$binary" == *.o ]]; then
+              echo "Signing $binary with ES entitlement"
+              codesign --force --sign - --entitlements /tmp/es_bench.entitlements "$binary" || true
+            fi
+          done
+
       - name: L7 benchmark with Endpoint Security
         id: benchmark_with_es
         shell: bash
         continue-on-error: true
         run: |
-          make macos_benchmark 2>&1 | tee benchmark_with_es.log
+          sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test -- --nocapture 2>&1 | tee benchmark_with_es.log
 
       - name: L7 benchmark without Endpoint Security
         id: benchmark_no_es
