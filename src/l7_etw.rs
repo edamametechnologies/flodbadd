@@ -25,7 +25,7 @@ mod win {
     use windows::Win32::System::Diagnostics::Etw::{
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace,
         StartTraceW, CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS,
-        EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
+        EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
         EVENT_TRACE_FLAG, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
         EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
         PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
@@ -203,9 +203,8 @@ mod win {
                 props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
                 props.Wnode.ClientContext = 1; // QPC for timestamps
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-                props.EnableFlags = EVENT_TRACE_FLAG(
-                    EVENT_TRACE_FLAG_NETWORK_TCPIP.0 | EVENT_TRACE_FLAG_PROCESS.0,
-                );
+                props.EnableFlags =
+                    EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
                 props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
                 props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
 
@@ -238,11 +237,12 @@ mod win {
                 // Enable TCP/IP provider
                 let mut tcp_params = ENABLE_TRACE_PARAMETERS::default();
                 tcp_params.Version = 2;
+                const ENABLE_PROVIDER: u32 = 1;
                 let _ = EnableTraceEx2(
                     session_handle,
                     &TCP_IP_GUID,
-                    EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                    TRACE_LEVEL_INFORMATION.0,
+                    ENABLE_PROVIDER,
+                    TRACE_LEVEL_INFORMATION as u8,
                     0xFFFFFFFF_FFFFFFFF,
                     0,
                     0,
@@ -255,8 +255,8 @@ mod win {
                 let _ = EnableTraceEx2(
                     session_handle,
                     &PROCESS_GUID,
-                    EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                    TRACE_LEVEL_INFORMATION.0,
+                    ENABLE_PROVIDER,
+                    TRACE_LEVEL_INFORMATION as u8,
                     0xFFFFFFFF_FFFFFFFF,
                     0,
                     0,
