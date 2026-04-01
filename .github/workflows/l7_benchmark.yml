@@ -181,7 +181,9 @@ jobs:
         shell: bash
         continue-on-error: true
         run: |
-          sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test -- --nocapture 2>&1 | tee benchmark_with_es.log
+          BENCH_BIN=$(find target/debug/deps -name 'l7_benchmark_test-*' -perm +111 ! -name '*.d' ! -name '*.o' | head -1)
+          echo "Running signed binary: $BENCH_BIN"
+          sudo -E "$BENCH_BIN" --nocapture 2>&1 | tee benchmark_with_es.log
 
       - name: L7 benchmark without Endpoint Security
         id: benchmark_no_es

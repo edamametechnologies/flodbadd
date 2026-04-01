@@ -19,7 +19,7 @@ use tokio::time::sleep;
 
 const DST: &str = "1.1.1.1";
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-const PORT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
+const PORT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Serialize)]
 struct BenchmarkResult {
@@ -397,6 +397,77 @@ async fn run_burst_scenario(
     }
 }
 
+async fn run_self_connect_scenario(
+    l7: &FlodbaddL7,
+    local_ip: IpAddr,
+) -> ScenarioResult {
+    use std::net::TcpStream;
+    const N: u32 = 5;
+    let dst_ip: IpAddr = DST.parse().unwrap();
+    let mut resolved = 0u32;
+    let mut correct_name = 0u32;
+    let mut latency_sum = 0u64;
+    let mut last_source = String::from("none");
+
+    for _ in 0..N {
+        let stream = match TcpStream::connect_timeout(
+            &std::net::SocketAddr::new(dst_ip, 80),
+            Duration::from_secs(5),
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                last_source = "connect_failed".into();
+                continue;
+            }
+        };
+        let local_port = match stream.local_addr() {
+            Ok(a) => a.port(),
+            Err(_) => continue,
+        };
+        let session = Session {
+            protocol: Protocol::TCP,
+            src_ip: local_ip,
+            src_port: local_port,
+            dst_ip,
+            dst_port: 80,
+        };
+        l7.add_connection_to_resolver(&session).await;
+        let poll_start = Instant::now();
+        let mut found = false;
+        while poll_start.elapsed() < RESOLVE_TIMEOUT {
+            if let Some(res) = l7.get_resolved_l7(&session).await {
+                if let Some(ref data) = res.l7 {
+                    resolved += 1;
+                    latency_sum += poll_start.elapsed().as_millis() as u64;
+                    last_source = format_source(&res.source);
+                    let name = data.process_name.to_lowercase();
+                    if name.contains("l7_benchmark") || name.contains("benchmark") || name.contains("cargo") {
+                        correct_name += 1;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        if !found {
+            last_source = "timeout".into();
+        }
+        drop(stream);
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    let avg_latency_ms = if resolved > 0 { latency_sum / u64::from(resolved) } else { 0 };
+    ScenarioResult {
+        name: "self_connect_tcp".into(),
+        resolved,
+        total: N,
+        avg_latency_ms,
+        source: last_source,
+        correct_name,
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn l7_benchmark() {
@@ -458,6 +529,7 @@ async fn l7_benchmark() {
     }
 
     results.push(run_burst_scenario(&l7, local_ip, null_out).await);
+    results.push(run_self_connect_scenario(&l7, local_ip).await);
 
     l7.stop().await;
 
