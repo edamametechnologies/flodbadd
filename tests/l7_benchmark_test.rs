@@ -86,8 +86,69 @@ fn get_default_local_ip() -> IpAddr {
     socket.local_addr().unwrap().ip()
 }
 
+#[cfg(target_os = "linux")]
+fn try_find_client_port_proc(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
+    use std::io::Read as IoRead;
+    let dst_port_hex = format!("{:04X}", dst_port);
+    let dst_ip_hex = match dst_ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{:02X}{:02X}{:02X}{:02X}", o[3], o[2], o[1], o[0])
+        }
+        _ => return None,
+    };
+    let fd_path = format!("/proc/{}/fd", pid);
+    let mut inodes = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&fd_path) {
+        for entry in entries.flatten() {
+            if let Ok(link) = std::fs::read_link(entry.path()) {
+                let s = link.to_string_lossy();
+                if s.starts_with("socket:[") {
+                    if let Some(ino) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
+                        if let Ok(i) = ino.parse::<u64>() {
+                            inodes.insert(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut tcp_content = String::new();
+    if std::fs::File::open("/proc/net/tcp")
+        .and_then(|mut f| f.read_to_string(&mut tcp_content))
+        .is_err()
+    {
+        return None;
+    }
+    for line in tcp_content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 {
+            continue;
+        }
+        let remote = cols[2];
+        if !remote.ends_with(&format!(":{}", dst_port_hex)) || !remote.starts_with(&dst_ip_hex) {
+            continue;
+        }
+        if let Ok(inode) = cols[9].parse::<u64>() {
+            if inodes.contains(&inode) {
+                let local = cols[1];
+                if let Some(colon_pos) = local.rfind(':') {
+                    if let Ok(port) = u16::from_str_radix(&local[colon_pos + 1..], 16) {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(not(target_os = "windows"))]
 fn try_find_client_port(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
+    #[cfg(target_os = "linux")]
+    if let Some(port) = try_find_client_port_proc(pid, dst_ip, dst_port) {
+        return Some(port);
+    }
     let dst_str = format!("{}:{}", dst_ip, dst_port);
     let output = Command::new("lsof")
         .args(["-anP", "-iTCP", &format!("-p{}", pid)])
@@ -166,7 +227,8 @@ fn build_scenarios(null_out: &str) -> Vec<Scenario> {
         process: "curl",
         args: vec![
             "-s".into(), "-o".into(), null_out.into(),
-            "--max-time".into(), "5".into(),
+            "--limit-rate".into(), "1K".into(),
+            "--max-time".into(), "3".into(),
             "http://1.1.1.1/".into(),
         ],
         dst_port: 80,
@@ -204,7 +266,8 @@ fn build_scenarios(null_out: &str) -> Vec<Scenario> {
         process: "curl",
         args: vec![
             "-s".into(), "-o".into(), null_out.into(),
-            "--max-time".into(), "5".into(),
+            "--limit-rate".into(), "1K".into(),
+            "--max-time".into(), "3".into(),
             "https://1.1.1.1/".into(),
         ],
         dst_port: 443,
@@ -306,7 +369,8 @@ async fn run_burst_scenario(
     for _ in 0..N {
         let args: Vec<String> = vec![
             "-s".into(), "-o".into(), null_out.into(),
-            "--max-time".into(), "5".into(),
+            "--limit-rate".into(), "1K".into(),
+            "--max-time".into(), "3".into(),
             "http://1.1.1.1/".into(),
         ];
         let (res, corr, lat, src) = run_single_iteration(

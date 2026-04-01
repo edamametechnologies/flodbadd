@@ -154,9 +154,8 @@ jobs:
 
       - name: Build and codesign benchmark binary with ES entitlement
         shell: bash
-        continue-on-error: true
         run: |
-          sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test --no-run 2>&1
+          cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test --no-run 2>&1
           cat > /tmp/es_bench.entitlements << 'ENTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -170,7 +169,8 @@ jobs:
           for binary in target/debug/deps/l7_benchmark_test-*; do
             if [ -x "$binary" ] && [[ ! "$binary" == *.d ]] && [[ ! "$binary" == *.o ]]; then
               echo "Signing $binary with ES entitlement"
-              codesign --force --sign - --entitlements /tmp/es_bench.entitlements "$binary" || true
+              codesign --force --sign - --entitlements /tmp/es_bench.entitlements "$binary"
+              codesign -dvvv "$binary" 2>&1 | head -5
             fi
           done
 
