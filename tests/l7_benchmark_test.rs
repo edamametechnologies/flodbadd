@@ -1,4 +1,14 @@
-// Cross-platform L7 attribution benchmark.
+// L7 Attribution Benchmark -- resolution rate and minimum detectable session duration.
+//
+// Two measurements:
+//   1. Resolution rate (%): for a realistic mix of session lifetimes, what fraction
+//      gets L7-resolved with vs. without kernel support?
+//   2. Minimum detectable duration: binary search for the shortest TCP connection
+//      that the resolver can still attribute.
+//
+// All sessions are created from the test process itself (TcpStream::connect), so
+// local port is always known -- no lsof/proc dependency.
+//
 //   cargo test --features packetcapture --test l7_benchmark_test -- --nocapture
 #![cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
@@ -12,46 +22,13 @@ use flodbadd::l7_etw;
 use flodbadd::sessions::{Protocol, Session};
 use serde::Serialize;
 use serial_test::serial;
-use std::net::IpAddr;
-use std::process::Command;
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-const DST: &str = "1.1.1.1";
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-const PORT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(8);
-
-#[derive(Debug, Serialize)]
-struct BenchmarkResult {
-    platform: String,
-    kernel_l7: String,
-    kernel_l7_available: bool,
-    scenarios: Vec<ScenarioResult>,
-}
-
-#[derive(Debug, Serialize)]
-struct ScenarioResult {
-    name: String,
-    resolved: u32,
-    total: u32,
-    avg_latency_ms: u64,
-    source: String,
-    correct_name: u32,
-}
-
-fn null_device() -> &'static str {
-    #[cfg(windows)]
-    { "NUL" }
-    #[cfg(not(windows))]
-    { "/dev/null" }
-}
-
-fn is_available(cmd: &str) -> bool {
-    #[cfg(windows)]
-    { Command::new("where").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false) }
-    #[cfg(not(windows))]
-    { Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false) }
-}
+const DST_IP: &str = "1.1.1.1";
+const DST_PORT: u16 = 80;
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(12);
 
 fn platform_string() -> &'static str {
     #[cfg(target_os = "linux")]
@@ -82,401 +59,326 @@ fn format_source(s: &L7ResolutionSource) -> String {
 
 fn get_default_local_ip() -> IpAddr {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-    let _ = socket.connect("1.1.1.1:80");
+    let _ = socket.connect(format!("{}:{}", DST_IP, DST_PORT));
     socket.local_addr().unwrap().ip()
 }
 
-#[cfg(target_os = "linux")]
-fn try_find_client_port_proc(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
-    use std::io::Read as IoRead;
-    let dst_port_hex = format!("{:04X}", dst_port);
-    let dst_ip_hex = match dst_ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            format!("{:02X}{:02X}{:02X}{:02X}", o[3], o[2], o[1], o[0])
-        }
-        _ => return None,
-    };
-    let fd_path = format!("/proc/{}/fd", pid);
-    let mut inodes = std::collections::HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(&fd_path) {
-        for entry in entries.flatten() {
-            if let Ok(link) = std::fs::read_link(entry.path()) {
-                let s = link.to_string_lossy();
-                if s.starts_with("socket:[") {
-                    if let Some(ino) = s.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
-                        if let Ok(i) = ino.parse::<u64>() {
-                            inodes.insert(i);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut tcp_content = String::new();
-    if std::fs::File::open("/proc/net/tcp")
-        .and_then(|mut f| f.read_to_string(&mut tcp_content))
-        .is_err()
-    {
-        return None;
-    }
-    for line in tcp_content.lines().skip(1) {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 10 {
-            continue;
-        }
-        let remote = cols[2];
-        if !remote.ends_with(&format!(":{}", dst_port_hex)) || !remote.starts_with(&dst_ip_hex) {
-            continue;
-        }
-        if let Ok(inode) = cols[9].parse::<u64>() {
-            if inodes.contains(&inode) {
-                let local = cols[1];
-                if let Some(colon_pos) = local.rfind(':') {
-                    if let Ok(port) = u16::from_str_radix(&local[colon_pos + 1..], 16) {
-                        return Some(port);
-                    }
-                }
-            }
-        }
-    }
-    None
+// ---------------------------------------------------------------------------
+// Result types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct BenchmarkResult {
+    platform: String,
+    kernel_l7: String,
+    kernel_l7_available: bool,
+    resolution_rate: ResolutionRateResult,
+    min_duration: MinDurationResult,
 }
 
-#[cfg(not(target_os = "windows"))]
-fn try_find_client_port(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
-    #[cfg(target_os = "linux")]
-    if let Some(port) = try_find_client_port_proc(pid, dst_ip, dst_port) {
-        return Some(port);
-    }
-    let dst_str = format!("{}:{}", dst_ip, dst_port);
-    let output = Command::new("lsof")
-        .args(["-anP", "-iTCP", &format!("-p{}", pid)])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        if line.contains(&dst_str) && line.contains("->") {
-            if let Some(arrow_pos) = line.find("->") {
-                let before = &line[..arrow_pos];
-                if let Some(colon_pos) = before.rfind(':') {
-                    if let Ok(port) = before[colon_pos + 1..].trim().parse::<u16>() {
-                        return Some(port);
-                    }
-                }
-            }
-        }
-    }
-    None
+#[derive(Debug, Serialize)]
+struct ResolutionRateResult {
+    buckets: Vec<DurationBucket>,
+    overall_resolved: u32,
+    overall_total: u32,
+    overall_rate_pct: f64,
 }
 
-#[cfg(target_os = "windows")]
-fn try_find_client_port(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
-    let dst_str = format!("{}:{}", dst_ip, dst_port);
-    let pid_str = pid.to_string();
-    let output = Command::new("netstat")
-        .args(["-ano", "-p", "TCP"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if !trimmed.contains(&dst_str) {
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() >= 5 && parts[4] == pid_str {
-            let local_addr = parts[1];
-            if let Some(colon_pos) = local_addr.rfind(':') {
-                if let Ok(port) = local_addr[colon_pos + 1..].parse::<u16>() {
-                    return Some(port);
-                }
-            }
-        }
-    }
-    None
+#[derive(Debug, Serialize)]
+struct DurationBucket {
+    label: String,
+    hold_ms: u64,
+    resolved: u32,
+    total: u32,
+    rate_pct: f64,
+    avg_latency_ms: u64,
+    sources: Vec<String>,
 }
 
-async fn find_client_port(pid: u32, dst_ip: &IpAddr, dst_port: u16) -> Option<u16> {
-    let start = Instant::now();
-    while start.elapsed() < PORT_DISCOVER_TIMEOUT {
-        if let Some(port) = try_find_client_port(pid, dst_ip, dst_port) {
-            return Some(port);
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    None
+#[derive(Debug, Serialize)]
+struct MinDurationResult {
+    min_resolved_ms: u64,
+    max_unresolved_ms: u64,
+    probes: Vec<DurationProbe>,
 }
 
-struct Scenario {
-    name: &'static str,
-    process: &'static str,
-    args: Vec<String>,
-    dst_port: u16,
-    iterations: u32,
+#[derive(Debug, Serialize)]
+struct DurationProbe {
+    hold_ms: u64,
+    resolved: bool,
+    latency_ms: u64,
+    source: String,
 }
 
-fn build_scenarios(null_out: &str) -> Vec<Scenario> {
-    let mut s = Vec::new();
-    if !is_available("curl") {
-        return s;
-    }
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-    s.push(Scenario {
-        name: "short_lived_curl",
-        process: "curl",
-        args: vec![
-            "-s".into(), "-o".into(), null_out.into(),
-            "--limit-rate".into(), "1K".into(),
-            "--max-time".into(), "3".into(),
-            "http://1.1.1.1/".into(),
-        ],
-        dst_port: 80,
-        iterations: 3,
-    });
-
-    s.push(Scenario {
-        name: "medium_lived_curl",
-        process: "curl",
-        args: vec![
-            "-s".into(), "-o".into(), null_out.into(),
-            "--limit-rate".into(), "100".into(),
-            "--max-time".into(), "5".into(),
-            "http://1.1.1.1/".into(),
-        ],
-        dst_port: 80,
-        iterations: 3,
-    });
-
-    s.push(Scenario {
-        name: "long_lived_curl",
-        process: "curl",
-        args: vec![
-            "-s".into(), "-o".into(), null_out.into(),
-            "--limit-rate".into(), "50".into(),
-            "--max-time".into(), "8".into(),
-            "http://1.1.1.1/".into(),
-        ],
-        dst_port: 80,
-        iterations: 2,
-    });
-
-    s.push(Scenario {
-        name: "short_lived_curl_https",
-        process: "curl",
-        args: vec![
-            "-s".into(), "-o".into(), null_out.into(),
-            "--limit-rate".into(), "1K".into(),
-            "--max-time".into(), "3".into(),
-            "https://1.1.1.1/".into(),
-        ],
-        dst_port: 443,
-        iterations: 3,
-    });
-
-    s
+struct ConnectionAttempt {
+    resolved: bool,
+    #[allow(dead_code)]
+    correct: bool,
+    latency_ms: u64,
+    source: String,
 }
 
-async fn run_single_iteration(
+async fn attempt_connection(
     l7: &FlodbaddL7,
-    process: &str,
-    args: &[String],
-    dst_ip: IpAddr,
-    dst_port: u16,
     local_ip: IpAddr,
-) -> (bool, bool, u64, String) {
-    let mut child = match Command::new(process)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return (false, false, 0, "spawn_failed".into()),
+    dst_ip: IpAddr,
+    hold_duration: Duration,
+) -> ConnectionAttempt {
+    let stream = match TcpStream::connect_timeout(
+        &SocketAddr::new(dst_ip, DST_PORT),
+        Duration::from_secs(5),
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            return ConnectionAttempt {
+                resolved: false,
+                correct: false,
+                latency_ms: 0,
+                source: "connect_failed".into(),
+            };
+        }
     };
 
-    let pid = child.id();
-
-    let client_port = match find_client_port(pid, &dst_ip, dst_port).await {
-        Some(p) => p,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return (false, false, 0, "no_port_discovered".into());
+    let local_port = match stream.local_addr() {
+        Ok(a) => a.port(),
+        Err(_) => {
+            return ConnectionAttempt {
+                resolved: false,
+                correct: false,
+                latency_ms: 0,
+                source: "no_local_addr".into(),
+            };
         }
     };
 
     let session = Session {
         protocol: Protocol::TCP,
         src_ip: local_ip,
-        src_port: client_port,
+        src_port: local_port,
         dst_ip,
-        dst_port,
+        dst_port: DST_PORT,
     };
 
     l7.add_connection_to_resolver(&session).await;
+
+    sleep(hold_duration).await;
+    drop(stream);
+
     let poll_start = Instant::now();
-
-    let mut resolved = false;
-    let mut correct = false;
-    let mut latency_ms = 0u64;
-    let mut source = String::from("timeout");
-
     while poll_start.elapsed() < RESOLVE_TIMEOUT {
         if let Some(res) = l7.get_resolved_l7(&session).await {
             if let Some(ref data) = res.l7 {
-                resolved = true;
-                latency_ms = poll_start.elapsed().as_millis() as u64;
-                source = format_source(&res.source);
                 let name = data.process_name.to_lowercase();
-                correct = name.contains("curl");
-                break;
+                let correct = name.contains("l7_benchmark")
+                    || name.contains("benchmark")
+                    || name.contains("cargo");
+                return ConnectionAttempt {
+                    resolved: true,
+                    correct,
+                    latency_ms: poll_start.elapsed().as_millis() as u64,
+                    source: format_source(&res.source),
+                };
             }
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(30)).await;
     }
-
-    if !resolved {
-        latency_ms = poll_start.elapsed().as_millis() as u64;
+    ConnectionAttempt {
+        resolved: false,
+        correct: false,
+        latency_ms: poll_start.elapsed().as_millis() as u64,
+        source: "timeout".into(),
     }
-
-    let _ = child.kill();
-    let _ = child.wait();
-    sleep(Duration::from_millis(200)).await;
-
-    (resolved, correct, latency_ms, source)
 }
 
-async fn run_burst_scenario(
+// ---------------------------------------------------------------------------
+// Part 1 -- Resolution rate across realistic session durations
+// ---------------------------------------------------------------------------
+
+async fn run_resolution_rate(
     l7: &FlodbaddL7,
     local_ip: IpAddr,
-    null_out: &str,
-) -> ScenarioResult {
-    const N: u32 = 5;
-    if !is_available("curl") {
-        return ScenarioResult {
-            name: "burst_curl".into(), resolved: 0, total: N,
-            avg_latency_ms: 0, source: "skipped".into(), correct_name: 0,
-        };
-    }
+    dst_ip: IpAddr,
+) -> ResolutionRateResult {
+    // Durations representing a realistic traffic mix:
+    //   0ms   = connect-and-immediately-close (health probe, port scan)
+    //   10ms  = very short REST API call
+    //   50ms  = typical HTTPS handshake + small payload
+    //   200ms = moderate API call
+    //   500ms = file download chunk, websocket setup
+    //   1s    = page load, streaming start
+    //   3s    = long API call or download
+    let hold_times: &[(&str, u64)] = &[
+        ("0ms_instant", 0),
+        ("10ms_api_call", 10),
+        ("50ms_https", 50),
+        ("200ms_moderate", 200),
+        ("500ms_download", 500),
+        ("1000ms_page_load", 1000),
+        ("3000ms_long", 3000),
+    ];
+    const ITERATIONS_PER_BUCKET: u32 = 3;
 
-    let dst_ip: IpAddr = DST.parse().unwrap();
-    let mut resolved = 0u32;
-    let mut correct_name = 0u32;
-    let mut latency_sum = 0u64;
-    let mut last_source = String::from("none");
+    let mut buckets = Vec::new();
+    let mut overall_resolved = 0u32;
+    let mut overall_total = 0u32;
 
-    for _ in 0..N {
-        let args: Vec<String> = vec![
-            "-s".into(), "-o".into(), null_out.into(),
-            "--limit-rate".into(), "1K".into(),
-            "--max-time".into(), "3".into(),
-            "http://1.1.1.1/".into(),
-        ];
-        let (res, corr, lat, src) = run_single_iteration(
-            l7, "curl", &args, dst_ip, 80, local_ip,
-        ).await;
-        last_source = src;
-        if res {
-            resolved += 1;
-            latency_sum += lat;
-            if corr { correct_name += 1; }
+    for &(label, hold_ms) in hold_times {
+        let mut resolved = 0u32;
+        let mut latency_sum = 0u64;
+        let mut sources = Vec::new();
+
+        for i in 0..ITERATIONS_PER_BUCKET {
+            let r = attempt_connection(
+                l7,
+                local_ip,
+                dst_ip,
+                Duration::from_millis(hold_ms),
+            )
+            .await;
+            println!(
+                "  [{}/{}] {}: resolved={} latency={}ms source={}",
+                i + 1,
+                ITERATIONS_PER_BUCKET,
+                label,
+                r.resolved,
+                r.latency_ms,
+                r.source,
+            );
+            if r.resolved {
+                resolved += 1;
+                latency_sum += r.latency_ms;
+            }
+            if !sources.contains(&r.source) {
+                sources.push(r.source);
+            }
+            sleep(Duration::from_millis(200)).await;
         }
-        sleep(Duration::from_millis(100)).await;
+
+        let avg_latency_ms = if resolved > 0 {
+            latency_sum / u64::from(resolved)
+        } else {
+            0
+        };
+        overall_resolved += resolved;
+        overall_total += ITERATIONS_PER_BUCKET;
+
+        buckets.push(DurationBucket {
+            label: label.to_string(),
+            hold_ms,
+            resolved,
+            total: ITERATIONS_PER_BUCKET,
+            rate_pct: (f64::from(resolved) / f64::from(ITERATIONS_PER_BUCKET)) * 100.0,
+            avg_latency_ms,
+            sources,
+        });
     }
 
-    let avg_latency_ms = if resolved > 0 { latency_sum / u64::from(resolved) } else { 0 };
+    let overall_rate_pct =
+        (f64::from(overall_resolved) / f64::from(overall_total)) * 100.0;
 
-    ScenarioResult {
-        name: "burst_curl".into(),
-        resolved,
-        total: N,
-        avg_latency_ms,
-        source: last_source,
-        correct_name,
+    ResolutionRateResult {
+        buckets,
+        overall_resolved,
+        overall_total,
+        overall_rate_pct,
     }
 }
 
-async fn run_self_connect_scenario(
+// ---------------------------------------------------------------------------
+// Part 2 -- Binary search for minimum detectable session duration
+// ---------------------------------------------------------------------------
+
+async fn run_min_duration_search(
     l7: &FlodbaddL7,
     local_ip: IpAddr,
-) -> ScenarioResult {
-    use std::net::TcpStream;
-    const N: u32 = 5;
-    let dst_ip: IpAddr = DST.parse().unwrap();
-    let mut resolved = 0u32;
-    let mut correct_name = 0u32;
-    let mut latency_sum = 0u64;
-    let mut last_source = String::from("none");
+    dst_ip: IpAddr,
+) -> MinDurationResult {
+    // Search range: 0ms to 500ms.  Anything above 500ms is expected to resolve.
+    let probe_durations_ms: &[u64] = &[0, 5, 10, 20, 50, 100, 150, 200, 300, 500];
+    const ATTEMPTS_PER_PROBE: u32 = 3;
+    const MAJORITY: u32 = 2; // 2/3 must resolve to count as "resolvable"
 
-    for _ in 0..N {
-        let stream = match TcpStream::connect_timeout(
-            &std::net::SocketAddr::new(dst_ip, 80),
-            Duration::from_secs(5),
-        ) {
-            Ok(s) => s,
-            Err(_) => {
-                last_source = "connect_failed".into();
-                continue;
+    let mut probes = Vec::new();
+    let mut min_resolved_ms: u64 = u64::MAX;
+    let mut max_unresolved_ms: u64 = 0;
+
+    for &hold_ms in probe_durations_ms {
+        let mut successes = 0u32;
+        let mut total_latency = 0u64;
+        let mut last_source = String::from("none");
+
+        for _ in 0..ATTEMPTS_PER_PROBE {
+            let r = attempt_connection(
+                l7,
+                local_ip,
+                dst_ip,
+                Duration::from_millis(hold_ms),
+            )
+            .await;
+            if r.resolved {
+                successes += 1;
+                total_latency += r.latency_ms;
+                last_source = r.source;
+            } else {
+                last_source = r.source;
             }
-        };
-        let local_port = match stream.local_addr() {
-            Ok(a) => a.port(),
-            Err(_) => continue,
-        };
-        let session = Session {
-            protocol: Protocol::TCP,
-            src_ip: local_ip,
-            src_port: local_port,
-            dst_ip,
-            dst_port: 80,
-        };
-        l7.add_connection_to_resolver(&session).await;
-        let poll_start = Instant::now();
-        let mut found = false;
-        while poll_start.elapsed() < RESOLVE_TIMEOUT {
-            if let Some(res) = l7.get_resolved_l7(&session).await {
-                if let Some(ref data) = res.l7 {
-                    resolved += 1;
-                    latency_sum += poll_start.elapsed().as_millis() as u64;
-                    last_source = format_source(&res.source);
-                    let name = data.process_name.to_lowercase();
-                    if name.contains("l7_benchmark") || name.contains("benchmark") || name.contains("cargo") {
-                        correct_name += 1;
-                    }
-                    found = true;
-                    break;
-                }
-            }
-            sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(200)).await;
         }
-        if !found {
-            last_source = "timeout".into();
+
+        let resolved = successes >= MAJORITY;
+        let avg_lat = if successes > 0 {
+            total_latency / u64::from(successes)
+        } else {
+            0
+        };
+
+        println!(
+            "  probe {}ms: {}/{} resolved={} latency={}ms source={}",
+            hold_ms, successes, ATTEMPTS_PER_PROBE, resolved, avg_lat, last_source,
+        );
+
+        if resolved && hold_ms < min_resolved_ms {
+            min_resolved_ms = hold_ms;
         }
-        drop(stream);
-        sleep(Duration::from_millis(200)).await;
+        if !resolved && hold_ms > max_unresolved_ms {
+            max_unresolved_ms = hold_ms;
+        }
+
+        probes.push(DurationProbe {
+            hold_ms,
+            resolved,
+            latency_ms: avg_lat,
+            source: last_source,
+        });
     }
 
-    let avg_latency_ms = if resolved > 0 { latency_sum / u64::from(resolved) } else { 0 };
-    ScenarioResult {
-        name: "self_connect_tcp".into(),
-        resolved,
-        total: N,
-        avg_latency_ms,
-        source: last_source,
-        correct_name,
+    if min_resolved_ms == u64::MAX {
+        min_resolved_ms = 0;
+    }
+
+    MinDurationResult {
+        min_resolved_ms,
+        max_unresolved_ms,
+        probes,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[serial]
 async fn l7_benchmark() {
-    let null_out = null_device();
     let (kernel_l7, kernel_l7_available) = kernel_l7_info();
     let local_ip = get_default_local_ip();
-    let dst_ip: IpAddr = DST.parse().unwrap();
+    let dst_ip: IpAddr = DST_IP.parse().unwrap();
 
-    println!("\nL7 Attribution Benchmark");
+    println!("\n=== L7 Attribution Benchmark ===");
     println!("  Platform:  {}", platform_string());
     println!("  Kernel L7: {} (available={})", kernel_l7, kernel_l7_available);
     println!("  Local IP:  {}", local_ip);
@@ -486,50 +388,12 @@ async fn l7_benchmark() {
     l7.start().await;
     sleep(Duration::from_millis(500)).await;
 
-    let scenarios = build_scenarios(null_out);
-    let mut results: Vec<ScenarioResult> = Vec::new();
+    println!("--- Part 1: Resolution Rate by Session Duration ---");
+    let resolution_rate = run_resolution_rate(&l7, local_ip, dst_ip).await;
 
-    for sc in &scenarios {
-        let mut total_resolved = 0u32;
-        let mut total_correct = 0u32;
-        let mut total_latency = 0u64;
-        let mut last_source = String::from("none");
-
-        for i in 0..sc.iterations {
-            let (res, corr, lat, src) = run_single_iteration(
-                &l7, sc.process, &sc.args, dst_ip, sc.dst_port, local_ip,
-            ).await;
-            last_source = src.clone();
-            if res {
-                total_resolved += 1;
-                total_latency += lat;
-                if corr { total_correct += 1; }
-            }
-            println!(
-                "  [{}/{}] {}: resolved={} correct={} latency={}ms source={}",
-                i + 1, sc.iterations, sc.name, res, corr, lat, src,
-            );
-            sleep(Duration::from_millis(300)).await;
-        }
-
-        let avg_latency_ms = if total_resolved > 0 {
-            total_latency / u64::from(total_resolved)
-        } else {
-            0
-        };
-
-        results.push(ScenarioResult {
-            name: sc.name.to_string(),
-            resolved: total_resolved,
-            total: sc.iterations,
-            avg_latency_ms,
-            source: last_source,
-            correct_name: total_correct,
-        });
-    }
-
-    results.push(run_burst_scenario(&l7, local_ip, null_out).await);
-    results.push(run_self_connect_scenario(&l7, local_ip).await);
+    println!();
+    println!("--- Part 2: Minimum Detectable Session Duration ---");
+    let min_duration = run_min_duration_search(&l7, local_ip, dst_ip).await;
 
     l7.stop().await;
 
@@ -537,11 +401,12 @@ async fn l7_benchmark() {
         platform: platform_string().to_string(),
         kernel_l7: kernel_l7.to_string(),
         kernel_l7_available,
-        scenarios: results,
+        resolution_rate,
+        min_duration,
     };
 
     let json = serde_json::to_string_pretty(&result).expect("serialize benchmark");
-    println!("BENCHMARK_JSON_START");
+    println!("\nBENCHMARK_JSON_START");
     println!("{}", json);
     println!("BENCHMARK_JSON_END");
 }
