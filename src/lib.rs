@@ -27,6 +27,8 @@ pub mod ip;
 ))]
 pub mod l7;
 pub mod l7_ebpf;
+pub mod l7_es;
+pub mod l7_etw;
 #[cfg(target_os = "macos")]
 pub mod l7_macos;
 pub mod mdns;

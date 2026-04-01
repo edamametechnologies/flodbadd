@@ -46,6 +46,8 @@
 // by combining direct matching with caching, PID reuse protection, and retry mechanisms.
 
 use crate::l7_ebpf;
+use crate::l7_es;
+use crate::l7_etw;
 #[cfg(target_os = "macos")]
 use crate::l7_macos;
 use crate::sessions::*;
@@ -118,6 +120,8 @@ pub enum L7ResolutionSource {
     HostCacheHitTerminated, // Within grace period
     FailedMaxRetries,       // Explicitly mark failures after retries
     Ebpf,                   // Obtained from eBPF helper on Linux
+    EndpointSecurity,       // Obtained via macOS Endpoint Security framework
+    Etw,                    // Obtained via Windows ETW kernel trace
     MacosLibproc,           // Obtained via PROC_PIDFDSOCKETINFO on macOS
 }
 
@@ -139,13 +143,6 @@ pub struct ProcessCacheEntry {
     pub termination_time: Option<Instant>,
 }
 
-/// Pending eager resolution request submitted by the packet hot path.
-#[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-struct EagerRequest {
-    session: Session,
-    tx: tokio::sync::oneshot::Sender<Option<SessionL7>>,
-}
-
 pub struct FlodbaddL7 {
     l7_map: Arc<CustomDashMap<Session, L7Resolution>>,
     resolver_queue: Arc<CustomDashMap<Session, ()>>,
@@ -156,19 +153,10 @@ pub struct FlodbaddL7 {
     cache_cleanup_handle: Option<TaskHandle>,
     sensitive_scan_handle: Option<TaskHandle>,
     host_service_cache: Arc<CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>>,
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    eager_tx: tokio::sync::mpsc::UnboundedSender<EagerRequest>,
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    eager_rx: Option<tokio::sync::mpsc::UnboundedReceiver<EagerRequest>>,
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    eager_handle: Option<TaskHandle>,
 }
 
 impl FlodbaddL7 {
     pub fn new() -> Self {
-        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-        let (eager_tx, eager_rx) = tokio::sync::mpsc::unbounded_channel::<EagerRequest>();
-
         Self {
             l7_map: Arc::new(CustomDashMap::new("l7_map")),
             resolver_queue: Arc::new(CustomDashMap::new("resolver_queue")),
@@ -179,12 +167,6 @@ impl FlodbaddL7 {
             cache_cleanup_handle: None,
             sensitive_scan_handle: None,
             host_service_cache: Arc::new(CustomDashMap::new("host_service_cache")),
-            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-            eager_tx,
-            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-            eager_rx: Some(eager_rx),
-            #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-            eager_handle: None,
         }
     }
 
@@ -199,9 +181,6 @@ impl FlodbaddL7 {
         self.start_cache_cleanup_task().await;
 
         self.start_sensitive_scan_task().await;
-
-        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-        self.start_eager_coalescing_task().await;
     }
 
     pub async fn stop(&mut self) {
@@ -223,13 +202,6 @@ impl FlodbaddL7 {
             task_handle.stop_flag.store(true, Ordering::Relaxed);
             let _ = task_handle.handle.await;
             info!("Stopped sensitive file scan task");
-        }
-
-        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-        if let Some(task_handle) = self.eager_handle.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
-            let _ = task_handle.handle.await;
-            info!("Stopped macOS eager coalescing task");
         }
     }
 
@@ -397,6 +369,24 @@ impl FlodbaddL7 {
                             continue;
                         }
 
+                        // Windows ETW: direct connection-to-PID from kernel trace
+                        if let Some(mut l7_etw_data) = l7_etw::get_l7_for_session(&connection) {
+                            l7_etw::enrich_session_l7(l7_etw_data.pid, &mut l7_etw_data);
+                            Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_etw_data);
+                            l7_map.insert(
+                                connection.clone(),
+                                L7Resolution {
+                                    l7: Some(l7_etw_data),
+                                    date: Utc::now(),
+                                    retry_count: 0,
+                                    last_retry: None,
+                                    source: L7ResolutionSource::Etw,
+                                },
+                            );
+                            successfully_resolved_count += 1;
+                            continue;
+                        }
+
                         // macOS libproc: direct socket-to-PID lookup
                         #[cfg(target_os = "macos")]
                         {
@@ -422,6 +412,12 @@ impl FlodbaddL7 {
                                         )
                                         .await;
                                         let mut l7_data = l7_data;
+                                        l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
+                                        let source = if l7_es::is_available() {
+                                            L7ResolutionSource::EndpointSecurity
+                                        } else {
+                                            L7ResolutionSource::MacosLibproc
+                                        };
                                         Self::merge_previous_sensitive(
                                             &l7_map,
                                             &connection,
@@ -434,7 +430,7 @@ impl FlodbaddL7 {
                                                 date: Utc::now(),
                                                 retry_count: 0,
                                                 last_retry: None,
-                                                source: L7ResolutionSource::MacosLibproc,
+                                                source,
                                             },
                                         );
                                         successfully_resolved_count += 1;
@@ -1478,37 +1474,6 @@ impl FlodbaddL7 {
             }
         }
 
-        // macOS eager probe: submit to the coalescing task which batches
-        // multiple sessions into a single scan_all_process_sockets + sysinfo
-        // refresh, amortising the cost across concurrent arrivals.
-        #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-        if eager {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            if self
-                .eager_tx
-                .send(EagerRequest {
-                    session: connection.clone(),
-                    tx,
-                })
-                .is_ok()
-            {
-                if let Ok(Some(l7_data)) = rx.await {
-                    self.l7_map.insert(
-                        connection.clone(),
-                        L7Resolution {
-                            l7: Some(l7_data),
-                            date: Utc::now(),
-                            retry_count: 0,
-                            last_retry: None,
-                            source: L7ResolutionSource::MacosLibproc,
-                        },
-                    );
-                    trace!("macOS eager coalesced resolution for {:?}", connection);
-                    return;
-                }
-            }
-        }
-
         self.l7_map.insert(
             connection.clone(),
             L7Resolution {
@@ -1528,248 +1493,6 @@ impl FlodbaddL7 {
     /// Convenience wrapper -- hot-path callers that need eager probes.
     pub async fn add_connection_to_resolver(&self, connection: &Session) {
         self.add_connection_to_resolver_ex(connection, true).await;
-    }
-
-    /// Resolve a batch of sessions in a single blocking call.
-    /// Performs ONE scan_all_process_sockets (libproc PID scan) and ONE
-    /// sysinfo refresh for the entire batch, then matches each session
-    /// against the resulting maps.
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    fn eager_macos_resolve_batch(sessions: &[Session]) -> Vec<(Session, Option<SessionL7>)> {
-        use sysinfo::{ProcessRefreshKind, RefreshKind, System, Users};
-
-        let (session_map, _entries) = l7_macos::scan_all_process_sockets(None);
-
-        let matched_pids: Vec<(usize, u32)> = sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, sess)| session_map.get(sess).map(|pid| (i, *pid)))
-            .collect();
-
-        if matched_pids.is_empty() {
-            return sessions.iter().map(|s| (s.clone(), None)).collect();
-        }
-
-        let refresh_kind =
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu());
-        let mut sys = System::new();
-        sys.refresh_specifics(refresh_kind);
-
-        let pid_to_process: HashMap<u32, &sysinfo::Process> = sys
-            .processes()
-            .iter()
-            .map(|(pid, proc_ref)| (pid.as_u32(), proc_ref))
-            .collect();
-
-        let mut sysinfo_users = Users::new();
-        sysinfo_users.refresh();
-        let uid_to_username: HashMap<&sysinfo::Uid, &str> = sysinfo_users
-            .iter()
-            .map(|user| (user.id(), user.name()))
-            .collect();
-
-        let mut results: Vec<(Session, Option<SessionL7>)> =
-            sessions.iter().map(|s| (s.clone(), None)).collect();
-
-        for (idx, pid) in matched_pids {
-            results[idx].1 = Self::build_l7_from_pid(pid, &pid_to_process, &uid_to_username);
-        }
-
-        results
-    }
-
-    /// Build a SessionL7 from a PID using a pre-populated pid_to_process map.
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    fn build_l7_from_pid(
-        pid: u32,
-        pid_to_process: &HashMap<u32, &sysinfo::Process>,
-        uid_to_username: &HashMap<&sysinfo::Uid, &str>,
-    ) -> Option<SessionL7> {
-        let process = pid_to_process.get(&pid)?;
-
-        let username = if let Some(user_id) = process.user_id() {
-            match uid_to_username.get(&user_id).map(|s| s.to_string()) {
-                Some(name) => name,
-                None => {
-                    if let Some(user) = users::get_user_by_uid(**user_id) {
-                        user.name().to_string_lossy().to_string()
-                    } else {
-                        String::new()
-                    }
-                }
-            }
-        } else {
-            String::new()
-        };
-
-        let process_name = process.name().to_string_lossy().to_string();
-        let process_path = process
-            .exe()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let cmd: Vec<String> = process
-            .cmd()
-            .iter()
-            .map(|e| e.to_string_lossy().to_string())
-            .collect();
-        let cwd = process
-            .cwd()
-            .map(|p| p.to_string_lossy().to_string())
-            .filter(|p| !p.is_empty());
-        let memory = process.memory();
-        let run_time = process.run_time();
-        let accumulated_cpu_time = process.accumulated_cpu_time();
-        let cpu_usage = if run_time > 0 {
-            ((accumulated_cpu_time as f64 * 10.0) / run_time as f64).round() as u32
-        } else {
-            0
-        };
-        let disk_stats = process.disk_usage();
-        let disk_usage = SessionProcessDiskUsage {
-            total_written_bytes: disk_stats.total_written_bytes,
-            written_bytes: disk_stats.written_bytes,
-            total_read_bytes: disk_stats.total_read_bytes,
-            read_bytes: disk_stats.read_bytes,
-        };
-        let open_files =
-            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
-
-        let parent_pid = process.parent().map(|p| p.as_u32());
-
-        let (parent_process_name, parent_process_path, parent_cmd) = if let Some(ppid) = parent_pid
-        {
-            if let Some(parent_proc) = pid_to_process.get(&ppid) {
-                (
-                    parent_proc.name().to_string_lossy().to_string(),
-                    parent_proc
-                        .exe()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    parent_proc
-                        .cmd()
-                        .iter()
-                        .map(|e| e.to_string_lossy().to_string())
-                        .collect(),
-                )
-            } else {
-                (String::new(), String::new(), Vec::new())
-            }
-        } else {
-            (String::new(), String::new(), Vec::new())
-        };
-
-        let (grandparent_pid, grandparent_process_name, grandparent_process_path, grandparent_cmd) =
-            Self::resolve_grandparent_sysinfo(parent_pid, pid_to_process);
-
-        let parent_script_path = Self::extract_script_path(&parent_process_path, &parent_cmd);
-        let grandparent_script_path =
-            Self::extract_script_path(&grandparent_process_path, &grandparent_cmd);
-        let spawned_from_tmp = Self::originates_from_tmp(
-            &process_path,
-            &parent_process_path,
-            parent_script_path.as_deref(),
-            &grandparent_process_path,
-            grandparent_script_path.as_deref(),
-            &cmd,
-        );
-
-        Some(SessionL7 {
-            pid,
-            process_name,
-            process_path,
-            username,
-            cmd,
-            cwd,
-            memory,
-            start_time: process.start_time(),
-            run_time,
-            cpu_usage,
-            accumulated_cpu_time,
-            disk_usage,
-            open_files,
-            parent_pid,
-            parent_process_name,
-            parent_process_path,
-            parent_cmd,
-            parent_script_path,
-            grandparent_pid,
-            grandparent_process_name,
-            grandparent_process_path,
-            grandparent_cmd,
-            grandparent_script_path,
-            spawned_from_tmp,
-        })
-    }
-
-    /// Start the macOS eager coalescing task. It drains the eager channel
-    /// in micro-batches: waits up to 50ms after the first request to
-    /// accumulate more, then resolves the whole batch with a single system
-    /// scan.
-    #[cfg(all(target_os = "macos", feature = "macoseagerl7"))]
-    async fn start_eager_coalescing_task(&mut self) {
-        const COALESCE_WINDOW: Duration = Duration::from_millis(50);
-
-        let mut eager_rx = match self.eager_rx.take() {
-            Some(rx) => rx,
-            None => {
-                warn!("Eager coalescing task: no receiver available (already started?)");
-                return;
-            }
-        };
-
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
-
-        let handle = tokio::spawn(async move {
-            info!(
-                "macOS eager coalescing task started ({}ms window)",
-                COALESCE_WINDOW.as_millis()
-            );
-
-            while !stop_flag_clone.load(Ordering::Relaxed) {
-                let first = match eager_rx.recv().await {
-                    Some(req) => req,
-                    None => break,
-                };
-
-                let mut batch = vec![first];
-
-                let deadline = tokio::time::Instant::now() + COALESCE_WINDOW;
-                loop {
-                    match tokio::time::timeout_at(deadline, eager_rx.recv()).await {
-                        Ok(Some(req)) => batch.push(req),
-                        _ => break,
-                    }
-                }
-
-                let sessions: Vec<Session> = batch.iter().map(|r| r.session.clone()).collect();
-                let batch_size = sessions.len();
-
-                let results =
-                    tokio::task::spawn_blocking(move || Self::eager_macos_resolve_batch(&sessions))
-                        .await
-                        .unwrap_or_default();
-
-                let mut resolved = 0usize;
-                for (req, (_session, l7_opt)) in batch.into_iter().zip(results.into_iter()) {
-                    if l7_opt.is_some() {
-                        resolved += 1;
-                    }
-                    let _ = req.tx.send(l7_opt);
-                }
-
-                if batch_size > 1 || resolved > 0 {
-                    debug!(
-                        "macOS eager batch: {} sessions, {} resolved in single scan",
-                        batch_size, resolved
-                    );
-                }
-            }
-
-            info!("macOS eager coalescing task stopped");
-        });
-
-        self.eager_handle = Some(TaskHandle { handle, stop_flag });
     }
 
     pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {

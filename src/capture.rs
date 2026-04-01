@@ -4,6 +4,8 @@ use crate::interface::*;
 use crate::ip::*;
 use crate::l7::{FlodbaddL7, L7ResolutionSource};
 use crate::l7_ebpf;
+use crate::l7_es;
+use crate::l7_etw;
 use crate::mdns::*;
 use crate::packets::*;
 use crate::resolver::FlodbaddResolver;
@@ -347,8 +349,10 @@ impl FlodbaddCapture {
 
         info!("Starting packet capture");
 
-        // Log eBPF L7 resolution helper status
+        // Log L7 resolution helper status
         l7_ebpf::init_and_log_status();
+        l7_es::init_and_log_status();
+        l7_etw::init_and_log_status();
 
         // Reset fetch timestamps to ensure incremental fetching works correctly after restart
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);

@@ -1,4 +1,4 @@
-.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup
+.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup windows_benchmark windows_benchmark_no_etw macos_benchmark macos_benchmark_no_es linux_benchmark linux_benchmark_no_ebpf
 
 upgrade:
 	rustup update
@@ -31,7 +31,29 @@ android:
 
 
 windows_test:
+	cargo test --features packetcapture,asyncpacketcapture,etw -- --nocapture --test-threads=1
+
+windows_test_no_etw:
 	cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+
+# L7 Attribution Benchmark targets
+windows_benchmark:
+	cargo test --features packetcapture,asyncpacketcapture,etw --test l7_benchmark_test -- --nocapture
+
+windows_benchmark_no_etw:
+	cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
+
+macos_benchmark:
+	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test -- --nocapture
+
+macos_benchmark_no_es:
+	sudo -E cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
+
+linux_benchmark: ebpf_setup
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf --test l7_benchmark_test -- --nocapture
+
+linux_benchmark_no_ebpf:
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
 
 # Setup the environment for eBPF testing
 ebpf_setup:
@@ -53,7 +75,7 @@ linux_test_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
 
 macos_test:
-	sudo -E cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity -- --nocapture --test-threads=1
 
 ios_test: ios
 
