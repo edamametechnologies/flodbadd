@@ -1,10 +1,56 @@
-# ETW Layer 7 Process Attribution
+# ETW Layer 7 Process Attribution (Experimental -- Not Enabled)
+
+## Status
+
+**The `etw` feature flag is not enabled by default.** Benchmarks show that
+`netstat2` (`GetExtendedTcpTable` from `iphlpapi.dll`) provides equivalent
+or better L7 resolution performance on Windows without any of ETW's
+operational complexity.
+
+### Why ETW is not useful for L7 socket attribution
+
+`GetExtendedTcpTable` is a synchronous Win32 syscall that queries the
+kernel's TCP connection table as a point-in-time snapshot. It returns all
+active connections with their owning PIDs in a single call. This is fast
+enough to resolve even instant-close (0 ms hold) TCP sessions -- matching
+eBPF's coverage on Linux.
+
+ETW, by contrast, delivers kernel trace events asynchronously via a callback
+thread with buffering latency. The TCP/IP Connect event arrives in the
+DashMap *after* the connection is already visible to `GetExtendedTcpTable`.
+In practice, `netstat2` always wins the resolution race.
+
+| Metric | netstat2 (GetExtendedTcpTable) | ETW (kernel trace) |
+|---|---|---|
+| Resolution rate (0 ms hold) | **100%** | 100% (but resolves as ExactMatch, not Etw) |
+| Min detectable session | **0 ms** | 0 ms (no improvement) |
+| API model | Synchronous syscall | Asynchronous event callback |
+| Privilege required | None | Administrator |
+| Session exclusivity | None | Exclusive NT Kernel Logger |
+| Operational conflicts | None | Conflicts with PerfMon, Xperf, etc. |
+| Additional dependency | `iphlpapi.dll` (always present) | `windows` crate ETW APIs |
+
+### Where ETW could add value beyond L7
+
+ETW is a powerful general-purpose kernel tracing facility. If EDAMAME needs
+Windows-specific telemetry beyond socket attribution in the future, ETW
+could be repurposed for:
+
+- **DLL/image load tracking** (`IMAGE_LOAD` events) -- detect injected DLLs
+- **File I/O monitoring** (`FileIo` provider) -- track sensitive file access
+- **Registry access tracing** -- detect persistence mechanisms
+- **Thread injection detection** -- cross-process thread creation
+- **Process metadata for exited processes** -- command line, environment
+  captured at process start, surviving process exit
+
+These use cases would require new event handlers beyond the current
+TCP/IP and Process providers.
 
 ## Overview
 
-Flodbadd includes an optional Windows ETW (Event Tracing for Windows) subsystem that maintains a live process table and connection-to-PID mapping fed by kernel trace events. This provides high-fidelity process attribution without the race conditions inherent in polling netstat2/sysinfo.
+Flodbadd includes an optional Windows ETW (Event Tracing for Windows) subsystem that maintains a live process table and connection-to-PID mapping fed by kernel trace events. The `etw` feature flag is available for experimentation but is not enabled in production builds.
 
-ETW is the Windows counterpart of the eBPF module on Linux (`l7_ebpf.rs`) and Endpoint Security on macOS (`l7_es.rs`).
+ETW was originally intended as the Windows counterpart of the eBPF module on Linux (`l7_ebpf.rs`) and Endpoint Security on macOS (`l7_es.rs`), but benchmarks demonstrated that Windows does not need kernel-level event tracing for L7 attribution because `GetExtendedTcpTable` is already fast enough.
 
 ## What is ETW?
 
@@ -54,9 +100,10 @@ Windows Event Tracing for Windows (ETW) is a kernel-level tracing facility that 
 3. ETW (Windows only) -- kernel TCP/IP + Process providers
 4. netstat (all platforms) -- universal fallback
 
-## Enabling ETW
+## Enabling ETW (Experimental)
 
-### Cargo Feature
+ETW is **not enabled** in `edamame_helper` or `edamame_posture` by default.
+To experiment with it:
 
 ```toml
 [dependencies]
@@ -75,16 +122,17 @@ No entitlement request needed (unlike macOS ES).
 
 ## Where the ETW Client Runs
 
-### edamame_helper (Production)
+ETW is not enabled in production. If re-enabled for experimentation:
+
+### edamame_helper
 
 - Runs as Windows Service with LocalSystem privileges
-- Already handles packet capture via flodbadd
-- ETW session created in-process
+- Would create ETW session in-process alongside packet capture
 
-### edamame_posture (Standalone)
+### edamame_posture
 
 - Must run as Administrator
-- Direct ETW access when built with etw feature
+- Would get direct ETW access when built with `etw` feature
 
 ## ETW Providers Used
 
@@ -117,12 +165,19 @@ When ETW is unavailable (not admin, session conflict), the module returns `is_av
 | **macOS** | None | Use ES instead |
 | **Linux** | None | Use eBPF instead |
 
-## Performance
+## Performance (Benchmark Results)
 
-| Method | Connection Attribution | Process Metadata | Notes |
+CI benchmarks (`tests/l7_benchmark_test.rs`) show no measurable resolution
+improvement from ETW over `netstat2` on Windows:
+
+| Method | Resolution rate (0 ms hold) | Min detectable session | Primary source |
 |---|---|---|---|
-| **ETW** | < 1ms (event-driven) | < 1ms lookup | Kernel-delivered, no polling |
-| **netstat2 + sysinfo** | 10-50ms (polling) | 10-50ms refresh | Race-prone for short-lived processes |
+| **netstat2 (GetExtendedTcpTable)** | **100%** | **0 ms** | ExactMatch |
+| **ETW + netstat2** | **100%** | **0 ms** | ExactMatch (ETW never wins the race) |
+
+On Windows, `GetExtendedTcpTable` is a synchronous kernel syscall, not a
+polling loop. It returns the full connection table with PIDs in one call,
+which is why it resolves even instant-close sessions.
 
 ## Kernel Trace Session Limitations
 
