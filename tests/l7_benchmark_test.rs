@@ -32,13 +32,21 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(12);
 
 fn platform_string() -> &'static str {
     #[cfg(target_os = "linux")]
-    { "linux" }
+    {
+        "linux"
+    }
     #[cfg(target_os = "macos")]
-    { "macos" }
+    {
+        "macos"
+    }
     #[cfg(target_os = "windows")]
-    { "windows" }
+    {
+        "windows"
+    }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    { "unknown" }
+    {
+        "unknown"
+    }
 }
 
 fn kernel_l7_info() -> (&'static str, bool) {
@@ -232,13 +240,7 @@ async fn run_resolution_rate(
         let mut sources = Vec::new();
 
         for i in 0..ITERATIONS_PER_BUCKET {
-            let r = attempt_connection(
-                l7,
-                local_ip,
-                dst_ip,
-                Duration::from_millis(hold_ms),
-            )
-            .await;
+            let r = attempt_connection(l7, local_ip, dst_ip, Duration::from_millis(hold_ms)).await;
             println!(
                 "  [{}/{}] {}: resolved={} latency={}ms source={}",
                 i + 1,
@@ -277,8 +279,7 @@ async fn run_resolution_rate(
         });
     }
 
-    let overall_rate_pct =
-        (f64::from(overall_resolved) / f64::from(overall_total)) * 100.0;
+    let overall_rate_pct = (f64::from(overall_resolved) / f64::from(overall_total)) * 100.0;
 
     ResolutionRateResult {
         buckets,
@@ -312,13 +313,7 @@ async fn run_min_duration_search(
         let mut last_source = String::from("none");
 
         for _ in 0..ATTEMPTS_PER_PROBE {
-            let r = attempt_connection(
-                l7,
-                local_ip,
-                dst_ip,
-                Duration::from_millis(hold_ms),
-            )
-            .await;
+            let r = attempt_connection(l7, local_ip, dst_ip, Duration::from_millis(hold_ms)).await;
             if r.resolved {
                 successes += 1;
                 total_latency += r.latency_ms;
@@ -380,7 +375,10 @@ async fn l7_benchmark() {
 
     println!("\n=== L7 Attribution Benchmark ===");
     println!("  Platform:  {}", platform_string());
-    println!("  Kernel L7: {} (available={})", kernel_l7, kernel_l7_available);
+    println!(
+        "  Kernel L7: {} (available={})",
+        kernel_l7, kernel_l7_available
+    );
     println!("  Local IP:  {}", local_ip);
     println!();
 

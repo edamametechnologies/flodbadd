@@ -22,17 +22,16 @@ mod win {
     use std::sync::Arc;
     use tracing::{debug, error, warn};
 
+    use windows::core::{GUID, PCWSTR};
     use windows::Win32::System::Diagnostics::Etw::{
-        CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace,
-        StartTraceW, CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS,
-        EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
+        CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
+        CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
         EVENT_TRACE_FLAG, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
         EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
-        PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
-        TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+        PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION,
+        WNODE_FLAG_TRACED_GUID,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::core::{GUID, PCWSTR};
 
     const KERNEL_LOGGER_NAME: &str = "NT Kernel Logger";
 
@@ -140,7 +139,8 @@ mod win {
             let init_status = if is_available {
                 "Enabled: Windows ETW kernel trace with TCP/IP and Process providers".to_string()
             } else {
-                "Disabled: ETW kernel trace session failed to start (need Administrator)".to_string()
+                "Disabled: ETW kernel trace session failed to start (need Administrator)"
+                    .to_string()
             };
 
             if is_available {
@@ -182,8 +182,7 @@ mod win {
                     + (logger_name_wide.len() * 2)
                     + 1024;
                 let mut stop_buf = vec![0u8; buf_size];
-                let stop_props =
-                    &mut *(stop_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                let stop_props = &mut *(stop_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
                 stop_props.Wnode.BufferSize = buf_size as u32;
                 stop_props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
                 stop_props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
@@ -197,14 +196,12 @@ mod win {
 
                 // Allocate buffer for the new trace session
                 let mut trace_buf = vec![0u8; buf_size];
-                let props =
-                    &mut *(trace_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                let props = &mut *(trace_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
                 props.Wnode.BufferSize = buf_size as u32;
                 props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
                 props.Wnode.ClientContext = 1; // QPC for timestamps
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-                props.EnableFlags =
-                    EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
+                props.EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
                 props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
                 props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
 
@@ -265,9 +262,7 @@ mod win {
 
                 // Open the trace for consumption
                 let mut logfile = EVENT_TRACE_LOGFILEW::default();
-                logfile.LoggerName = windows::core::PWSTR(
-                    logger_name_wide.as_ptr() as *mut u16,
-                );
+                logfile.LoggerName = windows::core::PWSTR(logger_name_wide.as_ptr() as *mut u16);
                 logfile.Anonymous1.ProcessTraceMode =
                     PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
                 logfile.Anonymous2.EventRecordCallback = Some(event_record_callback);
@@ -495,8 +490,7 @@ mod win {
                 let fixed_size = std::mem::size_of::<ProcessStartEvent>();
                 let remaining = data_len.saturating_sub(fixed_size);
                 let remaining_ptr = (data_ptr as *const u8).add(fixed_size);
-                let remaining_slice =
-                    std::slice::from_raw_parts(remaining_ptr, remaining);
+                let remaining_slice = std::slice::from_raw_parts(remaining_ptr, remaining);
 
                 // The image path is a null-terminated ANSI string at the end of the payload
                 // in older format, or a wide string. Try to extract it.
@@ -661,9 +655,7 @@ pub fn is_available() -> bool {
 pub fn init_and_log_status() {
     let available = is_available();
     if available {
-        info!(
-            "ETW L7 process tracking is ENABLED - connection-to-PID mapping via kernel trace"
-        );
+        info!("ETW L7 process tracking is ENABLED - connection-to-PID mapping via kernel trace");
     } else {
         #[cfg(all(target_os = "windows", feature = "etw"))]
         {

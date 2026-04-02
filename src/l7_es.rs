@@ -144,10 +144,7 @@ mod macos {
             }
         }
 
-        fn run_es_client(
-            table: Arc<DashMap<u32, EsProcessInfo>>,
-            available: Arc<AtomicBool>,
-        ) {
+        fn run_es_client(table: Arc<DashMap<u32, EsProcessInfo>>, available: Arc<AtomicBool>) {
             let table_for_handler = AssertUnwindSafe(Arc::clone(&table));
 
             let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
@@ -178,11 +175,7 @@ mod macos {
                             .to_string_lossy()
                             .to_string();
                         let parent_name = extract_process_name(&parent_path);
-                        let child_path = child
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
+                        let child_path = child.executable().path().to_string_lossy().to_string();
 
                         let info = EsProcessInfo {
                             pid: child_pid,
@@ -209,11 +202,7 @@ mod macos {
                     Some(Event::NotifyExec(exec)) => {
                         let target = exec.target();
                         let target_pid = target.audit_token().pid() as u32;
-                        let target_path = target
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
+                        let target_path = target.executable().path().to_string_lossy().to_string();
 
                         let args: Vec<String> = exec
                             .args()
@@ -328,7 +317,10 @@ mod macos {
             let version_str = String::from_utf8_lossy(&output.stdout);
             let parts: Vec<&str> = version_str.trim().split('.').collect();
             let major = parts.first()?.parse::<u32>().ok()?;
-            let minor = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let minor = parts
+                .get(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
             Some((major, minor))
         }
 
@@ -400,7 +392,9 @@ mod macos {
                         };
                         fn path_is_tmp(p: &str) -> bool {
                             let lp = p.to_lowercase();
-                            lp.starts_with("/tmp/") || lp.starts_with("/var/tmp/") || lp.starts_with("/dev/shm/")
+                            lp.starts_with("/tmp/")
+                                || lp.starts_with("/var/tmp/")
+                                || lp.starts_with("/dev/shm/")
                         }
                         l7.spawned_from_tmp = path_is_tmp(&l7.process_path)
                             || path_is_tmp(&l7.parent_process_path)
