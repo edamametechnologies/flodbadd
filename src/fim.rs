@@ -330,6 +330,18 @@ mod tests {
         let _ = paths;
     }
 
+    fn poll_for_events(store: &FimEventStore, min_count: usize, timeout_ms: u64) -> Vec<FimEvent> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let events = store.get_all_events();
+            if events.len() >= min_count || std::time::Instant::now() >= deadline {
+                return events;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     #[test]
     fn test_fim_watcher_lifecycle() {
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -343,17 +355,18 @@ mod tests {
         assert!(watcher.is_running());
         assert_eq!(watcher.watch_paths().len(), 1);
 
-        // Create a file to trigger an event
         let test_file = temp.path().join("test.txt");
         fs::write(&test_file, "hello fim").expect("write test file");
 
-        // Give the watcher a moment to process
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let events = poll_for_events(watcher.store(), 1, 5000);
+        assert!(
+            !events.is_empty(),
+            "FIM watcher should detect file creation within 5s"
+        );
 
-        let events = watcher.store().get_all_events();
-        // The watcher should have caught the file creation (platform-dependent timing)
-        // We don't assert exact count since it depends on OS event delivery timing
-        info!("FIM test: captured {} events", events.len());
+        let matching = events.iter().any(|e| e.path.contains("test.txt"));
+        assert!(matching, "Should have an event for test.txt, got: {:?}",
+            events.iter().map(|e| &e.path).collect::<Vec<_>>());
 
         watcher.stop();
     }
@@ -383,17 +396,20 @@ mod tests {
         let watcher =
             FimWatcher::start(vec![temp.path().to_path_buf()], config).expect("start watcher");
 
-        // Create a file that matches the sensitive path pattern
         let key_file = ssh_dir.join("id_rsa");
         fs::write(&key_file, "fake-key-content").expect("write key file");
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let events = poll_for_events(watcher.store(), 1, 5000);
+        assert!(
+            !events.is_empty(),
+            "FIM watcher should detect .ssh/id_rsa creation within 5s"
+        );
 
         let sensitive = watcher.store().get_sensitive_events();
-        info!(
-            "FIM sensitive test: {} sensitive events out of {} total",
-            sensitive.len(),
-            watcher.store().event_count()
+        assert!(
+            !sensitive.is_empty(),
+            "Creating .ssh/id_rsa should produce a sensitive event. All events: {:?}",
+            events.iter().map(|e| (&e.path, e.is_sensitive)).collect::<Vec<_>>()
         );
 
         watcher.stop();
@@ -424,6 +440,45 @@ mod tests {
         let (size, hash) = get_file_metadata(&test_file, 10);
         assert_eq!(size, Some(100));
         assert!(hash.is_none(), "Should skip hashing files above threshold");
+    }
+
+    #[test]
+    fn test_fim_watcher_create_modify_delete() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let config = FimConfig {
+            recursive: true,
+            ..Default::default()
+        };
+        let watcher =
+            FimWatcher::start(vec![temp.path().to_path_buf()], config).expect("start watcher");
+
+        let test_file = temp.path().join("lifecycle.txt");
+
+        fs::write(&test_file, "initial").expect("create file");
+        let events = poll_for_events(watcher.store(), 1, 5000);
+        assert!(!events.is_empty(), "Should detect file creation");
+
+        let before_modify = watcher.store().event_count();
+        fs::write(&test_file, "modified content").expect("modify file");
+        let events = poll_for_events(watcher.store(), before_modify + 1, 5000);
+        assert!(
+            events.len() > before_modify,
+            "Should detect file modification (had {}, now {})",
+            before_modify,
+            events.len()
+        );
+
+        let before_delete = watcher.store().event_count();
+        fs::remove_file(&test_file).expect("delete file");
+        let events = poll_for_events(watcher.store(), before_delete + 1, 5000);
+        assert!(
+            events.len() > before_delete,
+            "Should detect file deletion (had {}, now {})",
+            before_delete,
+            events.len()
+        );
+
+        watcher.stop();
     }
 
     #[test]

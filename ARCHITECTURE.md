@@ -10,6 +10,7 @@ Flodbadd transforms raw network packets into enriched, security-aware sessions a
 2. **Session Reconstruction** - Stateful TCP/UDP tracking with Zeek-style history
 3. **Security Analysis** - Whitelists, blacklists, ML anomaly detection
 4. **Intelligence Enrichment** - ASN, DNS, mDNS, process attribution
+5. **File Integrity Monitoring** - Cross-platform filesystem change detection (feature: `fim`)
 
 ## Module Structure
 
@@ -40,7 +41,10 @@ src/
 ├── oui.rs              # MAC OUI vendor lookup
 ├── profiles.rs         # Device type identification
 ├── port_vulns.rs       # Port vulnerability database
-└── vendor_vulns.rs     # Vendor vulnerability tracking
+├── vendor_vulns.rs     # Vendor vulnerability tracking
+│
+├── fim.rs              # File integrity watcher (feature: fim)
+└── fim_events.rs       # FIM event store and data types (feature: fim)
 ```
 
 ## Data Flow

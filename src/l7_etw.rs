@@ -26,7 +26,7 @@ mod win {
     use windows::Win32::System::Diagnostics::Etw::{
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
         CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
-        EVENT_TRACE_FLAG, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
+        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
         EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
         PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION,
         WNODE_FLAG_TRACED_GUID,
@@ -304,10 +304,6 @@ mod win {
                 dst_port: session.dst_port,
             };
             self.connection_table.get(&key).map(|r| *r.value())
-        }
-
-        pub fn get_process_info(&self, pid: u32) -> Option<EtwProcessInfo> {
-            self.process_table.get(&pid).map(|e| e.value().clone())
         }
 
         pub fn get_l7_for_session(&self, session: &Session) -> Option<SessionL7> {
@@ -594,10 +590,6 @@ mod win {
 
     impl FlodbaddL7Etw {
         pub fn get_l7_for_session(&self, _session: &Session) -> Option<SessionL7> {
-            None
-        }
-
-        pub fn get_process_info(&self, _pid: u32) -> Option<EtwProcessInfo> {
             None
         }
 
