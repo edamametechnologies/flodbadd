@@ -48,20 +48,16 @@ impl FimWatcher {
         let store_clone = store.clone();
         let hash_threshold = config.hash_size_threshold;
         let mut watcher = RecommendedWatcher::new(
-            move |result: std::result::Result<Event, notify::Error>| {
-                match result {
-                    Ok(event) => {
-                        if let Some(fim_events) =
-                            translate_notify_event(&event, hash_threshold)
-                        {
-                            for fim_event in fim_events {
-                                store_clone.insert(fim_event);
-                            }
+            move |result: std::result::Result<Event, notify::Error>| match result {
+                Ok(event) => {
+                    if let Some(fim_events) = translate_notify_event(&event, hash_threshold) {
+                        for fim_event in fim_events {
+                            store_clone.insert(fim_event);
                         }
                     }
-                    Err(e) => {
-                        error!("FIM watcher error: {:?}", e);
-                    }
+                }
+                Err(e) => {
+                    error!("FIM watcher error: {:?}", e);
                 }
             },
             Config::default(),
@@ -253,7 +249,9 @@ fn desktop_watch_paths() -> Vec<PathBuf> {
     if let Some(home) = home_dir() {
         let home = PathBuf::from(home);
 
-        let common_dirs = [".ssh", ".gnupg", ".aws", ".kube", ".docker", ".cursor", ".claude"];
+        let common_dirs = [
+            ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".cursor", ".claude",
+        ];
         for dir in &common_dirs {
             let p = home.join(dir);
             if p.exists() {
@@ -331,8 +329,7 @@ mod tests {
     }
 
     fn poll_for_events(store: &FimEventStore, min_count: usize, timeout_ms: u64) -> Vec<FimEvent> {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let events = store.get_all_events();
             if events.len() >= min_count || std::time::Instant::now() >= deadline {
@@ -365,8 +362,11 @@ mod tests {
         );
 
         let matching = events.iter().any(|e| e.path.contains("test.txt"));
-        assert!(matching, "Should have an event for test.txt, got: {:?}",
-            events.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert!(
+            matching,
+            "Should have an event for test.txt, got: {:?}",
+            events.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
 
         watcher.stop();
     }
@@ -409,7 +409,10 @@ mod tests {
         assert!(
             !sensitive.is_empty(),
             "Creating .ssh/id_rsa should produce a sensitive event. All events: {:?}",
-            events.iter().map(|e| (&e.path, e.is_sensitive)).collect::<Vec<_>>()
+            events
+                .iter()
+                .map(|e| (&e.path, e.is_sensitive))
+                .collect::<Vec<_>>()
         );
 
         watcher.stop();

@@ -43,7 +43,12 @@ pub struct FimEvent {
 
 impl FimEvent {
     pub fn compute_uid(path: &str, event_type: &FimEventType, timestamp: &DateTime<Utc>) -> String {
-        let input = format!("{}:{}:{}", path, event_type, timestamp.timestamp_nanos_opt().unwrap_or(0));
+        let input = format!(
+            "{}:{}:{}",
+            path,
+            event_type,
+            timestamp.timestamp_nanos_opt().unwrap_or(0)
+        );
         let hash = blake3::hash(input.as_bytes());
         hash.to_hex()[..24].to_string()
     }
@@ -315,7 +320,9 @@ mod tests {
     fn test_is_temp_directory_path() {
         assert!(is_temp_directory_path("/tmp/evil.sh"));
         assert!(is_temp_directory_path("/var/tmp/payload"));
-        assert!(is_temp_directory_path("C:\\Users\\user\\AppData\\Local\\Temp\\script.ps1"));
+        assert!(is_temp_directory_path(
+            "C:\\Users\\user\\AppData\\Local\\Temp\\script.ps1"
+        ));
         assert!(!is_temp_directory_path("/home/user/project/src/main.rs"));
         assert!(!is_temp_directory_path("/usr/bin/bash"));
     }
