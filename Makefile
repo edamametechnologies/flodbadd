@@ -31,10 +31,10 @@ android:
 
 
 windows_test:
-	cargo test --features packetcapture,asyncpacketcapture,etw -- --nocapture --test-threads=1
+	cargo test --features packetcapture,asyncpacketcapture,etw,fim -- --nocapture --test-threads=1
 
 windows_test_no_etw:
-	cargo test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+	cargo test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
 
 # L7 Attribution Benchmark targets
 windows_benchmark:
@@ -69,13 +69,13 @@ linux_test: ebpf_setup
 	@echo "Current kernel: $$(uname -r)"
 	@echo "Debug filesystem: $$(mount | grep debugfs || echo 'Not mounted')"
 	@echo "BPF filesystem: $$(mount | grep bpf || echo 'Not mounted')"
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf -- --nocapture --test-threads=1
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim -- --nocapture --test-threads=1
 
 linux_test_no_ebpf:
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture -- --nocapture --test-threads=1
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
 
 macos_test:
-	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity -- --nocapture --test-threads=1
+	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim -- --nocapture --test-threads=1
 
 ios_test: ios
 

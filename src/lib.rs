@@ -12,6 +12,16 @@ pub mod broadcast;
     feature = "packetcapture"
 ))]
 pub mod capture;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "fim"
+))]
+pub mod fim;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "fim"
+))]
+pub mod fim_events;
 pub mod device_info;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
