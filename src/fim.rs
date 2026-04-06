@@ -41,6 +41,8 @@ pub struct FimWatcher {
     running: Arc<AtomicBool>,
 }
 
+pub const FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT: usize = 128;
+
 impl FimWatcher {
     pub fn start(paths: Vec<PathBuf>, config: FimConfig) -> Result<Self> {
         let store = Arc::new(FimEventStore::new());
@@ -308,6 +310,39 @@ fn lookup_process_details(
         });
 
     (process_name, process_path)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
+    let candidates = store.get_recent_events_missing_process_attribution(max_events);
+    let mut updated = 0;
+
+    for event in candidates {
+        if event.event_type == FimEventType::Delete {
+            continue;
+        }
+
+        let path = Path::new(&event.path);
+        let (pid, fallback_name) = match lookup_pid_for_path(path) {
+            Some(details) => details,
+            None => continue,
+        };
+
+        let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+        if process_name.is_none() && process_path.is_none() {
+            continue;
+        }
+
+        store.update_process_attribution(&event.uid, process_name, process_path);
+        updated += 1;
+    }
+
+    updated
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn backfill_missing_process_attribution(_store: &FimEventStore, _max_events: usize) -> usize {
+    0
 }
 
 #[cfg(target_os = "linux")]

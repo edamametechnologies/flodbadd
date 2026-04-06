@@ -118,6 +118,54 @@ impl FimEventStore {
         self.events.clear();
     }
 
+    pub fn get_recent_events_missing_process_attribution(
+        &self,
+        max_events: usize,
+    ) -> Vec<FimEvent> {
+        let mut events: Vec<FimEvent> = self
+            .events
+            .iter()
+            .filter(|e| process_attribution_missing(e.value()))
+            .map(|e| e.value().clone())
+            .collect();
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        if events.len() > max_events {
+            events.truncate(max_events);
+        }
+        events
+    }
+
+    pub fn update_process_attribution(
+        &self,
+        uid: &str,
+        process_name: Option<String>,
+        process_path: Option<String>,
+    ) {
+        if process_name.is_none() && process_path.is_none() {
+            return;
+        }
+
+        if let Some(mut event) = self.events.get_mut(uid) {
+            if event
+                .process_name
+                .as_deref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                event.process_name = process_name;
+            }
+
+            if event
+                .process_path
+                .as_deref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                event.process_path = process_path;
+            }
+        }
+    }
+
     pub fn has_suspicious_events(&self) -> bool {
         self.events.iter().any(|e| {
             let ev = e.value();
@@ -150,6 +198,19 @@ impl FimEventStore {
             }
         }
     }
+}
+
+fn process_attribution_missing(event: &FimEvent) -> bool {
+    event
+        .process_name
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+        && event
+            .process_path
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
 }
 
 impl Default for FimEventStore {
@@ -251,6 +312,89 @@ mod tests {
         assert_eq!(store.event_count(), 2);
         assert_eq!(store.get_sensitive_events().len(), 1);
         assert_eq!(store.get_sensitive_events()[0].labels, vec!["ssh"]);
+    }
+
+    #[test]
+    fn test_recent_events_missing_process_attribution_only_returns_missing_recent_first() {
+        let store = FimEventStore::new();
+        let older_ts = Utc::now() - ChronoDuration::minutes(2);
+        let newer_ts = Utc::now() - ChronoDuration::minutes(1);
+
+        store.insert(FimEvent {
+            path: "/tmp/with-process.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: older_ts,
+            size: None,
+            hash: None,
+            process_name: Some("cursor".to_string()),
+            process_path: Some("/Applications/Cursor.app".to_string()),
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/tmp/with-process.txt", &FimEventType::Modify, &older_ts),
+        });
+        store.insert(FimEvent {
+            path: "/tmp/missing-older.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: older_ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/tmp/missing-older.txt", &FimEventType::Modify, &older_ts),
+        });
+        let newest_uid =
+            FimEvent::compute_uid("/tmp/missing-newer.txt", &FimEventType::Create, &newer_ts);
+        store.insert(FimEvent {
+            path: "/tmp/missing-newer.txt".to_string(),
+            event_type: FimEventType::Create,
+            timestamp: newer_ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: newest_uid.clone(),
+        });
+
+        let missing = store.get_recent_events_missing_process_attribution(1);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].uid, newest_uid);
+    }
+
+    #[test]
+    fn test_update_process_attribution_backfills_missing_fields() {
+        let store = FimEventStore::new();
+        let ts = Utc::now();
+        let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+        });
+
+        store.update_process_attribution(
+            &uid,
+            Some("cursor".to_string()),
+            Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
+        );
+
+        let events = store.get_all_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].process_name.as_deref(), Some("cursor"));
+        assert_eq!(
+            events[0].process_path.as_deref(),
+            Some("/Applications/Cursor.app/Contents/MacOS/Cursor")
+        );
     }
 
     #[test]
