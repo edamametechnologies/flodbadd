@@ -16,11 +16,11 @@ async_fn_in_trait = "allow"
 [features]
 default = []
 asyncpacketcapture = []
-packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "sysinfo", "netstat2" ]
+packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "dep:sysinfo", "netstat2" ]
 ebpf = [ "aya", "bytemuck", "nix", "l7_ebpf_program" ]
 endpointsecurity = [ "endpoint-sec" ]
 etw = []
-fim = [ "dep:notify", "dep:blake3" ]
+fim = [ "dep:notify", "dep:blake3", "dep:sysinfo" ]
 examples = ["clap", "tracing-subscriber"]
 
 [dependencies]

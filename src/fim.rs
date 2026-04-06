@@ -5,8 +5,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +141,10 @@ fn translate_notify_event(event: &Event, hash_threshold: u64) -> Option<Vec<FimE
 
         let sensitive = is_sensitive_path(&path_str);
         let labels = classify_sensitive_path_labels_sync(&[path_str.clone()]);
+        // Attribution is expensive and platform-dependent, so only attempt it for
+        // sensitive or temp-ish paths that are likely to matter for vuln correlation.
+        let (process_name, process_path) =
+            best_effort_process_attribution(path, sensitive, event_type);
 
         let ts = Utc::now();
         let uid = FimEvent::compute_uid(&path_str, &event_type, &ts);
@@ -147,8 +155,8 @@ fn translate_notify_event(event: &Event, hash_threshold: u64) -> Option<Vec<FimE
             timestamp: ts,
             size,
             hash,
-            process_name: None,
-            process_path: None,
+            process_name,
+            process_path,
             is_sensitive: sensitive,
             labels,
             uid,
@@ -178,6 +186,128 @@ fn get_file_metadata(path: &Path, hash_threshold: u64) -> (Option<u64>, Option<S
         }
         Err(_) => (None, None),
     }
+}
+
+fn should_attempt_process_attribution(
+    path: &Path,
+    is_sensitive: bool,
+    event_type: FimEventType,
+) -> bool {
+    if is_sensitive {
+        return true;
+    }
+
+    if event_type == FimEventType::Delete {
+        return false;
+    }
+
+    let path_str = path.to_string_lossy();
+    path_str.contains("/tmp/")
+        || path_str.contains("/var/tmp/")
+        || path_str.contains("/private/tmp/")
+        || path_str.contains("\\Temp\\")
+        || path_str.contains("\\AppData\\Local\\Temp\\")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn best_effort_process_attribution(
+    path: &Path,
+    is_sensitive: bool,
+    event_type: FimEventType,
+) -> (Option<String>, Option<String>) {
+    if !should_attempt_process_attribution(path, is_sensitive, event_type) {
+        return (None, None);
+    }
+
+    let (pid, fallback_name) = match lookup_pid_for_path(path) {
+        Some(details) => details,
+        None => return (None, None),
+    };
+
+    lookup_process_details(pid, fallback_name)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn best_effort_process_attribution(
+    _path: &Path,
+    _is_sensitive: bool,
+    _event_type: FimEventType,
+) -> (Option<String>, Option<String>) {
+    (None, None)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
+    let output = Command::new("lsof")
+        .arg("-n")
+        .arg("-w")
+        .arg("-Fpc")
+        .arg("--")
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_lsof_pid_and_command(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn parse_lsof_pid_and_command(output: &str) -> Option<(u32, Option<String>)> {
+    let mut pid = None;
+    let mut command = None;
+
+    for line in output.lines() {
+        if pid.is_none() {
+            if let Some(rest) = line.strip_prefix('p') {
+                pid = rest.parse::<u32>().ok();
+            }
+            continue;
+        }
+
+        if command.is_none() {
+            if let Some(rest) = line.strip_prefix('c') {
+                if !rest.is_empty() {
+                    command = Some(rest.to_string());
+                }
+                break;
+            }
+        }
+    }
+
+    pid.map(|pid| (pid, command))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn lookup_process_details(
+    pid: u32,
+    fallback_name: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let mut system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu()),
+    );
+    system.refresh_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu()),
+    );
+
+    let process = system.process(Pid::from_u32(pid));
+    let process_path = process
+        .and_then(|process| process.exe())
+        .map(|path| path.to_string_lossy().to_string());
+    let process_name = process
+        .map(|process| process.name().to_string_lossy().to_string())
+        .or(fallback_name)
+        .or_else(|| {
+            process_path.as_ref().and_then(|path| {
+                Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+        });
+
+    (process_name, process_path)
 }
 
 #[cfg(target_os = "linux")]
@@ -527,5 +657,36 @@ mod tests {
         };
         let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD);
         assert!(results.is_none());
+    }
+
+    #[test]
+    fn test_should_attempt_process_attribution_for_sensitive_or_temp_paths() {
+        assert!(should_attempt_process_attribution(
+            Path::new("/Users/test/.ssh/id_rsa"),
+            true,
+            FimEventType::Create
+        ));
+        assert!(should_attempt_process_attribution(
+            Path::new("/tmp/suspicious-script.sh"),
+            false,
+            FimEventType::Modify
+        ));
+        assert!(!should_attempt_process_attribution(
+            Path::new("/tmp/deleted-secret.txt"),
+            false,
+            FimEventType::Delete
+        ));
+        assert!(!should_attempt_process_attribution(
+            Path::new("/Users/test/Documents/notes.txt"),
+            false,
+            FimEventType::Modify
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn test_parse_lsof_pid_and_command_extracts_first_process() {
+        let parsed = parse_lsof_pid_and_command("p4242\nccursor\nf4\n");
+        assert_eq!(parsed, Some((4242, Some("cursor".to_string()))));
     }
 }
