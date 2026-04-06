@@ -47,6 +47,19 @@ src/
 └── fim_events.rs       # FIM event store and data types (feature: fim)
 ```
 
+### File Integrity Monitoring Path
+
+`fim.rs` wraps the platform watcher backend from `notify`, translates raw
+filesystem events into `FimEvent`, and enriches them with:
+
+- File metadata (size and optional BLAKE3 hash)
+- Sensitive-path labels from `open_files.rs`
+- Best-effort process attribution on macOS/Linux via `lsof` plus `sysinfo`
+
+Process attribution is intentionally limited to sensitive or temp-ish paths so
+the watcher stays cheap on the common path while still giving the vulnerability
+detector enough context to correlate suspicious file activity.
+
 ## Data Flow
 
 ```
