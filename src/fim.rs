@@ -504,6 +504,17 @@ mod tests {
         }
     }
 
+    fn poll_for_sensitive_events(store: &FimEventStore, timeout_ms: u64) -> Vec<FimEvent> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let sensitive = store.get_sensitive_events();
+            if !sensitive.is_empty() || std::time::Instant::now() >= deadline {
+                return sensitive;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     #[test]
     fn test_fim_watcher_lifecycle() {
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -570,7 +581,7 @@ mod tests {
             "FIM watcher should detect .ssh/id_rsa creation within 5s"
         );
 
-        let sensitive = watcher.store().get_sensitive_events();
+        let sensitive = poll_for_sensitive_events(watcher.store(), 5000);
         assert!(
             !sensitive.is_empty(),
             "Creating .ssh/id_rsa should produce a sensitive event. All events: {:?}",
