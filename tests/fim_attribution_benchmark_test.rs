@@ -49,19 +49,28 @@ fn poll_for_events(
     }
 }
 
-/// Spawn a child shell that writes FILE_COUNT files into `dir`.
-/// Uses a separate process so macOS ES delivers events to our client.
+/// Spawn a child process that writes FILE_COUNT files using explicit
+/// open/write/close syscalls.  Uses Python for portable, predictable
+/// file I/O that produces clean ES NOTIFY_CREATE and NOTIFY_CLOSE events.
 fn write_files_via_child(dir: &std::path::Path) -> Duration {
     let script = format!(
-        "for i in $(seq -w 0 {}); do printf '%.0sB' {{1..1024}} > {}/bench_${{i}}.dat; done",
-        FILE_COUNT - 1,
-        dir.display()
+        r#"
+import os
+d = '{}'
+for i in range({}):
+    p = os.path.join(d, 'bench_{{:04d}}.dat'.format(i))
+    f = open(p, 'wb')
+    f.write(b'B' * 1024)
+    f.close()
+"#,
+        dir.display(),
+        FILE_COUNT
     );
     let start = Instant::now();
-    let status = Command::new("sh")
+    let status = Command::new("python3")
         .args(["-c", &script])
         .status()
-        .expect("spawn file writer child");
+        .expect("spawn python file writer child");
     let elapsed = start.elapsed();
     assert!(status.success(), "child writer exited with {status}");
     elapsed
