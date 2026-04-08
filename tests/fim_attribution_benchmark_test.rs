@@ -19,7 +19,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const FILE_COUNT: usize = 50;
-const SETTLE_SECS: u64 = 3;
+const SETTLE_SECS: u64 = 5;
 
 #[derive(Debug, Serialize)]
 struct FimBenchmarkResult {
@@ -49,31 +49,25 @@ fn poll_for_events(
     }
 }
 
-/// Spawn a child process that writes FILE_COUNT files using explicit
-/// open/write/close syscalls.  Uses Python for portable, predictable
-/// file I/O that produces clean ES NOTIFY_CREATE and NOTIFY_CLOSE events.
+/// Spawn individual child processes that each write one file.
+/// This ensures each file write is a separate process event for ES.
 fn write_files_via_child(dir: &std::path::Path) -> Duration {
-    let script = format!(
-        r#"
-import os
-d = '{}'
-for i in range({}):
-    p = os.path.join(d, 'bench_{{:04d}}.dat'.format(i))
-    f = open(p, 'wb')
-    f.write(b'B' * 1024)
-    f.close()
-"#,
-        dir.display(),
-        FILE_COUNT
-    );
     let start = Instant::now();
-    let status = Command::new("python3")
-        .args(["-c", &script])
-        .status()
-        .expect("spawn python file writer child");
-    let elapsed = start.elapsed();
-    assert!(status.success(), "child writer exited with {status}");
-    elapsed
+    for i in 0..FILE_COUNT {
+        let path = dir.join(format!("bench_{:04}.dat", i));
+        let status = Command::new("dd")
+            .args([
+                &format!("if=/dev/zero"),
+                &format!("of={}", path.display()),
+                "bs=1024",
+                "count=1",
+            ])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn dd child");
+        assert!(status.success(), "dd exited with {status} for file {i}");
+    }
+    start.elapsed()
 }
 
 #[test]
