@@ -610,6 +610,17 @@ mod macos {
             )
         }
 
+        pub fn dump_file_attribution_paths(&self, max: usize) -> Vec<(String, u32, String)> {
+            self.file_attribution_table
+                .iter()
+                .take(max)
+                .map(|e| {
+                    let v = e.value();
+                    (e.key().clone(), v.pid, v.process_path.clone())
+                })
+                .collect()
+        }
+
         /// Targeted session resolution: iterate ES-known PIDs and probe their
         /// sockets via libproc until the matching session is found.  Much faster
         /// than a full `scan_all_process_sockets()` because we only visit PIDs
@@ -769,6 +780,10 @@ mod macos {
             (0, 0, 0, 0, 0, 0, 0, 0)
         }
 
+        pub fn dump_file_attribution_paths(&self, _max: usize) -> Vec<(String, u32, String)> {
+            Vec::new()
+        }
+
         pub fn enrich_session_l7(&self, _pid: u32, _base_l7: &mut SessionL7) {}
     }
 
@@ -869,6 +884,10 @@ pub fn file_attribution_count() -> usize {
 
 pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     macos::global().file_event_stats()
+}
+
+pub fn dump_file_attribution_paths(max: usize) -> Vec<(String, u32, String)> {
+    macos::global().dump_file_attribution_paths(max)
 }
 
 #[cfg(test)]

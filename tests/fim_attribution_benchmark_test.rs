@@ -91,6 +91,7 @@ fn fim_attribution_benchmark() {
     std::thread::sleep(Duration::from_millis(500));
 
     println!("\n=== FIM Attribution Benchmark ===");
+    println!("  Test process PID: {}", std::process::id());
     println!("  ES available: {}", l7_es::is_available());
     println!("  ES support:   {}", l7_es::es_support());
     println!(
@@ -126,9 +127,17 @@ fn fim_attribution_benchmark() {
         })
         .collect();
 
-    for (i, ev) in create_events.iter().take(3).enumerate() {
+    println!(
+        "  Total FIM events from notify: {} (of which {} are bench_ Create events)",
+        events.len(),
+        create_events.len()
+    );
+    for (i, ev) in create_events.iter().take(5).enumerate() {
         let es_hit = l7_es::get_file_attribution(&ev.path);
-        println!("  [diag {}] path={} es_hit={:?}", i, ev.path, es_hit);
+        println!(
+            "  [diag {}] path={} proc={:?} es_hit={:?}",
+            i, ev.path, ev.process_name, es_hit
+        );
     }
 
     let pre_attributed = create_events
@@ -185,6 +194,19 @@ fn fim_attribution_benchmark() {
 
     let (cr, cds, cdn, clr, clm, rn, ul, oth) = l7_es::file_event_stats();
     println!("  ES event counters: create={cr}(dest_some={cds},dest_none={cdn}) close={clr}(modified={clm}) rename={rn} unlink={ul} other={oth}");
+
+    let table_dump = l7_es::dump_file_attribution_paths(30);
+    println!("  ES file table dump ({} entries shown):", table_dump.len());
+    for (path, pid, exe) in &table_dump {
+        let is_bench = path.contains("bench_");
+        println!(
+            "    {} pid={} exe={} path={}",
+            if is_bench { "[MATCH]" } else { "[other]" },
+            pid,
+            exe,
+            path
+        );
+    }
 
     watcher.stop();
 
