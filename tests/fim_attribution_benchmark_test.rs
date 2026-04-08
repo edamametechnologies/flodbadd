@@ -1,10 +1,8 @@
 // FIM Process Attribution Benchmark -- ES vs lsof+cache attribution rates.
 //
-// Creates short-lived files and measures how many FIM events get process
-// attribution with vs without Endpoint Security. When ES is available the
-// file_attribution_table provides near-100% hit rate because the kernel
-// delivers (pid, path) at event time. Without ES the lsof+cache fallback
-// is inherently racy for short-lived file descriptors.
+// Spawns a child process to write files so the ES framework delivers events
+// to the parent (ES client host).  ES silently suppresses file events from
+// the process that owns the ES client, so in-process writes are invisible.
 //
 //   With ES:     sudo -E cargo test --features endpointsecurity,fim --test fim_attribution_benchmark_test -- --nocapture
 //   Without ES:  sudo -E cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
@@ -17,7 +15,7 @@ use flodbadd::fim::{
 use flodbadd::fim_events::FimEventType;
 use flodbadd::l7_es;
 use serde::Serialize;
-use std::fs;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const FILE_COUNT: usize = 50;
@@ -51,6 +49,24 @@ fn poll_for_events(
     }
 }
 
+/// Spawn a child shell that writes FILE_COUNT files into `dir`.
+/// Uses a separate process so macOS ES delivers events to our client.
+fn write_files_via_child(dir: &std::path::Path) -> Duration {
+    let script = format!(
+        "for i in $(seq -w 0 {}); do printf '%.0sB' {{1..1024}} > {}/bench_${{i}}.dat; done",
+        FILE_COUNT - 1,
+        dir.display()
+    );
+    let start = Instant::now();
+    let status = Command::new("sh")
+        .args(["-c", &script])
+        .status()
+        .expect("spawn file writer child");
+    let elapsed = start.elapsed();
+    assert!(status.success(), "child writer exited with {status}");
+    elapsed
+}
+
 #[test]
 fn fim_attribution_benchmark() {
     l7_es::init_and_log_status();
@@ -74,21 +90,19 @@ fn fim_attribution_benchmark() {
     println!("\n=== FIM Attribution Benchmark ===");
     println!("  ES available: {}", l7_es::is_available());
     println!("  ES support:   {}", l7_es::es_support());
-    println!("  Writing {} files to {}", FILE_COUNT, tmp.path().display());
+    println!(
+        "  Writing {} files to {} (via child process)",
+        FILE_COUNT,
+        tmp.path().display()
+    );
 
-    let write_start = Instant::now();
-    for i in 0..FILE_COUNT {
-        let path = tmp.path().join(format!("bench_{:04}.dat", i));
-        fs::write(&path, vec![0x42u8; 1024]).expect("write benchmark file");
-    }
-    let write_elapsed = write_start.elapsed();
+    let write_elapsed = write_files_via_child(tmp.path());
     println!(
         "  Wrote {} files in {}ms",
         FILE_COUNT,
         write_elapsed.as_millis()
     );
 
-    // Check ES table right after writes (before settle)
     let es_immediate = l7_es::file_attribution_count();
     println!("  ES file table size (immediate): {}", es_immediate);
 
@@ -109,17 +123,9 @@ fn fim_attribution_benchmark() {
         })
         .collect();
 
-    // Diagnostic: show path forms and manual ES lookup for first few events
     for (i, ev) in create_events.iter().take(3).enumerate() {
-        let canonical = std::fs::canonicalize(&ev.path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "N/A".to_string());
-        let es_raw = l7_es::get_file_attribution(&ev.path);
-        let es_canonical = l7_es::get_file_attribution(&canonical);
-        println!(
-            "  [diag {}] path={} canonical={} es_raw={:?} es_canonical={:?}",
-            i, ev.path, canonical, es_raw, es_canonical
-        );
+        let es_hit = l7_es::get_file_attribution(&ev.path);
+        println!("  [diag {}] path={} es_hit={:?}", i, ev.path, es_hit);
     }
 
     let pre_attributed = create_events
