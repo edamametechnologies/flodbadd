@@ -1,8 +1,11 @@
 // FIM Process Attribution Benchmark -- ES vs lsof+cache attribution rates.
 //
-// Spawns a child process to write files so the ES framework delivers events
-// to the parent (ES client host).  ES silently suppresses file events from
-// the process that owns the ES client, so in-process writes are invisible.
+// On macOS, the ES framework suppresses all events (process + file) from
+// the ES client's own process tree.  To test ES-based file attribution we
+// must create files from a process that is NOT a descendant of the test
+// binary.  We use `launchctl submit` to launch a launchd-managed job
+// whose parent is launchd (PID 1), making its events visible to our ES
+// client.
 //
 //   With ES:     sudo -E cargo test --features endpointsecurity,fim --test fim_attribution_benchmark_test -- --nocapture
 //   Without ES:  sudo -E cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
@@ -49,34 +52,90 @@ fn poll_for_events(
     }
 }
 
-/// Spawn a long-lived child process that writes all files and stays alive
-/// so we can check ES process table membership before it exits.
-fn write_files_via_child(dir: &std::path::Path) -> (Duration, u32) {
-    let script = format!(
-        "for i in $(seq -w 0000 {:04}); do dd if=/dev/zero of={}/bench_${{i}}.dat bs=1024 count=1 2>/dev/null; done; sleep 10",
-        FILE_COUNT - 1,
-        dir.display()
-    );
-    let start = Instant::now();
-    let child = Command::new("/bin/bash")
-        .args(["-c", &script])
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn bash child");
-    let child_pid = child.id();
+const LAUNCHD_LABEL: &str = "com.edamame.fimbench";
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let count = (0..FILE_COUNT)
-            .filter(|i| dir.join(format!("bench_{:04}.dat", i)).exists())
-            .count();
-        if count >= FILE_COUNT || Instant::now() > deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+/// Write files from a launchd-managed job (parent = launchd PID 1).
+/// ES suppresses the client's own process tree, so we must create files
+/// from a completely independent process for ES to see them.
+fn write_files_via_launchd(dir: &std::path::Path) -> Duration {
+    let done_flag = dir.join(".done");
+    let script = format!(
+        "#!/bin/bash\nfor i in $(seq -w 0000 {:04}); do\n  /bin/dd if=/dev/zero of={}/bench_${{i}}.dat bs=1024 count=1 2>/dev/null\ndone\ntouch {}\n",
+        FILE_COUNT - 1,
+        dir.display(),
+        done_flag.display()
+    );
+    let script_path = dir.join("writer.sh");
+    std::fs::write(&script_path, script).expect("write script");
+
+    Command::new("chmod")
+        .args(["+x", &script_path.to_string_lossy().to_string()])
+        .status()
+        .expect("chmod");
+
+    // Remove any stale job with this label
+    let _ = Command::new("launchctl")
+        .args(["remove", LAUNCHD_LABEL])
+        .output();
+
+    let start = Instant::now();
+
+    let submit = Command::new("launchctl")
+        .args([
+            "submit",
+            "-l",
+            LAUNCHD_LABEL,
+            "--",
+            "/bin/bash",
+            &script_path.to_string_lossy().to_string(),
+        ])
+        .output()
+        .expect("launchctl submit");
+
+    if !submit.status.success() {
+        let stderr = String::from_utf8_lossy(&submit.stderr);
+        println!("  [warn] launchctl submit failed: {}", stderr.trim());
+        println!("  Falling back to direct child process");
+        return write_files_via_child(dir);
     }
 
-    (start.elapsed(), child_pid)
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if done_flag.exists() {
+            break;
+        }
+        if Instant::now() > deadline {
+            println!("  [warn] launchd job timed out, checking files...");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = Command::new("launchctl")
+        .args(["remove", LAUNCHD_LABEL])
+        .output();
+
+    start.elapsed()
+}
+
+/// Fallback: spawn child process for file writing (ES won't see these).
+fn write_files_via_child(dir: &std::path::Path) -> Duration {
+    let start = Instant::now();
+    for i in 0..FILE_COUNT {
+        let path = dir.join(format!("bench_{:04}.dat", i));
+        let status = Command::new("dd")
+            .args([
+                &format!("if=/dev/zero"),
+                &format!("of={}", path.display()),
+                "bs=1024",
+                "count=1",
+            ])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn dd child");
+        assert!(status.success(), "dd failed for file {i}");
+    }
+    start.elapsed()
 }
 
 #[test]
@@ -89,6 +148,12 @@ fn fim_attribution_benchmark() {
         .prefix("fim_bench_")
         .tempdir_in("/tmp")
         .expect("create temp dir in /tmp");
+
+    // Make the temp dir world-writable so the launchd job can write to it
+    Command::new("chmod")
+        .args(["777", &tmp.path().to_string_lossy().to_string()])
+        .status()
+        .expect("chmod temp dir");
 
     let config = FimConfig {
         recursive: true,
@@ -103,37 +168,37 @@ fn fim_attribution_benchmark() {
     println!("  Test process PID: {}", std::process::id());
     println!("  ES available: {}", l7_es::is_available());
     println!("  ES support:   {}", l7_es::es_support());
+    println!("  ES process table size: {}", l7_es::process_count());
     println!(
-        "  Writing {} files to {} (via child process)",
+        "  Writing {} files to {} (via launchd job)",
         FILE_COUNT,
         tmp.path().display()
     );
 
-    let (write_elapsed, child_pid) = write_files_via_child(tmp.path());
+    let write_elapsed = write_files_via_launchd(tmp.path());
+
+    let actual_files = (0..FILE_COUNT)
+        .filter(|i| tmp.path().join(format!("bench_{:04}.dat", i)).exists())
+        .count();
     println!(
-        "  Wrote {} files in {}ms",
+        "  Wrote {}/{} files in {}ms",
+        actual_files,
         FILE_COUNT,
         write_elapsed.as_millis()
     );
 
-    let es_proc_count = l7_es::process_count();
-    println!("  ES process table size: {}", es_proc_count);
-    let child_in_es = l7_es::get_process_info(child_pid);
     println!(
-        "  Bash child PID={} in ES proc table: {} (info={:?})",
-        child_pid,
-        child_in_es.is_some(),
-        child_in_es.as_ref().map(|i| &i.process_path)
+        "  ES file table size (immediate): {}",
+        l7_es::file_attribution_count()
     );
-
-    let es_immediate = l7_es::file_attribution_count();
-    println!("  ES file table size (immediate): {}", es_immediate);
 
     println!("  Waiting {}s for events to settle...", SETTLE_SECS);
     std::thread::sleep(Duration::from_secs(SETTLE_SECS));
 
-    let es_after_settle = l7_es::file_attribution_count();
-    println!("  ES file table size (after settle): {}", es_after_settle);
+    println!(
+        "  ES file table size (after settle): {}",
+        l7_es::file_attribution_count()
+    );
 
     let events = poll_for_events(watcher.store(), FILE_COUNT, Duration::from_secs(5));
 
