@@ -184,6 +184,7 @@ pub struct ModelStats {
     pub unique_samples_count: usize,
     pub downsample_factor: u32,
     pub feature_count: usize,
+    pub per_flow_downsample_map_size: usize,
     pub recent_score_distribution: Option<ScoreDistribution>,
 }
 
@@ -2297,6 +2298,7 @@ impl SessionAnalyzer {
                     unique_samples_count: unique_samples,
                     downsample_factor: model.downsample_factor,
                     feature_count: NUM_FEATURES,
+                    per_flow_downsample_map_size: model.per_flow_downsample.len(),
                     recent_score_distribution: score_dist,
                 };
 
@@ -2330,6 +2332,7 @@ impl SessionAnalyzer {
                     unique_samples_count: 0,
                     downsample_factor: 1,
                     feature_count: NUM_FEATURES,
+                    per_flow_downsample_map_size: 0,
                     recent_score_distribution: None,
                 };
 
@@ -3040,6 +3043,7 @@ impl SessionAnalyzer {
                     unique_samples_count: 0,
                     downsample_factor: 1,
                     feature_count: NUM_FEATURES,
+                    per_flow_downsample_map_size: 0,
                     recent_score_distribution: None,
                 },
                 session_stats: SessionStats {

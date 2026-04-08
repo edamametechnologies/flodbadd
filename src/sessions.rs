@@ -19,6 +19,8 @@ pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds
 pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
 // Keep 8 hours of history
 pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(28800);
+// Hard cap on tracked sessions to bound memory under sustained high traffic
+pub const MAX_TRACKED_SESSIONS: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd)]
 pub enum Protocol {

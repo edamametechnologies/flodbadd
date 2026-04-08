@@ -2012,6 +2012,30 @@ impl FlodbaddCapture {
         for key in sessions_to_remove.iter() {
             sessions.remove(key);
         }
+
+        // Evict oldest inactive sessions if count exceeds hard cap
+        let remaining = sessions.len();
+        if remaining > MAX_TRACKED_SESSIONS {
+            let overflow = remaining - MAX_TRACKED_SESSIONS;
+            let mut candidates: Vec<(Session, DateTime<Utc>)> = sessions
+                .iter()
+                .filter(|entry| !entry.value().status.active)
+                .map(|entry| (entry.key().clone(), entry.value().stats.last_activity))
+                .collect();
+            candidates.sort_by_key(|(_, last_activity)| *last_activity);
+            let to_evict = candidates.into_iter().take(overflow);
+            let mut evicted = 0;
+            for (key, _) in to_evict {
+                sessions.remove(&key);
+                evicted += 1;
+            }
+            if evicted > 0 {
+                warn!(
+                    "Session cap eviction: removed {} oldest inactive sessions (was {} > {})",
+                    evicted, remaining, MAX_TRACKED_SESSIONS
+                );
+            }
+        }
     }
 
     pub async fn update_sessions(&self) {
