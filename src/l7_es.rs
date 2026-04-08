@@ -437,21 +437,23 @@ mod macos {
                         counters.close_received.fetch_add(1, Ordering::Relaxed);
                         if ev.modified() {
                             counters.close_modified.fetch_add(1, Ordering::Relaxed);
-                            let path = ev.target().path().to_string_lossy().to_string();
-                            let exe = responsible
-                                .executable()
-                                .path()
-                                .to_string_lossy()
-                                .to_string();
-                            FlodbaddL7Es::record_file_attribution(
-                                &file_table_for_handler,
-                                &file_counter_for_handler,
-                                &table_for_handler,
-                                path,
-                                responsible_pid,
-                                &exe,
-                            );
                         }
+                        // Record all close events, not just modified ones:
+                        // newly created files may have modified=false on APFS.
+                        let path = ev.target().path().to_string_lossy().to_string();
+                        let exe = responsible
+                            .executable()
+                            .path()
+                            .to_string_lossy()
+                            .to_string();
+                        FlodbaddL7Es::record_file_attribution(
+                            &file_table_for_handler,
+                            &file_counter_for_handler,
+                            &table_for_handler,
+                            path,
+                            responsible_pid,
+                            &exe,
+                        );
                     }
                     Some(Event::NotifyRename(ev)) => {
                         counters.rename_received.fetch_add(1, Ordering::Relaxed);
