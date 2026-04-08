@@ -93,6 +93,33 @@ mod macos {
         file_insert_counter: Arc<AtomicU64>,
         available: Arc<AtomicBool>,
         init_status: String,
+        file_event_counters: Arc<FileEventCounters>,
+    }
+
+    pub struct FileEventCounters {
+        pub create_received: AtomicU64,
+        pub create_dest_some: AtomicU64,
+        pub create_dest_none: AtomicU64,
+        pub close_received: AtomicU64,
+        pub close_modified: AtomicU64,
+        pub rename_received: AtomicU64,
+        pub unlink_received: AtomicU64,
+        pub other_event: AtomicU64,
+    }
+
+    impl Default for FileEventCounters {
+        fn default() -> Self {
+            Self {
+                create_received: AtomicU64::new(0),
+                create_dest_some: AtomicU64::new(0),
+                create_dest_none: AtomicU64::new(0),
+                close_received: AtomicU64::new(0),
+                close_modified: AtomicU64::new(0),
+                rename_received: AtomicU64::new(0),
+                unlink_received: AtomicU64::new(0),
+                other_event: AtomicU64::new(0),
+            }
+        }
     }
 
     impl FlodbaddL7Es {
@@ -112,6 +139,7 @@ mod macos {
                         file_insert_counter: Arc::new(AtomicU64::new(0)),
                         available: Arc::new(AtomicBool::new(false)),
                         init_status: msg,
+                        file_event_counters: Arc::new(FileEventCounters::default()),
                     };
                 }
                 version::set_runtime_version(major as u64, minor as u64, 0);
@@ -123,14 +151,13 @@ mod macos {
             let file_attribution_table = Arc::new(DashMap::new());
             let file_insert_counter = Arc::new(AtomicU64::new(0));
             let available = Arc::new(AtomicBool::new(false));
+            let file_event_counters = Arc::new(FileEventCounters::default());
             let table_for_thread = Arc::clone(&process_table);
             let file_table_for_thread = Arc::clone(&file_attribution_table);
             let file_counter_for_thread = Arc::clone(&file_insert_counter);
             let available_for_thread = Arc::clone(&available);
+            let counters_for_thread = Arc::clone(&file_event_counters);
 
-            // Client is !Send + !Sync -- must be created and kept alive on a
-            // dedicated thread. The DashMap process table is the shared
-            // communication channel (lock-free, Arc-shared).
             if let Err(e) = std::thread::Builder::new()
                 .name("es-client".into())
                 .spawn(move || {
@@ -139,6 +166,7 @@ mod macos {
                         file_table_for_thread,
                         file_counter_for_thread,
                         available_for_thread,
+                        counters_for_thread,
                     );
                 })
             {
@@ -177,6 +205,7 @@ mod macos {
                 file_insert_counter,
                 available,
                 init_status,
+                file_event_counters,
             }
         }
 
@@ -236,10 +265,12 @@ mod macos {
             file_table: Arc<DashMap<String, FimEsAttribution>>,
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
+            event_counters: Arc<FileEventCounters>,
         ) {
             let table_for_handler = AssertUnwindSafe(Arc::clone(&table));
             let file_table_for_handler = AssertUnwindSafe(Arc::clone(&file_table));
             let file_counter_for_handler = AssertUnwindSafe(Arc::clone(&file_counter));
+            let counters = AssertUnwindSafe(Arc::clone(&event_counters));
 
             let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
                 let responsible = msg.process();
@@ -367,7 +398,9 @@ mod macos {
                         table_for_handler.remove(&responsible_pid);
                     }
                     Some(Event::NotifyCreate(ev)) => {
+                        counters.create_received.fetch_add(1, Ordering::Relaxed);
                         if let Some(dest) = ev.destination() {
+                            counters.create_dest_some.fetch_add(1, Ordering::Relaxed);
                             use endpoint_sec::EventCreateDestinationFile;
                             let path = match dest {
                                 EventCreateDestinationFile::ExistingFile(f) => {
@@ -396,10 +429,14 @@ mod macos {
                                 responsible_pid,
                                 &exe,
                             );
+                        } else {
+                            counters.create_dest_none.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     Some(Event::NotifyClose(ev)) => {
+                        counters.close_received.fetch_add(1, Ordering::Relaxed);
                         if ev.modified() {
+                            counters.close_modified.fetch_add(1, Ordering::Relaxed);
                             let path = ev.target().path().to_string_lossy().to_string();
                             let exe = responsible
                                 .executable()
@@ -417,6 +454,7 @@ mod macos {
                         }
                     }
                     Some(Event::NotifyRename(ev)) => {
+                        counters.rename_received.fetch_add(1, Ordering::Relaxed);
                         let source = ev.source().path().to_string_lossy().to_string();
                         let exe = responsible
                             .executable()
@@ -433,6 +471,7 @@ mod macos {
                         );
                     }
                     Some(Event::NotifyUnlink(ev)) => {
+                        counters.unlink_received.fetch_add(1, Ordering::Relaxed);
                         let path = ev.target().path().to_string_lossy().to_string();
                         let exe = responsible
                             .executable()
@@ -551,6 +590,19 @@ mod macos {
 
         pub fn file_attribution_count(&self) -> usize {
             self.file_attribution_table.len()
+        }
+
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
+            let c = &self.file_event_counters;
+            (
+                c.create_received.load(Ordering::Relaxed),
+                c.create_dest_some.load(Ordering::Relaxed),
+                c.create_dest_none.load(Ordering::Relaxed),
+                c.close_received.load(Ordering::Relaxed),
+                c.close_modified.load(Ordering::Relaxed),
+                c.rename_received.load(Ordering::Relaxed),
+                c.unlink_received.load(Ordering::Relaxed),
+            )
         }
 
         /// Targeted session resolution: iterate ES-known PIDs and probe their
@@ -708,6 +760,10 @@ mod macos {
             0
         }
 
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
+            (0, 0, 0, 0, 0, 0, 0)
+        }
+
         pub fn enrich_session_l7(&self, _pid: u32, _base_l7: &mut SessionL7) {}
     }
 
@@ -804,6 +860,10 @@ pub fn get_file_attribution(path: &str) -> Option<(u32, String, String)> {
 
 pub fn file_attribution_count() -> usize {
     macos::global().file_attribution_count()
+}
+
+pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64) {
+    macos::global().file_event_stats()
 }
 
 #[cfg(test)]
