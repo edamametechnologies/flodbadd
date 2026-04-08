@@ -50,12 +50,13 @@ fn poll_for_events(
 }
 
 /// Spawn individual child processes that each write one file.
-/// This ensures each file write is a separate process event for ES.
-fn write_files_via_child(dir: &std::path::Path) -> Duration {
+/// Returns (elapsed, vec of child PIDs).
+fn write_files_via_child(dir: &std::path::Path) -> (Duration, Vec<u32>) {
     let start = Instant::now();
+    let mut pids = Vec::with_capacity(FILE_COUNT);
     for i in 0..FILE_COUNT {
         let path = dir.join(format!("bench_{:04}.dat", i));
-        let status = Command::new("dd")
+        let child = Command::new("dd")
             .args([
                 &format!("if=/dev/zero"),
                 &format!("of={}", path.display()),
@@ -63,11 +64,17 @@ fn write_files_via_child(dir: &std::path::Path) -> Duration {
                 "count=1",
             ])
             .stderr(std::process::Stdio::null())
-            .status()
+            .spawn()
             .expect("spawn dd child");
-        assert!(status.success(), "dd exited with {status} for file {i}");
+        pids.push(child.id());
+        let output = child.wait_with_output().expect("wait for dd");
+        assert!(
+            output.status.success(),
+            "dd exited with {:?} for file {i}",
+            output.status
+        );
     }
-    start.elapsed()
+    (start.elapsed(), pids)
 }
 
 #[test]
@@ -100,11 +107,26 @@ fn fim_attribution_benchmark() {
         tmp.path().display()
     );
 
-    let write_elapsed = write_files_via_child(tmp.path());
+    let (write_elapsed, child_pids) = write_files_via_child(tmp.path());
     println!(
         "  Wrote {} files in {}ms",
         FILE_COUNT,
         write_elapsed.as_millis()
+    );
+
+    let es_proc_count = l7_es::process_count();
+    println!("  ES process table size: {}", es_proc_count);
+    let mut child_in_es = 0;
+    for &pid in child_pids.iter().take(10) {
+        let in_es = l7_es::get_process_info(pid).is_some();
+        if in_es {
+            child_in_es += 1;
+        }
+    }
+    println!(
+        "  Child PIDs in ES proc table: {}/10 sampled (first 5: {:?})",
+        child_in_es,
+        &child_pids[..5.min(child_pids.len())]
     );
 
     let es_immediate = l7_es::file_attribution_count();
