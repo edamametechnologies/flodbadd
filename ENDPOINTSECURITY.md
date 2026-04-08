@@ -152,13 +152,46 @@ The Flutter app is sandboxed and cannot use ES directly. It reads session data (
 | Event | Purpose |
 |---|---|
 | `ES_EVENT_TYPE_NOTIFY_CREATE` | Record which process created a file |
-| `ES_EVENT_TYPE_NOTIFY_CLOSE` | Record which process modified and closed a file (only when `modified == true`) |
+| `ES_EVENT_TYPE_NOTIFY_CLOSE` | Record which process closed a file (all close events, not just `modified == true`, since APFS may report `modified=false` for newly created files) |
 | `ES_EVENT_TYPE_NOTIFY_RENAME` | Record which process renamed a file |
 | `ES_EVENT_TYPE_NOTIFY_UNLINK` | Record which process deleted a file |
 
 File events populate a bounded `file_attribution_table` (DashMap, max 50K entries, 30s TTL) that the FIM subsystem queries for process attribution. This eliminates the racy `lsof` probe for short-lived file operations.
 
 Only NOTIFY (not AUTH) events are used -- the ES client never blocks process execution or file I/O.
+
+## ES Self-Muting Behavior
+
+macOS Endpoint Security suppresses all events (process and file) from the ES client's own process tree. This means:
+
+- Events from the process that called `es_new_client()` are suppressed
+- Events from **child processes** of the client are also suppressed
+- Only events from completely independent process trees are delivered
+
+This is why the ES client runs in the `edamame_helper` daemon (production) or `edamame_posture` (standalone):
+
+```
+edamame_helper (ES client)     <-- owns ES, does NOT generate user file events
+    |
+    +-- flodbadd capture       <-- packet capture, session tracking
+    +-- l7_es process table    <-- populated by events from OTHER processes
+    +-- l7_es file attribution <-- populated by file events from OTHER processes
+
+User processes (editors, AI agents, scripts)  <-- INDEPENDENT process tree
+    |
+    +-- File operations visible to ES
+```
+
+This architectural separation is critical: the ES client must be an independent daemon, not a library loaded into the application being monitored.
+
+### Testing Implications
+
+ES file attribution cannot be exercised from within a single test binary because the test IS the ES client. The FIM attribution benchmark verifies:
+1. ES initializes and receives events from system processes
+2. The 3-tier lookup code path works end-to-end
+3. lsof-based attribution works as the fallback
+
+Full ES file attribution is validated through the production deployment where the helper daemon is independent from user file operations.
 
 ## Graceful Fallback
 
