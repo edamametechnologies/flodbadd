@@ -1,4 +1,4 @@
-.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup windows_benchmark windows_benchmark_no_etw macos_benchmark macos_benchmark_no_es linux_benchmark linux_benchmark_no_ebpf
+.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup windows_benchmark windows_benchmark_no_etw macos_benchmark macos_benchmark_no_es linux_benchmark linux_benchmark_no_ebpf macos_fim_benchmark macos_fim_benchmark_no_es
 
 upgrade:
 	rustup update
@@ -54,6 +54,13 @@ linux_benchmark: ebpf_setup
 
 linux_benchmark_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
+
+# FIM Attribution Benchmark targets
+macos_fim_benchmark:
+	sudo -E cargo test --features endpointsecurity,fim --test fim_attribution_benchmark_test -- --nocapture
+
+macos_fim_benchmark_no_es:
+	sudo -E cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
 
 # Setup the environment for eBPF testing
 ebpf_setup:

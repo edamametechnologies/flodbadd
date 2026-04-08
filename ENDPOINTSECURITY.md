@@ -30,22 +30,28 @@ Apple's Endpoint Security framework (macOS 10.15+) delivers real-time system eve
                             |  | l7.rs     |    |  - ES client singleton | |
                             |  | resolver  |<---|  - DashMap process     | |
                             |  +-----------+    |    table               | |
-                            |       |           +------------------------+ |
-                            |       |                    ^                  |
-                            |       v                    |                  |
-                            |  +-----------+    ES event callbacks         |
-                            |  |l7_macos.rs|    (FORK / EXEC / EXIT)       |
-                            |  | libproc   |             |                  |
-                            |  | socket    |    +------------------------+ |
-                            |  | scan      |    |  EndpointSecurity.fwk  | |
+                            |       |           |  - DashMap file        | |
+                            |       |           |    attribution table   | |
                             |  +-----------+    +------------------------+ |
+                            |  | fim.rs    |--->  (file attribution)      |
+                            |  | FIM       |             ^                  |
+                            |  | watcher   |             |                  |
+                            |  +-----------+    ES event callbacks         |
+                            |       |           (FORK / EXEC / EXIT +      |
+                            |       v            CREATE / CLOSE /           |
+                            |  +-----------+     RENAME / UNLINK)          |
+                            |  |l7_macos.rs|             |                  |
+                            |  | libproc   |    +------------------------+ |
+                            |  | socket    |    |  EndpointSecurity.fwk  | |
+                            |  | scan      |    +------------------------+ |
+                            |  +-----------+                               |
                             +---------------------------------------------+
                                                          |
                                                          | mach messages
                                                          v
                             +---------------------------------------------+
                             |              macOS Kernel                    |
-                            |    Process lifecycle event delivery          |
+                            |    Process lifecycle + file event delivery   |
                             +---------------------------------------------+
 ```
 
@@ -133,13 +139,26 @@ The Flutter app is sandboxed and cannot use ES directly. It reads session data (
 
 ## ES Events Used
 
+### Process Lifecycle Events
+
 | Event | Purpose |
 |---|---|
 | `ES_EVENT_TYPE_NOTIFY_FORK` | Track new PIDs, build parent chain |
 | `ES_EVENT_TYPE_NOTIFY_EXEC` | Capture executable path, arguments, CWD, code signing |
 | `ES_EVENT_TYPE_NOTIFY_EXIT` | Garbage-collect stale PIDs from process table |
 
-Only NOTIFY (not AUTH) events are used -- the ES client never blocks process execution.
+### File Attribution Events
+
+| Event | Purpose |
+|---|---|
+| `ES_EVENT_TYPE_NOTIFY_CREATE` | Record which process created a file |
+| `ES_EVENT_TYPE_NOTIFY_CLOSE` | Record which process modified and closed a file (only when `modified == true`) |
+| `ES_EVENT_TYPE_NOTIFY_RENAME` | Record which process renamed a file |
+| `ES_EVENT_TYPE_NOTIFY_UNLINK` | Record which process deleted a file |
+
+File events populate a bounded `file_attribution_table` (DashMap, max 50K entries, 30s TTL) that the FIM subsystem queries for process attribution. This eliminates the racy `lsof` probe for short-lived file operations.
+
+Only NOTIFY (not AUTH) events are used -- the ES client never blocks process execution or file I/O.
 
 ## Graceful Fallback
 
@@ -224,10 +243,15 @@ This can happen on older macOS versions that don't support all event types. The 
 flodbadd/
   src/
     l7.rs          # L7 resolution interface (dispatch + enrichment)
-    l7_es.rs       # ES client, process table, enrichment (macOS only)
+    l7_es.rs       # ES client, process + file attribution tables (macOS only)
     l7_ebpf.rs     # eBPF-based resolution (Linux only)
     l7_macos.rs    # libproc socket-to-PID mapping (macOS)
     capture.rs     # Integrates L7 with packet capture
+    fim.rs         # FIM watcher, 3-tier attribution, lsof cache
+    fim_events.rs  # FIM event store (bounded at 10K events, 8h retention)
+  tests/
+    l7_benchmark_test.rs             # L7 network attribution benchmark
+    fim_attribution_benchmark_test.rs # FIM file attribution benchmark (ES vs lsof)
 
 edamame_helper/
   macos/
@@ -252,11 +276,35 @@ ES clients require root or equivalent privileges. The helper LaunchDaemon satisf
 
 ### Event Volume
 
-FORK/EXEC/EXIT events are high-frequency on busy systems. The DashMap process table handles this efficiently, but the GC via EXIT events is critical to prevent unbounded growth.
+FORK/EXEC/EXIT events are high-frequency on busy systems. The DashMap process table handles this efficiently, and GC via EXIT events prevents unbounded growth.
+
+File events (CREATE/CLOSE/RENAME/UNLINK) can be higher frequency than process events. The file attribution table is bounded at 50,000 entries with a 30-second TTL and lazy pruning (every 1,000th insert) to keep memory usage predictable.
 
 ### No AUTH Events
 
-This module only uses NOTIFY events (observation-only). It never blocks or delays process execution. This is a deliberate choice to avoid any performance impact on the system.
+This module only uses NOTIFY events (observation-only). It never blocks or delays process execution or file I/O. This is a deliberate choice to avoid any performance impact on the system.
+
+## FIM Attribution Pipeline
+
+When the FIM subsystem (`fim.rs`) needs to attribute a file event to a process, it uses a three-tier lookup:
+
+```
+1. ES file attribution table   -- l7_es::get_file_attribution(path)
+2. lsof result cache            -- FIM_ATTRIBUTION_CACHE (5K entries, 10s TTL)
+3. Live lsof + sysinfo          -- lookup_pid_for_path() + lookup_process_details()
+```
+
+Tier 1 is populated by kernel-delivered ES file events and provides near-100% attribution for short-lived files. Tier 2 caches successful lsof results so burst writes to the same path avoid repeated lsof invocations. Tier 3 is the existing racy fallback.
+
+ES initialization is idempotent (OnceCell-based) and is called by both `FlodbaddCapture::start()` (packet capture) and `FimWatcher::start()` (FIM), so the ES client is active whenever either subsystem is running.
+
+### Memory Bounds
+
+| Collection | Max Size | TTL | Pruning |
+|---|---|---|---|
+| `process_table` (DashMap) | Bounded by OS process count | N/A | EXIT events remove entries |
+| `file_attribution_table` (DashMap) | 50,000 entries | 30s | Lazy (every 1,000th insert) + hard cap |
+| `FIM_ATTRIBUTION_CACHE` (DashMap) | 5,000 entries | 10s | Lazy (every 500th insert) + hard cap |
 
 ## Related Documentation
 

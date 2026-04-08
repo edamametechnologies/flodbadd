@@ -1,10 +1,17 @@
-// Endpoint Security process attribution for macOS.
+// Endpoint Security process and file attribution for macOS.
 //
-// Uses Apple's Endpoint Security framework to maintain a live process table
-// populated by kernel-delivered FORK/EXEC/EXIT events. This table provides
-// high-fidelity process metadata (executable path, parent chain, code signing,
-// arguments, cwd) without the race conditions inherent in polling sysinfo after
-// the fact.
+// Uses Apple's Endpoint Security framework to maintain:
+//   1. A live process table populated by kernel-delivered FORK/EXEC/EXIT events.
+//   2. A file attribution table populated by NOTIFY_CREATE/CLOSE/RENAME/UNLINK
+//      events, mapping recently-touched file paths to the responsible process.
+//
+// The process table provides high-fidelity process metadata (executable path,
+// parent chain, code signing, arguments) without the race conditions inherent
+// in polling sysinfo after the fact.
+//
+// The file attribution table is consumed by the FIM subsystem to attribute
+// file events to processes at kernel-delivered time, avoiding the racy lsof
+// probe that misses short-lived writes.
 //
 // Socket-to-PID mapping still comes from libproc (l7_macos.rs). This module
 // enriches the PID with process metadata from the ES-maintained table, avoiding
@@ -27,9 +34,22 @@ mod macos {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::panic::AssertUnwindSafe;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
     use tracing::{debug, error, warn};
+
+    const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
+    const FILE_ATTR_TTL_SECS: u64 = 30;
+    const FILE_ATTR_PRUNE_INTERVAL: u64 = 1_000;
+
+    #[derive(Clone, Debug)]
+    pub struct FimEsAttribution {
+        pub pid: u32,
+        pub process_name: String,
+        pub process_path: String,
+        pub recorded_at: Instant,
+    }
 
     #[derive(Clone, Debug)]
     pub struct EsProcessInfo {
@@ -68,6 +88,9 @@ mod macos {
 
     pub struct FlodbaddL7Es {
         process_table: Arc<DashMap<u32, EsProcessInfo>>,
+        file_attribution_table: Arc<DashMap<String, FimEsAttribution>>,
+        #[allow(dead_code)]
+        file_insert_counter: Arc<AtomicU64>,
         available: Arc<AtomicBool>,
         init_status: String,
     }
@@ -85,6 +108,8 @@ mod macos {
                     warn!("ES disabled: {}", msg);
                     return Self {
                         process_table: Arc::new(DashMap::new()),
+                        file_attribution_table: Arc::new(DashMap::new()),
+                        file_insert_counter: Arc::new(AtomicU64::new(0)),
                         available: Arc::new(AtomicBool::new(false)),
                         init_status: msg,
                     };
@@ -95,8 +120,12 @@ mod macos {
             }
 
             let process_table = Arc::new(DashMap::new());
+            let file_attribution_table = Arc::new(DashMap::new());
+            let file_insert_counter = Arc::new(AtomicU64::new(0));
             let available = Arc::new(AtomicBool::new(false));
             let table_for_thread = Arc::clone(&process_table);
+            let file_table_for_thread = Arc::clone(&file_attribution_table);
+            let file_counter_for_thread = Arc::clone(&file_insert_counter);
             let available_for_thread = Arc::clone(&available);
 
             // Client is !Send + !Sync -- must be created and kept alive on a
@@ -105,7 +134,12 @@ mod macos {
             if let Err(e) = std::thread::Builder::new()
                 .name("es-client".into())
                 .spawn(move || {
-                    Self::run_es_client(table_for_thread, available_for_thread);
+                    Self::run_es_client(
+                        table_for_thread,
+                        file_table_for_thread,
+                        file_counter_for_thread,
+                        available_for_thread,
+                    );
                 })
             {
                 error!("Failed to spawn ES client thread: {}", e);
@@ -121,7 +155,7 @@ mod macos {
 
             let init_status = if is_available {
                 format!(
-                    "Enabled: macOS {} with ES process tracking (FORK/EXEC/EXIT)",
+                    "Enabled: macOS {} with ES process + file tracking (FORK/EXEC/EXIT + CREATE/CLOSE/RENAME/UNLINK)",
                     version_str
                 )
             } else {
@@ -132,20 +166,80 @@ mod macos {
             };
 
             if is_available {
-                info!("ES L7 helper initialized: {}", init_status);
+                info!("ES helper initialized: {}", init_status);
             } else {
-                warn!("ES L7 helper: {}", init_status);
+                warn!("ES helper: {}", init_status);
             }
 
             Self {
                 process_table,
+                file_attribution_table,
+                file_insert_counter,
                 available,
                 init_status,
             }
         }
 
-        fn run_es_client(table: Arc<DashMap<u32, EsProcessInfo>>, available: Arc<AtomicBool>) {
+        fn record_file_attribution(
+            file_table: &DashMap<String, FimEsAttribution>,
+            file_counter: &AtomicU64,
+            process_table: &DashMap<u32, EsProcessInfo>,
+            path: String,
+            responsible_pid: u32,
+            responsible_exe_path: &str,
+        ) {
+            let (process_name, process_path) =
+                if let Some(info) = process_table.get(&responsible_pid) {
+                    (info.process_name.clone(), info.process_path.clone())
+                } else {
+                    (
+                        extract_process_name(responsible_exe_path),
+                        responsible_exe_path.to_string(),
+                    )
+                };
+
+            file_table.insert(
+                path,
+                FimEsAttribution {
+                    pid: responsible_pid,
+                    process_name,
+                    process_path,
+                    recorded_at: Instant::now(),
+                },
+            );
+
+            let count = file_counter.fetch_add(1, Ordering::Relaxed);
+            if count % FILE_ATTR_PRUNE_INTERVAL == 0 && count > 0 {
+                Self::prune_file_attribution_table(file_table);
+            }
+        }
+
+        fn prune_file_attribution_table(table: &DashMap<String, FimEsAttribution>) {
+            let cutoff = Instant::now() - std::time::Duration::from_secs(FILE_ATTR_TTL_SECS);
+            table.retain(|_, v| v.recorded_at > cutoff);
+
+            if table.len() > FILE_ATTR_MAX_ENTRIES {
+                let mut entries: Vec<_> = table
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().recorded_at))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                let to_remove = entries.len() - FILE_ATTR_MAX_ENTRIES;
+                for (key, _) in entries.into_iter().take(to_remove) {
+                    table.remove(&key);
+                }
+            }
+        }
+
+        fn run_es_client(
+            table: Arc<DashMap<u32, EsProcessInfo>>,
+            file_table: Arc<DashMap<String, FimEsAttribution>>,
+            file_counter: Arc<AtomicU64>,
+            available: Arc<AtomicBool>,
+        ) {
             let table_for_handler = AssertUnwindSafe(Arc::clone(&table));
+            let file_table_for_handler = AssertUnwindSafe(Arc::clone(&file_table));
+            let file_counter_for_handler = AssertUnwindSafe(Arc::clone(&file_counter));
 
             let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
                 let responsible = msg.process();
@@ -272,6 +366,88 @@ mod macos {
                     Some(Event::NotifyExit(_)) => {
                         table_for_handler.remove(&responsible_pid);
                     }
+                    Some(Event::NotifyCreate(ev)) => {
+                        if let Some(dest) = ev.destination() {
+                            use endpoint_sec::EventCreateDestinationFile;
+                            let path = match dest {
+                                EventCreateDestinationFile::ExistingFile(f) => {
+                                    f.path().to_string_lossy().to_string()
+                                }
+                                EventCreateDestinationFile::NewPath {
+                                    directory,
+                                    filename,
+                                    ..
+                                } => {
+                                    let dir = directory.path().to_string_lossy();
+                                    let name = filename.to_string_lossy();
+                                    format!("{}/{}", dir.trim_end_matches('/'), name)
+                                }
+                            };
+                            let exe = responsible
+                                .executable()
+                                .path()
+                                .to_string_lossy()
+                                .to_string();
+                            FlodbaddL7Es::record_file_attribution(
+                                &file_table_for_handler,
+                                &file_counter_for_handler,
+                                &table_for_handler,
+                                path,
+                                responsible_pid,
+                                &exe,
+                            );
+                        }
+                    }
+                    Some(Event::NotifyClose(ev)) => {
+                        if ev.modified() {
+                            let path = ev.target().path().to_string_lossy().to_string();
+                            let exe = responsible
+                                .executable()
+                                .path()
+                                .to_string_lossy()
+                                .to_string();
+                            FlodbaddL7Es::record_file_attribution(
+                                &file_table_for_handler,
+                                &file_counter_for_handler,
+                                &table_for_handler,
+                                path,
+                                responsible_pid,
+                                &exe,
+                            );
+                        }
+                    }
+                    Some(Event::NotifyRename(ev)) => {
+                        let source = ev.source().path().to_string_lossy().to_string();
+                        let exe = responsible
+                            .executable()
+                            .path()
+                            .to_string_lossy()
+                            .to_string();
+                        FlodbaddL7Es::record_file_attribution(
+                            &file_table_for_handler,
+                            &file_counter_for_handler,
+                            &table_for_handler,
+                            source,
+                            responsible_pid,
+                            &exe,
+                        );
+                    }
+                    Some(Event::NotifyUnlink(ev)) => {
+                        let path = ev.target().path().to_string_lossy().to_string();
+                        let exe = responsible
+                            .executable()
+                            .path()
+                            .to_string_lossy()
+                            .to_string();
+                        FlodbaddL7Es::record_file_attribution(
+                            &file_table_for_handler,
+                            &file_counter_for_handler,
+                            &table_for_handler,
+                            path,
+                            responsible_pid,
+                            &exe,
+                        );
+                    }
                     _ => {}
                 }
             };
@@ -292,6 +468,10 @@ mod macos {
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_FORK,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXEC,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXIT,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_CREATE,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_CLOSE,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_RENAME,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_UNLINK,
             ];
             if let Err(e) = client.subscribe(&events) {
                 error!("ES subscribe failed: {:?}", e);
@@ -299,7 +479,7 @@ mod macos {
             }
 
             available.store(true, Ordering::Release);
-            info!("ES client created and subscribed to FORK/EXEC/EXIT events");
+            info!("ES client subscribed to FORK/EXEC/EXIT + CREATE/CLOSE/RENAME/UNLINK");
 
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
@@ -338,6 +518,24 @@ mod macos {
 
         pub fn process_count(&self) -> usize {
             self.process_table.len()
+        }
+
+        pub fn get_file_attribution(&self, path: &str) -> Option<(u32, String, String)> {
+            let entry = self.file_attribution_table.get(path)?;
+            let attr = entry.value();
+            let elapsed = attr.recorded_at.elapsed().as_secs();
+            if elapsed > FILE_ATTR_TTL_SECS {
+                return None;
+            }
+            Some((
+                attr.pid,
+                attr.process_name.clone(),
+                attr.process_path.clone(),
+            ))
+        }
+
+        pub fn file_attribution_count(&self) -> usize {
+            self.file_attribution_table.len()
         }
 
         /// Targeted session resolution: iterate ES-known PIDs and probe their
@@ -487,6 +685,14 @@ mod macos {
             0
         }
 
+        pub fn get_file_attribution(&self, _path: &str) -> Option<(u32, String, String)> {
+            None
+        }
+
+        pub fn file_attribution_count(&self) -> usize {
+            0
+        }
+
         pub fn enrich_session_l7(&self, _pid: u32, _base_l7: &mut SessionL7) {}
     }
 
@@ -538,19 +744,19 @@ pub fn init_and_log_status() {
     let available = is_available();
     if available {
         info!(
-            "ES L7 process tracking is ENABLED - process metadata from Endpoint Security framework"
+            "ES process + file tracking ENABLED - process and file attribution from Endpoint Security framework"
         );
     } else {
         #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
         {
             tracing::warn!(
-                "ES L7 process tracking is DISABLED - falling back to sysinfo-based resolution"
+                "ES process + file tracking DISABLED - falling back to sysinfo/lsof-based resolution"
             );
         }
         #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]
         {
             info!(
-                "ES L7 process tracking not available on this platform (non-macOS or feature disabled)"
+                "ES process + file tracking not available on this platform (non-macOS or feature disabled)"
             );
         }
     }
@@ -575,6 +781,14 @@ pub fn es_support() -> String {
 
 pub fn process_count() -> usize {
     macos::global().process_count()
+}
+
+pub fn get_file_attribution(path: &str) -> Option<(u32, String, String)> {
+    macos::global().get_file_attribution(path)
+}
+
+pub fn file_attribution_count() -> usize {
+    macos::global().file_attribution_count()
 }
 
 #[cfg(test)]

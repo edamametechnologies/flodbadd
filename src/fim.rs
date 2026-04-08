@@ -3,15 +3,87 @@ use crate::open_files::is_sensitive_path;
 use crate::sensitive_paths::classify_sensitive_path_labels_sync;
 use anyhow::{Context, Result};
 use chrono::Utc;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use dashmap::DashMap;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::time::Instant;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use tracing::{debug, error, info, warn};
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const FIM_ATTRIBUTION_CACHE_MAX_ENTRIES: usize = 5_000;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL: u64 = 500;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct CachedAttribution {
+    process_name: Option<String>,
+    process_path: Option<String>,
+    recorded_at: Instant,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static FIM_ATTRIBUTION_CACHE: Lazy<DashMap<String, CachedAttribution>> =
+    Lazy::new(DashMap::new);
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static FIM_CACHE_INSERT_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn prune_attribution_cache() {
+    let cutoff = Instant::now() - std::time::Duration::from_secs(FIM_ATTRIBUTION_CACHE_TTL_SECS);
+    FIM_ATTRIBUTION_CACHE.retain(|_, v| v.recorded_at > cutoff);
+
+    if FIM_ATTRIBUTION_CACHE.len() > FIM_ATTRIBUTION_CACHE_MAX_ENTRIES {
+        let mut entries: Vec<_> = FIM_ATTRIBUTION_CACHE
+            .iter()
+            .map(|e| (e.key().clone(), e.value().recorded_at))
+            .collect();
+        entries.sort_by_key(|(_, ts)| *ts);
+        let to_remove = entries.len() - FIM_ATTRIBUTION_CACHE_MAX_ENTRIES;
+        for (key, _) in entries.into_iter().take(to_remove) {
+            FIM_ATTRIBUTION_CACHE.remove(&key);
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &Option<String>) {
+    FIM_ATTRIBUTION_CACHE.insert(
+        path.to_string(),
+        CachedAttribution {
+            process_name: process_name.clone(),
+            process_path: process_path.clone(),
+            recorded_at: Instant::now(),
+        },
+    );
+
+    let count = FIM_CACHE_INSERT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if count % FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL == 0 && count > 0 {
+        prune_attribution_cache();
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn lookup_cache(path: &str) -> Option<(Option<String>, Option<String>)> {
+    let entry = FIM_ATTRIBUTION_CACHE.get(path)?;
+    if entry.recorded_at.elapsed().as_secs() > FIM_ATTRIBUTION_CACHE_TTL_SECS {
+        return None;
+    }
+    Some((entry.process_name.clone(), entry.process_path.clone()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FimMode {
@@ -45,6 +117,8 @@ pub const FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT: usize = 128;
 
 impl FimWatcher {
     pub fn start(paths: Vec<PathBuf>, config: FimConfig) -> Result<Self> {
+        crate::l7_es::init_and_log_status();
+
         let store = Arc::new(FimEventStore::new());
         let running = Arc::new(AtomicBool::new(true));
 
@@ -221,12 +295,31 @@ fn best_effort_process_attribution(
         return (None, None);
     }
 
+    let path_str = path.to_string_lossy();
+
+    // Tier 1: ES file attribution table (macOS only, zero-cost on other platforms)
+    if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&path_str) {
+        return (Some(name), Some(proc_path));
+    }
+
+    // Tier 2: in-memory lsof result cache
+    if let Some((name, proc_path)) = lookup_cache(&path_str) {
+        if name.is_some() || proc_path.is_some() {
+            return (name, proc_path);
+        }
+    }
+
+    // Tier 3: live lsof + sysinfo
     let (pid, fallback_name) = match lookup_pid_for_path(path) {
         Some(details) => details,
         None => return (None, None),
     };
 
-    lookup_process_details(pid, fallback_name)
+    let result = lookup_process_details(pid, fallback_name);
+    if result.0.is_some() || result.1.is_some() {
+        cache_attribution(&path_str, &result.0, &result.1);
+    }
+    result
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -322,6 +415,23 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             continue;
         }
 
+        // Tier 1: ES file attribution table
+        if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&event.path) {
+            store.update_process_attribution(&event.uid, Some(name), Some(proc_path));
+            updated += 1;
+            continue;
+        }
+
+        // Tier 2: in-memory lsof result cache
+        if let Some((name, proc_path)) = lookup_cache(&event.path) {
+            if name.is_some() || proc_path.is_some() {
+                store.update_process_attribution(&event.uid, name, proc_path);
+                updated += 1;
+                continue;
+            }
+        }
+
+        // Tier 3: live lsof + sysinfo
         let path = Path::new(&event.path);
         let (pid, fallback_name) = match lookup_pid_for_path(path) {
             Some(details) => details,
@@ -333,6 +443,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             continue;
         }
 
+        cache_attribution(&event.path, &process_name, &process_path);
         store.update_process_attribution(&event.uid, process_name, process_path);
         updated += 1;
     }
@@ -343,6 +454,26 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn backfill_missing_process_attribution(_store: &FimEventStore, _max_events: usize) -> usize {
     0
+}
+
+/// Returns `(lsof_cache_size, es_available)` for diagnostic and benchmarking purposes.
+pub fn attribution_cache_stats() -> (usize, bool) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        (FIM_ATTRIBUTION_CACHE.len(), crate::l7_es::is_available())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        (0, false)
+    }
+}
+
+pub fn clear_attribution_cache() {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        FIM_ATTRIBUTION_CACHE.clear();
+        FIM_CACHE_INSERT_COUNTER.store(0, Ordering::Relaxed);
+    }
 }
 
 #[cfg(target_os = "linux")]
