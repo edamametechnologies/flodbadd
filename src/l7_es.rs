@@ -487,7 +487,9 @@ mod macos {
                             &exe,
                         );
                     }
-                    _ => {}
+                    _ => {
+                        counters.other_event.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             };
 
@@ -592,7 +594,7 @@ mod macos {
             self.file_attribution_table.len()
         }
 
-        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
             let c = &self.file_event_counters;
             (
                 c.create_received.load(Ordering::Relaxed),
@@ -602,6 +604,7 @@ mod macos {
                 c.close_modified.load(Ordering::Relaxed),
                 c.rename_received.load(Ordering::Relaxed),
                 c.unlink_received.load(Ordering::Relaxed),
+                c.other_event.load(Ordering::Relaxed),
             )
         }
 
@@ -760,8 +763,8 @@ mod macos {
             0
         }
 
-        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
-            (0, 0, 0, 0, 0, 0, 0)
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+            (0, 0, 0, 0, 0, 0, 0, 0)
         }
 
         pub fn enrich_session_l7(&self, _pid: u32, _base_l7: &mut SessionL7) {}
@@ -862,7 +865,7 @@ pub fn file_attribution_count() -> usize {
     macos::global().file_attribution_count()
 }
 
-pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64) {
+pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     macos::global().file_event_stats()
 }
 

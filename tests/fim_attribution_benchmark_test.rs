@@ -174,8 +174,8 @@ fn fim_attribution_benchmark() {
     println!("  lsof cache size: {}", lsof_cache_size);
     println!("  Backfill took {}ms", backfill_elapsed.as_millis());
 
-    let (cr, cds, cdn, clr, clm, rn, ul) = l7_es::file_event_stats();
-    println!("  ES event counters: create_recv={cr} dest_some={cds} dest_none={cdn} close_recv={clr} close_modified={clm} rename={rn} unlink={ul}");
+    let (cr, cds, cdn, clr, clm, rn, ul, oth) = l7_es::file_event_stats();
+    println!("  ES event counters: create={cr}(dest_some={cds},dest_none={cdn}) close={clr}(modified={clm}) rename={rn} unlink={ul} other={oth}");
 
     watcher.stop();
 
