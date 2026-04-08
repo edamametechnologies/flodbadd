@@ -88,8 +88,15 @@ fn fim_attribution_benchmark() {
         write_elapsed.as_millis()
     );
 
+    // Check ES table right after writes (before settle)
+    let es_immediate = l7_es::file_attribution_count();
+    println!("  ES file table size (immediate): {}", es_immediate);
+
     println!("  Waiting {}s for events to settle...", SETTLE_SECS);
     std::thread::sleep(Duration::from_secs(SETTLE_SECS));
+
+    let es_after_settle = l7_es::file_attribution_count();
+    println!("  ES file table size (after settle): {}", es_after_settle);
 
     let events = poll_for_events(watcher.store(), FILE_COUNT, Duration::from_secs(5));
 
@@ -101,6 +108,19 @@ fn fim_attribution_benchmark() {
                 && e.path.ends_with(".dat")
         })
         .collect();
+
+    // Diagnostic: show path forms and manual ES lookup for first few events
+    for (i, ev) in create_events.iter().take(3).enumerate() {
+        let canonical = std::fs::canonicalize(&ev.path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "N/A".to_string());
+        let es_raw = l7_es::get_file_attribution(&ev.path);
+        let es_canonical = l7_es::get_file_attribution(&canonical);
+        println!(
+            "  [diag {}] path={} canonical={} es_raw={:?} es_canonical={:?}",
+            i, ev.path, canonical, es_raw, es_canonical
+        );
+    }
 
     let pre_attributed = create_events
         .iter()
