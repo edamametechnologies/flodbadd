@@ -521,10 +521,25 @@ mod macos {
         }
 
         pub fn get_file_attribution(&self, path: &str) -> Option<(u32, String, String)> {
-            let entry = self.file_attribution_table.get(path)?;
+            // ES records canonical paths (e.g. /private/tmp/...) while notify
+            // may deliver user-provided paths (e.g. /tmp/...).  Try the raw
+            // path first, then fall back to the canonicalized form.
+            if let Some(hit) = self.lookup_file_attr(path) {
+                return Some(hit);
+            }
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                let canonical_str = canonical.to_string_lossy();
+                if canonical_str.as_ref() != path {
+                    return self.lookup_file_attr(&canonical_str);
+                }
+            }
+            None
+        }
+
+        fn lookup_file_attr(&self, key: &str) -> Option<(u32, String, String)> {
+            let entry = self.file_attribution_table.get(key)?;
             let attr = entry.value();
-            let elapsed = attr.recorded_at.elapsed().as_secs();
-            if elapsed > FILE_ATTR_TTL_SECS {
+            if attr.recorded_at.elapsed().as_secs() > FILE_ATTR_TTL_SECS {
                 return None;
             }
             Some((
