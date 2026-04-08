@@ -521,9 +521,12 @@ impl IsolationForestModel {
                 handle_ref.is_finished()
             );
             if handle_ref.is_finished() {
-                // The blocking thread has finished – gather the result and update state
                 debug!("train_model: Previous task finished, getting result");
-                let handle = self.training_handle.take().unwrap();
+                let Some(handle) = self.training_handle.take() else {
+                    error!("train_model: training_handle was None despite is_finished() check");
+                    self.training_in_progress.store(false, Ordering::Release);
+                    return;
+                };
                 match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
                     Some(Ok(Ok(forest))) => {
                         info!("train_model: Background training completed successfully");
@@ -1656,51 +1659,52 @@ impl SessionAnalyzer {
                     if let Some(handle_ref) = model_guard.training_handle.as_ref() {
                         if !handle_ref.is_finished() {
                             info!("Analyzer (Finalize Warmup): Waiting for ongoing training task to complete...");
-                            let handle = model_guard.training_handle.take().unwrap();
-                            match await_join_with_timeout(
-                                handle,
-                                std::time::Duration::from_secs(120),
-                            )
-                            .await
-                            {
-                                Some(Ok(Ok(forest))) => {
-                                    info!("Analyzer (Finalize Warmup): Training task completed successfully.");
-                                    model_guard.forest = Some(forest);
-                                    model_guard.last_training_time = Utc::now();
-                                    model_guard.invalidate_score_cache_for_retrain();
-                                }
-                                Some(Ok(Err(e))) => warn!(
-                                    "Analyzer (Finalize Warmup): Training task failed: {:?}",
-                                    e
-                                ),
-                                Some(Err(e)) => error!(
-                                    "Analyzer (Finalize Warmup): Training task panicked: {:?}",
-                                    e
-                                ),
-                                None => {
-                                    error!("Analyzer (Finalize Warmup): Training task timed out after 120s - possible EIF hang");
-                                    model_guard.training_cancel.store(true, Ordering::Release);
-                                    model_guard.training_timeouts_count =
-                                        model_guard.training_timeouts_count.saturating_add(1);
-                                    model_guard.training_handle = None;
-                                    model_guard
-                                        .training_in_progress
-                                        .store(false, Ordering::Release);
+                            if let Some(handle) = model_guard.training_handle.take() {
+                                match await_join_with_timeout(
+                                    handle,
+                                    std::time::Duration::from_secs(120),
+                                )
+                                .await
+                                {
+                                    Some(Ok(Ok(forest))) => {
+                                        info!("Analyzer (Finalize Warmup): Training task completed successfully.");
+                                        model_guard.forest = Some(forest);
+                                        model_guard.last_training_time = Utc::now();
+                                        model_guard.invalidate_score_cache_for_retrain();
+                                    }
+                                    Some(Ok(Err(e))) => warn!(
+                                        "Analyzer (Finalize Warmup): Training task failed: {:?}",
+                                        e
+                                    ),
+                                    Some(Err(e)) => error!(
+                                        "Analyzer (Finalize Warmup): Training task panicked: {:?}",
+                                        e
+                                    ),
+                                    None => {
+                                        error!("Analyzer (Finalize Warmup): Training task timed out after 120s - possible EIF hang");
+                                        model_guard.training_cancel.store(true, Ordering::Release);
+                                        model_guard.training_timeouts_count =
+                                            model_guard.training_timeouts_count.saturating_add(1);
+                                        model_guard.training_handle = None;
+                                        model_guard
+                                            .training_in_progress
+                                            .store(false, Ordering::Release);
+                                    }
                                 }
                             }
                         } else {
-                            // Already finished, try to process with timeout (should be fast)
-                            let handle = model_guard.training_handle.take().unwrap();
-                            match await_join_with_timeout(handle, std::time::Duration::from_secs(10)).await {
-                                Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); model_guard.invalidate_score_cache_for_retrain(); },
-                                Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
-                                Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
-                                None => {
-                                    error!("Analyzer (Finalize Warmup): Finished training task timed out - possible EIF issue");
-                                    model_guard.training_cancel.store(true, Ordering::Release);
-                                    model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
-                                    model_guard.training_handle = None;
-                                    model_guard.training_in_progress.store(false, Ordering::Release);
+                            if let Some(handle) = model_guard.training_handle.take() {
+                                match await_join_with_timeout(handle, std::time::Duration::from_secs(10)).await {
+                                    Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); model_guard.invalidate_score_cache_for_retrain(); },
+                                    Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
+                                    Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
+                                    None => {
+                                        error!("Analyzer (Finalize Warmup): Finished training task timed out - possible EIF issue");
+                                        model_guard.training_cancel.store(true, Ordering::Release);
+                                        model_guard.training_timeouts_count = model_guard.training_timeouts_count.saturating_add(1);
+                                        model_guard.training_handle = None;
+                                        model_guard.training_in_progress.store(false, Ordering::Release);
+                                    }
                                 }
                             }
                         }

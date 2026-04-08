@@ -1414,10 +1414,12 @@ impl FlodbaddL7 {
                             < TERMINATION_GRACE_PERIOD;
 
                         if in_grace_period {
+                            let elapsed = TERMINATED_PIDS
+                                .get(&l7_data.pid)
+                                .map(|e| e.value().elapsed());
                             debug!(
                                 "Using recently terminated host cache data for port {}, protocol {:?}: PID {} terminated {:?} ago",
-                                service_port, service_protocol, l7_data.pid,
-                                TERMINATED_PIDS.get(&l7_data.pid).unwrap().value().elapsed()
+                                service_port, service_protocol, l7_data.pid, elapsed
                             );
                             return Some((
                                 l7_data.clone(),

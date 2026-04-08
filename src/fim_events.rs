@@ -169,9 +169,7 @@ impl FimEventStore {
     pub fn has_suspicious_events(&self) -> bool {
         self.events.iter().any(|e| {
             let ev = e.value();
-            ev.is_sensitive
-                || is_temp_directory_path(&ev.path)
-                || (ev.event_type == FimEventType::Create && is_temp_directory_path(&ev.path))
+            ev.is_sensitive || is_temp_directory_path(&ev.path)
         })
     }
 
@@ -222,6 +220,7 @@ impl Default for FimEventStore {
 fn is_temp_directory_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.starts_with("/tmp/")
+        || normalized.starts_with("/private/tmp/")
         || normalized.starts_with("/var/tmp/")
         || normalized.contains("/Temp/")
         || normalized.contains("/AppData/Local/Temp/")
