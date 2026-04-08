@@ -49,32 +49,34 @@ fn poll_for_events(
     }
 }
 
-/// Spawn individual child processes that each write one file.
-/// Returns (elapsed, vec of child PIDs).
-fn write_files_via_child(dir: &std::path::Path) -> (Duration, Vec<u32>) {
+/// Spawn a long-lived child process that writes all files and stays alive
+/// so we can check ES process table membership before it exits.
+fn write_files_via_child(dir: &std::path::Path) -> (Duration, u32) {
+    let script = format!(
+        "for i in $(seq -w 0000 {:04}); do dd if=/dev/zero of={}/bench_${{i}}.dat bs=1024 count=1 2>/dev/null; done; sleep 10",
+        FILE_COUNT - 1,
+        dir.display()
+    );
     let start = Instant::now();
-    let mut pids = Vec::with_capacity(FILE_COUNT);
-    for i in 0..FILE_COUNT {
-        let path = dir.join(format!("bench_{:04}.dat", i));
-        let child = Command::new("dd")
-            .args([
-                &format!("if=/dev/zero"),
-                &format!("of={}", path.display()),
-                "bs=1024",
-                "count=1",
-            ])
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn dd child");
-        pids.push(child.id());
-        let output = child.wait_with_output().expect("wait for dd");
-        assert!(
-            output.status.success(),
-            "dd exited with {:?} for file {i}",
-            output.status
-        );
+    let child = Command::new("/bin/bash")
+        .args(["-c", &script])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn bash child");
+    let child_pid = child.id();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let count = (0..FILE_COUNT)
+            .filter(|i| dir.join(format!("bench_{:04}.dat", i)).exists())
+            .count();
+        if count >= FILE_COUNT || Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    (start.elapsed(), pids)
+
+    (start.elapsed(), child_pid)
 }
 
 #[test]
@@ -107,7 +109,7 @@ fn fim_attribution_benchmark() {
         tmp.path().display()
     );
 
-    let (write_elapsed, child_pids) = write_files_via_child(tmp.path());
+    let (write_elapsed, child_pid) = write_files_via_child(tmp.path());
     println!(
         "  Wrote {} files in {}ms",
         FILE_COUNT,
@@ -116,17 +118,12 @@ fn fim_attribution_benchmark() {
 
     let es_proc_count = l7_es::process_count();
     println!("  ES process table size: {}", es_proc_count);
-    let mut child_in_es = 0;
-    for &pid in child_pids.iter().take(10) {
-        let in_es = l7_es::get_process_info(pid).is_some();
-        if in_es {
-            child_in_es += 1;
-        }
-    }
+    let child_in_es = l7_es::get_process_info(child_pid);
     println!(
-        "  Child PIDs in ES proc table: {}/10 sampled (first 5: {:?})",
-        child_in_es,
-        &child_pids[..5.min(child_pids.len())]
+        "  Bash child PID={} in ES proc table: {} (info={:?})",
+        child_pid,
+        child_in_es.is_some(),
+        child_in_es.as_ref().map(|i| &i.process_path)
     );
 
     let es_immediate = l7_es::file_attribution_count();
