@@ -34,8 +34,7 @@ struct CachedAttribution {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-static FIM_ATTRIBUTION_CACHE: Lazy<DashMap<String, CachedAttribution>> =
-    Lazy::new(DashMap::new);
+static FIM_ATTRIBUTION_CACHE: Lazy<DashMap<String, CachedAttribution>> = Lazy::new(DashMap::new);
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 static FIM_CACHE_INSERT_COUNTER: std::sync::atomic::AtomicU64 =

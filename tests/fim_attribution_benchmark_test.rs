@@ -74,11 +74,7 @@ fn fim_attribution_benchmark() {
     println!("\n=== FIM Attribution Benchmark ===");
     println!("  ES available: {}", l7_es::is_available());
     println!("  ES support:   {}", l7_es::es_support());
-    println!(
-        "  Writing {} files to {}",
-        FILE_COUNT,
-        tmp.path().display()
-    );
+    println!("  Writing {} files to {}", FILE_COUNT, tmp.path().display());
 
     let write_start = Instant::now();
     for i in 0..FILE_COUNT {
@@ -100,7 +96,9 @@ fn fim_attribution_benchmark() {
     let create_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.event_type == FimEventType::Create && e.path.contains("bench_") && e.path.ends_with(".dat")
+            e.event_type == FimEventType::Create
+                && e.path.contains("bench_")
+                && e.path.ends_with(".dat")
         })
         .collect();
 
@@ -126,7 +124,9 @@ fn fim_attribution_benchmark() {
     let create_events_after: Vec<_> = events_after
         .iter()
         .filter(|e| {
-            e.event_type == FimEventType::Create && e.path.contains("bench_") && e.path.ends_with(".dat")
+            e.event_type == FimEventType::Create
+                && e.path.contains("bench_")
+                && e.path.ends_with(".dat")
         })
         .collect();
 
@@ -152,10 +152,7 @@ fn fim_attribution_benchmark() {
     println!("  Attribution rate: {:.1}%", attribution_rate);
     println!("  ES file table size: {}", es_file_table_size);
     println!("  lsof cache size: {}", lsof_cache_size);
-    println!(
-        "  Backfill took {}ms",
-        backfill_elapsed.as_millis()
-    );
+    println!("  Backfill took {}ms", backfill_elapsed.as_millis());
 
     watcher.stop();
 
