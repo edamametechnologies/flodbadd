@@ -232,6 +232,8 @@ fn translate_notify_event(event: &Event, hash_threshold: u64) -> Option<Vec<FimE
             hash,
             process_name,
             process_path,
+            parent_process_name: None,
+            parent_process_path: None,
             is_sensitive: sensitive,
             labels,
             uid,
