@@ -10,10 +10,11 @@
 // through a single trait object or generic parameter instead of the current
 // per-module free functions.
 //
-// Backends that should implement this trait:
-//   - l7_ebpf::FlodbaddL7Ebpf  (Linux eBPF kprobe-based resolution)
-//   - l7_es::FlodbaddL7Es      (macOS Endpoint Security framework)
-//   - l7_etw::FlodbaddL7Etw    (Windows ETW kernel trace)
+// Backends that should implement this trait (future struct wrappers around
+// existing free-function modules):
+//   - l7_ebpf module  (Linux eBPF kprobe-based resolution)
+//   - l7_es module    (macOS Endpoint Security framework)
+//   - l7_etw module   (Windows ETW kernel trace)
 //
 // l7_macos is a lower-level libproc socket scanner without a singleton pattern;
 // it does not fit this trait directly but could be wrapped in an adapter.
