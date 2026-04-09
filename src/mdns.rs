@@ -16,7 +16,8 @@ use wez_mdns::{Host, QueryParameters};
 
 lazy_static! {
     static ref MDNS_STOP: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    static ref MDNS_HANDLE: Arc<CustomMutex<Option<task::JoinHandle<()>>>> = Arc::new(CustomMutex::new(None));
+    static ref MDNS_HANDLE: Arc<CustomMutex<Option<task::JoinHandle<()>>>> =
+        Arc::new(CustomMutex::new(None));
     static ref DEVICES: Arc<CustomMutex<HashMap<String, mDNSInfo>>> =
         Arc::new(CustomMutex::new(HashMap::new()));
 }

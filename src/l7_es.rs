@@ -904,4 +904,54 @@ mod tests {
         let support = es_support();
         assert!(!support.is_empty());
     }
+
+    /// Validates that the ES client initializes when the binary is codesigned
+    /// with the Endpoint Security entitlement and running as root.
+    ///
+    /// Run via: make macos_test   (codesigns automatically)
+    /// Or manually:
+    ///   cargo test --features endpointsecurity,fim --no-run
+    ///   codesign --force --sign - --entitlements ../edamame_helper/macos/edamame_helper.entitlements target/debug/deps/flodbadd-*
+    ///   sudo -E target/debug/deps/flodbadd-* test_es_entitlement_active --nocapture
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
+    fn test_es_entitlement_active() {
+        let running_as_root = users::get_effective_uid() == 0;
+        if !running_as_root {
+            eprintln!(
+                "SKIP: test_es_entitlement_active requires root (run via `make macos_test`)"
+            );
+            return;
+        }
+
+        init_and_log_status();
+
+        let available = is_available();
+        let support = es_support();
+
+        eprintln!("ES available: {}", available);
+        eprintln!("ES support:   {}", support);
+
+        if !available {
+            eprintln!(
+                "SKIP: ES client could not initialize (SIP enabled + no Developer ID cert). \
+                 ES validation will run in CI."
+            );
+            return;
+        }
+
+        // Give ES a moment to populate the process table from the running system
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let proc_count = process_count();
+        eprintln!("ES processes after 2s: {}", proc_count);
+        assert!(
+            proc_count > 0,
+            "ES initialized but process table is empty after 2s -- \
+             FORK/EXEC events not being received"
+        );
+
+        let my_pid = std::process::id();
+        eprintln!("Own PID: {}, ES lookup: {:?}", my_pid, get_process_info(my_pid));
+    }
 }

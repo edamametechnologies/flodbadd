@@ -1,4 +1,4 @@
-.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup windows_benchmark windows_benchmark_no_etw macos_benchmark macos_benchmark_no_es linux_benchmark linux_benchmark_no_ebpf macos_fim_benchmark macos_fim_benchmark_no_es
+.PHONY: upgrade unused_dependencies format clean test ios android ebpf_setup windows_benchmark windows_benchmark_no_etw macos_benchmark macos_benchmark_no_es linux_benchmark linux_benchmark_no_ebpf macos_fim_benchmark macos_fim_benchmark_no_es macos_es_test
 
 upgrade:
 	rustup update
@@ -43,8 +43,50 @@ windows_benchmark:
 windows_benchmark_no_etw:
 	cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
 
-macos_benchmark:
-	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test -- --nocapture
+# Codesign test binaries with the ES entitlement for Endpoint Security testing.
+#
+# ES entitlement enforcement on macOS with SIP enabled:
+#   - Requires Developer ID Application + notarization
+#   - Ad-hoc works in CI runners (relaxed security)
+#   - macos_es_test: full local flow (sign + notarize + run)
+#   - macos_codesign_es: ad-hoc for CI use only
+ES_ENTITLEMENTS := /tmp/flodbadd_es_test.entitlements
+CODESIGN_IDENTITY ?= -
+macos_codesign_es:
+	cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim --no-run 2>&1
+	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>com.apple.developer.endpoint-security.client</key>\n\t<true/>\n</dict>\n</plist>\n' > $(ES_ENTITLEMENTS)
+	@if [ "$(CODESIGN_IDENTITY)" = "-" ]; then \
+		echo "No Developer ID cert found -- signing ad-hoc (ES will only work in CI or with SIP disabled)"; \
+	else \
+		echo "Signing with: $(CODESIGN_IDENTITY)"; \
+	fi
+	@for binary in target/debug/deps/*-*; do \
+		if [ -x "$$binary" ] && [ ! -d "$$binary" ] && case "$$binary" in *.d|*.o|*.rmeta) false;; *) true;; esac; then \
+			codesign --force --sign "$(CODESIGN_IDENTITY)" --entitlements $(ES_ENTITLEMENTS) "$$binary" 2>/dev/null && \
+			echo "Signed: $$binary"; \
+		fi; \
+	done
+
+HELPER_FIND_PROFILE := ../edamame_helper/macos/find-provisioning-profile.sh
+HELPER_PROV_PROFILE = $(shell $(HELPER_FIND_PROFILE) com.edamametechnologies.edamame-helper 2>/dev/null)
+
+macos_es_test:
+	$(eval ES_BIN := $(shell cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim --no-run 2>&1 | grep 'unittests src/lib.rs' | sed 's/.*(\(.*\))/\1/'))
+	@echo "Test binary: $(ES_BIN)"
+	@if [ -z "$(HELPER_PROV_PROFILE)" ]; then \
+		echo "No ES provisioning profile found. Run: cd ../edamame_helper && fastlane dev"; \
+		exit 1; \
+	fi
+	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>com.apple.developer.endpoint-security.client</key>\n\t<true/>\n</dict>\n</plist>\n' > $(ES_ENTITLEMENTS)
+	codesign --force --timestamp --options=runtime \
+		--entitlements $(ES_ENTITLEMENTS) \
+		-i com.edamametechnologies.edamame-helper \
+		--sign "Developer ID Application: Edamame Technologies (WSL782B48J)" "$(ES_BIN)"
+	sudo "$(ES_BIN)" l7_es::tests::test_es_entitlement_active --nocapture
+
+macos_benchmark: macos_codesign_es
+	$(eval BENCH_BIN := $(shell find target/debug/deps -name 'l7_benchmark_test-*' -perm +111 ! -name '*.d' ! -name '*.o' | head -1))
+	sudo -E "$(BENCH_BIN)" --nocapture
 
 macos_benchmark_no_es:
 	sudo -E cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
@@ -56,8 +98,9 @@ linux_benchmark_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
 
 # FIM Attribution Benchmark targets
-macos_fim_benchmark:
-	sudo -E cargo test --features endpointsecurity,fim --test fim_attribution_benchmark_test -- --nocapture
+macos_fim_benchmark: macos_codesign_es
+	$(eval BENCH_BIN := $(shell find target/debug/deps -name 'fim_attribution_benchmark_test-*' -perm +111 ! -name '*.d' ! -name '*.o' | head -1))
+	sudo -E "$(BENCH_BIN)" --nocapture
 
 macos_fim_benchmark_no_es:
 	sudo -E cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
@@ -81,7 +124,7 @@ linux_test: ebpf_setup
 linux_test_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
 
-macos_test:
+macos_test: macos_codesign_es
 	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim -- --nocapture --test-threads=1
 
 ios_test: ios

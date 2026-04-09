@@ -60,6 +60,12 @@ jobs:
         shell: bash
         run: brew install protobuf
 
+      - name: Install ES provisioning profile
+        shell: bash
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "${{ secrets.APPLE_ES_HELPER_PROVISIONING_PROFILE }}" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/EDAMAME_Helper.provisionprofile"
+
       - name: Build and codesign FIM benchmark with ES entitlement
         shell: bash
         run: |
