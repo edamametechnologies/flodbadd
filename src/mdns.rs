@@ -8,17 +8,17 @@ use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::IpAddr, sync::Arc};
-use tokio::sync::Mutex;
 use tokio::task;
 use tokio::time::Duration;
 use tracing::{debug, info, trace, warn};
-use wez_mdns::{Host, QueryParameters}; // Our own fork with minor adjustements
+use undeadlock::CustomMutex;
+use wez_mdns::{Host, QueryParameters};
 
 lazy_static! {
     static ref MDNS_STOP: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    static ref MDNS_HANDLE: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
-    static ref DEVICES: Arc<Mutex<HashMap<String, mDNSInfo>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    static ref MDNS_HANDLE: Arc<CustomMutex<Option<task::JoinHandle<()>>>> = Arc::new(CustomMutex::new(None));
+    static ref DEVICES: Arc<CustomMutex<HashMap<String, mDNSInfo>>> =
+        Arc::new(CustomMutex::new(HashMap::new()));
 }
 
 #[derive(Debug, Clone)]
@@ -303,7 +303,7 @@ async fn fetch_mdns_info_task() {
     loop {
         if MDNS_STOP.load(Ordering::Relaxed) {
             info!("Received mDNS termination signal");
-            trace!("mDNS database: {:?}", DEVICES.lock().await);
+            trace!("mDNS database: {:?}", &*DEVICES.lock().await);
             break;
         }
         trace!("Starting mDNS discovery loop");
