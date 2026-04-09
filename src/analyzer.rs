@@ -3239,7 +3239,8 @@ impl SessionAnalyzer {
 pub(crate) mod tests {
     use super::*;
     use crate::sessions::{
-        Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+        DomainResolutionType, Protocol, Session, SessionInfo, SessionStats, SessionStatus,
+        WhitelistState,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use uuid::Uuid;
@@ -4350,5 +4351,81 @@ pub(crate) mod tests {
         assert_eq!(normal_count_2, 1, "One normal session should be counted");
 
         println!("Normal sessions count verified");
+    }
+
+    fn make_minimal_session(dst_port: u16) -> SessionInfo {
+        SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                src_port: 50000,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                dst_port,
+            },
+            stats: SessionStats::new(Utc::now()),
+            status: SessionStatus::default(),
+            is_local_src: false,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_type: DomainResolutionType::default(),
+            dst_domain_type: DomainResolutionType::default(),
+            dst_service: None,
+            l7: None,
+            src_asn: None,
+            dst_asn: None,
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            whitelist_reason: None,
+            dismissed: false,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_compute_features_no_l7_returns_zero_prevalence() {
+        let session = make_minimal_session(443);
+        let freq = HashMap::new();
+        let features = compute_features(&session, &freq);
+        assert_eq!(
+            features[0], 0.0,
+            "process_prevalence should be 0 without L7"
+        );
+        assert!(features[11] == 443.0, "dst_port should be 443");
+    }
+
+    #[test]
+    fn test_compute_features_with_l7_prevalence() {
+        let mut session = make_minimal_session(80);
+        session.l7 = Some(crate::sessions::SessionL7 {
+            process_name: "curl".to_string(),
+            ..Default::default()
+        });
+        let mut freq = HashMap::new();
+        freq.insert("curl".to_string(), 10u32);
+        let features = compute_features(&session, &freq);
+        let expected = (11.0_f64).ln();
+        assert!(
+            (features[0] - expected).abs() < 0.001,
+            "process_prevalence should be ln(10+1)"
+        );
+    }
+
+    #[test]
+    fn test_compute_features_all_finite() {
+        let session = make_minimal_session(22);
+        let freq = HashMap::new();
+        let features = compute_features(&session, &freq);
+        for (idx, val) in features.iter().enumerate() {
+            assert!(
+                val.is_finite(),
+                "feature[{}] should be finite, got {}",
+                idx,
+                val
+            );
+        }
     }
 }
