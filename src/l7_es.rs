@@ -918,9 +918,7 @@ mod tests {
     fn test_es_entitlement_active() {
         let running_as_root = users::get_effective_uid() == 0;
         if !running_as_root {
-            eprintln!(
-                "SKIP: test_es_entitlement_active requires root (run via `make macos_test`)"
-            );
+            eprintln!("SKIP: test_es_entitlement_active requires root (run via `make macos_test`)");
             return;
         }
 
@@ -952,6 +950,10 @@ mod tests {
         );
 
         let my_pid = std::process::id();
-        eprintln!("Own PID: {}, ES lookup: {:?}", my_pid, get_process_info(my_pid));
+        eprintln!(
+            "Own PID: {}, ES lookup: {:?}",
+            my_pid,
+            get_process_info(my_pid)
+        );
     }
 }
