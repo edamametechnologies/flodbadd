@@ -187,7 +187,7 @@ jobs:
         shell: bash
         run: |
           rustup target add x86_64-linux-android
-          cargo install cross --git https://github.com/cross-rs/cross
+          cargo install cross
 
       - name: Install protobuf (with apt lock handling)
         shell: bash
@@ -293,29 +293,6 @@ jobs:
         if: ${{ matrix.platform == 'linux' }}
         shell: bash
         run: ./tests/ebpf_test.sh
-        continue-on-error: true
-
-      - name: Ad-hoc codesign test binaries with ES entitlement (macOS only)
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          cat > /tmp/es_test.entitlements << 'ENTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>com.apple.developer.endpoint-security.client</key>
-            <true/>
-          </dict>
-          </plist>
-          ENTEOF
-          sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --no-run 2>&1 | \
-            grep -oE 'target/[^ ]*' | while read binary; do
-              if [ -x "$binary" ]; then
-                echo "Signing $binary with ES entitlement"
-                codesign --force --sign - --entitlements /tmp/es_test.entitlements "$binary" || true
-              fi
-            done
         continue-on-error: true
 
       - name: Run tests

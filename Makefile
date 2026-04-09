@@ -53,6 +53,7 @@ windows_benchmark_no_etw:
 ES_ENTITLEMENTS := /tmp/flodbadd_es_test.entitlements
 CODESIGN_IDENTITY ?= -
 macos_codesign_es:
+	@sudo chown -R $$(id -un) "$$HOME/.cargo" ./target 2>/dev/null || true
 	cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim --no-run 2>&1
 	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>com.apple.developer.endpoint-security.client</key>\n\t<true/>\n</dict>\n</plist>\n' > $(ES_ENTITLEMENTS)
 	@if [ "$(CODESIGN_IDENTITY)" = "-" ]; then \
@@ -125,7 +126,9 @@ linux_test_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
 
 macos_test: macos_codesign_es
-	sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim -- --nocapture --test-threads=1
+	@RC=0; sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim -- --nocapture --test-threads=1 || RC=$$?; \
+	sudo chown -R $$(id -un) "$$HOME/.cargo" ./target 2>/dev/null || true; \
+	exit $$RC
 
 ios_test: ios
 
