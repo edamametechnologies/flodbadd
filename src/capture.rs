@@ -2550,6 +2550,12 @@ impl FlodbaddCapture {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test module (~4,267 lines). This is one of the largest inline test modules
+// in the codebase. Extraction to separate files under tests/capture_*.rs is
+// planned to improve navigation and compile-time isolation, but has not been
+// done yet due to the risk of breaking test-only imports and helper sharing.
+// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*; // Make items from parent module visible
