@@ -13,13 +13,13 @@ pub mod broadcast;
 ))]
 pub mod capture;
 pub mod device_info;
-pub mod error;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
     feature = "packetcapture"
 ))]
 pub mod dns;
 pub mod dns_ebpf;
+pub mod error;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
     feature = "fim"
@@ -40,9 +40,9 @@ pub mod l7;
 pub mod l7_ebpf;
 pub mod l7_es;
 pub mod l7_etw;
-pub mod l7_trait;
 #[cfg(target_os = "macos")]
 pub mod l7_macos;
+pub mod l7_trait;
 pub mod mdns;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub mod neighbors;
