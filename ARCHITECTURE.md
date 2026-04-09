@@ -232,13 +232,31 @@ User Space                    Kernel Space (eBPF)
 
 See [EBPF.md](EBPF.md) for complete documentation.
 
+## L7 Process Attribution
+
+Process attribution resolves which local process owns a network session. The
+primary mechanism varies by platform:
+
+- **Linux**: eBPF kprobes (`l7_ebpf.rs`) when the `ebpf` feature is enabled.
+  Falls back to netstat polling via the `netstat2` crate.
+- **macOS**: `lsof`-based resolution via `l7.rs`.
+- **Windows**: Netstat polling via `netstat2`. The `etw` feature flag exists for
+  future Event Tracing for Windows (ETW) integration but is currently an empty
+  stub. Enabling `etw` compiles the Windows ETW crate dependencies (see
+  `Win32_System_Diagnostics_Etw` in `Cargo.toml`) but does not activate any
+  runtime behavior. A real ETW consumer would require native ETW provider
+  registration and session management that has not been implemented.
+
 ## Feature Flags
 
 | Feature | Description |
 |---------|-------------|
 | `packetcapture` | Live packet capture (requires root/CAP_NET_RAW) |
-| `asyncpacketcapture` | Async capture mode |
+| `asyncpacketcapture` | Async capture API over pcap; enables async channel-based packet delivery. Depends on `packetcapture` being enabled in the consuming crate. |
 | `ebpf` | Linux eBPF acceleration (x86_64/aarch64) |
+| `etw` | Windows ETW stub (empty; requires native ETW dependencies to build) |
+| `endpointsecurity` | macOS Endpoint Security framework (optional, requires entitlements) |
+| `fim` | File integrity monitoring via notify + BLAKE3 hashing |
 
 ## Platform Support
 

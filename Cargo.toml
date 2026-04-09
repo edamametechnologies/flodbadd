@@ -15,7 +15,9 @@ async_fn_in_trait = "allow"
 
 [features]
 default = []
+# Async channel-based packet delivery API; depends on packetcapture being enabled in the consuming crate
 asyncpacketcapture = []
+# Live packet capture via pcap/Npcap; pulls in DNS, process attribution, and packet parsing deps
 packetcapture = [ "pcap", "pnet_packet", "hickory-resolver", "dns-parser", "dep:sysinfo", "netstat2" ]
 ebpf = [ "aya", "bytemuck", "nix", "l7_ebpf_program" ]
 endpointsecurity = [ "endpoint-sec" ]
