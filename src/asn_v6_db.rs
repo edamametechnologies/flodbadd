@@ -520,7 +520,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:3a0:f007::	2001:3a0:f007:ffff:ffff:ffff:ffff:ffff	131079	JP	KANDANET4 INTERNET MULTIFEED CO.
 2001:3a0:f008::	2001:3a0:ffff:ffff:ffff:ffff:ffff:ffff	7521	JP	MFEED INTERNET MULTIFEED CO.
 2001:3a1::	2001:3a7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:3a8::	2001:3a8:ffff:ffff:ffff:ffff:ffff:ffff	9848	KR	SEJONGTELECOM-AS-KR SEJONG NETWORKS
+2001:3a8::	2001:3a8:8eff:ffff:ffff:ffff:ffff:ffff	9848	KR	SEJONGTELECOM-AS-KR SEJONG NETWORKS
+2001:3a8:8f00::	2001:3a8:8f00:ffff:ffff:ffff:ffff:ffff	214432	GB	ZLIDC
+2001:3a8:8f01::	2001:3a8:ffff:ffff:ffff:ffff:ffff:ffff	9848	KR	SEJONGTELECOM-AS-KR SEJONG NETWORKS
 2001:3a9::	2001:3af:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:3b0::	2001:3b0:ffff:ffff:ffff:ffff:ffff:ffff	17529	JP	MEDIACAT STARCAT CABLE NETWORK Co .,LTD.
 2001:3b1::	2001:3b7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -691,9 +693,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:430:fff4::	2001:430:fff4:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2001:430:fff5::	2001:430:ffff:ffff:ffff:ffff:ffff:ffff	7332	US	LIGHTBOUND-AS
 2001:431::	2001:437:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:438::	2001:438:2e:ffff:ffff:ffff:ffff:ffff	6461	US	ZAYO-6461
-2001:438:2f::	2001:438:2f:ffff:ffff:ffff:ffff:ffff	17025	US	ZAYO-CUSTOMER-17025
-2001:438:30::	2001:438:37:ffff:ffff:ffff:ffff:ffff	6461	US	ZAYO-6461
+2001:438::	2001:438:37:ffff:ffff:ffff:ffff:ffff	6461	US	ZAYO-6461
 2001:438:38::	2001:438:38:ffff:ffff:ffff:ffff:ffff	17025	US	ZAYO-CUSTOMER-17025
 2001:438:39::	2001:438:39:ffff:ffff:ffff:ffff:ffff	401693	US	CANI
 2001:438:3a::	2001:438:49:ffff:ffff:ffff:ffff:ffff	6461	US	ZAYO-6461
@@ -733,8 +733,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:468:700::	2001:468:700:ffff:ffff:ffff:ffff:ffff	20080	US	AMPATH
 2001:468:701::	2001:468:701:ffff:ffff:ffff:ffff:ffff	3681	US	FIU
 2001:468:702::	2001:468:bff:ffff:ffff:ffff:ffff:ffff	11537	US	INTERNET2-RESEARCH-EDU
-2001:468:c00::	2001:468:c0e:ffff:ffff:ffff:ffff:ffff	10886	US	MAX-GIGAPOP
-2001:468:c0f::	2001:468:c7f:ffff:ffff:ffff:ffff:ffff	10886	US	MAX-GIGAPOP
+2001:468:c00::	2001:468:c7f:ffff:ffff:ffff:ffff:ffff	10886	US	MAX-GIGAPOP
 2001:468:c80::	2001:468:c80:ffff:ffff:ffff:ffff:ffff	1312	US	VA-TECH-AS
 2001:468:c81::	2001:468:cbf:ffff:ffff:ffff:ffff:ffff	40220	US	MARIA
 2001:468:cc0::	2001:468:cc0:ffff:ffff:ffff:ffff:ffff	3140	US	TJHSST-AS
@@ -4166,7 +4165,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:559:c095::	2001:559:c095:ffff:ffff:ffff:ffff:ffff	7922	US	COMCAST-7922
 2001:559:c096::	2001:559:c096:ffff:ffff:ffff:ffff:ffff	33287	US	COMCAST-33287
 2001:559:c097::	2001:559:c097:ffff:ffff:ffff:ffff:ffff	33651	US	CMCS
-2001:559:c098::	2001:559:c098:ffff:ffff:ffff:ffff:ffff	7922	US	COMCAST-7922
+2001:559:c098::	2001:559:c098:ffff:ffff:ffff:ffff:ffff	33657	US	CMCS
 2001:559:c099::	2001:559:c099:ffff:ffff:ffff:ffff:ffff	7015	US	COMCAST-7015
 2001:559:c09a::	2001:559:c0a0:ffff:ffff:ffff:ffff:ffff	7922	US	COMCAST-7922
 2001:559:c0a1::	2001:559:c0a1:ffff:ffff:ffff:ffff:ffff	33652	US	CMCS
@@ -8635,7 +8634,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:67c:15c0::	2001:67c:15c0:ffff:ffff:ffff:ffff:ffff	207278	DE	RAIDER
 2001:67c:15c1::	2001:67c:15c7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:15c8::	2001:67c:15c8:ffff:ffff:ffff:ffff:ffff	1257	EU	TELE2
-2001:67c:15c9::	2001:67c:15cf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:67c:15c9::	2001:67c:15cb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:67c:15cc::	2001:67c:15cc:ffff:ffff:ffff:ffff:ffff	216145	BG	SEVENDC
+2001:67c:15cd::	2001:67c:15cf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:15d0::	2001:67c:15d0:ffff:ffff:ffff:ffff:ffff	52201	RU	TCTEL
 2001:67c:15d1::	2001:67c:15d3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:15d4::	2001:67c:15d4:ffff:ffff:ffff:ffff:ffff	47397	RU	BASE-AS
@@ -9517,7 +9518,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:67c:27f8::	2001:67c:27f8:ffff:ffff:ffff:ffff:ffff	51040	SE	PIRATE-AS Piratpartiet North Korea
 2001:67c:27f9::	2001:67c:27fb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:27fc::	2001:67c:27fc:ffff:ffff:ffff:ffff:ffff	12732	DE	GUTCON-NET Carrier51 GmbH, GutCon GmbH
-2001:67c:27fd::	2001:67c:2807:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:67c:27fd::	2001:67c:27ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:67c:2800::	2001:67c:2800:ffff:ffff:ffff:ffff:ffff	205329	TW	MUILTIES-NETWORK Muilties Network
+2001:67c:2801::	2001:67c:2807:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:2808::	2001:67c:2808:ffff:ffff:ffff:ffff:ffff	197678	PL	MINISTERSTWO-IT
 2001:67c:2809::	2001:67c:280b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:67c:280c::	2001:67c:280c:ffff:ffff:ffff:ffff:ffff	57839	FR	AS-FR-LIR-CELYA-2011-047
@@ -10245,9 +10248,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:7f9:c::	2001:7f9:c:ffff:ffff:ffff:ffff:ffff	15606	PL	NASK-DNS-ANYCAST
 2001:7f9:d::	2001:7fa:4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:7fa:5::	2001:7fa:5:ffff:ffff:ffff:ffff:ffff	23911	CN	CNGI-BJIX-AS-AP China Next Generation Internet Beijing IX
-2001:7fa:6::	2001:7fb:edff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:ee00::	2001:7fb:ee05:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:ee06::	2001:7fb:eeff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:7fa:6::	2001:7fb:eeff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:7fb:ef00::	2001:7fb:ef05:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
 2001:7fb:ef06::	2001:7fb:fb01:ff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:7fb:fb01:100::	2001:7fb:fb01:200:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
@@ -10255,20 +10256,8 @@ pub static ASN_V6_DB: &str = r###"
 2001:7fb:fd02::	2001:7fb:fd03:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
 2001:7fb:fd04::	2001:7fb:fd04:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:7fb:fd05::	2001:7fb:fd05:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fd06::	2001:7fb:fdff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:fe00::	2001:7fb:fe01:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fe02::	2001:7fb:fe02:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:fe03::	2001:7fb:fe07:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fe08::	2001:7fb:fe09:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:fe0a::	2001:7fb:fe10:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fe11::	2001:7fb:fe11:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:fe12::	2001:7fb:fe19:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fe1a::	2001:7fb:fe1f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:fe20::	2001:7fb:fe20:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:fe21::	2001:7fb:feff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:ff00::	2001:7fb:ff01:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
-2001:7fb:ff02::	2001:7fb:ff02:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:7fb:ff03::	2001:7fb:ff07:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
+2001:7fb:fd06::	2001:7fb:feff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:7fb:ff00::	2001:7fb:ff07:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
 2001:7fb:ff08::	2001:7fb:ff09:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:7fb:ff0a::	2001:7fb:ff10:ffff:ffff:ffff:ffff:ffff	12654	NL	RIPE-NCC-RIS-AS Reseaux IP Europeens Network Coordination Centre RIPE NCC
 2001:7fb:ff11::	2001:7fb:ff11:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -11868,9 +11857,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df0:6380::	2001:df0:6380:ffff:ffff:ffff:ffff:ffff	135972	VN	ICTQUANGNAM-AS-VN Quang Nam Department of Information and Communications
 2001:df0:6381::	2001:df0:63ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df0:6400::	2001:df0:6400:ffff:ffff:ffff:ffff:ffff	131236	SG	GENWORXPTELTD-AS-AP Genworx Pte Ltd
-2001:df0:6401::	2001:df0:647f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df0:6480::	2001:df0:6480:ffff:ffff:ffff:ffff:ffff	63752	VN	ICTHOABINH-AS-VN Hoa Binh Department of Information and Communications
-2001:df0:6481::	2001:df0:65bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df0:6401::	2001:df0:65bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df0:65c0::	2001:df0:65c0:ffff:ffff:ffff:ffff:ffff	141565	IN	PUETPL-AS Puravi Elite Technologies Pvt. Ltd.
 2001:df0:65c1::	2001:df0:67bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df0:67c0::	2001:df0:67c0:ffff:ffff:ffff:ffff:ffff	149492	BD	HAZARIBAGHONLINE-AS-AP Hazaribagh Online
@@ -12350,7 +12337,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:df1:3ac0::	2001:df1:3ac0:ffff:ffff:ffff:ffff:ffff	45671	AU	AS45671-NET-AU Wholesale Services Provider
 2001:df1:3ac1::	2001:df1:3b7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df1:3b80::	2001:df1:3b80:ffff:ffff:ffff:ffff:ffff	139609	SB	SISCC-AS-AP Solomon Islands Submarine Cable Company
-2001:df1:3b81::	2001:df1:3d3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df1:3b81::	2001:df1:3cbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df1:3cc0::	2001:df1:3cc0:ffff:ffff:ffff:ffff:ffff	135257	IN	DLGTPL-AS DL GTPL Broadband Private Limited
+2001:df1:3cc1::	2001:df1:3d3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df1:3d40::	2001:df1:3d40:ffff:ffff:ffff:ffff:ffff	149712	ID	LINKTEL-AS-ID KabelTelekom
 2001:df1:3d41::	2001:df1:3dff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df1:3e00::	2001:df1:3e00:ffff:ffff:ffff:ffff:ffff	134868	IN	SHARKTELINFOCOM-AS-IN SHARKTEL INFOCOM PRIVATE LIMITED
@@ -12957,9 +12946,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df2:3dc0::	2001:df2:3dc0:ffff:ffff:ffff:ffff:ffff	152639	BD	SPEEDONLINE-AS-BD SPEED ONLINE
 2001:df2:3dc1::	2001:df2:3ebf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:3ec0::	2001:df2:3ec0:ffff:ffff:ffff:ffff:ffff	141673	ID	IDNIC-MAMURA-AS-ID PT Mamura Inter Media
-2001:df2:3ec1::	2001:df2:3f3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df2:3f40::	2001:df2:3f40:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
-2001:df2:3f41::	2001:df2:3fbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df2:3ec1::	2001:df2:3fbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:3fc0::	2001:df2:3fc0:ffff:ffff:ffff:ffff:ffff	142519	IN	SMTPM-AS-IN Smtpmailers Pvt Ltd
 2001:df2:3fc1::	2001:df2:407f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:4080::	2001:df2:4081:ffff:ffff:ffff:ffff:ffff	55318	VN	ACB-AS-VN Asia Commercial Bank
@@ -13153,9 +13140,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df2:8f40::	2001:df2:8f40:ffff:ffff:ffff:ffff:ffff	151118	IN	SUMERRU-AS-IN SUMERRU INFOTECH PRIVATE LIMITED
 2001:df2:8f41::	2001:df2:8fbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:8fc0::	2001:df2:8fc0:ffff:ffff:ffff:ffff:ffff	140115	IN	LAYANPL-AS-IN Laya Network Private Limited
-2001:df2:8fc1::	2001:df2:903f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df2:9040::	2001:df2:9040:ffff:ffff:ffff:ffff:ffff	151119	IN	CLICKER-AS-IN Clickr Services Private Limited
-2001:df2:9041::	2001:df2:90bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df2:8fc1::	2001:df2:90bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:90c0::	2001:df2:90c0:ffff:ffff:ffff:ffff:ffff	151127	IN	RAJALNET-AS-IN RAJAL NETWORK
 2001:df2:90c1::	2001:df2:90ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df2:9100::	2001:df2:9100:ffff:ffff:ffff:ffff:ffff	136843	ID	IDNIC-DISKOMINFOSMG-AS-ID Dinas Komunikasi dan Informatika Pemerintah Kota Semarang
@@ -14011,7 +13996,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:df4:13c1::	2001:df4:13c1:ffff:ffff:ffff:ffff:ffff	152698	BD	ZORN-AS-AP Zorn Technologies
 2001:df4:13c2::	2001:df4:143f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:1440::	2001:df4:1440:ffff:ffff:ffff:ffff:ffff	153174	PH	ADADSI-AS-AP Aioni Digital and Data Solutions Inc.
-2001:df4:1441::	2001:df4:177f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df4:1441::	2001:df4:16ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df4:1700::	2001:df4:1700:ffff:ffff:ffff:ffff:ffff	137084	IN	SENSE-AS-IN Sense Connect It Pvt Ltd
+2001:df4:1701::	2001:df4:177f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:1780::	2001:df4:1780:ffff:ffff:ffff:ffff:ffff	38074	JP	SDCC-AS-AP SDCC Japan-West Area
 2001:df4:1781::	2001:df4:1781:ffff:ffff:ffff:ffff:ffff	140868	JP	TAKATASDCC-AS-AP TakataSDCC Net
 2001:df4:1782::	2001:df4:183f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -14114,7 +14101,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:df4:3d40::	2001:df4:3d40:ffff:ffff:ffff:ffff:ffff	152992	VN	DATAONLINE-VN ONLINE DATA COMPANY LIMITED
 2001:df4:3d41::	2001:df4:3ebf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:3ec0::	2001:df4:3ec0:ffff:ffff:ffff:ffff:ffff	153322	PH	PERSIAN1-AS-AP Persian Cable TV Network
-2001:df4:3ec1::	2001:df4:40bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df4:3ec1::	2001:df4:403f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df4:4040::	2001:df4:4040:ffff:ffff:ffff:ffff:ffff	138302	IN	SBSP-AS-IN STROMNET BROADBAND SERVICES PRIVATE LIMITED
+2001:df4:4041::	2001:df4:40bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:40c0::	2001:df4:40c0:ffff:ffff:ffff:ffff:ffff	214441	IN	LHY LetsHostYou
 2001:df4:40c1::	2001:df4:417f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:4180::	2001:df4:4180:ffff:ffff:ffff:ffff:ffff	140917	BD	MET-AS-AP ERA TRADERS
@@ -14204,9 +14193,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df4:6140::	2001:df4:6140:ffff:ffff:ffff:ffff:ffff	140937	AU	TECHAROBPTYLTD-AS-AP Techarob Pty Ltd
 2001:df4:6141::	2001:df4:62ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:6300::	2001:df4:6300:ffff:ffff:ffff:ffff:ffff	137487	PH	MERALCO-AS-AP Manila Electric Company
-2001:df4:6301::	2001:df4:633f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df4:6340::	2001:df4:6340:ffff:ffff:ffff:ffff:ffff	153359	PH	ISADP-AS-AP Imtech Solution and Data Providers
-2001:df4:6341::	2001:df4:64bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df4:6301::	2001:df4:64bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:64c0::	2001:df4:64c0:ffff:ffff:ffff:ffff:ffff	153140	ID	IDNIC-KAM-AS-ID PT Karya Akbar Mandiri
 2001:df4:64c1::	2001:df4:65bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df4:65c0::	2001:df4:65c0:ffff:ffff:ffff:ffff:ffff	153260	IN	EWIRE-AS-IN Expresswire Private Limited
@@ -15195,9 +15182,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df6:68c0::	2001:df6:68c0:ffff:ffff:ffff:ffff:ffff	154059	IN	IRINN-ACNPVT-AS-IN ACN PRIME PRIVATE LIMITED
 2001:df6:68c1::	2001:df6:697f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:6980::	2001:df6:6980:ffff:ffff:ffff:ffff:ffff	136275	BD	FBDN-AS-AP FASTLINK BD DOT NET
-2001:df6:6981::	2001:df6:6aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df6:6b00::	2001:df6:6b00:ffff:ffff:ffff:ffff:ffff	135772	IN	POWERNET-AS-AP POWERNET
-2001:df6:6b01::	2001:df6:6b3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df6:6981::	2001:df6:6b3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:6b40::	2001:df6:6b40:ffff:ffff:ffff:ffff:ffff	154442	ID	IDNIC-ASATRIONETWORK-ID PT Asa Trio Network
 2001:df6:6b41::	2001:df6:6b7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:6b80::	2001:df6:6b80:ffff:ffff:ffff:ffff:ffff	141805	IN	HUBCOM-AS-IN Hubcom Techno System Llp
@@ -15351,7 +15336,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:df6:b800::	2001:df6:b800:ffff:ffff:ffff:ffff:ffff	59349	JP	GMO-Z-COM GMO-Z.COM PTE. LTD.
 2001:df6:b801::	2001:df6:b83f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:b840::	2001:df6:b840:ffff:ffff:ffff:ffff:ffff	154512	IN	IRINN-TOPTUSIP-AS-IN TOPTUS BROADBAND SERVICES PRIVATE LIMITED
-2001:df6:b841::	2001:df6:b97f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df6:b841::	2001:df6:b8bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df6:b8c0::	2001:df6:b8c0:ffff:ffff:ffff:ffff:ffff	138990	ID	IDNIC-MJNETWORK-AS-ID PT Mulya Jaya Network Group
+2001:df6:b8c1::	2001:df6:b97f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:b980::	2001:df6:b980:ffff:ffff:ffff:ffff:ffff	136969	PK	KKNETWROK-AS-AP KK Networks Pvt Ltd.
 2001:df6:b981::	2001:df6:bb7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:bb80::	2001:df6:bb80:ffff:ffff:ffff:ffff:ffff	142297	NP	SMARTLINK-AS-AP Smart Link Network Pvt Ltd
@@ -15403,7 +15390,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:df6:e080::	2001:df6:e080:ffff:ffff:ffff:ffff:ffff	142547	BD	FCNNM-AS-AP Fatickchari Communication Network
 2001:df6:e081::	2001:df6:e0ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:e100::	2001:df6:e100:ffff:ffff:ffff:ffff:ffff	138359	MY	DATAKL-MY DataKL Solutions Sdn Bhd
-2001:df6:e101::	2001:df6:e3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df6:e101::	2001:df6:e23f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df6:e240::	2001:df6:e240:ffff:ffff:ffff:ffff:ffff	142393	ID	IDNIC-MEDIASOLUSISUKSES-AS-ID PT Media Solusi Sukses
+2001:df6:e241::	2001:df6:e3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:e400::	2001:df6:e400:ffff:ffff:ffff:ffff:ffff	132976	IN	KINGSBROADBAND-AS-IN Kings Broadband Pvt Ltd
 2001:df6:e401::	2001:df6:e4ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df6:e500::	2001:df6:e501:ffff:ffff:ffff:ffff:ffff	18030	AU	PERTH-AS-AP PERTH AIRPORT PTY LTD
@@ -15583,9 +15572,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:df7:8080::	2001:df7:8080:ffff:ffff:ffff:ffff:ffff	135746	IN	CITYLINE-AS Cityline Networks Pvt Ltd
 2001:df7:8081::	2001:df7:80ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df7:8100::	2001:df7:8100:ffff:ffff:ffff:ffff:ffff	138543	PH	CABLEVISION-AS-AP Cablevision Systems Corporation
-2001:df7:8101::	2001:df7:827f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:df7:8280::	2001:df7:8280:ffff:ffff:ffff:ffff:ffff	147017	BD	NETTWOHOMEBD-AS-AP Net Two Home
-2001:df7:8281::	2001:df7:8400:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:df7:8101::	2001:df7:8400:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df7:8401::	2001:df7:8401:ffff:ffff:ffff:ffff:ffff	134822	IN	ITTACN2-AS-AP GOVT OF INDIA
 2001:df7:8402::	2001:df7:84ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:df7:8500::	2001:df7:8500:ffff:ffff:ffff:ffff:ffff	138551	BD	SKYINFOONLINE-AS-AP Skyinfo Online
@@ -15822,8 +15809,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:ee0:3020::	2001:ee0:3100:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
 2001:ee0:3101::	2001:ee0:311f:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
 2001:ee0:3120::	2001:ee0:3207:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
-2001:ee0:3208::	2001:ee0:3209:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
-2001:ee0:320a::	2001:ee0:324a:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
+2001:ee0:3208::	2001:ee0:324a:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
 2001:ee0:324b::	2001:ee0:373f:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
 2001:ee0:3740::	2001:ee0:3e3f:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
 2001:ee0:3e40::	2001:ee0:4bbf:ffff:ffff:ffff:ffff:ffff	45899	VN	VNPT-AS-VN VNPT Corp
@@ -16244,8 +16230,8 @@ pub static ASN_V6_DB: &str = r###"
 2001:fe8:4::	2001:fe8:8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:fe8:9::	2001:fe8:9:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
 2001:fe8:a::	2001:fe8:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2001:fe8:10::	2001:fe8:10:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
-2001:fe8:11::	2001:fe8:47:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:fe8:10::	2001:fe8:11:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
+2001:fe8:12::	2001:fe8:47:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:fe8:48::	2001:fe8:48:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
 2001:fe8:49::	2001:fe8:4000:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:fe8:4001::	2001:fe8:4003:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
@@ -16264,7 +16250,9 @@ pub static ASN_V6_DB: &str = r###"
 2001:fe8:8132::	2001:fe8:8eff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:fe8:8f00::	2001:fe8:8f00:ffff:ffff:ffff:ffff:ffff	206283	AE	YAHSAT-FRANKFURT
 2001:fe8:8f01::	2001:fe8:8f01:ffff:ffff:ffff:ffff:ffff	198247	AE	AD1
-2001:fe8:8f02::	2001:fe8:c000:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:fe8:8f02::	2001:fe8:8fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:fe8:9000::	2001:fe8:9000:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
+2001:fe8:9001::	2001:fe8:c000:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:fe8:c001::	2001:fe8:c002:ffff:ffff:ffff:ffff:ffff	24435	PK	SUPERNET-PAKISTAN-AS-AP Supernet Limited Transit Autonomous System Number
 2001:fe8:c003::	2001:fef:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:ff0::	2001:ff0:ffff:ffff:ffff:ffff:ffff:ffff	9824	JP	JTCL-JP-AS JCOM Co., Ltd.
@@ -16279,7 +16267,8 @@ pub static ASN_V6_DB: &str = r###"
 2001:1203:2000::	2001:1203:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:1204::	2001:1204:ffff:ffff:ffff:ffff:ffff:ffff	28461	MX	GRUPO SURNET SA DE CV
 2001:1205::	2001:1205:ffff:ffff:ffff:ffff:ffff:ffff	272385	MX	NUONETWORKS SAPI DE CV
-2001:1206::	2001:1207:cfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2001:1206::	2001:1206:ffff:ffff:ffff:ffff:ffff:ffff	28462	MX	FRANCISCO GIOVANI CHESSANI TOBIAS
+2001:1207::	2001:1207:cfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:1207:d000::	2001:1207:ffff:ffff:ffff:ffff:ffff:ffff	28459	MX	MICHELLE MORENO MORENO
 2001:1208::	2001:1208:ffff:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
 2001:1209::	2001:120f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -16293,13 +16282,13 @@ pub static ASN_V6_DB: &str = r###"
 2001:1218:5003::	2001:1218:6010:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:6011::	2001:1218:6012:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:6013::	2001:1218:6017:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
-2001:1218:6018::	2001:1218:6021:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
-2001:1218:6022::	2001:1218:6024:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
+2001:1218:6018::	2001:1218:6024:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:6025::	2001:1218:6028:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:6029::	2001:1218:602a:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:602b::	2001:1218:6039:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:603a::	2001:1218:603d:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
-2001:1218:603e::	2001:1218:6056:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
+2001:1218:603e::	2001:1218:604d:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
+2001:1218:604e::	2001:1218:6056:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:6057::	2001:1218:605d:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:605e::	2001:1218:60bb:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2001:1218:60bc::	2001:1218:ffff:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
@@ -16415,8 +16404,7 @@ pub static ASN_V6_DB: &str = r###"
 2001:1248:3800::	2001:1248:38ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:1248:3900::	2001:1248:3904:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:3905::	2001:1248:3a09:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
-2001:1248:3a0a::	2001:1248:3a18:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
-2001:1248:3a19::	2001:1248:3a34:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
+2001:1248:3a0a::	2001:1248:3a34:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:3a35::	2001:1248:3a3e:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:3a3f::	2001:1248:3a7e:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:3a7f::	2001:1248:3a97:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
@@ -17153,7 +17141,8 @@ pub static ASN_V6_DB: &str = r###"
 2001:1248:c325::	2001:1248:c33e:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:c33f::	2001:1248:c352:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:c353::	2001:1248:c358:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
-2001:1248:c359::	2001:1248:c37f:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
+2001:1248:c359::	2001:1248:c363:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
+2001:1248:c364::	2001:1248:c37f:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:c380::	2001:1248:dfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2001:1248:e000::	2001:1248:e01b:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
 2001:1248:e01c::	2001:1248:e01f:ffff:ffff:ffff:ffff:ffff	11172	MX	Alestra, S. de R.L. de C.V.
@@ -17194,15 +17183,16 @@ pub static ASN_V6_DB: &str = r###"
 2001:1260:9::	2001:1260:9:ffff:ffff:ffff:ffff:ffff	28533	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:a::	2001:1260:b:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:c::	2001:1260:c:ffff:ffff:ffff:ffff:ffff	28537	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
-2001:1260:d::	2001:1260:11:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
+2001:1260:d::	2001:1260:e:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
+2001:1260:f::	2001:1260:f:ffff:ffff:ffff:ffff:ffff	28544	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
+2001:1260:10::	2001:1260:11:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:12::	2001:1260:12:ffff:ffff:ffff:ffff:ffff	28535	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:13::	2001:1260:13:ffff:ffff:ffff:ffff:ffff	28531	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:14::	2001:1260:14:ffff:ffff:ffff:ffff:ffff	28534	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:15::	2001:1260:19:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:1a::	2001:1260:1a:ffff:ffff:ffff:ffff:ffff	28530	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:1b::	2001:1260:107:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
-2001:1260:108::	2001:1260:10b:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
-2001:1260:10c::	2001:1260:10d:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
+2001:1260:108::	2001:1260:10d:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:10e::	2001:1260:112:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:113::	2001:1260:11e:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
 2001:1260:11f::	2001:1260:1ff:ffff:ffff:ffff:ffff:ffff	13591	MX	Mexico Red de Telecomunicaciones, S. de R.L. de C.V.
@@ -17494,7 +17484,8 @@ pub static ASN_V6_DB: &str = r###"
 2001:13b0:8017::	2001:13b0:801e:ffff:ffff:ffff:ffff:ffff	3549	US	LVLT-3549
 2001:13b0:801f::	2001:13b0:801f:ffff:ffff:ffff:ffff:ffff	3549	US	LVLT-3549
 2001:13b0:8020::	2001:13b0:8020:ffff:ffff:ffff:ffff:ffff	272896	CO	COMSSET COMUNICACIONES SAS
-2001:13b0:8021::	2001:13b0:8028:ffff:ffff:ffff:ffff:ffff	3549	US	LVLT-3549
+2001:13b0:8021::	2001:13b0:8021:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
+2001:13b0:8022::	2001:13b0:8028:ffff:ffff:ffff:ffff:ffff	3549	US	LVLT-3549
 2001:13b0:8029::	2001:13b0:8029:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
 2001:13b0:802a::	2001:13b0:a030:ffff:ffff:ffff:ffff:ffff	3549	US	LVLT-3549
 2001:13b0:a031::	2001:13b0:a031:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
@@ -17851,23 +17842,19 @@ pub static ASN_V6_DB: &str = r###"
 2001:16a2:b8ea::	2001:16a2:b8ea:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:b8eb::	2001:16a2:b8fc:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:b8fd::	2001:16a2:b8fd:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:b8fe::	2001:16a2:b9c6:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:b9c7::	2001:16a2:b9c7:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:b9c8::	2001:16a2:b9c8:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:b8fe::	2001:16a2:b9c8:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:b9c9::	2001:16a2:b9c9:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:b9ca::	2001:16a2:b9d1:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:b9d2::	2001:16a2:b9d2:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:b9d3::	2001:16a2:b9ee:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:b9ef::	2001:16a2:b9ef:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:b9f0::	2001:16a2:ba03:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:b9d3::	2001:16a2:ba03:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:ba04::	2001:16a2:ba04:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:ba05::	2001:16a2:ba0d:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:ba0e::	2001:16a2:ba0e:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:ba0f::	2001:16a2:ba16:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:ba17::	2001:16a2:ba17:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:ba18::	2001:16a2:ba42:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:ba43::	2001:16a2:ba43:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:ba44::	2001:16a2:bb0b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:ba18::	2001:16a2:ba45:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:ba46::	2001:16a2:ba46:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:ba47::	2001:16a2:bb0b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb0c::	2001:16a2:bb0c:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb0d::	2001:16a2:bb12:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb13::	2001:16a2:bb13:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
@@ -17881,45 +17868,39 @@ pub static ASN_V6_DB: &str = r###"
 2001:16a2:bb30::	2001:16a2:bb30:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb31::	2001:16a2:bb4e:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb4f::	2001:16a2:bb4f:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb50::	2001:16a2:bb55:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb56::	2001:16a2:bb56:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb57::	2001:16a2:bb57:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb58::	2001:16a2:bb58:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb59::	2001:16a2:bb5a:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bb50::	2001:16a2:bb5a:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb5b::	2001:16a2:bb5b:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb5c::	2001:16a2:bb5c:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb5d::	2001:16a2:bb5d:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb5e::	2001:16a2:bb5e:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb5f::	2001:16a2:bb5f:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb60::	2001:16a2:bb64:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb65::	2001:16a2:bb66:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb67::	2001:16a2:bb67:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb68::	2001:16a2:bb68:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb69::	2001:16a2:bb69:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb6a::	2001:16a2:bb6a:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb6b::	2001:16a2:bb6b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb6c::	2001:16a2:bb6d:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb6e::	2001:16a2:bb7b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bb5e::	2001:16a2:bb64:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bb65::	2001:16a2:bb65:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bb66::	2001:16a2:bb6b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bb6c::	2001:16a2:bb6c:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bb6d::	2001:16a2:bb7b:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb7c::	2001:16a2:bb7d:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb7e::	2001:16a2:bb7e:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb7f::	2001:16a2:bb7f:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb80::	2001:16a2:bb82:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bb83::	2001:16a2:bb83:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bb84::	2001:16a2:bb95:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bb80::	2001:16a2:bb95:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb96::	2001:16a2:bb96:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb97::	2001:16a2:bb97:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:bb98::	2001:16a2:bb99:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a2:bb9a::	2001:16a2:bbaf:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bbb0::	2001:16a2:bbd0:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bbd1::	2001:16a2:bbd2:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bbd3::	2001:16a2:bbd3:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bbd4::	2001:16a2:bbd5:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bbd6::	2001:16a2:bbd6:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bbd7::	2001:16a2:bbd8:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bbd9::	2001:16a2:bbd9:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bbda::	2001:16a2:bbdb:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a2:bbdc::	2001:16a2:bbf7:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a2:bbf8::	2001:16a2:bfff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbb0::	2001:16a2:bbcf:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbd0::	2001:16a2:bbdb:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbdc::	2001:16a2:bbdd:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbde::	2001:16a2:bbde:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbdf::	2001:16a2:bbdf:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbe0::	2001:16a2:bbe0:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbe1::	2001:16a2:bbe1:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbe2::	2001:16a2:bbe2:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbe3::	2001:16a2:bbe6:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbe7::	2001:16a2:bbe9:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbea::	2001:16a2:bbec:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bbed::	2001:16a2:bbed:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bbee::	2001:16a2:bbff:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bc00::	2001:16a2:bcff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a2:bd00::	2001:16a2:bd05:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a2:bd06::	2001:16a2:bfff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:c000::	2001:16a2:c0df:ffff:ffff:ffff:ffff:ffff	39891	SA	ALJAWWALSTC-AS
 2001:16a2:c0e0::	2001:16a2:c0ff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a2:c100::	2001:16a2:c10f:ffff:ffff:ffff:ffff:ffff	39891	SA	ALJAWWALSTC-AS
@@ -18003,11 +17984,23 @@ pub static ASN_V6_DB: &str = r###"
 2001:16a3:2035::	2001:16a3:2035:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a3:2036::	2001:16a3:2044:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a3:2045::	2001:16a3:2045:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a3:2046::	2001:16a3:2101:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2046::	2001:16a3:2048:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2049::	2001:16a3:2049:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:204a::	2001:16a3:204e:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:204f::	2001:16a3:204f:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2050::	2001:16a3:2050:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2051::	2001:16a3:2052:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2053::	2001:16a3:2054:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2055::	2001:16a3:2056:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2057::	2001:16a3:2101:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a3:2102::	2001:16a3:2121:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
 2001:16a3:2122::	2001:16a3:2122:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
-2001:16a3:2123::	2001:16a3:2126:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
-2001:16a3:2127::	2001:16a3:ffff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2123::	2001:16a3:212f:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2130::	2001:16a3:2130:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2131::	2001:16a3:2131:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2132::	2001:16a3:2132:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
+2001:16a3:2133::	2001:16a3:2134:ffff:ffff:ffff:ffff:ffff	25019	SA	SAUDINETSTC-AS
+2001:16a3:2135::	2001:16a3:ffff:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a4::	2001:16a4:8f:ffff:ffff:ffff:ffff:ffff	39891	SA	ALJAWWALSTC-AS
 2001:16a4:90::	2001:16a4:af:ffff:ffff:ffff:ffff:ffff	39386	SA	STC-IGW-AS
 2001:16a4:b0::	2001:16a4:df:ffff:ffff:ffff:ffff:ffff	39891	SA	ALJAWWALSTC-AS
@@ -21690,7 +21683,9 @@ pub static ASN_V6_DB: &str = r###"
 2400:3ca0::	2400:3ca0:8f:ffff:ffff:ffff:ffff:ffff	136373	IN	ALLIED-AS Allied It Infrastructure And Services Pvt Ltd
 2400:3ca0:90::	2400:3cdf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:3ce0::	2400:3ce0:ffff:ffff:ffff:ffff:ffff:ffff	140113	IN	RISNET-AS-IN Riyaz Internet Service Private Limited
-2400:3ce1::	2400:3d7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:3ce1::	2400:3d5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:3d60::	2400:3d60:ffff:ffff:ffff:ffff:ffff:ffff	149170	PH	TOLEDOCABLETV-AS-AP TOLEDO CABLE TV
+2400:3d61::	2400:3d7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:3d80::	2400:3d80:ffff:ffff:ffff:ffff:ffff:ffff	56304	NZ	THETOTALTEAM-AS-AP The Total Team Limited
 2400:3d81::	2400:3dbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:3dc0::	2400:3dc0:8:ffff:ffff:ffff:ffff:ffff	134371	BD	CIRCLENETWORK-BD CIRCLE NETWORK BANGLADESH
@@ -24317,8 +24312,8 @@ pub static ASN_V6_DB: &str = r###"
 2400:cb00:1243::	2400:cb00:1244:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:1245::	2400:cb00:1253:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:1254::	2400:cb00:1254:ffff:ffff:ffff:ffff:ffff	14789	US	CLOUDFLARENET
-2400:cb00:1255::	2400:cb00:1255:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
-2400:cb00:1256::	2400:cb00:1263:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:cb00:1255::	2400:cb00:1256:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
+2400:cb00:1257::	2400:cb00:1263:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:1264::	2400:cb00:1264:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:1265::	2400:cb00:1266:ffff:ffff:ffff:ffff:ffff	14789	US	CLOUDFLARENET
 2400:cb00:1267::	2400:cb00:1270:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -24359,7 +24354,9 @@ pub static ASN_V6_DB: &str = r###"
 2400:cb00:a141::	2400:cb00:a145:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:a146::	2400:cb00:a150:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:a151::	2400:cb00:a155:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
-2400:cb00:a156::	2400:cb00:a170:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:cb00:a156::	2400:cb00:a160:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:cb00:a161::	2400:cb00:a165:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
+2400:cb00:a166::	2400:cb00:a170:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:a171::	2400:cb00:a175:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:a176::	2400:cb00:a1a0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:a1a1::	2400:cb00:a1a3:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
@@ -24521,7 +24518,9 @@ pub static ASN_V6_DB: &str = r###"
 2400:cb00:a9b1::	2400:cb00:a9b1:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:a9b2::	2400:cb00:a9f0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:a9f1::	2400:cb00:a9f3:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
-2400:cb00:a9f4::	2400:cb00:aa50:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:cb00:a9f4::	2400:cb00:aa20:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:cb00:aa21::	2400:cb00:aa23:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
+2400:cb00:aa24::	2400:cb00:aa50:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:aa51::	2400:cb00:aa52:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2400:cb00:aa53::	2400:cb00:aa60:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:cb00:aa61::	2400:cb00:aa61:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
@@ -25731,7 +25730,9 @@ pub static ASN_V6_DB: &str = r###"
 2400:e340:3::	2400:e340:ffff:ffff:ffff:ffff:ffff:ffff	136450	BD	KASTECH-AS-AP Kastech Computer Valley
 2400:e341::	2400:e3bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:e3c0::	2400:e3c0:ffff:ffff:ffff:ffff:ffff:ffff	45267	NZ	LIGHTWIRE-AS-AP Lightwire LTD
-2400:e3c1::	2400:e47f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:e3c1::	2400:e3e0:abb1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2400:e3e0:abb2::	2400:e3e0:abb2:ffff:ffff:ffff:ffff:ffff	199436	JP	A-NET Shota Network | Shota Saikou!
+2400:e3e0:abb3::	2400:e47f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2400:e480::	2400:e480:d:ffff:ffff:ffff:ffff:ffff	131588	TW	FISC-AS-TW Financial Information Service Co., Ltd.
 2400:e480:e::	2400:e480:ffff:ffff:ffff:ffff:ffff:ffff	131588	TW	FISC-AS-TW Financial Information Service Co., Ltd.
 2400:e481::	2400:e4c0:3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -25955,8 +25956,7 @@ pub static ASN_V6_DB: &str = r###"
 2400:fc00:8300::	2400:fc00:854f:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
 2400:fc00:8550::	2400:fc00:85af:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
 2400:fc00:85b0::	2400:fc00:87bf:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
-2400:fc00:87c0::	2400:fc00:87ef:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
-2400:fc00:87f0::	2400:fc00:8cef:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
+2400:fc00:87c0::	2400:fc00:8cef:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
 2400:fc00:8cf0::	2400:fc00:9900:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
 2400:fc00:9901::	2400:fc00:ffff:ffff:ffff:ffff:ffff:ffff	45773	PK	HECPERN-AS-PK PERN AS Content Servie Provider, Islamabad, Pakistan
 2400:fc01::	2400:fcdf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -26272,9 +26272,7 @@ pub static ASN_V6_DB: &str = r###"
 2401:1400::	2401:1400:ffff:ffff:ffff:ffff:ffff:ffff	9297	AU	COLOCITY-AS-AP Colocity Pty Ltd
 2401:1401::	2401:141f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:1420::	2401:1420:0:ffff:ffff:ffff:ffff:ffff	150856	VN	VNGDC-VN VNG DATA CENTER CO., LTD
-2401:1420:1::	2401:145f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:1460::	2401:1460:ffff:ffff:ffff:ffff:ffff:ffff	150424	NP	JNLPL-AS-AP Janaki Net Link
-2401:1461::	2401:14c0:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:1420:1::	2401:14c0:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:14c0:2::	2401:14c0:2:ffff:ffff:ffff:ffff:ffff	136531	BD	NETEXPRESSONLINE-AS-AP NetExpress Online
 2401:14c0:3::	2401:14c0:3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:14c0:4::	2401:14c0:4:ffff:ffff:ffff:ffff:ffff	136531	BD	NETEXPRESSONLINE-AS-AP NetExpress Online
@@ -26323,9 +26321,7 @@ pub static ASN_V6_DB: &str = r###"
 2401:1700:e::	2401:1700:e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:1700:f::	2401:1700:12:ffff:ffff:ffff:ffff:ffff	55666	ID	GMEDIA-AS-ID PT Media Sarana Data
 2401:1700:13::	2401:1700:13:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:1700:14::	2401:1700:1c:ffff:ffff:ffff:ffff:ffff	55666	ID	GMEDIA-AS-ID PT Media Sarana Data
-2401:1700:1d::	2401:1700:1d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:1700:1e::	2401:1700:22:ffff:ffff:ffff:ffff:ffff	55666	ID	GMEDIA-AS-ID PT Media Sarana Data
+2401:1700:14::	2401:1700:22:ffff:ffff:ffff:ffff:ffff	55666	ID	GMEDIA-AS-ID PT Media Sarana Data
 2401:1700:23::	2401:1700:7c0e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:1700:7c0f::	2401:1700:7c0f:ffff:ffff:ffff:ffff:ffff	55666	ID	GMEDIA-AS-ID PT Media Sarana Data
 2401:1700:7c10::	2401:1700:7c16:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -27665,7 +27661,9 @@ pub static ASN_V6_DB: &str = r###"
 2401:4900:880d::	2401:4900:8810:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:4900:8811::	2401:4900:8811:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
 2401:4900:8812::	2401:4900:8812:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:4900:8813::	2401:4900:88a3:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
+2401:4900:8813::	2401:4900:888f:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
+2401:4900:8890::	2401:4900:8891:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:4900:8892::	2401:4900:88a3:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
 2401:4900:88a4::	2401:4900:88a7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:4900:88a8::	2401:4900:88bf:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
 2401:4900:88c0::	2401:4900:88c3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -28031,7 +28029,9 @@ pub static ASN_V6_DB: &str = r###"
 2401:4900:cb70::	2401:4900:cb71:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
 2401:4900:cb72::	2401:4900:cb72:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
 2401:4900:cb73::	2401:4900:cb77:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:4900:cb78::	2401:4900:cb7f:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
+2401:4900:cb78::	2401:4900:cb7d:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
+2401:4900:cb7e::	2401:4900:cb7e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:4900:cb7f::	2401:4900:cb7f:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
 2401:4900:cb80::	2401:4900:cbbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:4900:cbc0::	2401:4900:cbff:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
 2401:4900:cc00::	2401:4900:cc01:ffff:ffff:ffff:ffff:ffff	24560	IN	AIRTELBROADBAND-AS-AP Bharti Airtel Ltd., Telemedia Services
@@ -28060,8 +28060,8 @@ pub static ASN_V6_DB: &str = r###"
 2401:4900:d800::	2401:4900:d82f:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
 2401:4900:d830::	2401:4900:d95f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:4900:d960::	2401:4900:d98f:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
-2401:4900:d990::	2401:4900:d9cf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:4900:d9d0::	2401:4900:d9ff:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
+2401:4900:d990::	2401:4900:d9bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:4900:d9c0::	2401:4900:d9ff:ffff:ffff:ffff:ffff:ffff	45609	IN	BHARTI-MOBILITY-AS-AP Bharti Airtel Ltd. AS for GPRS Service
 2401:4900:da00::	2401:49ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:4a00::	2401:4a00:ffff:ffff:ffff:ffff:ffff:ffff	17444	HK	HKBNESL-AS-AP HKBN Enterprise Solutions Limited
 2401:4a01::	2401:4a5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -28231,9 +28231,7 @@ pub static ASN_V6_DB: &str = r###"
 2401:5ee1::	2401:5f1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:5f20::	2401:5f20:fff:ffff:ffff:ffff:ffff:ffff	150767	TW	SHIJICOLTD-AS-TW Shi Ji Industrial Co., Ltd.
 2401:5f20:1000::	2401:5f20:1fff:ffff:ffff:ffff:ffff:ffff	9923	TW	AS-SIMPLE Simple Information, Inc.
-2401:5f20:2000::	2401:5f20:efff:ffff:ffff:ffff:ffff:ffff	150767	TW	SHIJICOLTD-AS-TW Shi Ji Industrial Co., Ltd.
-2401:5f20:f000::	2401:5f20:f000:ffff:ffff:ffff:ffff:ffff	216123	TW	ZHUYUANNETWORK
-2401:5f20:f001::	2401:5f20:ffff:ffff:ffff:ffff:ffff:ffff	150767	TW	SHIJICOLTD-AS-TW Shi Ji Industrial Co., Ltd.
+2401:5f20:2000::	2401:5f20:ffff:ffff:ffff:ffff:ffff:ffff	205329	TW	MUILTIES-NETWORK Muilties Network
 2401:5f21::	2401:5f7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:5f80::	2401:5f80:6:ffff:ffff:ffff:ffff:ffff	38731	VN	VTDC-AS-VN Vietel - CHT Compamy Ltd
 2401:5f80:7::	2401:5f80:6fff:ffff:ffff:ffff:ffff:ffff	38731	VN	VTDC-AS-VN Vietel - CHT Compamy Ltd
@@ -28700,7 +28698,9 @@ pub static ASN_V6_DB: &str = r###"
 2401:8e00:9100::	2401:8e00:ffff:ffff:ffff:ffff:ffff:ffff	9260	PK	MULTINET-AS-AP Multinet Pakistan Pvt. Ltd.
 2401:8e01::	2401:8e1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:8e20::	2401:8e20:0:ffff:ffff:ffff:ffff:ffff	149107	VN	TRUMVPS-VN TRUMVPS COMPANY LIMITED
-2401:8e20:1::	2401:8edf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:8e20:1::	2401:8ea0:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:8ea0:1000::	2401:8ea0:1fff:ffff:ffff:ffff:ffff:ffff	153473	IN	FLEXHOSTING1-AS-AP FLEXHOSTING SERVICES
+2401:8ea0:2000::	2401:8edf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:8ee0::	2401:8ee0:ffff:ffff:ffff:ffff:ffff:ffff	152494	IN	SHRIK-AS-IN SHRIKSHETRA NETWORKS PRIVATE LIMITED
 2401:8ee1::	2401:8f1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:8f20::	2401:8f20:0:ffff:ffff:ffff:ffff:ffff	151917	VN	JUPITERMEDIA-VN Jupiter Media Joint Stock Company
@@ -29062,8 +29062,7 @@ pub static ASN_V6_DB: &str = r###"
 2401:b760:12::	2401:b760:26:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:27::	2401:b760:31:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:32::	2401:b760:41:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
-2401:b760:42::	2401:b760:51:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
-2401:b760:52::	2401:b760:61:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
+2401:b760:42::	2401:b760:61:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:62::	2401:b760:76:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:77::	2401:b760:81:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:82::	2401:b760:86:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
@@ -29072,8 +29071,7 @@ pub static ASN_V6_DB: &str = r###"
 2401:b760:97::	2401:b760:1ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:200::	2401:b760:3ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:400::	2401:b760:9ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
-2401:b760:a00::	2401:b760:11ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
-2401:b760:1200::	2401:b760:13ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
+2401:b760:a00::	2401:b760:13ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:1400::	2401:b760:20ff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b760:2100::	2401:b760:ffff:ffff:ffff:ffff:ffff:ffff	152317	BT	WPDA-AS-AP Wangdue Phodrang Dzongkhag Administration
 2401:b761::	2401:b77f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -30134,12 +30132,10 @@ pub static ASN_V6_DB: &str = r###"
 2401:df61::	2401:df7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:df80::	2401:df80:ffff:ffff:ffff:ffff:ffff:ffff	133652	IN	ZAPBYTES-AS-IN Zapbytes Technologies Pvt. Ltd.
 2401:df81::	2401:e11f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:e120::	2401:e120:104d:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
-2401:e120:104e::	2401:e120:104f:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
+2401:e120::	2401:e120:104f:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
 2401:e120:1050::	2401:e120:1055:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
 2401:e120:1056::	2401:e120:1057:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
-2401:e120:1058::	2401:e120:204d:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
-2401:e120:204e::	2401:e120:204f:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
+2401:e120:1058::	2401:e120:204f:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
 2401:e120:2050::	2401:e120:2057:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
 2401:e120:2058::	2401:e120:ffff:ffff:ffff:ffff:ffff:ffff	56231	MY	ASTRO-MY-AS-AP MEASAT Broadcast Network Systems
 2401:e121::	2401:e17f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -30165,7 +30161,8 @@ pub static ASN_V6_DB: &str = r###"
 2401:e320:200::	2401:e320:3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:e320:400::	2401:e320:5ff:ffff:ffff:ffff:ffff:ffff	45700	ID	IDNIC-STARLINK-AS-ID PT Starlink Services Indonesia
 2401:e320:600::	2401:e320:7ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:e320:800::	2401:e320:1001:ffff:ffff:ffff:ffff:ffff	45700	ID	IDNIC-STARLINK-AS-ID PT Starlink Services Indonesia
+2401:e320:800::	2401:e320:cff:ffff:ffff:ffff:ffff:ffff	45700	ID	IDNIC-STARLINK-AS-ID PT Starlink Services Indonesia
+2401:e320:d00::	2401:e320:1001:ffff:ffff:ffff:ffff:ffff	45700	ID	IDNIC-STARLINK-AS-ID PT Starlink Services Indonesia
 2401:e320:1002::	2401:e380:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:e380:10::	2401:e380:10:ffff:ffff:ffff:ffff:ffff	131091	HK	GSS-AS-AP GSS Global
 2401:e380:11::	2401:e380:1000:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -30265,8 +30262,8 @@ pub static ASN_V6_DB: &str = r###"
 2401:eb20::	2401:eb20:ffff:ffff:ffff:ffff:ffff:ffff	153276	IN	MULTILIN-AS-IN MULTILINK BROADBAND PRIVATE LIMITED
 2401:eb21::	2401:eb9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:eba0::	2401:eba0:ffff:ffff:ffff:ffff:ffff:ffff	150654	IN	KENNIESIT-AS-IN Kennies Star India Private Limited
-2401:eba1::	2401:ebc0:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2401:ebc0:1000::	2401:ebc0:8fff:ffff:ffff:ffff:ffff:ffff	137041	BD	SERVER-GROUP-AS-AP HiFiServer Technologies Datacenter Server Group
+2401:eba1::	2401:ebc0:2fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:ebc0:3000::	2401:ebc0:8fff:ffff:ffff:ffff:ffff:ffff	137041	BD	SERVER-GROUP-AS-AP HiFiServer Technologies Datacenter Server Group
 2401:ebc0:9000::	2401:ebff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:ec00::	2401:ec00:ffff:ffff:ffff:ffff:ffff:ffff	24349	CN	CNGI-BJ-IX3-AS-AP CERNET2 IX at Peking University
 2401:ec01::	2401:ec1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -30314,7 +30311,9 @@ pub static ASN_V6_DB: &str = r###"
 2401:f1e0:ffff::	2401:f1e0:ffff:ffff:ffff:ffff:ffff:ffff	38136	HK	AKARI-NETWORKS-AS-AP Akari Networks
 2401:f1e1::	2401:f1ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:f200::	2401:f200:ffff:ffff:ffff:ffff:ffff:ffff	9988	MM	MPT-AP Myanma Posts and Telecommunications
-2401:f201::	2401:f2df:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:f201::	2401:f29f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2401:f2a0::	2401:f2a0:ffff:ffff:ffff:ffff:ffff:ffff	148992	IN	TOIINDIA THINGS OF INDIA OPC PRIVATE LIMITED
+2401:f2a1::	2401:f2df:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:f2e0::	2401:f2e0:1ff:ffff:ffff:ffff:ffff:ffff	150423	SG	SERVER-AS-AP Server Galactic Private Limited
 2401:f2e0:200::	2401:f35f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2401:f360::	2401:f360:ffff:ffff:ffff:ffff:ffff:ffff	153655	AU	RFCPL-AS-AP Rural Fibre Co Pty Ltd
@@ -31736,14 +31735,12 @@ pub static ASN_V6_DB: &str = r###"
 2402:1c80::	2402:1c80:fff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:1000::	2402:1c80:a000:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:a001::	2402:1c80:a0ff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
-2402:1c80:a100::	2402:1c80:c2ff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
-2402:1c80:c300::	2402:1c80:cdff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
+2402:1c80:a100::	2402:1c80:cdff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:ce00::	2402:1c80:cfff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:d000::	2402:1c80:d1ff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:d200::	2402:1c80:d3ff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c80:d400::	2402:1c80:d5ff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
-2402:1c80:d600::	2402:1c80:daff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
-2402:1c80:db00::	2402:1c80:ffff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
+2402:1c80:d600::	2402:1c80:ffff:ffff:ffff:ffff:ffff:ffff	133957	BD	SOL-BD SOL-
 2402:1c81::	2402:1ca0:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:1ca0:8000::	2402:1ca0:ffff:ffff:ffff:ffff:ffff:ffff	149173	AF	HBISC-AS-AP Hindukush Bridge ICT Services Company
 2402:1ca1::	2402:1d1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -31948,8 +31945,8 @@ pub static ASN_V6_DB: &str = r###"
 2402:3180:4::	2402:3180:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:3180:8000::	2402:3180:ffff:ffff:ffff:ffff:ffff:ffff	133492	CN	CLOUD-CN AIYUN
 2402:3181::	2402:327f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:3280::	2402:3280:ffff:ffff:ffff:ffff:ffff:ffff	134116	BD	THENETHEADS-AS-AP Md. Manzurul Haque Khan TA THE NET HEADS
-2402:3281::	2402:32bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:3280::	2402:3280:7fff:ffff:ffff:ffff:ffff:ffff	134116	BD	THENETHEADS-AS-AP Md. Manzurul Haque Khan TA THE NET HEADS
+2402:3280:8000::	2402:32bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:32c0::	2402:32c0:ffff:ffff:ffff:ffff:ffff:ffff	132637	ID	BITSNET-AS-ID PT BINA INFORMATIKA SOLUSI
 2402:32c1::	2402:32ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:3300::	2402:3300:ffff:ffff:ffff:ffff:ffff:ffff	131259	SG	QX-AS-AP QOXY PTE LTD
@@ -32310,9 +32307,7 @@ pub static ASN_V6_DB: &str = r###"
 2402:3a80:46f0::	2402:3a80:46f3:ffff:ffff:ffff:ffff:ffff	38266	IN	VIL-AS-AP Vodafone Idea Ltd
 2402:3a80:46f4::	2402:3a80:46ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:3a80:4700::	2402:3a80:479f:ffff:ffff:ffff:ffff:ffff	38266	IN	VIL-AS-AP Vodafone Idea Ltd
-2402:3a80:47a0::	2402:3a80:480f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:3a80:4810::	2402:3a80:484f:ffff:ffff:ffff:ffff:ffff	38266	IN	VIL-AS-AP Vodafone Idea Ltd
-2402:3a80:4850::	2402:3a80:4a0f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:3a80:47a0::	2402:3a80:4a0f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:3a80:4a10::	2402:3a80:4a6f:ffff:ffff:ffff:ffff:ffff	38266	IN	VIL-AS-AP Vodafone Idea Ltd
 2402:3a80:4a70::	2402:3a80:bfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:3a80:c000::	2402:3a80:c009:ffff:ffff:ffff:ffff:ffff	38266	IN	VIL-AS-AP Vodafone Idea Ltd
@@ -32466,7 +32461,9 @@ pub static ASN_V6_DB: &str = r###"
 2402:4480:303::	2402:4480:401:ffff:ffff:ffff:ffff:ffff	174	US	COGENT-174
 2402:4480:402::	2402:4480:403:ffff:ffff:ffff:ffff:ffff	174	US	COGENT-174
 2402:4480:404::	2402:4480:ffff:ffff:ffff:ffff:ffff:ffff	174	US	COGENT-174
-2402:4481::	2402:451f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:4481::	2402:44df:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:44e0::	2402:44e0:ffff:ffff:ffff:ffff:ffff:ffff	142168	BD	-Reserved AS-
+2402:44e1::	2402:451f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:4520::	2402:4520:ffff:ffff:ffff:ffff:ffff:ffff	153107	ID	IDNIC-RNET-AS-ID PT Rnet Mitra Sentosa
 2402:4521::	2402:455f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:4560::	2402:4560:ffff:ffff:ffff:ffff:ffff:ffff	150559	ID	IDNIC-GMT-AS-ID PT Genezis Mitra Technology
@@ -32519,8 +32516,8 @@ pub static ASN_V6_DB: &str = r###"
 2402:4c60:100::	2402:4c60:103:ffff:ffff:ffff:ffff:ffff	141383	IN	VERGE-AS-AP VERGE CLOUD PRIVATE LIMITED
 2402:4c60:104::	2402:4c60:10f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:4c60:110::	2402:4c60:113:ffff:ffff:ffff:ffff:ffff	141383	IN	VERGE-AS-AP VERGE CLOUD PRIVATE LIMITED
-2402:4c60:114::	2402:4c60:1008:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:4c60:1009::	2402:4c60:100b:ffff:ffff:ffff:ffff:ffff	141383	IN	VERGE-AS-AP VERGE CLOUD PRIVATE LIMITED
+2402:4c60:114::	2402:4c60:1007:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:4c60:1008::	2402:4c60:100b:ffff:ffff:ffff:ffff:ffff	141383	IN	VERGE-AS-AP VERGE CLOUD PRIVATE LIMITED
 2402:4c60:100c::	2402:4c60:100c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:4c60:100d::	2402:4c60:1012:ffff:ffff:ffff:ffff:ffff	141383	IN	VERGE-AS-AP VERGE CLOUD PRIVATE LIMITED
 2402:4c60:1013::	2402:4cbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -32722,9 +32719,7 @@ pub static ASN_V6_DB: &str = r###"
 2402:6440:1::	2402:6440:2:ffff:ffff:ffff:ffff:ffff	135905	VN	VNPT-AS-VN VIETNAM POSTS AND TELECOMMUNICATIONS GROUP
 2402:6440:3::	2402:647f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:6480::	2402:6480:ffff:ffff:ffff:ffff:ffff:ffff	134201	BD	MDM-AS-AP Metaphor Digital Media
-2402:6481::	2402:653f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:6540::	2402:6540:ffff:ffff:ffff:ffff:ffff:ffff	137431	MM	RPCL-AS-AP ZORRO RITZ PUBLIC COMPANY LIMITED
-2402:6541::	2402:663f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:6481::	2402:663f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:6640::	2402:6640:22:ffff:ffff:ffff:ffff:ffff	134995	NP	IZONE-AS-AP I. ZONE PVT. LTD
 2402:6640:23::	2402:6640:24:ffff:ffff:ffff:ffff:ffff	134995	NP	IZONE-AS-AP I. ZONE PVT. LTD
 2402:6640:25::	2402:6640:ffff:ffff:ffff:ffff:ffff:ffff	134995	NP	IZONE-AS-AP I. ZONE PVT. LTD
@@ -33119,7 +33114,10 @@ pub static ASN_V6_DB: &str = r###"
 2402:8400:a00::	2402:85ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:8600::	2402:8600:ffff:ffff:ffff:ffff:ffff:ffff	38896	ID	CERGIS-AS-AP PT. Centra Global Investama
 2402:8601::	2402:863f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:8640::	2402:8640:ffff:ffff:ffff:ffff:ffff:ffff	137491	BD	PEEREX-NET-AS-AP PEEREX NETWORKS LTD.IIG
+2402:8640::	2402:8640:2:ffff:ffff:ffff:ffff:ffff	137491	BD	PEEREX-NET-AS-AP PEEREX NETWORKS LTD.IIG
+2402:8640:3::	2402:8640:6:ffff:ffff:ffff:ffff:ffff	137491	BD	PEEREX-NET-AS-AP PEEREX NETWORKS LTD.IIG
+2402:8640:7::	2402:8640:8:ffff:ffff:ffff:ffff:ffff	137491	BD	PEEREX-NET-AS-AP PEEREX NETWORKS LTD.IIG
+2402:8640:9::	2402:8640:ffff:ffff:ffff:ffff:ffff:ffff	137491	BD	PEEREX-NET-AS-AP PEEREX NETWORKS LTD.IIG
 2402:8641::	2402:877f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:8780::	2402:8780:1003:ffff:ffff:ffff:ffff:ffff	63859	ID	MYREPUBLIC-AS-ID PT. Eka Mas Republik
 2402:8780:1004::	2402:8780:1005:ffff:ffff:ffff:ffff:ffff	63859	ID	MYREPUBLIC-AS-ID PT. Eka Mas Republik
@@ -33293,7 +33291,9 @@ pub static ASN_V6_DB: &str = r###"
 2402:a000:8000::	2402:a000:ffff:ffff:ffff:ffff:ffff:ffff	24211	ID	DETIK-AS-ID PT. Detik Ini JUga
 2402:a001::	2402:a0bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:a0c0::	2402:a0c0:6:ffff:ffff:ffff:ffff:ffff	137922	US	IBOSS-AS-AP IBOSS Inc.
-2402:a0c0:7::	2402:a1bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:a0c0:7::	2402:a0ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:a100::	2402:a100:ffff:ffff:ffff:ffff:ffff:ffff	45289	ID	INDOTRANS-AS-ID Indotrans Data, PT
+2402:a101::	2402:a1bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:a1c0::	2402:a1c0:1fff:ffff:ffff:ffff:ffff:ffff	137526	BD	PLUSNETINC-AS-AP Plusnet Inc
 2402:a1c0:2000::	2402:a1c0:f000:ffff:ffff:ffff:ffff:ffff	137526	BD	PLUSNETINC-AS-AP Plusnet Inc
 2402:a1c0:f001::	2402:a1c0:ffff:ffff:ffff:ffff:ffff:ffff	137526	BD	PLUSNETINC-AS-AP Plusnet Inc
@@ -33387,7 +33387,8 @@ pub static ASN_V6_DB: &str = r###"
 2402:b500:1000::	2402:b500:1001:ffff:ffff:ffff:ffff:ffff	38203	BD	ADNTELECOMLTD-BD ADN Telecom Ltd.
 2402:b500:1002::	2402:b500:100f:ffff:ffff:ffff:ffff:ffff	38203	BD	ADNTELECOMLTD-BD ADN Telecom Ltd.
 2402:b500:1010::	2402:b53f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:b540::	2402:b540:6ff:ffff:ffff:ffff:ffff:ffff	137554	BD	DREAMNET-AS-AP Dream.Net
+2402:b540::	2402:b540:205:ffff:ffff:ffff:ffff:ffff	137554	BD	DREAMNET-AS-AP Dream.Net
+2402:b540:206::	2402:b540:6ff:ffff:ffff:ffff:ffff:ffff	137554	BD	DREAMNET-AS-AP Dream.Net
 2402:b540:700::	2402:b540:ffff:ffff:ffff:ffff:ffff:ffff	137554	BD	DREAMNET-AS-AP Dream.Net
 2402:b541::	2402:b5bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:b5c0::	2402:b5c0:ffff:ffff:ffff:ffff:ffff:ffff	137553	BD	GLOBALCOM-AS-AP GLOBAL COMMUNICATION
@@ -33500,7 +33501,9 @@ pub static ASN_V6_DB: &str = r###"
 2402:cac0::	2402:cac0:ffff:ffff:ffff:ffff:ffff:ffff	59217	HK	AZONNELIMITED-AS-AP Azonne Limited
 2402:cac1::	2402:cb3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:cb40::	2402:cb40:ffff:ffff:ffff:ffff:ffff:ffff	135132	PH	DNI-PH Dreamscape Networks Inc.
-2402:cb41::	2402:ccff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:cb41::	2402:ccbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:ccc0::	2402:ccc0:ffff:ffff:ffff:ffff:ffff:ffff	134041	IN	NCORECREATIVETECHNOLOGIES-AS-IN Ncore Creative Technologies Pvt.Ltd.
+2402:ccc1::	2402:ccff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:cd00::	2402:cd00:ffff:ffff:ffff:ffff:ffff:ffff	45942	IN	SIKKANET-AS-AP Sikka Broadband Pvt. Ltd.
 2402:cd01::	2402:cdff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:ce00::	2402:ce01:ffff:ffff:ffff:ffff:ffff:ffff	7700	SG	SINGTEL-DVBIP-AS-AP SINGAPORE TELECOMMUNICATIONS LTD
@@ -33561,9 +33564,7 @@ pub static ASN_V6_DB: &str = r###"
 2402:d700::	2402:d700:ffff:ffff:ffff:ffff:ffff:ffff	37906	JP	NETIRD-2 NetIRD Inc.
 2402:d701::	2402:d7c0:2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:d7c0:3::	2402:d7c0:7:ffff:ffff:ffff:ffff:ffff	133234	IN	PLUSNETCOMMUNICATION-AS-IN PLUSNET COMMUNICATION PVT. LTD.
-2402:d7c0:8::	2402:d83f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2402:d840::	2402:d840:ffff:ffff:ffff:ffff:ffff:ffff	134555	AU	ENCOO-AS-AP Encoo Pty Ltd
-2402:d841::	2402:da80:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2402:d7c0:8::	2402:da80:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:da80:100::	2402:da80:100:ffff:ffff:ffff:ffff:ffff	64022	HK	KAMATERAINC-AS-AP Kamatera, Inc.
 2402:da80:101::	2402:db40:50ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2402:db40:5100::	2402:db40:5100:ffff:ffff:ffff:ffff:ffff	4808	CN	CHINA169-BJ China Unicom Beijing Province Network
@@ -34969,9 +34970,7 @@ pub static ASN_V6_DB: &str = r###"
 2403:ad80:8100::	2403:ad80:81ff:ffff:ffff:ffff:ffff:ffff	134835	HK	SNL-HK Starry Network Limited
 2403:ad80:8200::	2403:ae7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2403:ae80::	2403:ae80:ffff:ffff:ffff:ffff:ffff:ffff	140504	NR	DIGICELNAURU-AS-AP Digicel Nauru Corporation
-2403:ae81::	2403:b0bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2403:b0c0::	2403:b0c0:0:ffff:ffff:ffff:ffff:ffff	131630	TW	TWIDC-AS-TW AsiaPacificNewTechnologies Co. Ltd
-2403:b0c0:1::	2403:b0ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2403:ae81::	2403:b0ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2403:b100::	2403:b100:7fff:ffff:ffff:ffff:ffff:ffff	9989	SG	EQUINIX-AP Equinix Singapore Pte Ltd
 2403:b100:8000::	2403:b100:ffff:ffff:ffff:ffff:ffff:ffff	15830	NL	EQUINIX
 2403:b101::	2403:b200:1fd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -35043,10 +35042,7 @@ pub static ASN_V6_DB: &str = r###"
 2403:bf40:6::	2403:bf40:6:ffff:ffff:ffff:ffff:ffff	131386	VN	LVSS-AS-VN Long Van System Solution JSC
 2403:bf40:7::	2403:bf40:23f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2403:bf40:240::	2403:bf40:27f:ffff:ffff:ffff:ffff:ffff	131386	VN	LVSS-AS-VN Long Van System Solution JSC
-2403:bf40:280::	2403:bf7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2403:bf80::	2403:bf80:3:ffff:ffff:ffff:ffff:ffff	9832	BD	ISN-AS-AP ISN, Internet Service Provider
-2403:bf80:4::	2403:bf80:ffff:ffff:ffff:ffff:ffff:ffff	9832	BD	ISN-AS-AP ISN, Internet Service Provider
-2403:bf81::	2403:bfff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2403:bf40:280::	2403:bfff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2403:c000::	2403:c000:1400:ffff:ffff:ffff:ffff:ffff	4741	TH	SAMART-INFONET-AS Samart Infonet Co., Ltd.
 2403:c000:1401::	2403:c000:1401:ffff:ffff:ffff:ffff:ffff	38228	TH	MOD-NON-AP Ministry Of Defence, Thailand
 2403:c000:1402::	2403:c000:ffff:ffff:ffff:ffff:ffff:ffff	4741	TH	SAMART-INFONET-AS Samart Infonet Co., Ltd.
@@ -35756,8 +35752,8 @@ pub static ASN_V6_DB: &str = r###"
 2404:3100:21::	2404:3100:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2404:3100:1000::	2404:3100:107f:ffff:ffff:ffff:ffff:ffff	45669	PK	MOBILINK-AS-PK PMCL LDI IP TRANSIT
 2404:3100:1080::	2404:3100:13ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2404:3100:1400::	2404:3100:147f:ffff:ffff:ffff:ffff:ffff	45669	PK	MOBILINK-AS-PK PMCL LDI IP TRANSIT
-2404:3100:1480::	2404:3100:17ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2404:3100:1400::	2404:3100:14ff:ffff:ffff:ffff:ffff:ffff	45669	PK	MOBILINK-AS-PK PMCL LDI IP TRANSIT
+2404:3100:1500::	2404:3100:17ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2404:3100:1800::	2404:3100:18ff:ffff:ffff:ffff:ffff:ffff	45669	PK	MOBILINK-AS-PK PMCL LDI IP TRANSIT
 2404:3100:1900::	2404:3100:1bff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2404:3100:1c00::	2404:3100:1dff:ffff:ffff:ffff:ffff:ffff	45669	PK	MOBILINK-AS-PK PMCL LDI IP TRANSIT
@@ -36532,7 +36528,8 @@ pub static ASN_V6_DB: &str = r###"
 2404:a700::	2404:a700:f:ffff:ffff:ffff:ffff:ffff	33182	US	DIMENOC
 2404:a700:10::	2404:a7ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2404:a800::	2404:a800:6:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
-2404:a800:7::	2404:a800:40:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
+2404:a800:7::	2404:a800:1f:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
+2404:a800:20::	2404:a800:40:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
 2404:a800:41::	2404:a800:4a:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
 2404:a800:4b::	2404:a800:1451:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
 2404:a800:1452::	2404:a800:1610:ffff:ffff:ffff:ffff:ffff	9498	IN	BBIL-AP BHARTI Airtel Ltd.
@@ -36937,7 +36934,10 @@ pub static ASN_V6_DB: &str = r###"
 2404:c001::	2404:c03f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2404:c040::	2404:c040:ffff:ffff:ffff:ffff:ffff:ffff	136174	PK	TPCPL-AS-AP The Professional Communications Pvt Ltd
 2404:c041::	2404:c13f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2404:c140::	2404:c140:231:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
+2404:c140::	2404:c140:20f:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
+2404:c140:210::	2404:c140:21f:ffff:ffff:ffff:ffff:ffff	149030	HK	CHRISNET-AS-AP Chris Chang???s Network
+2404:c140:220::	2404:c140:221:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
+2404:c140:222::	2404:c140:231:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
 2404:c140:232::	2404:c140:1f06:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
 2404:c140:1f07::	2404:c140:2102:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
 2404:c140:2103::	2404:c140:ffff:ffff:ffff:ffff:ffff:ffff	138997	HK	EDCL-AS-AP Eons Data Communications Limited
@@ -37818,9 +37818,7 @@ pub static ASN_V6_DB: &str = r###"
 2405:16c0:1::	2405:17bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:17c0::	2405:17c0:100:ffff:ffff:ffff:ffff:ffff	139331	IN	DCORP-AS-AP DEVELENTCORP PRIVATE LIMITED
 2405:17c0:101::	2405:17c0:1ff:ffff:ffff:ffff:ffff:ffff	139331	IN	DCORP-AS-AP DEVELENTCORP PRIVATE LIMITED
-2405:17c0:200::	2405:17c0:2ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2405:17c0:300::	2405:17c0:3ff:ffff:ffff:ffff:ffff:ffff	139331	IN	DCORP-AS-AP DEVELENTCORP PRIVATE LIMITED
-2405:17c0:400::	2405:17c0:a0ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2405:17c0:200::	2405:17c0:a0ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:17c0:a100::	2405:17c0:a1ff:ffff:ffff:ffff:ffff:ffff	139331	IN	DCORP-AS-AP DEVELENTCORP PRIVATE LIMITED
 2405:17c0:a200::	2405:17ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:1800::	2405:1800:ffff:ffff:ffff:ffff:ffff:ffff	9999	JP	ATTOKYO AT TOKYO Corporation
@@ -38907,7 +38905,8 @@ pub static ASN_V6_DB: &str = r###"
 2405:8a00:a04d::	2405:8a00:a052:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
 2405:8a00:a053::	2405:8a00:a056:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
 2405:8a00:a057::	2405:8a00:c012:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
-2405:8a00:c013::	2405:8a00:c022:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
+2405:8a00:c013::	2405:8a00:c020:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
+2405:8a00:c021::	2405:8a00:c022:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
 2405:8a00:c023::	2405:8a00:c027:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
 2405:8a00:c028::	2405:8a00:ffff:ffff:ffff:ffff:ffff:ffff	55824	IN	NKN-CORE-NW NKN Core Network
 2405:8a01::	2405:8a3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -39341,15 +39340,17 @@ pub static ASN_V6_DB: &str = r###"
 2405:e000:1421::	2405:e000:ffff:ffff:ffff:ffff:ffff:ffff	37963	CN	ALIBABA-CN-NET Hangzhou Alibaba Advertising Co.,Ltd.
 2405:e001::	2405:e0bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:e0c0::	2405:e0c0:0:ffff:ffff:ffff:ffff:ffff	63730	VN	VNSO-AS-VN VNSO TECHNOLOGY COMPANY
-2405:e0c0:1::	2405:e0ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2405:e100::	2405:e100:9:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
+2405:e0c0:1::	2405:e100:0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2405:e100:1::	2405:e100:9:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
 2405:e100:a::	2405:e100:a:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
 2405:e100:b::	2405:e100:b:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
 2405:e100:c::	2405:e100:c:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
-2405:e100:d::	2405:e100:f:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
-2405:e100:10::	2405:e100:10:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2405:e100:d::	2405:e100:e:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
+2405:e100:f::	2405:e100:10:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:e100:11::	2405:e100:1b:ffff:ffff:ffff:ffff:ffff	132116	IN	ANINETWORK-IN Ani Network Pvt Ltd
-2405:e100:1c::	2405:e100:1e:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
+2405:e100:1c::	2405:e100:1c:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
+2405:e100:1d::	2405:e100:1d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2405:e100:1e::	2405:e100:1e:ffff:ffff:ffff:ffff:ffff	137085	IN	ANI89-AS-IN ANO Broadband Service Pvt Ltd
 2405:e100:1f::	2405:e17f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2405:e180::	2405:e180:ffff:ffff:ffff:ffff:ffff:ffff	134143	AU	PDKPL-AS-AP Kinetix Networks
 2405:e181::	2405:e1ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -39777,9 +39778,7 @@ pub static ASN_V6_DB: &str = r###"
 2406:840:eb00::	2406:840:eb05:ffff:ffff:ffff:ffff:ffff	142553	CN	AIRSPROJECT-PRIVATE-NETWORK Airs Project Private Network Main
 2406:840:eb06::	2406:840:eb06:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:840:eb07::	2406:840:eb08:ffff:ffff:ffff:ffff:ffff	142553	CN	AIRSPROJECT-PRIVATE-NETWORK Airs Project Private Network Main
-2406:840:eb09::	2406:840:eb0a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2406:840:eb0b::	2406:840:eb0b:ffff:ffff:ffff:ffff:ffff	142553	CN	AIRSPROJECT-PRIVATE-NETWORK Airs Project Private Network Main
-2406:840:eb0c::	2406:840:eb0e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:eb09::	2406:840:eb0e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:840:eb0f::	2406:840:eb0f:ffff:ffff:ffff:ffff:ffff	142553	CN	AIRSPROJECT-PRIVATE-NETWORK Airs Project Private Network Main
 2406:840:eb10::	2406:840:eb7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:840:eb80::	2406:840:eb83:ffff:ffff:ffff:ffff:ffff	140731	CN	TOHU-OP-AP TOHU Public Internet
@@ -39869,12 +39868,18 @@ pub static ASN_V6_DB: &str = r###"
 2406:840:fcf6::	2406:840:fd3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:840:fd40::	2406:840:fd4f:ffff:ffff:ffff:ffff:ffff	153057	CN	LIRUIZHI-AS-AP Li Ruizhi
 2406:840:fd50::	2406:840:fd5f:ffff:ffff:ffff:ffff:ffff	153168	CN	LUBIN-AS-AP Lu Bin
-2406:840:fd60::	2406:840:fd67:ffff:ffff:ffff:ffff:ffff	153170	CN	CUIHONGTAO-AS-AP Cui Hongtao
-2406:840:fd68::	2406:840:fd6f:ffff:ffff:ffff:ffff:ffff	153170	CN	CUIHONGTAO-AS-AP Cui Hongtao
-2406:840:fd70::	2406:840:fd77:ffff:ffff:ffff:ffff:ffff	153171	CN	HANJIAJUN-AS-AP Han Jiajun
-2406:840:fd78::	2406:840:fd7f:ffff:ffff:ffff:ffff:ffff	153171	CN	HANJIAJUN-AS-AP Han Jiajun
-2406:840:fd80::	2406:840:fd87:ffff:ffff:ffff:ffff:ffff	153172	CN	WANGGONGRUI-AS-AP Wang Gongrui
-2406:840:fd88::	2406:840:fd8f:ffff:ffff:ffff:ffff:ffff	153172	CN	WANGGONGRUI-AS-AP Wang Gongrui
+2406:840:fd60::	2406:840:fd60:ffff:ffff:ffff:ffff:ffff	153170	CN	CUIHONGTAO-AS-AP Cui Hongtao
+2406:840:fd61::	2406:840:fd66:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:fd67::	2406:840:fd67:ffff:ffff:ffff:ffff:ffff	153170	CN	CUIHONGTAO-AS-AP Cui Hongtao
+2406:840:fd68::	2406:840:fd6f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:fd70::	2406:840:fd70:ffff:ffff:ffff:ffff:ffff	153171	CN	HANJIAJUN-AS-AP Han Jiajun
+2406:840:fd71::	2406:840:fd76:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:fd77::	2406:840:fd77:ffff:ffff:ffff:ffff:ffff	153171	CN	HANJIAJUN-AS-AP Han Jiajun
+2406:840:fd78::	2406:840:fd7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:fd80::	2406:840:fd80:ffff:ffff:ffff:ffff:ffff	153172	CN	WANGGONGRUI-AS-AP Wang Gongrui
+2406:840:fd81::	2406:840:fd86:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:840:fd87::	2406:840:fd87:ffff:ffff:ffff:ffff:ffff	153172	CN	WANGGONGRUI-AS-AP Wang Gongrui
+2406:840:fd88::	2406:840:fd8f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:840:fd90::	2406:840:fd9f:ffff:ffff:ffff:ffff:ffff	152922	CN	ZHANGFUYU-AS-CN Zhang Fuyu
 2406:840:fda0::	2406:840:fda7:ffff:ffff:ffff:ffff:ffff	152930	CN	LINXIANGLIANG-AS-AP Lin Xiangliang
 2406:840:fda8::	2406:840:fdaf:ffff:ffff:ffff:ffff:ffff	152930	CN	LINXIANGLIANG-AS-AP Lin Xiangliang
@@ -40104,8 +40109,8 @@ pub static ASN_V6_DB: &str = r###"
 2406:1cc1::	2406:1dff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:1e00::	2406:1e00:ffff:ffff:ffff:ffff:ffff:ffff	56030	NZ	VOYAGERNET-AS-AP Voyager Internet Ltd.
 2406:1e01::	2406:1eff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2406:1f00::	2406:1f00:0:ffff:ffff:ffff:ffff:ffff	58580	AU	FASTRACK Fastrack Technology
-2406:1f00:1::	2406:1fff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2406:1f00::	2406:1f00:1:ffff:ffff:ffff:ffff:ffff	58580	AU	FASTRACK Fastrack Technology
+2406:1f00:2::	2406:1fff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2406:2000::	2406:2000:97:ffff:ffff:ffff:ffff:ffff	10310	US	YAHOO-1
 2406:2000:98::	2406:2000:98:ffff:ffff:ffff:ffff:ffff	38032	HK	YAHOO-HK2-AP internet content provider
 2406:2000:99::	2406:2000:9f:ffff:ffff:ffff:ffff:ffff	10310	US	YAHOO-1
@@ -41684,8 +41689,8 @@ pub static ASN_V6_DB: &str = r###"
 2407:14c0:105::	2407:14c0:1ff:ffff:ffff:ffff:ffff:ffff	138077	ID	IDNIC-ABHINAWA-AS-ID PT Abhinawa Sumberdaya Asia
 2407:14c0:200::	2407:14c0:ffff:ffff:ffff:ffff:ffff:ffff	138077	ID	IDNIC-ABHINAWA-AS-ID PT Abhinawa Sumberdaya Asia
 2407:14c1::	2407:1500:20:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2407:1500:21::	2407:1500:23:ffff:ffff:ffff:ffff:ffff	58752	BD	DELTA-IIG-BD Delta Infocom Limited.
-2407:1500:24::	2407:15ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2407:1500:21::	2407:1500:22:ffff:ffff:ffff:ffff:ffff	58752	BD	DELTA-IIG-BD Delta Infocom Limited.
+2407:1500:23::	2407:15ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2407:1600::	2407:1600:ffff:ffff:ffff:ffff:ffff:ffff	1299	SE	TWELVE99 Arelion, fka Telia Carrier
 2407:1601::	2407:19bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2407:19c0::	2407:19c0:fff:ffff:ffff:ffff:ffff:ffff	141519	IN	YUVACOM-AS-IN Yuvaa Communications Private Limited
@@ -63068,7 +63073,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:1fa0:6050::	2600:1fa0:606f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:1fa0:6070::	2600:1fa0:608f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:1fa0:6090::	2600:1fa0:60af:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:1fa0:60b0::	2600:1fa0:744f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:1fa0:60b0::	2600:1fa0:60cf:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:1fa0:60d0::	2600:1fa0:744f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:1fa0:7450::	2600:1fa0:748f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:1fa0:7490::	2600:1fa0:74cf:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:1fa0:74d0::	2600:1fa0:812f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -63995,7 +64001,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:6c21:d86::	2600:6c21:d89:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
 2600:6c21:d8a::	2600:6c21:d8b:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
 2600:6c21:d8c::	2600:6c21:d8d:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
-2600:6c21:d8e::	2600:6c21:e02:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
+2600:6c21:d8e::	2600:6c21:d8f:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
+2600:6c21:d90::	2600:6c21:e02:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
 2600:6c21:e03::	2600:6c21:e05:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
 2600:6c21:e06::	2600:6c21:e12:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
 2600:6c21:e13::	2600:6c21:e17:ffff:ffff:ffff:ffff:ffff	20115	US	CHARTER-20115
@@ -64268,7 +64275,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:9000:2052::	2600:9000:2056:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2057::	2600:9000:205b:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:205c::	2600:9000:2061:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:2062::	2600:9000:206e:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2062::	2600:9000:2065:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2066::	2600:9000:206e:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:206f::	2600:9000:2072:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2073::	2600:9000:2074:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2075::	2600:9000:207a:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -64322,7 +64330,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:9000:21fa::	2600:9000:2201:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2202::	2600:9000:2205:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2206::	2600:9000:2207:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:2208::	2600:9000:2224:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2208::	2600:9000:2211:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2212::	2600:9000:2224:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2225::	2600:9000:2249:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:224a::	2600:9000:22e1:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:22e2::	2600:9000:2307:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -64336,7 +64345,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:9000:23c0::	2600:9000:23c6:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:23c7::	2600:9000:23dc:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:23dd::	2600:9000:23e2:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:23e3::	2600:9000:243b:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:23e3::	2600:9000:242e:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:242f::	2600:9000:243b:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:243c::	2600:9000:243d:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:243e::	2600:9000:2440:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2441::	2600:9000:2447:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -64369,7 +64379,8 @@ pub static ASN_V6_DB: &str = r###"
 2600:9000:2612::	2600:9000:261f:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2620::	2600:9000:2632:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2633::	2600:9000:2634:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:2635::	2600:9000:2638:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2635::	2600:9000:2636:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2637::	2600:9000:2638:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2639::	2600:9000:263a:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:263b::	2600:9000:263c:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:263d::	2600:9000:263e:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -64445,14 +64456,16 @@ pub static ASN_V6_DB: &str = r###"
 2600:9000:277d::	2600:9000:2787:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2788::	2600:9000:27ad:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:27ae::	2600:9000:27af:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:27b0::	2600:9000:27ee:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:27b0::	2600:9000:27b1:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:27b2::	2600:9000:27ee:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:27ef::	2600:9000:27f0:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:27f1::	2600:9000:280b:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:280c::	2600:9000:281b:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:281c::	2600:9000:2846:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2847::	2600:9000:2848:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:2849::	2600:9000:284a:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2600:9000:284b::	2600:9000:28b5:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:284b::	2600:9000:2867:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
+2600:9000:2868::	2600:9000:28b5:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:28b6::	2600:9000:28b7:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:28b8::	2600:9000:28bd:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2600:9000:28be::	2600:9000:28d8:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
@@ -65337,15 +65350,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:805:6000::	2602:805:6000:ffff:ffff:ffff:ffff:ffff	36127	US	MCPS
 2602:805:6001::	2602:805:6fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:805:7000::	2602:805:700f:ffff:ffff:ffff:ffff:ffff	40069	US	AISNET
-2602:805:7010::	2602:805:9fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:805:a000::	2602:805:a000:ffff:ffff:ffff:ffff:ffff	398319	US	ANMISA-LLC
-2602:805:a001::	2602:805:a0fa:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:805:a0fb::	2602:805:a0fb:ffff:ffff:ffff:ffff:ffff	398319	US	ANMISA-LLC
-2602:805:a0fc::	2602:805:a0fc:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:805:a0fd::	2602:805:a0fd:ffff:ffff:ffff:ffff:ffff	398319	US	ANMISA-LLC
-2602:805:a0fe::	2602:805:a0fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:805:a0ff::	2602:805:a0ff:ffff:ffff:ffff:ffff:ffff	398319	US	ANMISA-LLC
-2602:805:a100::	2602:805:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:805:7010::	2602:805:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:806::	2602:806:ff:ffff:ffff:ffff:ffff:ffff	400563	US	AS-MVPS621-01
 2602:806:100::	2602:806:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:806:1000::	2602:806:1000:ffff:ffff:ffff:ffff:ffff	397556	US	IAA
@@ -65638,8 +65643,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:814:e000::	2602:814:e001:ffff:ffff:ffff:ffff:ffff	394999	US	K0MWB
 2602:814:e002::	2602:814:e00f:ffff:ffff:ffff:ffff:ffff	394999	US	K0MWB
 2602:814:e010::	2602:814:efff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:814:f000::	2602:814:f008:ffff:ffff:ffff:ffff:ffff	23347	US	ZYC
-2602:814:f009::	2602:814:f00c:ffff:ffff:ffff:ffff:ffff	23347	US	ZYC
+2602:814:f000::	2602:814:f00c:ffff:ffff:ffff:ffff:ffff	23347	US	ZYC
 2602:814:f00d::	2602:814:f00f:ffff:ffff:ffff:ffff:ffff	23347	US	ZYC
 2602:814:f010::	2602:814:f0ff:ffff:ffff:ffff:ffff:ffff	23347	US	ZYC
 2602:814:f100::	2602:814:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -65804,7 +65808,9 @@ pub static ASN_V6_DB: &str = r###"
 2602:f406::	2602:f406:ff:ffff:ffff:ffff:ffff:ffff	402359	US	AS402359
 2602:f406:100::	2602:f40a:9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f40a:a::	2602:f40a:a:ffff:ffff:ffff:ffff:ffff	401106	US	TECHIES365
-2602:f40a:b::	2602:f40c:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f40a:b::	2602:f40a:62:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f40a:63::	2602:f40a:63:ffff:ffff:ffff:ffff:ffff	401106	US	TECHIES365
+2602:f40a:64::	2602:f40c:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f40d::	2602:f40d:ff:ffff:ffff:ffff:ffff:ffff	401575	US	KB9GXK-01
 2602:f40d:100::	2602:f410:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f411::	2602:f411:ff:ffff:ffff:ffff:ffff:ffff	215248	NL	BASTIAANBRINK Bastiaan Mathijs Brink
@@ -65826,7 +65832,9 @@ pub static ASN_V6_DB: &str = r###"
 2602:f43b:10::	2602:f43b:1f:ffff:ffff:ffff:ffff:ffff	402247	US	FLEW - flew llc
 2602:f43b:20::	2602:f43b:20:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f43b:21::	2602:f43b:22:ffff:ffff:ffff:ffff:ffff	402247	US	FLEW - flew llc
-2602:f43b:23::	2602:f43f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f43b:23::	2602:f43b:fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f43b:ff::	2602:f43b:ff:ffff:ffff:ffff:ffff:ffff	402247	US	FLEW - flew llc
+2602:f43b:100::	2602:f43f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f440::	2602:f440:0:ffff:ffff:ffff:ffff:ffff	402230	US	AS402230
 2602:f440:1::	2602:f440:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f441::	2602:f441:ff:ffff:ffff:ffff:ffff:ffff	402238	US	AS402238
@@ -65975,13 +65983,13 @@ pub static ASN_V6_DB: &str = r###"
 2602:f50c:610::	2602:f50c:611:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
 2602:f50c:612::	2602:f50c:61f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f50c:620::	2602:f50c:621:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
-2602:f50c:622::	2602:f50c:63f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f50c:622::	2602:f50c:62f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f50c:630::	2602:f50c:631:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
+2602:f50c:632::	2602:f50c:63f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f50c:640::	2602:f50c:641:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
 2602:f50c:642::	2602:f50c:64f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f50c:650::	2602:f50c:651:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
-2602:f50c:652::	2602:f50c:80f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f50c:810::	2602:f50c:811:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
-2602:f50c:812::	2602:f50c:81f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f50c:652::	2602:f50c:81f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f50c:820::	2602:f50c:821:ffff:ffff:ffff:ffff:ffff	60900	CA	SSMIDGETECHNOLOGIES Ssmidge Technologies
 2602:f50c:822::	2602:f50d:0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f50d:1::	2602:f50d:1:ffff:ffff:ffff:ffff:ffff	13317	US	-Reserved AS-
@@ -66244,9 +66252,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:f65b::	2602:f65b:fff:ffff:ffff:ffff:ffff:ffff	400366	US	FS846-ASN-01
 2602:f65b:1000::	2602:f65f:0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f65f:1::	2602:f65f:2:ffff:ffff:ffff:ffff:ffff	64246	US	CRA-CO
-2602:f65f:3::	2602:f65f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f660::	2602:f660:0:ffff:ffff:ffff:ffff:ffff	402173	US	SCHENANIGANS-01 - I Need Help Alliance
-2602:f660:1::	2602:f660:7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f65f:3::	2602:f660:7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f660:80::	2602:f660:ff:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
 2602:f660:100::	2602:f660:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f661::	2602:f661:ff:ffff:ffff:ffff:ffff:ffff	26286	US	MYSTICDEVIO
@@ -66630,8 +66636,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:f7a7:10::	2602:f7a7:10:ffff:ffff:ffff:ffff:ffff	142046	TW	M1033-INFO-AS-TW 1033 Network Information Co.
 2602:f7a7:11::	2602:f7a7:1f:ffff:ffff:ffff:ffff:ffff	399624	US	LECTRON
 2602:f7a7:20::	2602:f7a7:20:ffff:ffff:ffff:ffff:ffff	206434	TW	CHENG-CHIH-TSAI
-2602:f7a7:21::	2602:f7a7:21:ffff:ffff:ffff:ffff:ffff	216123	TW	ZHUYUANNETWORK
-2602:f7a7:22::	2602:f7a7:ff:ffff:ffff:ffff:ffff:ffff	399624	US	LECTRON
+2602:f7a7:21::	2602:f7a7:ff:ffff:ffff:ffff:ffff:ffff	399624	US	LECTRON
 2602:f7a7:100::	2602:f7a9:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7aa::	2602:f7aa:ff:ffff:ffff:ffff:ffff:ffff	14619	US	AS-THERA-
 2602:f7aa:100::	2602:f7ab:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -66684,9 +66689,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:f7c7::	2602:f7c7:ff:ffff:ffff:ffff:ffff:ffff	401430	US	POND-IOT-01
 2602:f7c7:100::	2602:f7c7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7c8::	2602:f7c8:ff:ffff:ffff:ffff:ffff:ffff	401408	US	SALADCLOUD
-2602:f7c8:100::	2602:f7c9:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f7ca::	2602:f7ca:fff:ffff:ffff:ffff:ffff:ffff	400042	US	CRC-RITA-01
-2602:f7ca:1000::	2602:f7ce:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f7c8:100::	2602:f7ce:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7cf::	2602:f7cf:0:ffff:ffff:ffff:ffff:ffff	154324	SG	APL-AS-AP AltusCloud Pte. Ltd.
 2602:f7cf:1::	2602:f7cf:1:ffff:ffff:ffff:ffff:ffff	401322	US	LUCK-NETO-01
 2602:f7cf:2::	2602:f7cf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -66702,15 +66705,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:f7d6::	2602:f7d6:fff:ffff:ffff:ffff:ffff:ffff	399861	US	MOBITE-NET
 2602:f7d6:1000::	2602:f7d7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7d8::	2602:f7d8:0:ffff:ffff:ffff:ffff:ffff	401401	US	UNREDACTED-NOISENET
-2602:f7d8:1::	2602:f7d9:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f7da::	2602:f7da:2:ffff:ffff:ffff:ffff:ffff	401390	Unknown	ROUTEX
-2602:f7da:3::	2602:f7da:2f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f7da:30::	2602:f7da:3f:ffff:ffff:ffff:ffff:ffff	401390	Unknown	ROUTEX
-2602:f7da:40::	2602:f7da:8f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f7da:90::	2602:f7da:90:ffff:ffff:ffff:ffff:ffff	401390	Unknown	ROUTEX
-2602:f7da:91::	2602:f7da:a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f7da:aa::	2602:f7da:aa:ffff:ffff:ffff:ffff:ffff	401390	Unknown	ROUTEX
-2602:f7da:ab::	2602:f7dc:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f7d8:1::	2602:f7dc:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7dc:2::	2602:f7dc:2:ffff:ffff:ffff:ffff:ffff	216324	GB	HYPERGROUP-NET
 2602:f7dc:3::	2602:f7dc:3:ffff:ffff:ffff:ffff:ffff	401889	US	DATASPHERE-IX
 2602:f7dc:4::	2602:f7dc:6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -66751,7 +66746,9 @@ pub static ASN_V6_DB: &str = r###"
 2602:f7f8:5::	2602:f7f8:5:ffff:ffff:ffff:ffff:ffff	136557	AU	HOST-AS-AP Host Universal Pty Ltd
 2602:f7f8:6::	2602:f7f8:6:ffff:ffff:ffff:ffff:ffff	23470	US	RELIABLESITE
 2602:f7f8:7::	2602:f7f8:8:ffff:ffff:ffff:ffff:ffff	53724	US	EXTRAVM-LLC
-2602:f7f8:9::	2602:f7fa:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f7f8:9::	2602:f7f8:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:f7f9::	2602:f7f9:ff:ffff:ffff:ffff:ffff:ffff	398730	US	SMARTPATH
+2602:f7f9:100::	2602:f7fa:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7fb::	2602:f7fb:ff:ffff:ffff:ffff:ffff:ffff	54530	US	SPRINGFIELD-PUBLIC-SCHOOL-MA
 2602:f7fb:100::	2602:f7fb:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f7fc::	2602:f7fc:0:ffff:ffff:ffff:ffff:ffff	63183	US	YTHING-NET-1
@@ -67467,9 +67464,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:f997:d00::	2602:f99a:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f99b::	2602:f99b:0:ffff:ffff:ffff:ffff:ffff	30690	US	KAZEHANA-NETWORKS
 2602:f99b:1::	2602:f99b:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f99b:2::	2602:f99b:3:ffff:ffff:ffff:ffff:ffff	30690	US	KAZEHANA-NETWORKS
-2602:f99b:4::	2602:f99b:4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:f99b:5::	2602:f99b:5:ffff:ffff:ffff:ffff:ffff	30690	US	KAZEHANA-NETWORKS
+2602:f99b:2::	2602:f99b:5:ffff:ffff:ffff:ffff:ffff	30690	US	KAZEHANA-NETWORKS
 2602:f99b:6::	2602:f99b:9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:f99b:a::	2602:f99b:a:ffff:ffff:ffff:ffff:ffff	30690	US	KAZEHANA-NETWORKS
 2602:f99b:b::	2602:f99b:9f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -67979,9 +67974,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:faad:4::	2602:faad:7:ffff:ffff:ffff:ffff:ffff	204844	GB	NCSE-NETWORK-GLOBAL
 2602:faad:8::	2602:faad:8:ffff:ffff:ffff:ffff:ffff	198954	TW	CH-NETWORK
 2602:faad:9::	2602:faad:9:ffff:ffff:ffff:ffff:ffff	215934	TW	QIAN-NETWORK
-2602:faad:a::	2602:faad:a0:ffff:ffff:ffff:ffff:ffff	204844	GB	NCSE-NETWORK-GLOBAL
-2602:faad:a1::	2602:faad:a1:ffff:ffff:ffff:ffff:ffff	216123	TW	ZHUYUANNETWORK
-2602:faad:a2::	2602:faad:ff:ffff:ffff:ffff:ffff:ffff	204844	GB	NCSE-NETWORK-GLOBAL
+2602:faad:a::	2602:faad:ff:ffff:ffff:ffff:ffff:ffff	204844	GB	NCSE-NETWORK-GLOBAL
 2602:faad:100::	2602:faaf:0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:faaf:1::	2602:faaf:2:ffff:ffff:ffff:ffff:ffff	49585	DE	COREROUTE-AS
 2602:faaf:3::	2602:faaf:3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -68731,8 +68724,8 @@ pub static ASN_V6_DB: &str = r###"
 2602:fc3b::	2602:fc3b:ffff:ffff:ffff:ffff:ffff:ffff	399970	US	ARIN-RS-RND
 2602:fc3c::	2602:fc3c:fff:ffff:ffff:ffff:ffff:ffff	32582	US	600AMPS
 2602:fc3c:1000::	2602:fc3d:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:fc3e::	2602:fc3e:1:ffff:ffff:ffff:ffff:ffff	400190	US	FREEPORT-MCMORAN-INC
-2602:fc3e:2::	2602:fc3e:3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:fc3e::	2602:fc3e:0:ffff:ffff:ffff:ffff:ffff	400190	US	FREEPORT-MCMORAN-INC
+2602:fc3e:1::	2602:fc3e:3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:fc3e:400::	2602:fc3e:400:ffff:ffff:ffff:ffff:ffff	400190	US	FREEPORT-MCMORAN-INC
 2602:fc3e:401::	2602:fc3e:7ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:fc3e:800::	2602:fc3e:800:ffff:ffff:ffff:ffff:ffff	400190	US	FREEPORT-MCMORAN-INC
@@ -70084,173 +70077,193 @@ pub static ASN_V6_DB: &str = r###"
 2602:fefd:fa6::	2602:fefd:fa6:ffff:ffff:ffff:ffff:ffff	402157	US	PUPPYGIRL-LABS - Puppygirl Labs LLC
 2602:fefd:fa7::	2602:ff00:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff01::	2602:ff01:0:ffff:ffff:ffff:ffff:ffff	396101	US	NETCLOUD-ASN
-2602:ff01:1::	2602:ff03:0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:1::	2602:ff03:1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:2::	2602:ff03:3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:4::	2602:ff03:4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:5::	2602:ff03:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:10::	2602:ff03:10:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:11::	2602:ff03:14:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff01:1::	2602:ff03:2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:3::	2602:ff03:4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:5::	2602:ff03:14:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:15::	2602:ff03:15:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
 2602:ff03:16::	2602:ff03:17:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:18::	2602:ff03:18:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:19::	2602:ff03:21:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:22::	2602:ff03:22:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:23::	2602:ff03:24:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:19::	2602:ff03:24:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:25::	2602:ff03:25:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:26::	2602:ff03:95:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:96::	2602:ff03:96:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:97::	2602:ff03:fa:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:fb::	2602:ff03:fb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:fc::	2602:ff03:12a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:12b::	2602:ff03:12b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:12c::	2602:ff03:132:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:133::	2602:ff03:133:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:134::	2602:ff03:156:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:157::	2602:ff03:157:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:158::	2602:ff03:16e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:16f::	2602:ff03:16f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:170::	2602:ff03:179:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:26::	2602:ff03:2e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:2f::	2602:ff03:2f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:30::	2602:ff03:8f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:90::	2602:ff03:90:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:91::	2602:ff03:a6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:a7::	2602:ff03:a7:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:a8::	2602:ff03:f3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f4::	2602:ff03:f4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f5::	2602:ff03:13f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:140::	2602:ff03:140:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:141::	2602:ff03:15a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:15b::	2602:ff03:15b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:15c::	2602:ff03:173:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:174::	2602:ff03:174:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:175::	2602:ff03:179:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:17a::	2602:ff03:17a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
 2602:ff03:17b::	2602:ff03:180:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:181::	2602:ff03:181:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:182::	2602:ff03:1fd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:1fe::	2602:ff03:1fe:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:1ff::	2602:ff03:290:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:291::	2602:ff03:291:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:292::	2602:ff03:297:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:298::	2602:ff03:298:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:299::	2602:ff03:2ac:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:2ad::	2602:ff03:2ad:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:2ae::	2602:ff03:2c6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:2c7::	2602:ff03:2c7:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:2c8::	2602:ff03:341:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:342::	2602:ff03:342:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:343::	2602:ff03:397:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:398::	2602:ff03:398:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:399::	2602:ff03:3fd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:182::	2602:ff03:193:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:194::	2602:ff03:194:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:195::	2602:ff03:1d2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:1d3::	2602:ff03:1d3:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:1d4::	2602:ff03:23f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:240::	2602:ff03:240:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:241::	2602:ff03:247:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:248::	2602:ff03:248:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:249::	2602:ff03:24e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:24f::	2602:ff03:24f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:250::	2602:ff03:291:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:292::	2602:ff03:292:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:293::	2602:ff03:2f6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:2f7::	2602:ff03:2f7:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:2f8::	2602:ff03:316:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:317::	2602:ff03:317:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:318::	2602:ff03:357:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:358::	2602:ff03:358:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:359::	2602:ff03:37d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:37e::	2602:ff03:37e:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:37f::	2602:ff03:3be:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:3bf::	2602:ff03:3bf:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:3c0::	2602:ff03:3c4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:3c5::	2602:ff03:3c5:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:3c6::	2602:ff03:3fd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:3fe::	2602:ff03:3fe:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:3ff::	2602:ff03:412:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:413::	2602:ff03:413:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:414::	2602:ff03:415:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:416::	2602:ff03:416:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:417::	2602:ff03:44b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:44c::	2602:ff03:44c:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:44d::	2602:ff03:465:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:3ff::	2602:ff03:465:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:466::	2602:ff03:466:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:467::	2602:ff03:4d2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:4d3::	2602:ff03:4d3:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:4d4::	2602:ff03:4f6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:4f7::	2602:ff03:4f7:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:4f8::	2602:ff03:539:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:53a::	2602:ff03:53b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:53c::	2602:ff03:54d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:467::	2602:ff03:47f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:480::	2602:ff03:480:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:481::	2602:ff03:4d0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:4d1::	2602:ff03:4d1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:4d2::	2602:ff03:514:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:515::	2602:ff03:515:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:516::	2602:ff03:525:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:526::	2602:ff03:526:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:527::	2602:ff03:539:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:53a::	2602:ff03:53a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:53b::	2602:ff03:545:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:546::	2602:ff03:546:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:547::	2602:ff03:54d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:54e::	2602:ff03:54e:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:54f::	2602:ff03:559:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:55a::	2602:ff03:55a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:55b::	2602:ff03:560:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:54f::	2602:ff03:55c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:55d::	2602:ff03:55d:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:55e::	2602:ff03:560:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:561::	2602:ff03:561:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:562::	2602:ff03:5eb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:5ec::	2602:ff03:5ec:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:5ed::	2602:ff03:657:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:658::	2602:ff03:658:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:659::	2602:ff03:660:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:661::	2602:ff03:661:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:662::	2602:ff03:69d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:69e::	2602:ff03:69e:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:69f::	2602:ff03:70e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:70f::	2602:ff03:710:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:711::	2602:ff03:71e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:71f::	2602:ff03:71f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:720::	2602:ff03:738:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:562::	2602:ff03:5c1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:5c2::	2602:ff03:5c2:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:5c3::	2602:ff03:6c2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:6c3::	2602:ff03:6c3:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:6c4::	2602:ff03:70e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:70f::	2602:ff03:70f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:710::	2602:ff03:711:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:712::	2602:ff03:712:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:713::	2602:ff03:738:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:739::	2602:ff03:739:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:73a::	2602:ff03:778:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:779::	2602:ff03:779:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:77a::	2602:ff03:791:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:792::	2602:ff03:792:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:793::	2602:ff03:7b3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:7b4::	2602:ff03:7b4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:7b5::	2602:ff03:7cd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:7ce::	2602:ff03:7ce:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:7cf::	2602:ff03:7e8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:7e9::	2602:ff03:7e9:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:7ea::	2602:ff03:836:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:837::	2602:ff03:837:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:838::	2602:ff03:868:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:869::	2602:ff03:869:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:86a::	2602:ff03:8ba:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:8bb::	2602:ff03:8bb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:8bc::	2602:ff03:8c7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:8c8::	2602:ff03:8c8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:8c9::	2602:ff03:8dc:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:8dd::	2602:ff03:8dd:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:8de::	2602:ff03:8fb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:8fc::	2602:ff03:8fc:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:8fd::	2602:ff03:910:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:73a::	2602:ff03:795:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:796::	2602:ff03:796:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:797::	2602:ff03:79e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:79f::	2602:ff03:79f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:7a0::	2602:ff03:7a4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:7a5::	2602:ff03:7a5:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:7a6::	2602:ff03:7a8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:7a9::	2602:ff03:7a9:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:7aa::	2602:ff03:7ce:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:7cf::	2602:ff03:7cf:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:7d0::	2602:ff03:820:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:821::	2602:ff03:821:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:822::	2602:ff03:856:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:857::	2602:ff03:857:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:858::	2602:ff03:8ac:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:8ad::	2602:ff03:8ad:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:8ae::	2602:ff03:8b0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:8b1::	2602:ff03:8b1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:8b2::	2602:ff03:8bb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:8bc::	2602:ff03:8bc:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:8bd::	2602:ff03:910:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:911::	2602:ff03:911:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:912::	2602:ff03:9d7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:9d8::	2602:ff03:9d8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:9d9::	2602:ff03:9f7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:9f8::	2602:ff03:9f8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:9f9::	2602:ff03:a0c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:912::	2602:ff03:920:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:921::	2602:ff03:921:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:922::	2602:ff03:991:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:992::	2602:ff03:992:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:993::	2602:ff03:9bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:9c0::	2602:ff03:9c0:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:9c1::	2602:ff03:9db:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:9dc::	2602:ff03:9dc:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:9dd::	2602:ff03:9df:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:9e0::	2602:ff03:9e0:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:9e1::	2602:ff03:a0c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:a0d::	2602:ff03:a0d:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:a0e::	2602:ff03:a1a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:a1b::	2602:ff03:a1b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:a1c::	2602:ff03:acf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:a0e::	2602:ff03:a29:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:a2a::	2602:ff03:a2a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:a2b::	2602:ff03:a5f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:a60::	2602:ff03:a60:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:a61::	2602:ff03:acf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:ad0::	2602:ff03:ad0:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:ad1::	2602:ff03:ada:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:adb::	2602:ff03:adb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:adc::	2602:ff03:aee:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:aef::	2602:ff03:aef:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:af0::	2602:ff03:b0a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:b0b::	2602:ff03:b0b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:b0c::	2602:ff03:b42:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:b43::	2602:ff03:b43:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:b44::	2602:ff03:b8d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:b8e::	2602:ff03:b8e:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:b8f::	2602:ff03:b96:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:b97::	2602:ff03:b97:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:b98::	2602:ff03:b9b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:b9c::	2602:ff03:b9c:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:b9d::	2602:ff03:ba5:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:ba6::	2602:ff03:ba6:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:ba7::	2602:ff03:bca:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:bcb::	2602:ff03:bcb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:bcc::	2602:ff03:bd3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:bd4::	2602:ff03:bd4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:bd5::	2602:ff03:c68:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:c69::	2602:ff03:c69:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:c6a::	2602:ff03:cda:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:cdb::	2602:ff03:cdb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:cdc::	2602:ff03:d0f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:d10::	2602:ff03:d10:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:d11::	2602:ff03:d25:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:ad1::	2602:ff03:b15:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:b16::	2602:ff03:b16:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:b17::	2602:ff03:b58:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:b59::	2602:ff03:b59:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:b5a::	2602:ff03:b6f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:b70::	2602:ff03:b70:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:b71::	2602:ff03:b7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:b80::	2602:ff03:b80:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:b81::	2602:ff03:b9a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:b9b::	2602:ff03:b9b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:b9c::	2602:ff03:ba1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:ba2::	2602:ff03:ba2:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:ba3::	2602:ff03:be2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:be3::	2602:ff03:be3:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:be4::	2602:ff03:bfc:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:bfd::	2602:ff03:bfd:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:bfe::	2602:ff03:c7a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:c7b::	2602:ff03:c7b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:c7c::	2602:ff03:cba:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:cbb::	2602:ff03:cbb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:cbc::	2602:ff03:d25:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:d26::	2602:ff03:d26:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:d27::	2602:ff03:db3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:db4::	2602:ff03:db4:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:db5::	2602:ff03:e1a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:e1b::	2602:ff03:e1b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:e1c::	2602:ff03:e1e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:e1f::	2602:ff03:e1f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:e20::	2602:ff03:e61:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:d27::	2602:ff03:d53:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:d54::	2602:ff03:d54:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:d55::	2602:ff03:d8c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:d8d::	2602:ff03:d8d:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:d8e::	2602:ff03:db1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:db2::	2602:ff03:db2:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:db3::	2602:ff03:dd6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:dd7::	2602:ff03:dd7:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:dd8::	2602:ff03:de8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:de9::	2602:ff03:de9:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:dea::	2602:ff03:e0e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:e0f::	2602:ff03:e0f:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:e10::	2602:ff03:e2c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:e2d::	2602:ff03:e2d:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:e2e::	2602:ff03:e56:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:e57::	2602:ff03:e57:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:e58::	2602:ff03:e61:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:e62::	2602:ff03:e62:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:e63::	2602:ff03:eb0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:e63::	2602:ff03:e69:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:e6a::	2602:ff03:e6a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:e6b::	2602:ff03:eb0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff03:eb1::	2602:ff03:eb1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:eb2::	2602:ff03:eb7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:eb8::	2602:ff03:eb8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:eb9::	2602:ff03:ec9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:eca::	2602:ff03:eca:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:ecb::	2602:ff03:ee7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:ee8::	2602:ff03:ee8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:ee9::	2602:ff03:f0b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:f0c::	2602:ff03:f0c:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:f0d::	2602:ff03:f40:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:f41::	2602:ff03:f41:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:f42::	2602:ff03:f82:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:f83::	2602:ff03:f83:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:f84::	2602:ff03:ff2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff03:ff3::	2602:ff03:ff3:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2602:ff03:ff4::	2602:ff06:724:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:eb2::	2602:ff03:eb4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:eb5::	2602:ff03:eb5:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:eb6::	2602:ff03:f10:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f11::	2602:ff03:f11:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f12::	2602:ff03:f19:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f1a::	2602:ff03:f1a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f1b::	2602:ff03:f1c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f1d::	2602:ff03:f1d:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f1e::	2602:ff03:f29:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f2a::	2602:ff03:f2a:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f2b::	2602:ff03:f3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:f40::	2602:ff03:f40:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:f41::	2602:ff03:fbb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:fbc::	2602:ff03:fbc:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:fbd::	2602:ff03:fda:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:fdb::	2602:ff03:fdb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:fdc::	2602:ff03:ff0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:ff1::	2602:ff03:ff1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:ff2::	2602:ff03:ff7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff03:ff8::	2602:ff03:ff8:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2602:ff03:ff9::	2602:ff06:724:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff06:725::	2602:ff06:725:ffff:ffff:ffff:ffff:ffff	6939	US	HURRICANE
 2602:ff06:726::	2602:ff0a:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff0b::	2602:ff0b:fff:ffff:ffff:ffff:ffff:ffff	11071	US	IW-ASN-11071
@@ -70395,9 +70408,7 @@ pub static ASN_V6_DB: &str = r###"
 2602:ff65:e28::	2602:ff65:fff:ffff:ffff:ffff:ffff:ffff	33083	US	AXCELX-NET
 2602:ff65:1000::	2602:ff66:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff67::	2602:ff67:fff:ffff:ffff:ffff:ffff:ffff	15231	US	STARNOVA-LLC
-2602:ff67:1000::	2602:ff67:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2602:ff68::	2602:ff68:fff:ffff:ffff:ffff:ffff:ffff	63436	US	GREATLAKESCOMMUNICATION
-2602:ff68:1000::	2602:ff6d:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2602:ff67:1000::	2602:ff6d:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff6e::	2602:ff6e:fff:ffff:ffff:ffff:ffff:ffff	63202	CA	TARIDIUM-CANADA
 2602:ff6e:1000::	2602:ff6f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2602:ff70::	2602:ff70:fff:ffff:ffff:ffff:ffff:ffff	394367	CA	SYSLIFELINE
@@ -71982,7 +71993,8 @@ pub static ASN_V6_DB: &str = r###"
 2603:e604::	2603:e61e:57ff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
 2603:e61e:5800::	2603:e6ff:ffff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
 2603:e700::	2603:edff:ffff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
-2603:ee00::	2603:ef7f:ffff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
+2603:ee00::	2603:ef00:fff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
+2603:ef00:1000::	2603:ef7f:ffff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
 2603:ef80::	2603:efff:ffff:ffff:ffff:ffff:ffff:ffff	11492	US	CABLEONE
 2603:f000::	2603:f0ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2603:f100::	2603:f107:ffff:ffff:ffff:ffff:ffff:ffff	262287	BR	Latitude.sh LTDA
@@ -72438,9 +72450,7 @@ pub static ASN_V6_DB: &str = r###"
 2604:1be0::	2604:1be0:ffff:ffff:ffff:ffff:ffff:ffff	29698	US	LAKESHOREFIBER
 2604:1be1::	2604:1c1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:1c20::	2604:1c20:ffff:ffff:ffff:ffff:ffff:ffff	401909	US	MINRTT
-2604:1c21::	2604:1c5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2604:1c60::	2604:1c60:ffff:ffff:ffff:ffff:ffff:ffff	6685	US	BTUKINTERNAL Internal Use BT AS
-2604:1c61::	2604:1c9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2604:1c21::	2604:1c9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:1ca0::	2604:1ca0:ffff:ffff:ffff:ffff:ffff:ffff	33728	US	UNITEL-INC
 2604:1ca1::	2604:1cbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:1cc0::	2604:1cc0:ffff:ffff:ffff:ffff:ffff:ffff	21559	PR	OSNET
@@ -72573,8 +72583,8 @@ pub static ASN_V6_DB: &str = r###"
 2604:2800:ffed::	2604:2800:ffed:ffff:ffff:ffff:ffff:ffff	26793	US	ICS-LLC
 2604:2800:ffee::	2604:2800:ffee:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:2800:ffef::	2604:2800:fff3:ffff:ffff:ffff:ffff:ffff	26793	US	ICS-LLC
-2604:2800:fff4::	2604:2800:fff7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2604:2800:fff8::	2604:2800:fffb:ffff:ffff:ffff:ffff:ffff	26793	US	ICS-LLC
+2604:2800:fff4::	2604:2800:fff6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2604:2800:fff7::	2604:2800:fffb:ffff:ffff:ffff:ffff:ffff	26793	US	ICS-LLC
 2604:2800:fffc::	2604:2800:fffc:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:2800:fffd::	2604:2800:ffff:ffff:ffff:ffff:ffff:ffff	26793	US	ICS-LLC
 2604:2801::	2604:281f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -74112,7 +74122,9 @@ pub static ASN_V6_DB: &str = r###"
 2604:dc40::	2604:dc40:0:ffff:ffff:ffff:ffff:ffff	29802	US	HVC-AS
 2604:dc40:1::	2604:dc7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:dc80::	2604:dc80:ffff:ffff:ffff:ffff:ffff:ffff	32524	US	GRUPO-SMS
-2604:dc81::	2604:df3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2604:dc81::	2604:de7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2604:de80::	2604:de80:ffff:ffff:ffff:ffff:ffff:ffff	402155	US	WEB-01 - Beinn
+2604:de81::	2604:df3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:df40::	2604:df40:ffff:ffff:ffff:ffff:ffff:ffff	19256	US	COMMNET-WIRELESS-LLC
 2604:df41::	2604:dfbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2604:dfc0::	2604:dfc0:ffff:ffff:ffff:ffff:ffff:ffff	14727	US	LONE-STAR-ISP
@@ -74335,7 +74347,8 @@ pub static ASN_V6_DB: &str = r###"
 2604:fa00::	2604:fa00:102:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
 2604:fa00:103::	2604:fa00:111:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
 2604:fa00:112::	2604:fa00:116:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
-2604:fa00:117::	2604:fa00:121:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
+2604:fa00:117::	2604:fa00:11a:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
+2604:fa00:11b::	2604:fa00:121:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
 2604:fa00:122::	2604:fa00:123:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
 2604:fa00:124::	2604:fa00:127:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
 2604:fa00:128::	2604:fa00:fffe:ffff:ffff:ffff:ffff:ffff	32278	US	GETWIRELESS
@@ -75387,8 +75400,9 @@ pub static ASN_V6_DB: &str = r###"
 2605:59c0:7010::	2605:59c0:70ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59c0:7100::	2605:59c0:79ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c0:7a00::	2605:59c0:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:59c1::	2605:59c1:1aff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
-2605:59c1:1b00::	2605:59c1:1bff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59c1::	2605:59c1:187f:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59c1:1880::	2605:59c1:1b7f:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59c1:1b80::	2605:59c1:1bff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c1:1c00::	2605:59c1:1fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59c1:2000::	2605:59c1:4fff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c1:5000::	2605:59c7:2000:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -75408,8 +75422,7 @@ pub static ASN_V6_DB: &str = r###"
 2605:59c7:f083::	2605:59c7:f0bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59c7:f0c0::	2605:59c7:f0c0:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c7:f0c1::	2605:59c7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:59c8::	2605:59c8:127f:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
-2605:59c8:1280::	2605:59c8:2cff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59c8::	2605:59c8:2cff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c8:2d00::	2605:59c8:2fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59c8:3000::	2605:59c8:34ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59c8:3500::	2605:59c8:37ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -75439,7 +75452,9 @@ pub static ASN_V6_DB: &str = r###"
 2605:59ca:8062::	2605:59ca:8063:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59ca:8064::	2605:59ca:806f:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59ca:8070::	2605:59ca:80ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:59ca:8100::	2605:59ca:84ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59ca:8100::	2605:59ca:82ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
+2605:59ca:8300::	2605:59ca:83ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2605:59ca:8400::	2605:59ca:84ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59ca:8500::	2605:59ca:85ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:59ca:8600::	2605:59ca:93ff:ffff:ffff:ffff:ffff:ffff	14593	US	SPACEX-STARLINK
 2605:59ca:9400::	2605:5aff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -75650,7 +75665,9 @@ pub static ASN_V6_DB: &str = r###"
 2605:7900:25::	2605:7900:41:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:7900:42::	2605:7900:42:ffff:ffff:ffff:ffff:ffff	19133	US	BIRD-HOSTING
 2605:7900:43::	2605:793f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:7940::	2605:7940:ffff:ffff:ffff:ffff:ffff:ffff	30456	US	COSMIC
+2605:7940::	2605:7940:0:ffff:ffff:ffff:ffff:ffff	30456	US	COSMIC
+2605:7940:1::	2605:7940:1:ffff:ffff:ffff:ffff:ffff	60841	GB	BERRYBYTE BerryByte
+2605:7940:2::	2605:7940:ffff:ffff:ffff:ffff:ffff:ffff	30456	US	COSMIC
 2605:7941::	2605:797f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:7980::	2605:7980:0:ffff:ffff:ffff:ffff:ffff	14956	US	ROUTERHOSTING
 2605:7980:1::	2605:79bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -75929,29 +75946,26 @@ pub static ASN_V6_DB: &str = r###"
 2605:9cc0:11f::	2605:9cc0:11f:ffff:ffff:ffff:ffff:ffff	14618	US	AMAZON-AES
 2605:9cc0:120::	2605:9cc0:377:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:378::	2605:9cc0:378:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2605:9cc0:379::	2605:9cc0:3b3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:9cc0:3b4::	2605:9cc0:3b4:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2605:9cc0:3b5::	2605:9cc0:3cb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2605:9cc0:379::	2605:9cc0:3cb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:3cc::	2605:9cc0:3cc:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:3cd::	2605:9cc0:491:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:492::	2605:9cc0:493:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:494::	2605:9cc0:64c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:64d::	2605:9cc0:64d:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:64e::	2605:9cc0:bff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:9cc0:c00::	2605:9cc0:c00:ffff:ffff:ffff:ffff:ffff	21664	US	AMZN-BYOASN
+2605:9cc0:c00::	2605:9cc0:c00:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c01::	2605:9cc0:c01:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:c02::	2605:9cc0:c02:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c03::	2605:9cc0:c05:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:9cc0:c06::	2605:9cc0:c06:ffff:ffff:ffff:ffff:ffff	21664	US	AMZN-BYOASN
+2605:9cc0:c06::	2605:9cc0:c06:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c07::	2605:9cc0:c07:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:c08::	2605:9cc0:c08:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c09::	2605:9cc0:c0a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:c0b::	2605:9cc0:c0c:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c0d::	2605:9cc0:c12:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:c13::	2605:9cc0:c13:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2605:9cc0:c14::	2605:9cc0:c14:ffff:ffff:ffff:ffff:ffff	21664	US	AMZN-BYOASN
-2605:9cc0:c15::	2605:9cc0:c16:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2605:9cc0:c17::	2605:9cc0:c17:ffff:ffff:ffff:ffff:ffff	21664	US	AMZN-BYOASN
+2605:9cc0:c14::	2605:9cc0:c15:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2605:9cc0:c16::	2605:9cc0:c17:ffff:ffff:ffff:ffff:ffff	21664	US	AMZN-BYOASN
 2605:9cc0:c18::	2605:9cc0:c18:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:9cc0:c19::	2605:9cc0:c19:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
 2605:9cc0:c1a::	2605:9cc0:c1a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -76384,7 +76398,9 @@ pub static ASN_V6_DB: &str = r###"
 2605:cc40::	2605:cc40:ffff:ffff:ffff:ffff:ffff:ffff	46713	US	IPGOMA
 2605:cc41::	2605:cc7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:cc80::	2605:cc80:ffff:ffff:ffff:ffff:ffff:ffff	398700	US	CACTUS-INTERNATIONAL-INC
-2605:cc81::	2605:ccff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2605:cc81::	2605:ccbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2605:ccc0::	2605:ccc0:ffff:ffff:ffff:ffff:ffff:ffff	394209	US	ECBOCES-VNETS
+2605:ccc1::	2605:ccff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:cd00::	2605:cd00:ffff:ffff:ffff:ffff:ffff:ffff	53907	US	QTS-RIC
 2605:cd01::	2605:cd3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2605:cd40::	2605:cd40:1:ffff:ffff:ffff:ffff:ffff	14363	US	MTCCOMM
@@ -77496,8 +77512,8 @@ pub static ASN_V6_DB: &str = r###"
 2606:5000:4800::	2606:5000:49ff:ffff:ffff:ffff:ffff:ffff	19901	US	BRSPD-PUBLIC
 2606:5000:4a00::	2606:5000:4dff:ffff:ffff:ffff:ffff:ffff	209	US	CENTURYLINK-US-LEGACY-QWEST
 2606:5000:4e00::	2606:5000:59ff:ffff:ffff:ffff:ffff:ffff	19901	US	BRSPD-PUBLIC
-2606:5000:5a00::	2606:5000:5dff:ffff:ffff:ffff:ffff:ffff	209	US	CENTURYLINK-US-LEGACY-QWEST
-2606:5000:5e00::	2606:5000:61ff:ffff:ffff:ffff:ffff:ffff	19901	US	BRSPD-PUBLIC
+2606:5000:5a00::	2606:5000:5bff:ffff:ffff:ffff:ffff:ffff	209	US	CENTURYLINK-US-LEGACY-QWEST
+2606:5000:5c00::	2606:5000:61ff:ffff:ffff:ffff:ffff:ffff	19901	US	BRSPD-PUBLIC
 2606:5000:6200::	2606:5000:ffff:ffff:ffff:ffff:ffff:ffff	209	US	CENTURYLINK-US-LEGACY-QWEST
 2606:5001::	2606:503f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2606:5040::	2606:5040:ff:ffff:ffff:ffff:ffff:ffff	399580	CA	RADISHNETWORKS-NET-01
@@ -77814,8 +77830,7 @@ pub static ASN_V6_DB: &str = r###"
 2606:6c00:4::	2606:6c00:6:ffff:ffff:ffff:ffff:ffff	32787	US	PROLEXIC-TECHNOLOGIES-DDOS-MITIGATION-NETWORK
 2606:6c00:7::	2606:6c00:7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2606:6c00:8::	2606:6c00:9:ffff:ffff:ffff:ffff:ffff	32787	US	PROLEXIC-TECHNOLOGIES-DDOS-MITIGATION-NETWORK
-2606:6c00:a::	2606:6c00:fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2606:6c00:ff::	2606:6c00:ff:ffff:ffff:ffff:ffff:ffff	393560	US	AKAMAI-TEST
+2606:6c00:a::	2606:6c00:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2606:6c00:100::	2606:6c00:100:ffff:ffff:ffff:ffff:ffff	32787	US	PROLEXIC-TECHNOLOGIES-DDOS-MITIGATION-NETWORK
 2606:6c00:101::	2606:6c00:103:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2606:6c00:104::	2606:6c00:109:ffff:ffff:ffff:ffff:ffff	32787	US	PROLEXIC-TECHNOLOGIES-DDOS-MITIGATION-NETWORK
@@ -78414,9 +78429,7 @@ pub static ASN_V6_DB: &str = r###"
 2606:ae00:7af0::	2606:ae00:7b5f:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
 2606:ae00:7b60::	2606:ae00:7b7f:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
 2606:ae00:7b80::	2606:ae00:7e3f:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
-2606:ae00:7e40::	2606:ae00:800f:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
-2606:ae00:8010::	2606:ae00:802f:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
-2606:ae00:8030::	2606:ae00:82ff:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
+2606:ae00:7e40::	2606:ae00:82ff:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
 2606:ae00:8300::	2606:ae00:83ff:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
 2606:ae00:8400::	2606:ae00:87ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2606:ae00:8800::	2606:ae00:8fff:ffff:ffff:ffff:ffff:ffff	7287	US	PBI-NET-BLK2
@@ -79296,9 +79309,7 @@ pub static ASN_V6_DB: &str = r###"
 2607:c00::	2607:c00:ffff:ffff:ffff:ffff:ffff:ffff	3801	US	MISNET
 2607:c01::	2607:c3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:c40::	2607:c40:ffff:ffff:ffff:ffff:ffff:ffff	11059	US	MIFFLIN-COUNTY-WIRELESS
-2607:c41::	2607:cff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:d00::	2607:d00:ffff:ffff:ffff:ffff:ffff:ffff	14325	US	OSHEAN
-2607:d01::	2607:d3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2607:c41::	2607:d3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:d40::	2607:d40:ffff:ffff:ffff:ffff:ffff:ffff	5650	US	FRONTIER-FRTR
 2607:d41::	2607:dbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:dc0::	2607:dc0:ffff:ffff:ffff:ffff:ffff:ffff	399029	US	IXD-MEMBER-SERVICES
@@ -80180,7 +80191,8 @@ pub static ASN_V6_DB: &str = r###"
 2607:9000:b000::	2607:9000:ffff:ffff:ffff:ffff:ffff:ffff	11878	US	TZULO
 2607:9001::	2607:9080:4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:9080:5::	2607:9080:5:ffff:ffff:ffff:ffff:ffff	701	US	UUNET
-2607:9080:6::	2607:9080:604:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2607:9080:6::	2607:9080:6:ffff:ffff:ffff:ffff:ffff	7018	US	ATT-INTERNET4
+2607:9080:7::	2607:9080:604:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:9080:605::	2607:9080:605:ffff:ffff:ffff:ffff:ffff	62424	US	MARRIOTT-EU
 2607:9080:606::	2607:9080:704:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:9080:705::	2607:9080:705:ffff:ffff:ffff:ffff:ffff	62424	US	MARRIOTT-EU
@@ -80267,8 +80279,8 @@ pub static ASN_V6_DB: &str = r###"
 2607:9b80:5000::	2607:9b80:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:9b80:8000::	2607:9b80:9fff:ffff:ffff:ffff:ffff:ffff	46558	US	SUN-DSEO
 2607:9b80:a000::	2607:9bc0:100f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:9bc0:1010::	2607:9bc0:101f:ffff:ffff:ffff:ffff:ffff	3477	US	NOAA-NWAVE
-2607:9bc0:1020::	2607:9bc0:103f:ffff:ffff:ffff:ffff:ffff	4473	US	ATTIS-ASN4473
+2607:9bc0:1010::	2607:9bc0:102f:ffff:ffff:ffff:ffff:ffff	3477	US	NOAA-NWAVE
+2607:9bc0:1030::	2607:9bc0:103f:ffff:ffff:ffff:ffff:ffff	4473	US	ATTIS-ASN4473
 2607:9bc0:1040::	2607:9bff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:9c00::	2607:9c00:ffff:ffff:ffff:ffff:ffff:ffff	18474	US	AENEAS
 2607:9c01::	2607:9cff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -80534,9 +80546,7 @@ pub static ASN_V6_DB: &str = r###"
 2607:c040:a::	2607:c040:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:c040:10::	2607:c040:10:ffff:ffff:ffff:ffff:ffff	398089	US	LYNX-01
 2607:c040:11::	2607:c040:11:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:c040:12::	2607:c040:14:ffff:ffff:ffff:ffff:ffff	398089	US	LYNX-01
-2607:c040:15::	2607:c040:15:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:c040:16::	2607:c040:19:ffff:ffff:ffff:ffff:ffff	398089	US	LYNX-01
+2607:c040:12::	2607:c040:19:ffff:ffff:ffff:ffff:ffff	398089	US	LYNX-01
 2607:c040:1a::	2607:c040:1f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:c040:20::	2607:c040:22:ffff:ffff:ffff:ffff:ffff	398089	US	LYNX-01
 2607:c040:23::	2607:c040:25:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -81030,9 +81040,7 @@ pub static ASN_V6_DB: &str = r###"
 2607:f160:8900::	2607:f160:feff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:f160:ff00::	2607:f160:ffff:ffff:ffff:ffff:ffff:ffff	22394	US	CELLCO
 2607:f161::	2607:f16f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:f170::	2607:f170:1f:ffff:ffff:ffff:ffff:ffff	6364	US	ATLANTIC-NET-1
-2607:f170:20::	2607:f170:2f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2607:f170:30::	2607:f170:5f:ffff:ffff:ffff:ffff:ffff	6364	US	ATLANTIC-NET-1
+2607:f170::	2607:f170:5f:ffff:ffff:ffff:ffff:ffff	6364	US	ATLANTIC-NET-1
 2607:f170:60::	2607:f170:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:f170:100::	2607:f170:10f:ffff:ffff:ffff:ffff:ffff	6364	US	ATLANTIC-NET-1
 2607:f170:110::	2607:f170:11f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -81207,7 +81215,8 @@ pub static ASN_V6_DB: &str = r###"
 2607:f2c8::	2607:f2c8:ffff:ffff:ffff:ffff:ffff:ffff	23473	US	PAVLOVMEDIA
 2607:f2c9::	2607:f2d7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:f2d8::	2607:f2d8:42:ffff:ffff:ffff:ffff:ffff	18450	US	WEBNX
-2607:f2d8:43::	2607:f2d8:ffff:ffff:ffff:ffff:ffff:ffff	18450	US	WEBNX
+2607:f2d8:43::	2607:f2d8:9fff:ffff:ffff:ffff:ffff:ffff	18450	US	WEBNX
+2607:f2d8:a000::	2607:f2d8:ffff:ffff:ffff:ffff:ffff:ffff	18450	US	WEBNX
 2607:f2d9::	2607:f2f7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2607:f2f8::	2607:f2f8:ffff:ffff:ffff:ffff:ffff:ffff	25795	US	ARPNET
 2607:f2f9::	2607:f307:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -82897,8 +82906,7 @@ pub static ASN_V6_DB: &str = r###"
 2607:ffb0:3010::	2607:ffb0:3015:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
 2607:ffb0:3016::	2607:ffb0:301c:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
 2607:ffb0:301d::	2607:ffb0:3080:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
-2607:ffb0:3081::	2607:ffb0:3085:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
-2607:ffb0:3086::	2607:ffb0:4002:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
+2607:ffb0:3081::	2607:ffb0:4002:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
 2607:ffb0:4003::	2607:ffb0:4004:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
 2607:ffb0:4005::	2607:ffb0:4006:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
 2607:ffb0:4007::	2607:ffb0:400d:ffff:ffff:ffff:ffff:ffff	6327	CA	SHAW
@@ -82924,7 +82932,8 @@ pub static ASN_V6_DB: &str = r###"
 2607:ffd0:6::	2607:ffd0:1ff:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2607:ffd0:200::	2607:ffd0:302:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2607:ffd0:303::	2607:ffd0:303:ffff:ffff:ffff:ffff:ffff	395506	US	KN-DFW-ASN
-2607:ffd0:304::	2607:ffd0:803:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
+2607:ffd0:304::	2607:ffd0:702:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
+2607:ffd0:703::	2607:ffd0:803:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2607:ffd0:804::	2607:ffd0:eff:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2607:ffd0:f00::	2607:ffd0:ffff:ffff:ffff:ffff:ffff:ffff	13767	US	DATABANK-DFW
 2607:ffd1::	2607:ffd7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -82992,8 +83001,8 @@ pub static ASN_V6_DB: &str = r###"
 2608:106:afe::	2608:106:afe:ffff:ffff:ffff:ffff:ffff	27064	US	DNIC-ASBLK-27032-27159
 2608:106:aff::	2608:107:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2608:107:2::	2608:107:3:ffff:ffff:ffff:ffff:ffff	27046	US	DNIC-ASBLK-27032-27159
-2608:107:4::	2608:108:1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2608:108:2::	2608:108:3:ffff:ffff:ffff:ffff:ffff	27046	US	DNIC-ASBLK-27032-27159
+2608:107:4::	2608:108:2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2608:108:3::	2608:108:3:ffff:ffff:ffff:ffff:ffff	27046	US	DNIC-ASBLK-27032-27159
 2608:108:4::	2608:108:51a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2608:108:51aa::	2608:108:51aa:ffff:ffff:ffff:ffff:ffff	27064	US	DNIC-ASBLK-27032-27159
 2608:108:51ab::	2608:108:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -85155,9 +85164,7 @@ pub static ASN_V6_DB: &str = r###"
 2620:c6::	2620:c6:0:ffff:ffff:ffff:ffff:ffff	63056	US	HOOPESTON-AREA-SCHOOLS
 2620:c6:1::	2620:c7:5fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:c7:6000::	2620:c7:6000:ffff:ffff:ffff:ffff:ffff	16509	US	AMAZON-02
-2620:c7:6001::	2620:c8:1fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2620:c8:2000::	2620:c8:2000:ffff:ffff:ffff:ffff:ffff	401135	CA	STACIE-MOYER-ASN
-2620:c8:2001::	2620:c8:3fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2620:c7:6001::	2620:c8:3fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:c8:4000::	2620:c8:4000:ffff:ffff:ffff:ffff:ffff	36210	US	SFCF
 2620:c8:4001::	2620:c9:dfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:c9:e000::	2620:c9:e000:ffff:ffff:ffff:ffff:ffff	394763	US	CCCERA-AS
@@ -85588,7 +85595,8 @@ pub static ASN_V6_DB: &str = r###"
 2620:10a:8002::	2620:10a:8003:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:10a:8004::	2620:10a:8004:ffff:ffff:ffff:ffff:ffff	27299	CA	CIRA-REGISTRY
 2620:10a:8005::	2620:10a:8016:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2620:10a:8017::	2620:10a:801c:ffff:ffff:ffff:ffff:ffff	394354	CA	CIRA-CLOUD2
+2620:10a:8017::	2620:10a:801b:ffff:ffff:ffff:ffff:ffff	394354	CA	CIRA-CLOUD2
+2620:10a:801c::	2620:10a:801c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:10a:801d::	2620:10a:801d:ffff:ffff:ffff:ffff:ffff	55195	CA	CIRA-CLOUD1
 2620:10a:801e::	2620:10a:801f:ffff:ffff:ffff:ffff:ffff	394354	CA	CIRA-CLOUD2
 2620:10a:8020::	2620:10a:8021:ffff:ffff:ffff:ffff:ffff	55195	CA	CIRA-CLOUD1
@@ -86777,9 +86785,7 @@ pub static ASN_V6_DB: &str = r###"
 2620:160:e300::	2620:160:e30f:ffff:ffff:ffff:ffff:ffff	4196	US	WELLSFARGO-4196
 2620:160:e310::	2620:160:e31f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:160:e320::	2620:160:e32f:ffff:ffff:ffff:ffff:ffff	4196	US	WELLSFARGO-4196
-2620:160:e330::	2620:160:e371:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2620:160:e372::	2620:160:e372:ffff:ffff:ffff:ffff:ffff	2011	US	WELLSFARGO-2011
-2620:160:e373::	2620:160:e6ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2620:160:e330::	2620:160:e6ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:160:e700::	2620:160:e70f:ffff:ffff:ffff:ffff:ffff	10837	US	WELLSFARGO-10837
 2620:160:e710::	2620:160:e71f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2620:160:e720::	2620:160:e72f:ffff:ffff:ffff:ffff:ffff	4196	US	WELLSFARGO-4196
@@ -89169,9 +89175,7 @@ pub static ASN_V6_DB: &str = r###"
 2800:bf0:4501::	2800:bf0:453f:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
 2800:bf0:4540::	2800:bf0:4540:ffff:ffff:ffff:ffff:ffff	52257	EC	Telconet S.A
 2800:bf0:4541::	2800:bf0:45bf:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
-2800:bf0:45c0::	2800:bf0:45c0:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
-2800:bf0:45c1::	2800:bf0:45c1:ffff:ffff:ffff:ffff:ffff	52257	EC	Telconet S.A
-2800:bf0:45c2::	2800:bf0:45ff:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
+2800:bf0:45c0::	2800:bf0:45ff:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
 2800:bf0:4600::	2800:bf0:4600:ffff:ffff:ffff:ffff:ffff	52257	EC	Telconet S.A
 2800:bf0:4601::	2800:bf0:8009:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
 2800:bf0:800a::	2800:bf0:800c:ffff:ffff:ffff:ffff:ffff	27947	EC	Telconet S.A
@@ -89630,9 +89634,7 @@ pub static ASN_V6_DB: &str = r###"
 2801:11:8800::	2801:11:8800:ffff:ffff:ffff:ffff:ffff	14080	CO	Telmex Colombia S.A.
 2801:11:8801::	2801:11:b7ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2801:11:b800::	2801:11:b800:ffff:ffff:ffff:ffff:ffff	64113	CL	FALABELLA TECNOLOGIA CORPORATIVA LTDA
-2801:11:b801::	2801:12:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2801:12:100::	2801:12:10f:ffff:ffff:ffff:ffff:ffff	271818	CO	INSTITUTO NACIONAL DE SALUD
-2801:12:110::	2801:12:17ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2801:11:b801::	2801:12:17ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2801:12:1800::	2801:12:1800:ffff:ffff:ffff:ffff:ffff	27951	CO	Media Commerce Partners S.A
 2801:12:1801::	2801:12:27ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2801:12:2800::	2801:12:2800:ffff:ffff:ffff:ffff:ffff	269972	CO	UNIVERSIDAD DEL QUINDIO
@@ -90487,8 +90489,8 @@ pub static ASN_V6_DB: &str = r###"
 2801:c4:216::	2801:c4:217:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2801:c4:218::	2801:c4:218:ffff:ffff:ffff:ffff:ffff	272297	MX	INSTITUTO MEXICANO DE CINEMATOGRAFIA
 2801:c4:219::	2801:c4:21b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2801:c4:21c::	2801:c4:21d:ffff:ffff:ffff:ffff:ffff	272297	MX	INSTITUTO MEXICANO DE CINEMATOGRAFIA
-2801:c4:21e::	2801:c4:21f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2801:c4:21c::	2801:c4:21e:ffff:ffff:ffff:ffff:ffff	272297	MX	INSTITUTO MEXICANO DE CINEMATOGRAFIA
+2801:c4:21f::	2801:c4:21f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2801:c4:220::	2801:c4:224:ffff:ffff:ffff:ffff:ffff	272289	MX	Centro de Investigacion Cientifica de Yucatan, A.C.
 2801:c4:225::	2801:c4:227:ffff:ffff:ffff:ffff:ffff	272289	MX	Centro de Investigacion Cientifica de Yucatan, A.C.
 2801:c4:228::	2801:c4:228:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
@@ -91032,8 +91034,8 @@ pub static ASN_V6_DB: &str = r###"
 2801:1e5:13::	2801:1e5:13:ffff:ffff:ffff:ffff:ffff	19429	CO	ETB - Colombia
 2801:1e5:14::	2801:1e5:15:ffff:ffff:ffff:ffff:ffff	273083	CO	SECRETARIA DISTRITAL DE CULTURA, RECREACION Y DEPORTE
 2801:1e5:16::	2801:1e5:16:ffff:ffff:ffff:ffff:ffff	19429	CO	ETB - Colombia
-2801:1e5:17::	2801:1e5:1e:ffff:ffff:ffff:ffff:ffff	273083	CO	SECRETARIA DISTRITAL DE CULTURA, RECREACION Y DEPORTE
-2801:1e5:1f::	2801:1e5:1f:ffff:ffff:ffff:ffff:ffff	19429	CO	ETB - Colombia
+2801:1e5:17::	2801:1e5:1d:ffff:ffff:ffff:ffff:ffff	273083	CO	SECRETARIA DISTRITAL DE CULTURA, RECREACION Y DEPORTE
+2801:1e5:1e::	2801:1e5:1f:ffff:ffff:ffff:ffff:ffff	19429	CO	ETB - Colombia
 2801:1e5:20::	2801:1e5:27:ffff:ffff:ffff:ffff:ffff	273083	CO	SECRETARIA DISTRITAL DE CULTURA, RECREACION Y DEPORTE
 2801:1e5:28::	2801:1e5:2b:ffff:ffff:ffff:ffff:ffff	19429	CO	ETB - Colombia
 2801:1e5:2c::	2801:1e5:2c:ffff:ffff:ffff:ffff:ffff	273083	CO	SECRETARIA DISTRITAL DE CULTURA, RECREACION Y DEPORTE
@@ -91264,7 +91266,8 @@ pub static ASN_V6_DB: &str = r###"
 2803:960:e00e::	2803:960:e5ff:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
 2803:960:e600::	2803:960:ea18:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
 2803:960:ea19::	2803:960:efff:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
-2803:960:f000::	2803:960:ffff:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
+2803:960:f000::	2803:960:f007:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
+2803:960:f008::	2803:960:ffff:ffff:ffff:ffff:ffff:ffff	269735	CO	KALU DE COLOMBIA SAS
 2803:961::	2803:97f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:980::	2803:980:ffff:ffff:ffff:ffff:ffff:ffff	263248	CR	GCI SERVICE PROVIDER S.A.
 2803:981::	2803:990:ef:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -91357,7 +91360,8 @@ pub static ASN_V6_DB: &str = r###"
 2803:e50:44::	2803:e50:50:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
 2803:e50:51::	2803:e50:73:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
 2803:e50:74::	2803:e50:509:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
-2803:e50:50a::	2803:e50:2006:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
+2803:e50:50a::	2803:e50:511:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
+2803:e50:512::	2803:e50:2006:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
 2803:e50:2007::	2803:e50:2010:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
 2803:e50:2011::	2803:e50:2013:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
 2803:e50:2014::	2803:e50:3001:ffff:ffff:ffff:ffff:ffff	273217	DO	ACOLME TECH, SRL
@@ -91740,9 +91744,10 @@ pub static ASN_V6_DB: &str = r###"
 2803:1a00:5100::	2803:1a00:5212:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
 2803:1a00:5213::	2803:1a00:52ff:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
 2803:1a00:5300::	2803:1a00:5416:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
-2803:1a00:5417::	2803:1a00:541d:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
-2803:1a00:541e::	2803:1a00:5420:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
-2803:1a00:5421::	2803:1a00:630e:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
+2803:1a00:5417::	2803:1a00:5418:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
+2803:1a00:5419::	2803:1a00:541a:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
+2803:1a00:541b::	2803:1a00:541d:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
+2803:1a00:541e::	2803:1a00:630e:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
 2803:1a00:630f::	2803:1a00:63ff:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
 2803:1a00:6400::	2803:1a00:66ff:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
 2803:1a00:6700::	2803:1a00:680f:ffff:ffff:ffff:ffff:ffff	262186	CO	TV AZTECA SUCURSAL COLOMBIA
@@ -92271,9 +92276,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:3020:2::	2803:3020:9:ffff:ffff:ffff:ffff:ffff	265799	EC	EXPERTSERVI S.A.
 2803:3020:a::	2803:3020:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:3020:10::	2803:3020:10:ffff:ffff:ffff:ffff:ffff	265799	EC	EXPERTSERVI S.A.
-2803:3020:11::	2803:302f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:3030::	2803:3030:ffff:ffff:ffff:ffff:ffff:ffff	274280	VE	ACT NETWORK, C.A.
-2803:3031::	2803:303f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:3020:11::	2803:303f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:3040::	2803:3040:ffff:ffff:ffff:ffff:ffff:ffff	27660	CW	Curacao Telecom
 2803:3041::	2803:304f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:3050::	2803:3050:ffff:ffff:ffff:ffff:ffff:ffff	273101	PE	REDESVIP E.I.R.L.
@@ -92434,9 +92437,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:3a61::	2803:3a7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:3a80::	2803:3a80:bfff:ffff:ffff:ffff:ffff:ffff	23383	HN	METRORED S.A. DE C.V.
 2803:3a80:c000::	2803:3a80:ffff:ffff:ffff:ffff:ffff:ffff	23383	HN	METRORED S.A. DE C.V.
-2803:3a81::	2803:3a8f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:3a90::	2803:3a90:ffff:ffff:ffff:ffff:ffff:ffff	272872	AR	DATOS NET DEL SUR S.R.L
-2803:3a91::	2803:3aff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:3a81::	2803:3aff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:3b00::	2803:3b00:1f:ffff:ffff:ffff:ffff:ffff	52477	AR	ApInter
 2803:3b00:20::	2803:3b00:10f:ffff:ffff:ffff:ffff:ffff	52477	AR	ApInter
 2803:3b00:110::	2803:3b00:ffff:ffff:ffff:ffff:ffff:ffff	52477	AR	ApInter
@@ -92819,8 +92820,9 @@ pub static ASN_V6_DB: &str = r###"
 2803:5190:8001::	2803:5190:9000:ffff:ffff:ffff:ffff:ffff	272935	DO	GB TELECORP DOMINICANA, S.R.L
 2803:5190:9001::	2803:5190:ffff:ffff:ffff:ffff:ffff:ffff	272935	DO	GB TELECORP DOMINICANA, S.R.L
 2803:5191::	2803:51a0:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:51a0:10::	2803:51a0:2f:ffff:ffff:ffff:ffff:ffff	267699	EC	CUBOTELECOM CIA. LTDA.
-2803:51a0:30::	2803:51a0:50:ffff:ffff:ffff:ffff:ffff	267699	EC	CUBOTELECOM CIA. LTDA.
+2803:51a0:10::	2803:51a0:1f:ffff:ffff:ffff:ffff:ffff	267699	EC	CUBOTELECOM CIA. LTDA.
+2803:51a0:20::	2803:51a0:3f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:51a0:40::	2803:51a0:50:ffff:ffff:ffff:ffff:ffff	267699	EC	CUBOTELECOM CIA. LTDA.
 2803:51a0:51::	2803:51a0:5e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:51a0:5f::	2803:51a0:5f:ffff:ffff:ffff:ffff:ffff	267699	EC	CUBOTELECOM CIA. LTDA.
 2803:51a0:60::	2803:51a0:7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -93076,8 +93078,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:5ce0:500::	2803:5ce0:5ff:ffff:ffff:ffff:ffff:ffff	271809	CO	IGLESIA CRISTIANA DE LOS TESTIGOS DE JEHOVA
 2803:5ce0:600::	2803:5ce0:6ff:ffff:ffff:ffff:ffff:ffff	54235	CA	WTBTSC-AS
 2803:5ce0:700::	2803:5ce0:7ff:ffff:ffff:ffff:ffff:ffff	27887	DO	WIND Telecom S.A.
-2803:5ce0:800::	2803:5ce0:9ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:5ce0:a00::	2803:5ce0:aff:ffff:ffff:ffff:ffff:ffff	10753	US	LUMEN-LEGACY-L3-CUSTOMER-SHARED-USE
+2803:5ce0:800::	2803:5ce0:aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:5ce0:b00::	2803:5ce0:bff:ffff:ffff:ffff:ffff:ffff	272799	AR	ASOCIACION DE LOS TESTIGOS DE JEHOVA
 2803:5ce0:c00::	2803:5ce0:eff:ffff:ffff:ffff:ffff:ffff	54235	CA	WTBTSC-AS
 2803:5ce0:f00::	2803:5d0f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -93859,8 +93860,8 @@ pub static ASN_V6_DB: &str = r###"
 2803:8291::	2803:82bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:82c0::	2803:82c0:ffff:ffff:ffff:ffff:ffff:ffff	264832	AR	FIBERNEXT SRL
 2803:82c1::	2803:82cf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:82d0::	2803:82d0:5:ffff:ffff:ffff:ffff:ffff	262179	SV	TELENETWORK DE EL SALVADORS.A. DE C.V.
-2803:82d0:6::	2803:82d0:ffff:ffff:ffff:ffff:ffff:ffff	262179	SV	TELENETWORK DE EL SALVADORS.A. DE C.V.
+2803:82d0::	2803:82d0:7:ffff:ffff:ffff:ffff:ffff	262179	SV	TELENETWORK DE EL SALVADORS.A. DE C.V.
+2803:82d0:8::	2803:82d0:ffff:ffff:ffff:ffff:ffff:ffff	262179	SV	TELENETWORK DE EL SALVADORS.A. DE C.V.
 2803:82d1::	2803:833f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8340::	2803:8340:ffff:ffff:ffff:ffff:ffff:ffff	52330	CO	S3WIRELESS COLOMBIA S.A
 2803:8341::	2803:834f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -93905,9 +93906,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:85e0::	2803:85e0:ffff:ffff:ffff:ffff:ffff:ffff	270031	CO	TELENET DIGITAL S.A.S
 2803:85e1::	2803:85ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8600::	2803:8600:ffff:ffff:ffff:ffff:ffff:ffff	27759	HT	ACCESS HAITI S.A.
-2803:8601::	2803:860f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:8610::	2803:8610:ffff:ffff:ffff:ffff:ffff:ffff	271938	NI	Gavarrete Guadamuz y Compania Limitada
-2803:8611::	2803:864f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:8601::	2803:864f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8650::	2803:8650:ffff:ffff:ffff:ffff:ffff:ffff	273193	PE	FIBERTIM S.A.C
 2803:8651::	2803:868f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8690::	2803:8690:ffff:ffff:ffff:ffff:ffff:ffff	272889	EC	URDATEL S.A.S.
@@ -93969,7 +93968,9 @@ pub static ASN_V6_DB: &str = r###"
 2803:8960::	2803:8960:ffff:ffff:ffff:ffff:ffff:ffff	269736	PA	PACIFIC NETWORK COMMUNICATION S.A.
 2803:8961::	2803:898f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8990::	2803:8990:ffff:ffff:ffff:ffff:ffff:ffff	272943	DO	OPENCONNECTION FERNANDEZ, S.R.L
-2803:8991::	2803:8a0f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:8991::	2803:89df:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:89e0::	2803:89e0:ffff:ffff:ffff:ffff:ffff:ffff	270008	CL	SOCIEDAD COMERCIAL Y DE SERVICIOS DE INTERNET Y COMUNICACION CHILE SPA
+2803:89e1::	2803:8a0f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8a10::	2803:8a10:1fff:ffff:ffff:ffff:ffff:ffff	64120	PE	NOCPERU-LATIN TECHNOLOGIES
 2803:8a10:2000::	2803:8a4f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:8a50::	2803:8a50:ffff:ffff:ffff:ffff:ffff:ffff	273175	AR	CHIPPED S.R.L.
@@ -94764,7 +94765,14 @@ pub static ASN_V6_DB: &str = r###"
 2803:ad80:aa2::	2803:ad9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ada0::	2803:ada0:ffff:ffff:ffff:ffff:ffff:ffff	267759	AR	GRUPO INVERSOR EN COMUNICACIONES S.R.L
 2803:ada1::	2803:adbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:adc0::	2803:adc0:1fff:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0::	2803:adc0:1005:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1006::	2803:adc0:1008:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1009::	2803:adc0:1018:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1019::	2803:adc0:102c:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:102d::	2803:adc0:1042:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1043::	2803:adc0:1054:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1055::	2803:adc0:1b01:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
+2803:adc0:1b02::	2803:adc0:1fff:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
 2803:adc0:2000::	2803:adc0:ffff:ffff:ffff:ffff:ffff:ffff	265722	AR	LA RED WIFI SOCIEDAD DE HECHO
 2803:adc1::	2803:addf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ade0::	2803:ade0:2:ffff:ffff:ffff:ffff:ffff	270049	EC	MARVICNET CIA LTDA
@@ -94895,9 +94903,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:b430:5200::	2803:b430:ffff:ffff:ffff:ffff:ffff:ffff	274315	GT	AS274315
 2803:b431::	2803:b43f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:b440::	2803:b440:ffff:ffff:ffff:ffff:ffff:ffff	263785	CR	COLUMBUS NETWORKS DE COSTA RICA SOCIEDAD DE RESPONSABILIDAD LIMITADA
-2803:b441::	2803:b44f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:b450::	2803:b450:ffff:ffff:ffff:ffff:ffff:ffff	273137	AR	OLINTO S.R.L.
-2803:b451::	2803:b45f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:b441::	2803:b45f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:b460::	2803:b460:ffff:ffff:ffff:ffff:ffff:ffff	267843	VE	TCA SERVICES C.A.
 2803:b461::	2803:b47f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:b480::	2803:b480:0:ffff:ffff:ffff:ffff:ffff	28099	CL	iHosting Servicios Internet Ltda.
@@ -95108,7 +95114,9 @@ pub static ASN_V6_DB: &str = r###"
 2803:bfc0::	2803:bfc0:1ff:ffff:ffff:ffff:ffff:ffff	265787	EC	MERCREDI S.A.
 2803:bfc0:200::	2803:bfc0:2ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:bfc0:300::	2803:bfc0:3ff:ffff:ffff:ffff:ffff:ffff	265787	EC	MERCREDI S.A.
-2803:bfc0:400::	2803:bfe0:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:bfc0:400::	2803:bfcf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:bfd0::	2803:bfd0:ffff:ffff:ffff:ffff:ffff:ffff	274266	DO	FIBERCOM DOMINICANA SRL
+2803:bfd1::	2803:bfe0:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:bfe0:100::	2803:bfe0:2ff:ffff:ffff:ffff:ffff:ffff	271791	VE	CABLE NORTE CA.
 2803:bfe0:300::	2803:bfff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:c000::	2803:c000:13e:ffff:ffff:ffff:ffff:ffff	264628	VE	CORPORACION FIBEX TELECOM, C.A.
@@ -95343,7 +95351,9 @@ pub static ASN_V6_DB: &str = r###"
 2803:ca10::	2803:ca10:3ff:ffff:ffff:ffff:ffff:ffff	271917	VE	SOLUCIONES TECNICAS VENEZUELA, C.A.
 2803:ca10:400::	2803:ca1f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ca20::	2803:ca20:ffff:ffff:ffff:ffff:ffff:ffff	265849	HN	HONDURAS ADELANTE SA
-2803:ca21::	2803:ca4f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:ca21::	2803:ca2f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:ca30::	2803:ca30:ffff:ffff:ffff:ffff:ffff:ffff	272872	AR	DATOS NET DEL SUR S.R.L
+2803:ca31::	2803:ca4f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ca50::	2803:ca50:3c00:ffff:ffff:ffff:ffff:ffff	273177	EC	TELECOM3000 S.A.
 2803:ca50:3c01::	2803:ca50:3f00:ffff:ffff:ffff:ffff:ffff	273177	EC	TELECOM3000 S.A.
 2803:ca50:3f01::	2803:ca50:4c01:ffff:ffff:ffff:ffff:ffff	273177	EC	TELECOM3000 S.A.
@@ -95499,7 +95509,8 @@ pub static ASN_V6_DB: &str = r###"
 2803:cf50:615::	2803:d000:fffd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:d000:fffe::	2803:d000:fffe:ffff:ffff:ffff:ffff:ffff	393398	US	ASN-DIS
 2803:d000:ffff::	2803:d00f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:d010::	2803:d010:ffff:ffff:ffff:ffff:ffff:ffff	271806	DO	MR Networking, SRL
+2803:d010::	2803:d010:190:ffff:ffff:ffff:ffff:ffff	271806	DO	MR Networking, SRL
+2803:d010:191::	2803:d010:ffff:ffff:ffff:ffff:ffff:ffff	271806	DO	MR Networking, SRL
 2803:d011::	2803:d05f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:d060::	2803:d060:ffff:ffff:ffff:ffff:ffff:ffff	267813	VE	REPRESENTACIONES ABANET, C.A.
 2803:d061::	2803:d07f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -96326,9 +96337,7 @@ pub static ASN_V6_DB: &str = r###"
 2803:fa10:e001::	2803:fa10:ffff:ffff:ffff:ffff:ffff:ffff	271936	EC	SERVICIOS DE TELECOMUNICACIONES ATVCABLE CIA. LTDA.
 2803:fa11::	2803:fa50:100:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:fa50:101::	2803:fa50:102:ffff:ffff:ffff:ffff:ffff	273191	CO	Geanet SAS
-2803:fa50:103::	2803:fa7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:fa80::	2803:fa80:ffff:ffff:ffff:ffff:ffff:ffff	262934	AR	IP*RED
-2803:fa81::	2803:fa8f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:fa50:103::	2803:fa8f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:fa90::	2803:fa90:ffff:ffff:ffff:ffff:ffff:ffff	272887	DO	TURBOCOM TELECOM SRL
 2803:fa91::	2803:facf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:fad0::	2803:fad0:3:ffff:ffff:ffff:ffff:ffff	274084	DO	OWS OPTIMUM WIRELESS SERVICES, S.R.L.
@@ -96393,8 +96402,8 @@ pub static ASN_V6_DB: &str = r###"
 2803:ff21::	2803:ff3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ff40::	2803:ff40:ffff:ffff:ffff:ffff:ffff:ffff	263799	SR	CARIBBEAN COMMUNICATION SERVICES
 2803:ff41::	2803:ff50:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2803:ff50:100::	2803:ff50:6ff:ffff:ffff:ffff:ffff:ffff	273959	PE	GUECAM TECNOLOGIA Y SERVICIOS E.I.R.L.
-2803:ff50:700::	2803:ff5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2803:ff50:100::	2803:ff50:3ff:ffff:ffff:ffff:ffff:ffff	273959	PE	GUECAM TECNOLOGIA Y SERVICIOS E.I.R.L.
+2803:ff50:400::	2803:ff5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2803:ff60::	2803:ff60:f09:ffff:ffff:ffff:ffff:ffff	266783	EC	Anibal Humberto Enriquez MoncayoComunicate
 2803:ff60:f0a::	2803:ff60:f28:ffff:ffff:ffff:ffff:ffff	266783	EC	Anibal Humberto Enriquez MoncayoComunicate
 2803:ff60:f29::	2803:ff60:28ff:ffff:ffff:ffff:ffff:ffff	266783	EC	Anibal Humberto Enriquez MoncayoComunicate
@@ -96648,7 +96657,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:d0:2000::	2804:d0:ffff:ffff:ffff:ffff:ffff:ffff	28145	BR	RLINE TELECOM LTDA
 2804:d1::	2804:d3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:d4::	2804:d4:fff:ffff:ffff:ffff:ffff:ffff	28209	BR	Under Servicos de Internet Ltda
-2804:d4:1000::	2804:d4:8fff:ffff:ffff:ffff:ffff:ffff	28138	BR	WN INTERNET
+2804:d4:1000::	2804:d4:5fff:ffff:ffff:ffff:ffff:ffff	28138	BR	WN INTERNET
+2804:d4:6000::	2804:d4:8fff:ffff:ffff:ffff:ffff:ffff	28138	BR	WN INTERNET
 2804:d4:9000::	2804:d4:ffff:ffff:ffff:ffff:ffff:ffff	28138	BR	WN INTERNET
 2804:d5::	2804:df:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:e0::	2804:e0:3:ffff:ffff:ffff:ffff:ffff	28330	Unknown	AS28330
@@ -97697,7 +97707,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:3b8:229::	2804:3b8:22c:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
 2804:3b8:22d::	2804:3b8:232:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
 2804:3b8:233::	2804:3b8:23c:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
-2804:3b8:23d::	2804:3b8:262:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
+2804:3b8:23d::	2804:3b8:25d:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
+2804:3b8:25e::	2804:3b8:262:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
 2804:3b8:263::	2804:3b8:fadb:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
 2804:3b8:fadc::	2804:3b8:fadd:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
 2804:3b8:fade::	2804:3b8:fd0f:ffff:ffff:ffff:ffff:ffff	52965	BR	1TELECOM SERVICOS DE TECNOLOGIA EM INTERNET LTDA
@@ -98508,7 +98519,10 @@ pub static ASN_V6_DB: &str = r###"
 2804:90c:2001::	2804:90c:f9ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:90c:fa00::	2804:90c:faff:ffff:ffff:ffff:ffff:ffff	262617	BR	UWBR VOX Telecomunicacoes SA
 2804:90c:fb00::	2804:90f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:910::	2804:910:ffff:ffff:ffff:ffff:ffff:ffff	53075	BR	Holistica Provedor Internet Ltda
+2804:910::	2804:910:57f:ffff:ffff:ffff:ffff:ffff	53075	BR	Holistica Provedor Internet Ltda
+2804:910:580::	2804:910:5ff:ffff:ffff:ffff:ffff:ffff	53075	BR	Holistica Provedor Internet Ltda
+2804:910:600::	2804:910:87f:ffff:ffff:ffff:ffff:ffff	53075	BR	Holistica Provedor Internet Ltda
+2804:910:880::	2804:910:ffff:ffff:ffff:ffff:ffff:ffff	53075	BR	Holistica Provedor Internet Ltda
 2804:911::	2804:917:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:918::	2804:918:ffff:ffff:ffff:ffff:ffff:ffff	28584	BR	Defferrari Solucoes em Internet Ltda
 2804:919::	2804:91b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -98709,7 +98723,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:a98::	2804:a98:ffff:ffff:ffff:ffff:ffff:ffff	52896	BR	BDNET SOLUCOES TECNOLOGICAS LTDA ME
 2804:a99::	2804:a9b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:a9c::	2804:a9c:ffff:ffff:ffff:ffff:ffff:ffff	52898	BR	Multipla Servicos Inteligentes
-2804:a9d::	2804:aa8:ffcf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:a9d::	2804:aa7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:aa8::	2804:aa8:1ff:ffff:ffff:ffff:ffff:ffff	52903	BR	Sglinknet Telecomunicacoes Ltda-ME
+2804:aa8:200::	2804:aa8:ffcf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:aa8:ffd0::	2804:aa8:ffdf:ffff:ffff:ffff:ffff:ffff	52903	BR	Sglinknet Telecomunicacoes Ltda-ME
 2804:aa8:ffe0::	2804:aab:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:aac::	2804:aac:7fff:ffff:ffff:ffff:ffff:ffff	52905	BR	MIT Internet
@@ -99146,7 +99162,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:d94::	2804:d94:ffff:ffff:ffff:ffff:ffff:ffff	52640	BR	USCM - COMUNICACAO MULTIMIDIA LTDA.
 2804:d95::	2804:d97:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:d98::	2804:d98:ffff:ffff:ffff:ffff:ffff:ffff	52642	BR	SN BANDA LARGA COMERCIO E TELECOMUNICACOES LTDA -
-2804:d99::	2804:d9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:d99::	2804:d9b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:d9c::	2804:d9c:ffff:ffff:ffff:ffff:ffff:ffff	52647	BR	Melp Comercio & Representacoes Ltda ME
+2804:d9d::	2804:d9f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:da0::	2804:da0:ffff:ffff:ffff:ffff:ffff:ffff	28587	BR	RADNET SERVICOS EM TI LTDA
 2804:da1::	2804:da3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:da4::	2804:da4:a:ffff:ffff:ffff:ffff:ffff	27720	BR	CITTA TELECOM LTDA
@@ -99815,8 +99833,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:11b0::	2804:11b0:1:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
 2804:11b0:2::	2804:11b0:1f:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
 2804:11b0:20::	2804:11b0:1ff:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
-2804:11b0:200::	2804:11b0:aff:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
-2804:11b0:b00::	2804:11b0:100f:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
+2804:11b0:200::	2804:11b0:100f:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
 2804:11b0:1010::	2804:11b0:d005:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
 2804:11b0:d006::	2804:11b0:d7ff:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
 2804:11b0:d800::	2804:11b0:ffff:ffff:ffff:ffff:ffff:ffff	263432	BR	CORPORATIVA TELECOMUNICACOES EIRELI ME
@@ -100409,8 +100426,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:1600:3::	2804:1600:1ff:ffff:ffff:ffff:ffff:ffff	263421	BR	NR CONEXOES
 2804:1600:200::	2804:1600:3fff:ffff:ffff:ffff:ffff:ffff	263421	BR	NR CONEXOES
 2804:1600:4000::	2804:1600:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:1600:8000::	2804:1600:c1ff:ffff:ffff:ffff:ffff:ffff	263421	BR	NR CONEXOES
-2804:1600:c200::	2804:1603:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:1600:8000::	2804:1600:bfff:ffff:ffff:ffff:ffff:ffff	263421	BR	NR CONEXOES
+2804:1600:c000::	2804:1603:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:1604::	2804:1604:ffff:ffff:ffff:ffff:ffff:ffff	263422	BR	AXES SERVICOS DE COMUNICACAO LTDA.
 2804:1605::	2804:160b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:160c::	2804:160c:4fff:ffff:ffff:ffff:ffff:ffff	263264	BR	GRUPO CONECTA TELECOM SCM LTDA EPP
@@ -100855,8 +100872,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:1918::	2804:1918:17f:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
 2804:1918:180::	2804:1918:183:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
 2804:1918:184::	2804:1918:37f:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
-2804:1918:380::	2804:1918:385:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
-2804:1918:386::	2804:1918:387:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
+2804:1918:380::	2804:1918:387:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
 2804:1918:388::	2804:1918:ffff:ffff:ffff:ffff:ffff:ffff	52862	BR	ISP PREMIUM TELECOM SA
 2804:1919::	2804:191b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:191c::	2804:191c:ffff:ffff:ffff:ffff:ffff:ffff	52641	BR	JAN CHARLES RUECKERT - EPP
@@ -101634,7 +101650,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:1f3c:9010::	2804:1f3c:bfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:1f3c:c000::	2804:1f3c:dfff:ffff:ffff:ffff:ffff:ffff	273758	BR	PROCURADORIA GERAL DE JUSTICA
 2804:1f3c:e000::	2804:1f41:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:1f42::	2804:1f42:ffff:ffff:ffff:ffff:ffff:ffff	270694	BR	BANCO NACIONAL DE DESENVOLVIMENTO ECONOMICO E SOCI
+2804:1f42::	2804:1f42:17ff:ffff:ffff:ffff:ffff:ffff	270694	BR	BANCO NACIONAL DE DESENVOLVIMENTO ECONOMICO E SOCI
+2804:1f42:1800::	2804:1f42:1fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:1f42:2000::	2804:1f42:ffff:ffff:ffff:ffff:ffff:ffff	270694	BR	BANCO NACIONAL DE DESENVOLVIMENTO ECONOMICO E SOCI
 2804:1f43::	2804:1f45:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:1f46::	2804:1f46:0:ffff:ffff:ffff:ffff:ffff	268989	BR	MULTTV CONSULTORIA E LOCACOES DE EQUIPAMENTOS S.A.
 2804:1f46:1::	2804:1f46:fffe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -102093,7 +102111,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:2389::	2804:238b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:238c::	2804:238c:1ff:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
 2804:238c:200::	2804:238c:12ff:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
-2804:238c:1300::	2804:238c:3fff:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
+2804:238c:1300::	2804:238c:2200:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
+2804:238c:2201::	2804:238c:3fff:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
 2804:238c:4000::	2804:238c:50ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:238c:5100::	2804:238c:5107:ffff:ffff:ffff:ffff:ffff	264169	BR	WNP INTERNET
 2804:238c:5108::	2804:238c:5fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -102239,7 +102258,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:24cd::	2804:24d3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:24d4::	2804:24d4:ffff:ffff:ffff:ffff:ffff:ffff	52781	BR	Pertec Servicos de Telecomunicacoes ltda
 2804:24d5::	2804:24d7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:24d8::	2804:24d8:ffff:ffff:ffff:ffff:ffff:ffff	264244	BR	SPEED NET SERVICOS DE TELECOMUNICACOES LTDA-ME
+2804:24d8::	2804:24d8:8007:ffff:ffff:ffff:ffff:ffff	264244	BR	SPEED NET SERVICOS DE TELECOMUNICACOES LTDA-ME
+2804:24d8:8008::	2804:24d8:ffff:ffff:ffff:ffff:ffff:ffff	264244	BR	SPEED NET SERVICOS DE TELECOMUNICACOES LTDA-ME
 2804:24d9::	2804:24db:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:24dc::	2804:24dc:4ff:ffff:ffff:ffff:ffff:ffff	28186	BR	ITS TELECOMUNICACOES LTDA
 2804:24dc:500::	2804:24dc:ffff:ffff:ffff:ffff:ffff:ffff	28186	BR	ITS TELECOMUNICACOES LTDA
@@ -103067,10 +103087,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:2991::	2804:2993:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:2994::	2804:2994:2000:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
 2804:2994:2001::	2804:2994:2011:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
-2804:2994:2012::	2804:2994:2014:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
-2804:2994:2015::	2804:2994:201d:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
-2804:2994:201e::	2804:2994:801a:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
-2804:2994:801b::	2804:2994:ffff:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
+2804:2994:2012::	2804:2994:2016:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
+2804:2994:2017::	2804:2994:201d:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
+2804:2994:201e::	2804:2994:ffff:ffff:ffff:ffff:ffff:ffff	264023	BR	SE77E TELECOM EIRELI ME
 2804:2995::	2804:2997:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:2998::	2804:2998:ffff:ffff:ffff:ffff:ffff:ffff	264024	BR	Wnet Telecom e Informatica EIRELI
 2804:2999::	2804:299b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -103997,9 +104016,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:30fc:1f::	2804:30fc:43f:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
 2804:30fc:440::	2804:30fc:449:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
 2804:30fc:44a::	2804:30fc:458:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
-2804:30fc:459::	2804:30fc:464:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
-2804:30fc:465::	2804:30fc:484:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
-2804:30fc:485::	2804:30fc:ffff:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
+2804:30fc:459::	2804:30fc:462:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
+2804:30fc:463::	2804:30fc:464:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
+2804:30fc:465::	2804:30fc:ffff:ffff:ffff:ffff:ffff:ffff	263009	BR	FORTE TELECOM LTDA.
 2804:30fd::	2804:30ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:3100::	2804:3100:ffff:ffff:ffff:ffff:ffff:ffff	264986	BR	INTERATIVA NETWORKS
 2804:3101::	2804:3103:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -104018,11 +104037,12 @@ pub static ASN_V6_DB: &str = r###"
 2804:3119::	2804:311b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:311c::	2804:311c:ffff:ffff:ffff:ffff:ffff:ffff	264993	BR	NETLIDERES - PROVEDOR DE INTERNET EIRELI
 2804:311d::	2804:3123:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:3124::	2804:3124:800c:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
-2804:3124:800d::	2804:3124:c00d:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
+2804:3124::	2804:3124:43ff:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
+2804:3124:4400::	2804:3124:800c:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
+2804:3124:800d::	2804:3124:c007:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
+2804:3124:c008::	2804:3124:c00d:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
 2804:3124:c00e::	2804:3124:c012:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
-2804:3124:c013::	2804:3124:c016:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
-2804:3124:c017::	2804:3124:ffff:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
+2804:3124:c013::	2804:3124:ffff:ffff:ffff:ffff:ffff:ffff	264996	BR	SERVLINK TELECOM LTDA - ME
 2804:3125::	2804:3127:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:3128::	2804:3128:ffff:ffff:ffff:ffff:ffff:ffff	264997	BR	Direct Telecom Ltda
 2804:3129::	2804:312b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -105193,8 +105213,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:3aed::	2804:3aef:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:3af0::	2804:3af0:ffff:ffff:ffff:ffff:ffff:ffff	266119	BR	FOXLINK - INTERNET E ACESSORIOS LTDA
 2804:3af1::	2804:3af7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:3af8::	2804:3af8:9fff:ffff:ffff:ffff:ffff:ffff	266121	BR	SUPER SONIC TELECOM LTDA
-2804:3af8:a000::	2804:3af8:bfff:ffff:ffff:ffff:ffff:ffff	266121	BR	SUPER SONIC TELECOM LTDA
+2804:3af8::	2804:3af8:bfff:ffff:ffff:ffff:ffff:ffff	266121	BR	SUPER SONIC TELECOM LTDA
 2804:3af8:c000::	2804:3af8:ffff:ffff:ffff:ffff:ffff:ffff	266121	BR	SUPER SONIC TELECOM LTDA
 2804:3af9::	2804:3aff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:3b00::	2804:3b00:ffff:ffff:ffff:ffff:ffff:ffff	52973	BR	YIPI Telecom LTDA.
@@ -108548,7 +108567,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:5728:c000::	2804:5728:ffff:ffff:ffff:ffff:ffff:ffff	268048	BR	SpeedyNet Comunicacao Multimidia - Eireli
 2804:5729::	2804:572b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:572c::	2804:572c:ffff:ffff:ffff:ffff:ffff:ffff	268049	BR	INFORTEC COMERCIO VAREJISTA DE MAQUINAS, EQUIPAMEN
-2804:572d::	2804:5733:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:572d::	2804:572f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:5730::	2804:5730:ffff:ffff:ffff:ffff:ffff:ffff	268050	BR	SUPRINET SOLUCOES EM INTERNET LTDA
+2804:5731::	2804:5733:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5734::	2804:5734:ffff:ffff:ffff:ffff:ffff:ffff	268051	BR	NEXFIBRA TELECOMUNICACOES LTDA
 2804:5735::	2804:573f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5740::	2804:5740:ffff:ffff:ffff:ffff:ffff:ffff	268054	BR	GIGA NET INFORMATICA LTDA ME
@@ -108817,8 +108838,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:596c:1::	2804:596c:fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:596c:ff::	2804:596c:ff:ffff:ffff:ffff:ffff:ffff	268701	BR	VIVALINK INTERNET LTDA
 2804:596c:100::	2804:596c:11f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:596c:120::	2804:596c:13f:ffff:ffff:ffff:ffff:ffff	268701	BR	VIVALINK INTERNET LTDA
-2804:596c:140::	2804:596f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:596c:120::	2804:596c:17f:ffff:ffff:ffff:ffff:ffff	268701	BR	VIVALINK INTERNET LTDA
+2804:596c:180::	2804:596f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5970::	2804:5970:ffff:ffff:ffff:ffff:ffff:ffff	268702	BR	Grupo Max Net
 2804:5971::	2804:5973:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5974::	2804:5974:ffff:ffff:ffff:ffff:ffff:ffff	268703	BR	M de J Nenues Moreira
@@ -108860,9 +108881,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:59a4::	2804:59a4:ffff:ffff:ffff:ffff:ffff:ffff	268715	BR	N3 SOLUCOES TECNOLOGICAS LTDA
 2804:59a5::	2804:59ab:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:59ac::	2804:59ac:ffff:ffff:ffff:ffff:ffff:ffff	268718	BR	TOTAL NET PROVEDOR DE INTERNET LTDA
-2804:59ad::	2804:59b3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:59b4::	2804:59b4:ffff:ffff:ffff:ffff:ffff:ffff	268720	BR	MegaNet Fibra Optica Cacu
-2804:59b5::	2804:59b7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:59ad::	2804:59b7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:59b8::	2804:59b8:ffff:ffff:ffff:ffff:ffff:ffff	268721	BR	FNT SERVICOS DE COMUNICACAO MULTIMIDIA LTDA - ME
 2804:59b9::	2804:59bb:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:59bc::	2804:59bc:ffff:ffff:ffff:ffff:ffff:ffff	268722	BR	T G L SERVICOS DE TELECOMUNICACOES LTDA
@@ -108896,7 +108915,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:5a05::	2804:5a07:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5a08::	2804:5a08:ffff:ffff:ffff:ffff:ffff:ffff	268741	BR	RODRIGO OLIVEIRA DE SOUSA
 2804:5a09::	2804:5a0b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:5a0c::	2804:5a0c:ffff:ffff:ffff:ffff:ffff:ffff	268742	BR	DURVAL TELECOM LTDA
+2804:5a0c::	2804:5a0c:7fff:ffff:ffff:ffff:ffff:ffff	268742	BR	DURVAL TELECOM LTDA
+2804:5a0c:8000::	2804:5a0c:ffff:ffff:ffff:ffff:ffff:ffff	268742	BR	DURVAL TELECOM LTDA
 2804:5a0d::	2804:5a0f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5a10::	2804:5a10:ffff:ffff:ffff:ffff:ffff:ffff	268746	BR	GEFSON CARLOS DA SILVA HONORATO
 2804:5a11::	2804:5a13:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -109172,8 +109192,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:5c79::	2804:5c7b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5c7c::	2804:5c7c:ffff:ffff:ffff:ffff:ffff:ffff	268911	BR	ESMILENE GOIS FRANCA - ME
 2804:5c7d::	2804:5c80:1fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:5c80:2000::	2804:5c80:3fff:ffff:ffff:ffff:ffff:ffff	268912	BR	Escorpiao Telecom comercio e servicos de internet
-2804:5c80:4000::	2804:5c83:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:5c80:2000::	2804:5c80:2fff:ffff:ffff:ffff:ffff:ffff	268912	BR	Escorpiao Telecom comercio e servicos de internet
+2804:5c80:3000::	2804:5c83:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5c84::	2804:5c84:ffff:ffff:ffff:ffff:ffff:ffff	268913	BR	Ara Telecom Ltda
 2804:5c85::	2804:5c87:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:5c88::	2804:5c88:1cff:ffff:ffff:ffff:ffff:ffff	268914	BR	ERIQUELSON SILVA DE SOUTO - ME
@@ -110608,7 +110628,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:6831::	2804:6833:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6834::	2804:6834:ffff:ffff:ffff:ffff:ffff:ffff	269676	BR	FORCA E ACAO SERVICOS DE TELECOMUNICACAO EIRELI
 2804:6835::	2804:6837:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:6838::	2804:6838:ffff:ffff:ffff:ffff:ffff:ffff	269677	BR	Gerson Cerqueira
+2804:6838::	2804:6838:ffff:ffff:ffff:ffff:ffff:ffff	6	US	BULL-HN
 2804:6839::	2804:683b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:683c::	2804:683c:ffff:ffff:ffff:ffff:ffff:ffff	269678	BR	NETGTI Internet e Telecomunicacoes Eireli
 2804:683d::	2804:683f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -110981,9 +111001,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:6b30::	2804:6b30:ffff:ffff:ffff:ffff:ffff:ffff	270384	BR	OTILIA ANTONIA CELSO
 2804:6b31::	2804:6b33:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6b34::	2804:6b34:3fff:ffff:ffff:ffff:ffff:ffff	270385	BR	CONECTA - PROVEDOR DE INTERNET LTDA.
-2804:6b34:4000::	2804:6b34:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:6b34:8000::	2804:6b34:81ff:ffff:ffff:ffff:ffff:ffff	270385	BR	CONECTA - PROVEDOR DE INTERNET LTDA.
-2804:6b34:8200::	2804:6b34:bfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6b34:4000::	2804:6b34:bfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6b34:c000::	2804:6b34:c1ff:ffff:ffff:ffff:ffff:ffff	270385	BR	CONECTA - PROVEDOR DE INTERNET LTDA.
 2804:6b34:c200::	2804:6b34:c2ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6b34:c300::	2804:6b34:c4ff:ffff:ffff:ffff:ffff:ffff	270385	BR	CONECTA - PROVEDOR DE INTERNET LTDA.
@@ -111134,7 +111152,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:6c51::	2804:6c53:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6c54::	2804:6c54:3fff:ffff:ffff:ffff:ffff:ffff	270460	BR	LIVENET NETWORKS LTDA
 2804:6c54:4000::	2804:6c54:ffff:ffff:ffff:ffff:ffff:ffff	270460	BR	LIVENET NETWORKS LTDA
-2804:6c55::	2804:6c5b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6c55::	2804:6c57:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6c58::	2804:6c58:ffff:ffff:ffff:ffff:ffff:ffff	270462	BR	CHUINET Provedor
+2804:6c59::	2804:6c5b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6c5c::	2804:6c5c:ffff:ffff:ffff:ffff:ffff:ffff	270463	BR	ASCES NET TELECOMUNICACAO LTDA ME
 2804:6c5d::	2804:6c5f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6c60::	2804:6c60:ffff:ffff:ffff:ffff:ffff:ffff	270464	BR	NewFast Telecom
@@ -111276,7 +111296,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:6db4:300::	2804:6db4:ffff:ffff:ffff:ffff:ffff:ffff	270550	BR	TELECOMFIBER SERVICOS DE ACESSO A INTERNET EIRELI
 2804:6db5::	2804:6db7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6db8::	2804:6db8:ffff:ffff:ffff:ffff:ffff:ffff	270551	BR	CORELINK CONECT SEG E TRANSP DE DADOS LTDA
-2804:6db9::	2804:6dbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6db9::	2804:6dbb:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6dbc::	2804:6dbc:ffff:ffff:ffff:ffff:ffff:ffff	262473	BR	SAMISSA TELECOM
+2804:6dbd::	2804:6dbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6dc0::	2804:6dc0:ffff:ffff:ffff:ffff:ffff:ffff	270553	BR	CONEXAO NET
 2804:6dc1::	2804:6dc3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6dc4::	2804:6dc4:ffff:ffff:ffff:ffff:ffff:ffff	270554	BR	M. M. SERVICOS DE INFORMATICA LTDA ME
@@ -111349,9 +111371,7 @@ pub static ASN_V6_DB: &str = r###"
 2804:6e60::	2804:6e60:ffff:ffff:ffff:ffff:ffff:ffff	270593	BR	NAVEG FIBRA
 2804:6e61::	2804:6e63:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6e64::	2804:6e64:ffff:ffff:ffff:ffff:ffff:ffff	270594	BR	ITALY NETWORK COM. E SERV. DE TELECOMUNICACOES LTD
-2804:6e65::	2804:6e67:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:6e68::	2804:6e68:ffff:ffff:ffff:ffff:ffff:ffff	270595	BR	LIGO FIBRA
-2804:6e69::	2804:6e6b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:6e65::	2804:6e6b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6e6c::	2804:6e6c:ffff:ffff:ffff:ffff:ffff:ffff	270596	BR	Rafael Olegario Silva De Lima Servico De Comunicac
 2804:6e6d::	2804:6e73:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:6e74::	2804:6e74:ffff:ffff:ffff:ffff:ffff:ffff	270598	BR	FUSION INTERNET WIFI LTDA
@@ -112815,8 +112835,8 @@ pub static ASN_V6_DB: &str = r###"
 2804:7a64:c000::	2804:7a67:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:7a68::	2804:7a68:ffff:ffff:ffff:ffff:ffff:ffff	271369	BR	R&E TECNOLOGIA E SERVICOS LTDA - ME
 2804:7a69::	2804:7a6b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2804:7a6c::	2804:7a6c:bfff:ffff:ffff:ffff:ffff:ffff	271370	BR	LINKMASTER PROVEDOR SERVICOS E TELECOMUNICACOES-ME
-2804:7a6c:c000::	2804:7a6f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:7a6c::	2804:7a6c:ffff:ffff:ffff:ffff:ffff:ffff	271370	BR	LINKMASTER PROVEDOR SERVICOS E TELECOMUNICACOES-ME
+2804:7a6d::	2804:7a6f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:7a70::	2804:7a70:8010:ffff:ffff:ffff:ffff:ffff	271371	BR	Agility Telecom Varzea Alegre
 2804:7a70:8011::	2804:7a70:ffff:ffff:ffff:ffff:ffff:ffff	271371	BR	Agility Telecom Varzea Alegre
 2804:7a71::	2804:7a77:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -112883,7 +112903,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:7ae8::	2804:7ae8:ffff:ffff:ffff:ffff:ffff:ffff	271399	BR	SGPIEDADENET-PROVEDOR DE INTERNET LTDA - ME
 2804:7ae9::	2804:7aeb:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:7aec::	2804:7aec:ffff:ffff:ffff:ffff:ffff:ffff	271400	BR	CARRILHO E MORAES COMUNICACAO MULTIMIDIA EIRELI
-2804:7aed::	2804:7af3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:7aed::	2804:7aef:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:7af0::	2804:7af0:ffff:ffff:ffff:ffff:ffff:ffff	271401	BR	ATUAL TELECOM
+2804:7af1::	2804:7af3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:7af4::	2804:7af4:ffff:ffff:ffff:ffff:ffff:ffff	271402	BR	Live Conect Telecomunicacoes Ltda.
 2804:7af5::	2804:7af7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:7af8::	2804:7af8:100:ffff:ffff:ffff:ffff:ffff	264436	BR	INTLINK PROVEDORES LTDA
@@ -115202,7 +115224,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:8f3c:4001::	2804:8f3c:800f:ffff:ffff:ffff:ffff:ffff	273478	BR	Sage Networks
 2804:8f3c:8010::	2804:8f3c:8011:ffff:ffff:ffff:ffff:ffff	273478	BR	Sage Networks
 2804:8f3c:8012::	2804:8f3c:ffff:ffff:ffff:ffff:ffff:ffff	273478	BR	Sage Networks
-2804:8f3d::	2804:8f43:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:8f3d::	2804:8f3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:8f40::	2804:8f40:ffff:ffff:ffff:ffff:ffff:ffff	273479	BR	LIBERTY PROVEDOR LTDA
+2804:8f41::	2804:8f43:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:8f44::	2804:8f44:ffff:ffff:ffff:ffff:ffff:ffff	273480	BR	NOW FIBRA PROVEDOR DE INTERNET LTDA
 2804:8f45::	2804:8f47:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:8f48::	2804:8f48:a0ff:ffff:ffff:ffff:ffff:ffff	273481	BR	NC SERVICOS E TELECOMUNICACOES LTDA
@@ -115784,7 +115808,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:9498:1::	2804:9498:1:ffff:ffff:ffff:ffff:ffff	274468	BR	ENTEC SERVICOS DE TELECOMUNICACOES LTDA
 2804:9498:2::	2804:949b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:949c::	2804:949c:ffff:ffff:ffff:ffff:ffff:ffff	274471	BR	Wifi net servicos de telecomunicacoes
-2804:949d::	2804:94a7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:949d::	2804:949f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:94a0::	2804:94a0:fff:ffff:ffff:ffff:ffff:ffff	52876	BR	PW NETWORK INFORMATICA E TELECOMUNICACOES LTDA
+2804:94a0:1000::	2804:94a7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:94a8::	2804:94a8:ffff:ffff:ffff:ffff:ffff:ffff	274472	BR	H M FIGUEREDO
 2804:94a9::	2804:94ab:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:94ac::	2804:94ac:ffff:ffff:ffff:ffff:ffff:ffff	274473	BR	ENTERNET TELECOMUNICACOES LTDA
@@ -116088,7 +116114,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:97c4::	2804:97c4:ffff:ffff:ffff:ffff:ffff:ffff	275644	BR	AS275644
 2804:97c5::	2804:97c7:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:97c8::	2804:97c8:ffff:ffff:ffff:ffff:ffff:ffff	275645	BR	AS275645
-2804:97c9::	2804:97cf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:97c9::	2804:97cb:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:97cc::	2804:97cc:ffff:ffff:ffff:ffff:ffff:ffff	275646	BR	AS275646
+2804:97cd::	2804:97cf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:97d0::	2804:97d0:ffff:ffff:ffff:ffff:ffff:ffff	275647	BR	AS275647
 2804:97d1::	2804:97d3:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:97d4::	2804:97d4:ffff:ffff:ffff:ffff:ffff:ffff	275648	BR	AS275648
@@ -116133,7 +116161,9 @@ pub static ASN_V6_DB: &str = r###"
 2804:9844::	2804:9844:ffff:ffff:ffff:ffff:ffff:ffff	52986	BR	Vupt Provedora de Internet Ltda
 2804:9845::	2804:9847:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:9848::	2804:9848:ffff:ffff:ffff:ffff:ffff:ffff	275679	BR	AS275679
-2804:9849::	2804:984f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:9849::	2804:984b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2804:984c::	2804:984c:ffff:ffff:ffff:ffff:ffff:ffff	274348	BR	DATASEC PROJETOS E SERVICOS DE TECNOLOGIA E SEGUR
+2804:984d::	2804:984f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:9850::	2804:9850:ffff:ffff:ffff:ffff:ffff:ffff	275680	BR	AS275680
 2804:9851::	2804:985b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2804:985c::	2804:985c:ffff:ffff:ffff:ffff:ffff:ffff	275683	BR	AS275683
@@ -116590,7 +116620,8 @@ pub static ASN_V6_DB: &str = r###"
 2806:20d:5602::	2806:20d:5602:ffff:ffff:ffff:ffff:ffff	270164	MX	MATZANET SERVICIOS Y SISTEMAS DE COMUNICACION S.A DE C.V
 2806:20d:5603::	2806:20d:5607:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
 2806:20d:5608::	2806:20d:560e:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
-2806:20d:560f::	2806:20d:5614:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
+2806:20d:560f::	2806:20d:5612:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
+2806:20d:5613::	2806:20d:5614:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
 2806:20d:5615::	2806:20d:5618:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
 2806:20d:5619::	2806:20d:561b:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
 2806:20d:561c::	2806:20d:5702:ffff:ffff:ffff:ffff:ffff	32098	US	TRANSTELCO-INC
@@ -116648,7 +116679,8 @@ pub static ASN_V6_DB: &str = r###"
 2806:211::	2806:211:ffff:ffff:ffff:ffff:ffff:ffff	28539	MX	JOSE MIGUEL MACIAS CONTRERAS
 2806:212::	2806:212:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:213::	2806:213:ffff:ffff:ffff:ffff:ffff:ffff	33182	US	DIMENOC
-2806:214::	2806:216:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:214::	2806:214:ffff:ffff:ffff:ffff:ffff:ffff	28432	MX	Telecable del Mineral, S. A. de C.V.
+2806:215::	2806:216:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:217::	2806:217:201:ffff:ffff:ffff:ffff:ffff	28394	MX	Bicentel SA de CV
 2806:217:202::	2806:217:301:ffff:ffff:ffff:ffff:ffff	28394	MX	Bicentel SA de CV
 2806:217:302::	2806:217:401:ffff:ffff:ffff:ffff:ffff	28394	MX	Bicentel SA de CV
@@ -117564,9 +117596,7 @@ pub static ASN_V6_DB: &str = r###"
 2806:281:2::	2806:281:8006:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
 2806:281:8007::	2806:281:8009:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
 2806:281:800a::	2806:281:ffff:ffff:ffff:ffff:ffff:ffff	3356	US	LEVEL3
-2806:282::	2806:282:9:ffff:ffff:ffff:ffff:ffff	265509	MX	OPTOENLACES S.A. DE C.V.
-2806:282:a::	2806:282:fffd:ffff:ffff:ffff:ffff:ffff	265509	MX	OPTOENLACES S.A. DE C.V.
-2806:282:fffe::	2806:282:ffff:ffff:ffff:ffff:ffff:ffff	265509	MX	OPTOENLACES S.A. DE C.V.
+2806:282::	2806:282:ffff:ffff:ffff:ffff:ffff:ffff	265509	MX	OPTOENLACES S.A. DE C.V.
 2806:283::	2806:283:3fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:283:4000::	2806:283:77ff:ffff:ffff:ffff:ffff:ffff	265515	MX	TELEVERA RED S. A. P. I. DE C.V.
 2806:283:7800::	2806:285:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -118114,11 +118144,22 @@ pub static ASN_V6_DB: &str = r###"
 2806:2f0:65c3::	2806:2f0:701f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:2f0:7020::	2806:2f0:7022:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7023::	2806:2f0:7025:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
-2806:2f0:7026::	2806:2f0:7080:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
-2806:2f0:7081::	2806:2f0:7082:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7026::	2806:2f0:7042:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7043::	2806:2f0:705f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7060::	2806:2f0:7062:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7063::	2806:2f0:707f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7080::	2806:2f0:7082:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7083::	2806:2f0:709f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:2f0:70a0::	2806:2f0:70a2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
-2806:2f0:70a3::	2806:2f0:7162:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:70a3::	2806:2f0:70e2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:70e3::	2806:2f0:70ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7100::	2806:2f0:7102:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7103::	2806:2f0:711f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7120::	2806:2f0:7122:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7123::	2806:2f0:713f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7140::	2806:2f0:7142:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:7143::	2806:2f0:715f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7160::	2806:2f0:7162:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7163::	2806:2f0:717f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:2f0:7180::	2806:2f0:7182:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7183::	2806:2f0:71c2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
@@ -118132,8 +118173,10 @@ pub static ASN_V6_DB: &str = r###"
 2806:2f0:72a0::	2806:2f0:72a2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:72a3::	2806:2f0:72bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:2f0:72c0::	2806:2f0:72c2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
-2806:2f0:72c3::	2806:2f0:72e0:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
-2806:2f0:72e1::	2806:2f0:7302:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:72c3::	2806:2f0:72df:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:72e0::	2806:2f0:72e2:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
+2806:2f0:72e3::	2806:2f0:72ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:2f0:7300::	2806:2f0:7302:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7303::	2806:2f0:731f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:2f0:7320::	2806:2f0:7322:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
 2806:2f0:7323::	2806:2f0:733f:ffff:ffff:ffff:ffff:ffff	17072	MX	TOTAL PLAY TELECOMUNICACIONES SA DE CV
@@ -118730,8 +118773,7 @@ pub static ASN_V6_DB: &str = r###"
 2806:322:8705::	2806:322:8705:ffff:ffff:ffff:ffff:ffff	28546	MX	Servnet Mexico, S.A. de C.V.
 2806:322:8706::	2806:322:8709:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:322:870a::	2806:322:870a:ffff:ffff:ffff:ffff:ffff	28546	MX	Servnet Mexico, S.A. de C.V.
-2806:322:870b::	2806:323:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2806:324::	2806:324:ffff:ffff:ffff:ffff:ffff:ffff	265570	MX	INALAMBRICO DEDICADO S.A. DE C.V.
+2806:322:870b::	2806:324:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:325::	2806:325:ffff:ffff:ffff:ffff:ffff:ffff	28428	MX	INTERPHONET TELECOM, SA DE CV
 2806:326::	2806:326:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:327::	2806:327:ffff:ffff:ffff:ffff:ffff:ffff	265573	MX	NEUROTECH DE LA LAGUNA SA DE CV
@@ -118741,7 +118783,9 @@ pub static ASN_V6_DB: &str = r###"
 2806:32a:100::	2806:32a:3ff:ffff:ffff:ffff:ffff:ffff	265574	MX	IPTVTEL COMUNICACIONES S DE RL DE CV
 2806:32a:400::	2806:32b:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:32c::	2806:32c:ffff:ffff:ffff:ffff:ffff:ffff	265534	MX	TELECOMUNICACIONES DIVERSIFICADAS, S.A. DE C.V.
-2806:32d::	2806:32d:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:32d::	2806:32d:206f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:32d:2070::	2806:32d:207f:ffff:ffff:ffff:ffff:ffff	28431	MX	RAUL DUARTE URITA
+2806:32d:2080::	2806:32d:7fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:32d:8000::	2806:32d:afff:ffff:ffff:ffff:ffff:ffff	28431	MX	RAUL DUARTE URITA
 2806:32d:b000::	2806:32d:cfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:32d:d000::	2806:32d:d3ff:ffff:ffff:ffff:ffff:ffff	28431	MX	RAUL DUARTE URITA
@@ -118816,8 +118860,7 @@ pub static ASN_V6_DB: &str = r###"
 2806:34d:48::	2806:34d:48:ffff:ffff:ffff:ffff:ffff	15695	NL	EXPEREO
 2806:34d:49::	2806:34e:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:34f::	2806:34f:ffff:ffff:ffff:ffff:ffff:ffff	265604	MX	MT NETWORKS S. DE R.L. DE C.V.
-2806:350::	2806:350:ffff:ffff:ffff:ffff:ffff:ffff	263127	MX	Redes y Comunicaciones de Michoacan S.A. de C.V.
-2806:351::	2806:360:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2806:350::	2806:360:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:361::	2806:361:b:ffff:ffff:ffff:ffff:ffff	265605	MX	VELOCOM SA DE CV
 2806:361:c::	2806:361:ffff:ffff:ffff:ffff:ffff:ffff	265605	MX	VELOCOM SA DE CV
 2806:362::	2806:362:ffff:ffff:ffff:ffff:ffff:ffff	265606	MX	DIGY NETWORKS
@@ -119286,7 +119329,9 @@ pub static ASN_V6_DB: &str = r###"
 2806:103e:35::	2806:103e:35:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
 2806:103e:36::	2806:103f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2806:1040::	2806:1040:103:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
-2806:1040:104::	2806:1040:d00:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
+2806:1040:104::	2806:1040:108:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
+2806:1040:109::	2806:1040:109:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
+2806:1040:10a::	2806:1040:d00:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
 2806:1040:d01::	2806:1040:10ff:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
 2806:1040:1100::	2806:1040:1100:ffff:ffff:ffff:ffff:ffff	278	MX	Universidad Nacional Autonoma de Mexico
 2806:1040:1101::	2806:1040:ffff:ffff:ffff:ffff:ffff:ffff	8151	MX	UNINET
@@ -121281,7 +121326,8 @@ pub static ASN_V6_DB: &str = r###"
 2a00:54e1::	2a00:54ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a00:5500::	2a00:5500:ffff:ffff:ffff:ffff:ffff:ffff	3238	FI	ALCOM
 2a00:5501::	2a00:553f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a00:5540::	2a00:5540:ffff:ffff:ffff:ffff:ffff:ffff	50763	IM	MCKAYCOM
+2a00:5540::	2a00:5540:386:ffff:ffff:ffff:ffff:ffff	50763	IM	MCKAYCOM
+2a00:5540:387::	2a00:5540:ffff:ffff:ffff:ffff:ffff:ffff	50763	IM	MCKAYCOM
 2a00:5541::	2a00:555f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a00:5560::	2a00:5560:ffff:ffff:ffff:ffff:ffff:ffff	205411	DE	BOREUS
 2a00:5561::	2a00:557f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -121823,9 +121869,7 @@ pub static ASN_V6_DB: &str = r###"
 2a00:81a0:2301::	2a00:81a0:2400:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
 2a00:81a0:2401::	2a00:81a1:3103:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
 2a00:81a1:3104::	2a00:81a1:3105:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
-2a00:81a1:3106::	2a00:81a1:6101:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
-2a00:81a1:6102::	2a00:81a1:6103:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
-2a00:81a1:6104::	2a00:81a7:ffff:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
+2a00:81a1:3106::	2a00:81a7:ffff:ffff:ffff:ffff:ffff:ffff	60804	CH	SWISS-NETWORK
 2a00:81a8::	2a00:81ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a00:8200::	2a00:8200:ffff:ffff:ffff:ffff:ffff:ffff	204151	DK	KVIKNET-
 2a00:8201::	2a00:821f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -126184,7 +126228,9 @@ pub static ASN_V6_DB: &str = r###"
 2a01:ecc0:740::	2a01:ecc0:77f:ffff:ffff:ffff:ffff:ffff	49418	GB	AS-NETSHIELD
 2a01:ecc0:780::	2a01:ecc0:8bf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a01:ecc0:8c0::	2a01:ecc0:8ff:ffff:ffff:ffff:ffff:ffff	215590	GB	DPKGSOFT-AS
-2a01:ecc0:900::	2a01:ecc0:aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a01:ecc0:900::	2a01:ecc0:9f3:ffff:ffff:ffff:ffff:ffff	205480	UA	USER-AS
+2a01:ecc0:9f4::	2a01:ecc0:9ff:ffff:ffff:ffff:ffff:ffff	205480	UA	USER-AS
+2a01:ecc0:a00::	2a01:ecc0:aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a01:ecc0:b00::	2a01:ecc0:dbf:ffff:ffff:ffff:ffff:ffff	207957	GB	SERVHOST-AS
 2a01:ecc0:dc0::	2a01:ecc0:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a01:ecc0:1000::	2a01:ecc0:1fff:ffff:ffff:ffff:ffff:ffff	213877	GB	U1HOST-AS
@@ -126295,8 +126341,8 @@ pub static ASN_V6_DB: &str = r###"
 2a01:fb05:9000::	2a01:fb05:9fff:ffff:ffff:ffff:ffff:ffff	216096	AD	SECUREPEAK
 2a01:fb05:a000::	2a01:fb05:cfff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a01:fb05:d000::	2a01:fb05:dfff:ffff:ffff:ffff:ffff:ffff	216096	AD	SECUREPEAK
-2a01:fb05:e000::	2a01:fb06:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a01:fb07::	2a01:fb07:3fff:ffff:ffff:ffff:ffff:ffff	216096	AD	SECUREPEAK
+2a01:fb05:e000::	2a01:fb05:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a01:fb06::	2a01:fb07:3fff:ffff:ffff:ffff:ffff:ffff	216096	AD	SECUREPEAK
 2a01:fb07:4000::	2a01:fb3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a01:fb40::	2a01:fb47:ffff:ffff:ffff:ffff:ffff:ffff	213968	NL	NETWERKPLEK
 2a01:fb48::	2a01:fcbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -134729,7 +134775,7 @@ pub static ASN_V6_DB: &str = r###"
 2a03:5840:136::	2a03:5840:138:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a03:5840:139::	2a03:5840:139:ffff:ffff:ffff:ffff:ffff	214387	SE	AKOL
 2a03:5840:13a::	2a03:5840:13c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a03:5840:13d::	2a03:5840:13d:ffff:ffff:ffff:ffff:ffff	199240	Unknown	AS199240
+2a03:5840:13d::	2a03:5840:13d:ffff:ffff:ffff:ffff:ffff	199240	NL	AS199240
 2a03:5840:13e::	2a03:5840:13e:ffff:ffff:ffff:ffff:ffff	200116	IR	VAHIX-INFRASTRUCTURE
 2a03:5840:13f::	2a03:5840:13f:ffff:ffff:ffff:ffff:ffff	200074	US	ASSWH
 2a03:5840:140::	2a03:5840:14f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -136639,9 +136685,7 @@ pub static ASN_V6_DB: &str = r###"
 2a04:14c0::	2a04:14c7:ffff:ffff:ffff:ffff:ffff:ffff	199341	PL	ASN-MARGONET
 2a04:14c8::	2a04:153f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:1540::	2a04:1547:ffff:ffff:ffff:ffff:ffff:ffff	199348	IT	FIBRAWEB
-2a04:1548::	2a04:157f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a04:1580::	2a04:1587:ffff:ffff:ffff:ffff:ffff:ffff	5398	IT	INTERNETONE
-2a04:1588::	2a04:15bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a04:1548::	2a04:15bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:15c0::	2a04:15c7:ffff:ffff:ffff:ffff:ffff:ffff	34134	GB	FREECLIX FreeClix Ltd
 2a04:15c8::	2a04:15ff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:1600::	2a04:1607:ffff:ffff:ffff:ffff:ffff:ffff	61967	DE	AS-TELEMATIS *** SkyLink  XSServer
@@ -136944,7 +136988,9 @@ pub static ASN_V6_DB: &str = r###"
 2a04:3b01:5800::	2a04:3b01:580f:ffff:ffff:ffff:ffff:ffff	58172	KZ	FREEDOMTELECOM-AS FREEDOM TELECOM LLP
 2a04:3b01:5810::	2a04:3b01:5fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:3b01:6000::	2a04:3b01:600f:ffff:ffff:ffff:ffff:ffff	58172	KZ	FREEDOMTELECOM-AS FREEDOM TELECOM LLP
-2a04:3b01:6010::	2a04:3b3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a04:3b01:6010::	2a04:3b02:5c1f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a04:3b02:5c20::	2a04:3b02:5c2f:ffff:ffff:ffff:ffff:ffff	58172	KZ	FREEDOMTELECOM-AS FREEDOM TELECOM LLP
+2a04:3b02:5c30::	2a04:3b3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:3b40::	2a04:3b40:2:ffff:ffff:ffff:ffff:ffff	60664	DE	X-ION
 2a04:3b40:3::	2a04:3b40:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:3b41::	2a04:3b41:0:ffff:ffff:ffff:ffff:ffff	60664	DE	X-ION
@@ -138386,8 +138432,8 @@ pub static ASN_V6_DB: &str = r###"
 2a04:7d85::	2a04:7dbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:7dc0::	2a04:7dc7:ffff:ffff:ffff:ffff:ffff:ffff	43022	UA	UA-SEECH Zaporizhzhia, Soborniy av. 170b
 2a04:7dc8::	2a04:7dff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a04:7e00::	2a04:7e00:0:ffff:ffff:ffff:ffff:ffff	211347	RU	CPOSO-AS
-2a04:7e00:1::	2a04:7e7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a04:7e00::	2a04:7e00:1:ffff:ffff:ffff:ffff:ffff	211347	RU	CPOSO-AS
+2a04:7e00:2::	2a04:7e7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:7e80::	2a04:7e87:ffff:ffff:ffff:ffff:ffff:ffff	50794	EE	LEVIRA
 2a04:7e88::	2a04:7f3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a04:7f40::	2a04:7f47:ffff:ffff:ffff:ffff:ffff:ffff	197212	NO	AARDALSNETT-AS
@@ -140836,8 +140882,8 @@ pub static ASN_V6_DB: &str = r###"
 2a05:dfc1:9900::	2a05:dfc1:99ff:ffff:ffff:ffff:ffff:ffff	199925	VG	AZCOM-AS
 2a05:dfc1:9a00::	2a05:dfc1:9aff:ffff:ffff:ffff:ffff:ffff	137409	AU	GSLNETWORKS-AS-AP GSL Networks Pty LTD
 2a05:dfc1:9b00::	2a05:dfc1:acff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a05:dfc1:ad00::	2a05:dfc1:aeff:ffff:ffff:ffff:ffff:ffff	209182	AT	NUOVAFIBER-AS
-2a05:dfc1:af00::	2a05:dfc1:c2ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a05:dfc1:ad00::	2a05:dfc1:adff:ffff:ffff:ffff:ffff:ffff	209182	AT	NUOVAFIBER-AS
+2a05:dfc1:ae00::	2a05:dfc1:c2ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a05:dfc1:c300::	2a05:dfc1:c301:ffff:ffff:ffff:ffff:ffff	216079	DE	JG-AS Julian Gerhardt ASN
 2a05:dfc1:c302::	2a05:dfc1:c42b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a05:dfc1:c42c::	2a05:dfc1:c42d:ffff:ffff:ffff:ffff:ffff	47496	DE	FREACH-AS
@@ -142364,8 +142410,7 @@ pub static ASN_V6_DB: &str = r###"
 2a06:9801:19::	2a06:9801:19:ffff:ffff:ffff:ffff:ffff	211708	GB	MRTS-TERMINAL
 2a06:9801:1a::	2a06:9801:1b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:1c::	2a06:9801:1c:ffff:ffff:ffff:ffff:ffff	201379	DE	CHFOSTEDE-ASN
-2a06:9801:1d::	2a06:9801:1d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:9801:1e::	2a06:9801:1e:ffff:ffff:ffff:ffff:ffff	201667	US	BREADCLOUD
+2a06:9801:1d::	2a06:9801:1e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:1f::	2a06:9801:1f:ffff:ffff:ffff:ffff:ffff	200104	GB	MEOW-CYBER-NETWORKS Meow Cyber Networks
 2a06:9801:20::	2a06:9801:20:ffff:ffff:ffff:ffff:ffff	201674	CN	WENZHANGYU
 2a06:9801:21::	2a06:9801:22:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -142419,9 +142464,10 @@ pub static ASN_V6_DB: &str = r###"
 2a06:9801:c7::	2a06:9801:c7:ffff:ffff:ffff:ffff:ffff	200386	NL	PLUSSERVER-ASN-STL
 2a06:9801:c8::	2a06:9801:ce:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:cf::	2a06:9801:cf:ffff:ffff:ffff:ffff:ffff	200279	GB	DOUWES-NET
-2a06:9801:d0::	2a06:9801:d2:ffff:ffff:ffff:ffff:ffff	201371	DE	ERHARDT-SYSTEMS
-2a06:9801:d3::	2a06:9801:df:ffff:ffff:ffff:ffff:ffff	201371	DE	ERHARDT-SYSTEMS
-2a06:9801:e0::	2a06:9801:ef:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:d0::	2a06:9801:d0:ffff:ffff:ffff:ffff:ffff	201371	DE	ERHARDT-SYSTEMS
+2a06:9801:d1::	2a06:9801:d1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:d2::	2a06:9801:d2:ffff:ffff:ffff:ffff:ffff	201371	DE	ERHARDT-SYSTEMS
+2a06:9801:d3::	2a06:9801:ef:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:f0::	2a06:9801:ff:ffff:ffff:ffff:ffff:ffff	201392	US	COZY-CRITTERS-SOCIETY
 2a06:9801:100::	2a06:9801:101:ffff:ffff:ffff:ffff:ffff	204261	DE	WX-ONE
 2a06:9801:102::	2a06:9801:110:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -142439,7 +142485,9 @@ pub static ASN_V6_DB: &str = r###"
 2a06:9801:224::	2a06:9801:224:ffff:ffff:ffff:ffff:ffff	199892	MY	AKMAL-H
 2a06:9801:225::	2a06:9801:225:ffff:ffff:ffff:ffff:ffff	199874	ES	BEPROIT
 2a06:9801:226::	2a06:9801:226:ffff:ffff:ffff:ffff:ffff	199879	IL	BARUCHHASHEM
-2a06:9801:227::	2a06:9801:22b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:227::	2a06:9801:229:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:22a::	2a06:9801:22a:ffff:ffff:ffff:ffff:ffff	199243	NZ	AS199243
+2a06:9801:22b::	2a06:9801:22b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:22c::	2a06:9801:22e:ffff:ffff:ffff:ffff:ffff	201131	GB	NEWLINE-AS
 2a06:9801:22f::	2a06:9801:240:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:241::	2a06:9801:241:ffff:ffff:ffff:ffff:ffff	200085	US	WEILNET
@@ -142462,7 +142510,11 @@ pub static ASN_V6_DB: &str = r###"
 2a06:9801:278::	2a06:9801:278:ffff:ffff:ffff:ffff:ffff	199632	NO	TILDENINJA
 2a06:9801:279::	2a06:9801:27f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:280::	2a06:9801:280:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a06:9801:281::	2a06:9801:332:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:281::	2a06:9801:283:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:284::	2a06:9801:284:ffff:ffff:ffff:ffff:ffff	200104	GB	MEOW-CYBER-NETWORKS Meow Cyber Networks
+2a06:9801:285::	2a06:9801:28f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:9801:290::	2a06:9801:29f:ffff:ffff:ffff:ffff:ffff	199243	NZ	AS199243
+2a06:9801:2a0::	2a06:9801:332:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:9801:333::	2a06:9801:333:ffff:ffff:ffff:ffff:ffff	201182	LT	ITU
 2a06:9801:334::	2a06:98c0:1400:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:98c0:1401::	2a06:98c0:1401:ffff:ffff:ffff:ffff:ffff	202623	US	CLOUDFLARENET-CORE Cloudflare, Inc.
@@ -143446,7 +143498,7 @@ pub static ASN_V6_DB: &str = r###"
 2a06:de00:51::	2a06:de00:5f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de00:60::	2a06:de00:6f:ffff:ffff:ffff:ffff:ffff	151633	PH	ARCHON-AS-AP Archon Network and Data Solution
 2a06:de00:70::	2a06:de00:a2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de00:a3::	2a06:de00:a3:ffff:ffff:ffff:ffff:ffff	199133	Unknown	AS199133
+2a06:de00:a3::	2a06:de00:a3:ffff:ffff:ffff:ffff:ffff	199133	RU	AS199133
 2a06:de00:a4::	2a06:de00:ef:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de00:f0::	2a06:de00:ff:ffff:ffff:ffff:ffff:ffff	213748	DE	MQNG-AS
 2a06:de00:100::	2a06:de00:10f:ffff:ffff:ffff:ffff:ffff	44592	NL	SKYLINK
@@ -143508,87 +143560,87 @@ pub static ASN_V6_DB: &str = r###"
 2a06:de02:20::	2a06:de02:23:ffff:ffff:ffff:ffff:ffff	214430	JP	XRONOS
 2a06:de02:24::	2a06:de02:410:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:411::	2a06:de02:411:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:412::	2a06:de02:427:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:428::	2a06:de02:428:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:429::	2a06:de02:42c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:412::	2a06:de02:420:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:421::	2a06:de02:421:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:422::	2a06:de02:42c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:42d::	2a06:de02:42d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:42e::	2a06:de02:43e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:43f::	2a06:de02:43f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:440::	2a06:de02:441:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:442::	2a06:de02:443:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:440::	2a06:de02:442:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:443::	2a06:de02:443:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:444::	2a06:de02:44a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:44b::	2a06:de02:44b:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:44c::	2a06:de02:475:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:476::	2a06:de02:476:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:477::	2a06:de02:481:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:477::	2a06:de02:47c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:47d::	2a06:de02:47d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:47e::	2a06:de02:481:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:482::	2a06:de02:482:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:483::	2a06:de02:493:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:494::	2a06:de02:494:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:495::	2a06:de02:4a3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:4a4::	2a06:de02:4a4:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:4a5::	2a06:de02:4a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:495::	2a06:de02:49e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:49f::	2a06:de02:49f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:4a0::	2a06:de02:4a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:4aa::	2a06:de02:4aa:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:4ab::	2a06:de02:4c6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:4ab::	2a06:de02:4c1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:4c2::	2a06:de02:4c2:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:4c3::	2a06:de02:4c6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:4c7::	2a06:de02:4c7:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:4c8::	2a06:de02:4ce:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:4cf::	2a06:de02:4cf:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:4d0::	2a06:de02:4d6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:4c8::	2a06:de02:4d6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:4d7::	2a06:de02:4d7:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:4d8::	2a06:de02:4f0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:4f1::	2a06:de02:4f1:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:4f2::	2a06:de02:4f4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:4f5::	2a06:de02:4f5:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:4f6::	2a06:de02:500:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:501::	2a06:de02:501:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:502::	2a06:de02:510:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:4f6::	2a06:de02:50a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:50b::	2a06:de02:50b:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:50c::	2a06:de02:510:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:511::	2a06:de02:511:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:512::	2a06:de02:523:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:524::	2a06:de02:524:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:525::	2a06:de02:537:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:538::	2a06:de02:538:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:539::	2a06:de02:552:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:539::	2a06:de02:541:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:542::	2a06:de02:542:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:543::	2a06:de02:552:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:553::	2a06:de02:553:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:554::	2a06:de02:569:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:56a::	2a06:de02:56a:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:56b::	2a06:de02:572:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:573::	2a06:de02:573:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:574::	2a06:de02:575:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:576::	2a06:de02:576:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:577::	2a06:de02:57e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:56b::	2a06:de02:57e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:57f::	2a06:de02:57f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:580::	2a06:de02:586:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:587::	2a06:de02:587:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:588::	2a06:de02:588:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:589::	2a06:de02:589:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:58a::	2a06:de02:5b6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:588::	2a06:de02:59e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:59f::	2a06:de02:5a0:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:5a1::	2a06:de02:5b6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:5b7::	2a06:de02:5b7:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:5b8::	2a06:de02:5ce:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:5cf::	2a06:de02:5cf:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:5d0::	2a06:de02:5ea:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:5d0::	2a06:de02:5d9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:5da::	2a06:de02:5da:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:5db::	2a06:de02:5ea:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:5eb::	2a06:de02:5eb:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:5ec::	2a06:de02:5f6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:5f7::	2a06:de02:5f7:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:5f8::	2a06:de02:5fb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:5ec::	2a06:de02:5fb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:5fc::	2a06:de02:5fc:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:5fd::	2a06:de02:60c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:60d::	2a06:de02:60d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:60e::	2a06:de02:627:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:60e::	2a06:de02:61e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:61f::	2a06:de02:61f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:620::	2a06:de02:627:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:628::	2a06:de02:628:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:629::	2a06:de02:633:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:634::	2a06:de02:634:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:635::	2a06:de02:636:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:637::	2a06:de02:637:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:638::	2a06:de02:63e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:63f::	2a06:de02:63f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:640::	2a06:de02:646:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:635::	2a06:de02:637:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:638::	2a06:de02:638:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:639::	2a06:de02:646:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:647::	2a06:de02:647:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:648::	2a06:de02:651:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:652::	2a06:de02:652:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:653::	2a06:de02:65c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:648::	2a06:de02:65c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:65d::	2a06:de02:65d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:65e::	2a06:de02:662:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:663::	2a06:de02:663:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:664::	2a06:de02:675:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:65e::	2a06:de02:666:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:667::	2a06:de02:667:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:668::	2a06:de02:66d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:66e::	2a06:de02:66e:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:66f::	2a06:de02:675:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:676::	2a06:de02:676:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:677::	2a06:de02:685:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:686::	2a06:de02:686:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
@@ -143602,24 +143654,19 @@ pub static ASN_V6_DB: &str = r###"
 2a06:de02:6cf::	2a06:de02:6cf:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a06:de02:6d0::	2a06:de02:703:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:704::	2a06:de02:704:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:705::	2a06:de02:727:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:728::	2a06:de02:728:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:729::	2a06:de02:72b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:705::	2a06:de02:721:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:722::	2a06:de02:722:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:723::	2a06:de02:72b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:72c::	2a06:de02:72c:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:72d::	2a06:de02:72d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:72e::	2a06:de02:730:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:72d::	2a06:de02:730:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:731::	2a06:de02:731:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:732::	2a06:de02:732:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:733::	2a06:de02:733:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:734::	2a06:de02:790:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:791::	2a06:de02:791:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:792::	2a06:de02:798:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:799::	2a06:de02:799:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:79a::	2a06:de02:7a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:7aa::	2a06:de02:7aa:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:7ab::	2a06:de02:7fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de02:7ff::	2a06:de02:7ff:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a06:de02:800::	2a06:de02:1a00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:732::	2a06:de02:73c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:73d::	2a06:de02:73d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:73e::	2a06:de02:7a5:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:7a6::	2a06:de02:7a7:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:7a8::	2a06:de02:7e8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de02:7e9::	2a06:de02:7e9:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
+2a06:de02:7ea::	2a06:de02:1a00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de02:1a01::	2a06:de02:1a01:ffff:ffff:ffff:ffff:ffff	214971	DE	JANN-MIETZNER Jann Mietzner
 2a06:de02:1a02::	2a06:de02:1a02:ffff:ffff:ffff:ffff:ffff	47263	DE	CUBEHOSTING1
 2a06:de02:1a03::	2a06:de04:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -143628,25 +143675,24 @@ pub static ASN_V6_DB: &str = r###"
 2a06:de04:41::	2a06:de04:44:ffff:ffff:ffff:ffff:ffff	201950	DE	KIEKEMAL
 2a06:de04:45::	2a06:de05:6028:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:6029::	2a06:de05:6029:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:602a::	2a06:de05:602e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:602f::	2a06:de05:602f:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6030::	2a06:de05:6084:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6085::	2a06:de05:6085:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6086::	2a06:de05:60a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:602a::	2a06:de05:6075:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6076::	2a06:de05:6076:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6077::	2a06:de05:6078:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6079::	2a06:de05:6079:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:607a::	2a06:de05:60a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:60aa::	2a06:de05:60aa:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:60ab::	2a06:de05:60b9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:60ba::	2a06:de05:60ba:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:60bb::	2a06:de05:60be:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:60ab::	2a06:de05:60be:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:60bf::	2a06:de05:60bf:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:60c0::	2a06:de05:60c3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:60c4::	2a06:de05:60c4:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:60c5::	2a06:de05:60d0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:60d1::	2a06:de05:60d1:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:60d2::	2a06:de05:60f4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:60c5::	2a06:de05:60e4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:60e5::	2a06:de05:60e5:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:60e6::	2a06:de05:60e8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:60e9::	2a06:de05:60e9:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:60ea::	2a06:de05:60f4:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:60f5::	2a06:de05:60f5:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:60f6::	2a06:de05:60fe:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:60ff::	2a06:de05:60ff:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6100::	2a06:de05:612b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:60f6::	2a06:de05:612a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:612b::	2a06:de05:612b:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
 2a06:de05:612c::	2a06:de05:612c:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:612d::	2a06:de05:6130:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:6131::	2a06:de05:6131:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
@@ -143654,72 +143700,69 @@ pub static ASN_V6_DB: &str = r###"
 2a06:de05:6137::	2a06:de05:6137:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:6138::	2a06:de05:6140:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:6141::	2a06:de05:6141:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6142::	2a06:de05:614a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:614b::	2a06:de05:614b:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:614c::	2a06:de05:6164:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6165::	2a06:de05:6165:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6166::	2a06:de05:6167:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6168::	2a06:de05:6168:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6169::	2a06:de05:6172:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6142::	2a06:de05:6172:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:6173::	2a06:de05:6173:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:6174::	2a06:de05:619f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:61a0::	2a06:de05:61a0:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:61a1::	2a06:de05:61b6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:61b7::	2a06:de05:61b7:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:61b8::	2a06:de05:61e7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:61e8::	2a06:de05:61e8:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:61e9::	2a06:de05:61e9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:61ea::	2a06:de05:61ea:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:61a1::	2a06:de05:61c1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:61c2::	2a06:de05:61c2:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:61c3::	2a06:de05:61e7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:61e8::	2a06:de05:61ea:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
 2a06:de05:61eb::	2a06:de05:61ec:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:61ed::	2a06:de05:61ed:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:61ee::	2a06:de05:61f0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:61f1::	2a06:de05:61f1:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:61f2::	2a06:de05:6211:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6212::	2a06:de05:6212:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6213::	2a06:de05:621c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:61f2::	2a06:de05:61f5:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:61f6::	2a06:de05:61f6:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:61f7::	2a06:de05:61f7:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:61f8::	2a06:de05:61f8:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:61f9::	2a06:de05:621c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:621d::	2a06:de05:621d:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:621e::	2a06:de05:6246:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6247::	2a06:de05:6247:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6248::	2a06:de05:6264:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6265::	2a06:de05:6265:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6266::	2a06:de05:6275:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:6276::	2a06:de05:6276:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:6277::	2a06:de05:62b0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:62b1::	2a06:de05:62b1:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:62b2::	2a06:de05:62bb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:621e::	2a06:de05:6233:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6234::	2a06:de05:6234:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6235::	2a06:de05:623c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:623d::	2a06:de05:623d:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:623e::	2a06:de05:62bb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:62bc::	2a06:de05:62bc:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:62bd::	2a06:de05:62c0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:62c1::	2a06:de05:62c1:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:62c2::	2a06:de05:62d9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62bd::	2a06:de05:62c8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62c9::	2a06:de05:62c9:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:62ca::	2a06:de05:62d9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:62da::	2a06:de05:62da:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:62db::	2a06:de05:62df:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:62e0::	2a06:de05:62e0:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:62e1::	2a06:de05:62e9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62db::	2a06:de05:62e9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:62ea::	2a06:de05:62ea:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:62eb::	2a06:de05:62ed:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:62ee::	2a06:de05:62ee:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:62eb::	2a06:de05:62ee:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:62ef::	2a06:de05:62ef:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:62f0::	2a06:de05:62fd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:62fe::	2a06:de05:62fe:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:62ff::	2a06:de05:633c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:633d::	2a06:de05:633d:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:633e::	2a06:de05:6347:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62f0::	2a06:de05:62f3:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62f4::	2a06:de05:62f4:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:62f5::	2a06:de05:62f8:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:62f9::	2a06:de05:62f9:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:62fa::	2a06:de05:6313:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6314::	2a06:de05:6314:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6315::	2a06:de05:6316:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6317::	2a06:de05:6317:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6318::	2a06:de05:6347:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:6348::	2a06:de05:6348:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:6349::	2a06:de05:636a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:636b::	2a06:de05:636c:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:636d::	2a06:de05:636d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6349::	2a06:de05:6363:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6364::	2a06:de05:6364:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6365::	2a06:de05:636d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:636e::	2a06:de05:636e:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:636f::	2a06:de05:63ab:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:63ac::	2a06:de05:63ac:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:63ad::	2a06:de05:63d1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:636f::	2a06:de05:636f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6370::	2a06:de05:6370:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6371::	2a06:de05:6371:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6372::	2a06:de05:6372:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6373::	2a06:de05:6377:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:6378::	2a06:de05:6378:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:6379::	2a06:de05:63d1:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:63d2::	2a06:de05:63d2:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:63d3::	2a06:de05:63d5:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:63d6::	2a06:de05:63d6:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
-2a06:de05:63d7::	2a06:de05:63e2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a06:de05:63e3::	2a06:de05:63e3:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:63e4::	2a06:de05:63ee:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:63d7::	2a06:de05:63dd:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:63de::	2a06:de05:63de:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:63df::	2a06:de05:63ee:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:63ef::	2a06:de05:63ef:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
-2a06:de05:63f0::	2a06:de05:63f6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:63f0::	2a06:de05:63f2:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a06:de05:63f3::	2a06:de05:63f3:ffff:ffff:ffff:ffff:ffff	199340	HK	HONG-GUANWAN
+2a06:de05:63f4::	2a06:de05:63f6:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:63f7::	2a06:de05:63f7:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
 2a06:de05:63f8::	2a06:de05:63fa:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a06:de05:63fb::	2a06:de05:63fb:ffff:ffff:ffff:ffff:ffff	53667	US	PONYNET
@@ -144780,7 +144823,8 @@ pub static ASN_V6_DB: &str = r###"
 2a07:54c1:6020::	2a07:54c1:6fff:ffff:ffff:ffff:ffff:ffff	202142	US	PACKETHARBOR packetharbor.com
 2a07:54c1:7000::	2a07:54c1:80ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a07:54c1:8100::	2a07:54c1:81ff:ffff:ffff:ffff:ffff:ffff	215280	US	OCEAN-CA OCEAN NETWORKS
-2a07:54c1:8200::	2a07:54c1:88ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a07:54c1:8200::	2a07:54c1:87ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a07:54c1:8800::	2a07:54c1:88ff:ffff:ffff:ffff:ffff:ffff	214370	US	AS-MEHARBE
 2a07:54c1:8900::	2a07:54c1:8900:ffff:ffff:ffff:ffff:ffff	211743	LT	MEOWCATTO-NETWORK
 2a07:54c1:8901::	2a07:54c1:8901:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a07:54c1:8902::	2a07:54c1:8902:ffff:ffff:ffff:ffff:ffff	211743	LT	MEOWCATTO-NETWORK
@@ -146695,7 +146739,9 @@ pub static ASN_V6_DB: &str = r###"
 2a09:7a40::	2a09:7a47:ffff:ffff:ffff:ffff:ffff:ffff	34775	CY	LVNET-AS
 2a09:7a48::	2a09:7abf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a09:7ac0::	2a09:7ac0:ffff:ffff:ffff:ffff:ffff:ffff	39679	HU	ASJZTKFT
-2a09:7ac1::	2a09:7ac1:ffff:ffff:ffff:ffff:ffff:ffff	215366	HU	BGN
+2a09:7ac1::	2a09:7ac1:9:ffff:ffff:ffff:ffff:ffff	215366	HU	BGN
+2a09:7ac1:a::	2a09:7ac1:a:ffff:ffff:ffff:ffff:ffff	214059	HU	ACEHOSTONLINE
+2a09:7ac1:b::	2a09:7ac1:ffff:ffff:ffff:ffff:ffff:ffff	215366	HU	BGN
 2a09:7ac2::	2a09:7aff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a09:7b00::	2a09:7b07:ffff:ffff:ffff:ffff:ffff:ffff	1299	SE	TWELVE99 Arelion, fka Telia Carrier
 2a09:7b08::	2a09:7b7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -153076,8 +153122,8 @@ pub static ASN_V6_DB: &str = r###"
 2a0c:6ec0:3::	2a0c:6ec0:a00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0c:6ec0:a01::	2a0c:6ec0:a01:ffff:ffff:ffff:ffff:ffff	213922	RU	NXA-MSK
 2a0c:6ec0:a02::	2a0c:6ec0:aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0c:6ec0:b00::	2a0c:6ec0:b02:ffff:ffff:ffff:ffff:ffff	213922	RU	NXA-MSK
-2a0c:6ec0:b03::	2a0c:6fbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0c:6ec0:b00::	2a0c:6ec0:bff:ffff:ffff:ffff:ffff:ffff	213922	RU	NXA-MSK
+2a0c:6ec0:c00::	2a0c:6fbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0c:6fc0::	2a0c:6fc0:ff:ffff:ffff:ffff:ffff:ffff	198755	RU	GORSET-AS
 2a0c:6fc0:100::	2a0c:6fff:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0c:7000::	2a0c:7007:ffff:ffff:ffff:ffff:ffff:ffff	57508	IS	AS-ALZA-
@@ -153624,9 +153670,9 @@ pub static ASN_V6_DB: &str = r###"
 2a0c:9a40:8b00::	2a0c:9a40:8b00:ffff:ffff:ffff:ffff:ffff	200140	KR	HANSEUNG-KIM
 2a0c:9a40:8b01::	2a0c:9a40:8b0f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0c:9a40:8b10::	2a0c:9a40:8b10:ffff:ffff:ffff:ffff:ffff	199868	CA	LEANDRO
-2a0c:9a40:8b11::	2a0c:9a40:8c01:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0c:9a40:8c02::	2a0c:9a40:8c02:ffff:ffff:ffff:ffff:ffff	216191	BR	RIAD-VARGAS
-2a0c:9a40:8c03::	2a0c:9a40:8c07:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0c:9a40:8b11::	2a0c:9a40:8c00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0c:9a40:8c01::	2a0c:9a40:8c03:ffff:ffff:ffff:ffff:ffff	216191	BR	RIAD-VARGAS
+2a0c:9a40:8c04::	2a0c:9a40:8c07:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0c:9a40:8c08::	2a0c:9a40:8c09:ffff:ffff:ffff:ffff:ffff	216191	BR	RIAD-VARGAS
 2a0c:9a40:8c0a::	2a0c:9a40:8c0b:ffff:ffff:ffff:ffff:ffff	216191	BR	RIAD-VARGAS
 2a0c:9a40:8c0c::	2a0c:9a40:8c0f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -155765,7 +155811,7 @@ pub static ASN_V6_DB: &str = r###"
 2a0d:9781::	2a0d:97bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:97c0::	2a0d:97c7:ffff:ffff:ffff:ffff:ffff:ffff	34567	HK	NEXT-AS
 2a0d:97c8::	2a0d:983f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0d:9840::	2a0d:9840:0:ffff:ffff:ffff:ffff:ffff	212396	GB	FYFEWEB FyfeWeb Core Network
+2a0d:9840::	2a0d:9840:0:ffff:ffff:ffff:ffff:ffff	209264	GB	M3CONNECT-DC
 2a0d:9840:1::	2a0d:987f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:9880::	2a0d:9887:ffff:ffff:ffff:ffff:ffff:ffff	41435	UA	UNDERNET-AS1
 2a0d:9888::	2a0d:993f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -156224,11 +156270,11 @@ pub static ASN_V6_DB: &str = r###"
 2a0d:d940:30::	2a0d:d940:3c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:3d::	2a0d:d940:3d:ffff:ffff:ffff:ffff:ffff	207567	GB	INTEZIONET-AS
 2a0d:d940:3e::	2a0d:d940:4f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0d:d940:50::	2a0d:d940:51:ffff:ffff:ffff:ffff:ffff	199133	Unknown	AS199133
+2a0d:d940:50::	2a0d:d940:51:ffff:ffff:ffff:ffff:ffff	199133	RU	AS199133
 2a0d:d940:52::	2a0d:d940:53:ffff:ffff:ffff:ffff:ffff	200993	RU	NYANET NyaNet
 2a0d:d940:54::	2a0d:d940:5b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:5c::	2a0d:d940:5d:ffff:ffff:ffff:ffff:ffff	11967	EE	HOP179
-2a0d:d940:5e::	2a0d:d940:5e:ffff:ffff:ffff:ffff:ffff	199133	Unknown	AS199133
+2a0d:d940:5e::	2a0d:d940:5e:ffff:ffff:ffff:ffff:ffff	199133	RU	AS199133
 2a0d:d940:5f::	2a0d:d940:6f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:70::	2a0d:d940:7f:ffff:ffff:ffff:ffff:ffff	201541	LT	WHITE-NETWORK-AS Silute, Lithuania
 2a0d:d940:80::	2a0d:d940:8f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -156339,7 +156385,7 @@ pub static ASN_V6_DB: &str = r###"
 2a0d:d940:200b::	2a0d:d940:200c:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:200d::	2a0d:d940:200d:ffff:ffff:ffff:ffff:ffff	210464	AL	AVSISP AVS ISP EU1
 2a0d:d940:200e::	2a0d:d940:200e:ffff:ffff:ffff:ffff:ffff	201541	LT	WHITE-NETWORK-AS Silute, Lithuania
-2a0d:d940:200f::	2a0d:d940:200f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0d:d940:200f::	2a0d:d940:200f:ffff:ffff:ffff:ffff:ffff	215103	RU	PT-MEDIA-STREAM-INDONESIA
 2a0d:d940:2010::	2a0d:d940:2010:ffff:ffff:ffff:ffff:ffff	200386	NL	PLUSSERVER-ASN-STL
 2a0d:d940:2011::	2a0d:d940:8fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:9000::	2a0d:d940:9000:ffff:ffff:ffff:ffff:ffff	215096	RU	MADHOST-AS This is MadHost
@@ -156363,7 +156409,9 @@ pub static ASN_V6_DB: &str = r###"
 2a0d:d940:90a6::	2a0d:d940:90a6:ffff:ffff:ffff:ffff:ffff	202413	EE	GLEB-AS
 2a0d:d940:90a7::	2a0d:d940:90a9:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d940:90aa::	2a0d:d940:90aa:ffff:ffff:ffff:ffff:ffff	209057	RU	NETKEY-AS
-2a0d:d940:90ab::	2a0d:d97f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0d:d940:90ab::	2a0d:d940:90ad:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0d:d940:90ae::	2a0d:d940:90ae:ffff:ffff:ffff:ffff:ffff	199232	RU	KISELEV-AS
+2a0d:d940:90af::	2a0d:d97f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d980::	2a0d:d987:ffff:ffff:ffff:ffff:ffff:ffff	47987	UA	DELTAHOST-KYIV
 2a0d:d988::	2a0d:d9c2:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0d:d9c3::	2a0d:d9c5:ffff:ffff:ffff:ffff:ffff:ffff	208948	CH	RECYCLED-CLOUD-AS
@@ -157241,7 +157289,8 @@ pub static ASN_V6_DB: &str = r###"
 2a0e:46c4:2810::	2a0e:46c4:281f:ffff:ffff:ffff:ffff:ffff	200160	ID	PONGERY
 2a0e:46c4:2820::	2a0e:46c4:28ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:46c4:2900::	2a0e:46c4:2901:ffff:ffff:ffff:ffff:ffff	138435	HK	YUETAU-AS-HK YuetAu Network
-2a0e:46c4:2902::	2a0e:46c4:2903:ffff:ffff:ffff:ffff:ffff	138435	HK	YUETAU-AS-HK YuetAu Network
+2a0e:46c4:2902::	2a0e:46c4:2902:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:46c4:2903::	2a0e:46c4:2903:ffff:ffff:ffff:ffff:ffff	138435	HK	YUETAU-AS-HK YuetAu Network
 2a0e:46c4:2904::	2a0e:46c4:29ef:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:46c4:29f0::	2a0e:46c4:29ff:ffff:ffff:ffff:ffff:ffff	147047	HK	YUETAUYEUNG-AS-AP Yuet Au Yeung
 2a0e:46c4:2a00::	2a0e:46c4:2aff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -157617,17 +157666,17 @@ pub static ASN_V6_DB: &str = r###"
 2a0e:7d44:10::	2a0e:7d44:efff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:7d44:f000::	2a0e:7d44:f069:ffff:ffff:ffff:ffff:ffff	207618	US	DORIDIAN-AS
 2a0e:7d44:f06a::	2a0e:7d44:f0ff:ffff:ffff:ffff:ffff:ffff	207618	US	DORIDIAN-AS
-2a0e:7d44:f100::	2a0e:7d45:774f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0e:7d45:7750::	2a0e:7d45:7750:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a0e:7d45:7751::	2a0e:7d45:77d0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d44:f100::	2a0e:7d45:7750:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d45:7751::	2a0e:7d45:7751:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2a0e:7d45:7752::	2a0e:7d45:77d0:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:7d45:77d1::	2a0e:7d45:77d1:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a0e:7d45:77d2::	2a0e:7d45:77fa:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0e:7d45:77fb::	2a0e:7d45:77fb:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a0e:7d45:77fc::	2a0e:7d45:77ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d45:77d2::	2a0e:7d45:77fb:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d45:77fc::	2a0e:7d45:77fc:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2a0e:7d45:77fd::	2a0e:7d45:77ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:7d45:7800::	2a0e:7d45:7800:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a0e:7d45:7801::	2a0e:7d45:780a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a0e:7d45:780b::	2a0e:7d45:780b:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a0e:7d45:780c::	2a0e:7d45:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d45:7801::	2a0e:7d45:780b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0e:7d45:780c::	2a0e:7d45:780c:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2a0e:7d45:780d::	2a0e:7d45:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0e:7d46::	2a0e:7d46:4ff:ffff:ffff:ffff:ffff:ffff	38230	NL	NAVICENET-AS-AP Navice Consulting
 2a0e:7d46:500::	2a0e:7d46:9ff:ffff:ffff:ffff:ffff:ffff	38230	NL	NAVICENET-AS-AP Navice Consulting
 2a0e:7d46:a00::	2a0e:7d46:fff:ffff:ffff:ffff:ffff:ffff	38230	NL	NAVICENET-AS-AP Navice Consulting
@@ -159934,8 +159983,8 @@ pub static ASN_V6_DB: &str = r###"
 2a0f:1cc5:2510::	2a0f:1cc5:251f:ffff:ffff:ffff:ffff:ffff	153376	CN	BRNET-AS-AP Jilin Province Brick Business Service Limited
 2a0f:1cc5:2520::	2a0f:1cc5:25ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0f:1cc5:2600::	2a0f:1cc5:260b:ffff:ffff:ffff:ffff:ffff	202335	CN	HAIMA-AS Haima Global Network
-2a0f:1cc5:260c::	2a0f:1cc5:264f:ffff:ffff:ffff:ffff:ffff	202335	CN	HAIMA-AS Haima Global Network
-2a0f:1cc5:2650::	2a0f:1cc5:2d00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a0f:1cc5:260c::	2a0f:1cc5:265f:ffff:ffff:ffff:ffff:ffff	202335	CN	HAIMA-AS Haima Global Network
+2a0f:1cc5:2660::	2a0f:1cc5:2d00:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0f:1cc5:2d01::	2a0f:1cc5:2d01:ffff:ffff:ffff:ffff:ffff	214955	CN	LAUNCHPAD-NETWORK
 2a0f:1cc5:2d02::	2a0f:1cc5:2d02:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a0f:1cc5:2d03::	2a0f:1cc5:2d03:ffff:ffff:ffff:ffff:ffff	214955	CN	LAUNCHPAD-NETWORK
@@ -163317,7 +163366,8 @@ pub static ASN_V6_DB: &str = r###"
 2a10:2f00:191::	2a10:2f00:19f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:2f00:1a0::	2a10:2f00:1a0:ffff:ffff:ffff:ffff:ffff	215486	FR	SEOS
 2a10:2f00:1a1::	2a10:2f00:1a1:ffff:ffff:ffff:ffff:ffff	214801	DE	HOSTNER-HOSTING
-2a10:2f00:1a2::	2a10:2f01:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a10:2f00:1a2::	2a10:2f00:1a2:ffff:ffff:ffff:ffff:ffff	214432	GB	ZLIDC
+2a10:2f00:1a3::	2a10:2f01:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:2f01:100::	2a10:2f01:100:ffff:ffff:ffff:ffff:ffff	39753	CN	LIUXYON Liuxyon International
 2a10:2f01:101::	2a10:2f01:213:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:2f01:214::	2a10:2f01:214:ffff:ffff:ffff:ffff:ffff	216357	US	INFINITIUM-AS216357
@@ -164352,14 +164402,13 @@ pub static ASN_V6_DB: &str = r###"
 2a10:ccc1:43d::	2a10:ccc1:43d:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a10:ccc1:43e::	2a10:ccc1:44e:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:ccc1:44f::	2a10:ccc1:44f:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a10:ccc1:450::	2a10:ccc1:451:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a10:ccc1:452::	2a10:ccc1:456:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a10:ccc1:457::	2a10:ccc1:457:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
-2a10:ccc1:458::	2a10:ccc1:467:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a10:ccc1:450::	2a10:ccc1:467:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:ccc1:468::	2a10:ccc1:468:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a10:ccc1:469::	2a10:ccc1:46d:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:ccc1:46e::	2a10:ccc1:46e:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
-2a10:ccc1:46f::	2a10:ccc1:491:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a10:ccc1:46f::	2a10:ccc1:47b:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a10:ccc1:47c::	2a10:ccc1:47c:ffff:ffff:ffff:ffff:ffff	20473	US	AS-VULTR
+2a10:ccc1:47d::	2a10:ccc1:491:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:ccc1:492::	2a10:ccc1:492:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
 2a10:ccc1:493::	2a10:ccc1:49a:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a10:ccc1:49b::	2a10:ccc1:49b:ffff:ffff:ffff:ffff:ffff	202256	CN	LAWLIETNET
@@ -167861,8 +167910,7 @@ pub static ASN_V6_DB: &str = r###"
 2a12:be48::	2a12:be7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a12:be80::	2a12:be87:ffff:ffff:ffff:ffff:ffff:ffff	400177	US	RC
 2a12:be88::	2a12:bec0:81:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a12:bec0:82::	2a12:bec0:82:ffff:ffff:ffff:ffff:ffff	206125	FI	TIMNET
-2a12:bec0:83::	2a12:bec0:83:ffff:ffff:ffff:ffff:ffff	206125	FI	TIMNET
+2a12:bec0:82::	2a12:bec0:83:ffff:ffff:ffff:ffff:ffff	206125	FI	TIMNET
 2a12:bec0:84::	2a12:bec0:84:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a12:bec0:85::	2a12:bec0:85:ffff:ffff:ffff:ffff:ffff	206125	FI	TIMNET
 2a12:bec0:86::	2a12:bec0:ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -168182,7 +168230,9 @@ pub static ASN_V6_DB: &str = r###"
 2a12:cac0::	2a12:cac7:ffff:ffff:ffff:ffff:ffff:ffff	212144	LT	ISP
 2a12:cac8::	2a12:cb3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a12:cb40::	2a12:cb40:3e7:ffff:ffff:ffff:ffff:ffff	215172	GB	-Reserved AS-
-2a12:cb40:3e8::	2a12:cb42:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a12:cb40:3e8::	2a12:cb40:3ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a12:cb40:400::	2a12:cb40:40f:ffff:ffff:ffff:ffff:ffff	201371	DE	ERHARDT-SYSTEMS
+2a12:cb40:410::	2a12:cb42:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a12:cb43::	2a12:cb43:fff:ffff:ffff:ffff:ffff:ffff	204535	MY	KEVINTAN-
 2a12:cb43:1000::	2a12:cb44:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a12:cb45::	2a12:cb45:f:ffff:ffff:ffff:ffff:ffff	203168	GB	AOSUGI-AS
@@ -170236,7 +170286,7 @@ pub static ASN_V6_DB: &str = r###"
 2a13:bac0:162::	2a13:bb86:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a13:bb87::	2a13:bb87:0:ffff:ffff:ffff:ffff:ffff	13631	US	CIG-AS
 2a13:bb87:1::	2a13:bc3f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a13:bc40::	2a13:bc47:ffff:ffff:ffff:ffff:ffff:ffff	199211	Unknown	AS199211
+2a13:bc40::	2a13:bc47:ffff:ffff:ffff:ffff:ffff:ffff	199211	FR	AS199211
 2a13:bc48::	2a13:bc7f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a13:bc80::	2a13:bc87:ffff:ffff:ffff:ffff:ffff:ffff	61076	CH	VINIVIA
 2a13:bc88::	2a13:bcbf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -170259,7 +170309,7 @@ pub static ASN_V6_DB: &str = r###"
 2a13:c000::	2a13:c007:8013:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
 2a13:c007:8014::	2a13:c007:8014:ffff:ffff:ffff:ffff:ffff	199266	JP	CONTAINER-DEV
 2a13:c007:8015::	2a13:c007:8016:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
-2a13:c007:8017::	2a13:c007:8017:ffff:ffff:ffff:ffff:ffff	199176	Unknown	AS199176
+2a13:c007:8017::	2a13:c007:8017:ffff:ffff:ffff:ffff:ffff	199176	UA	AS199176
 2a13:c007:8018::	2a13:c007:801a:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
 2a13:c007:801b::	2a13:c007:801b:ffff:ffff:ffff:ffff:ffff	199108	JP	TAMUKAI-NETWORK-R TAMUKAI NETWORK R
 2a13:c007:801c::	2a13:c007:801f:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
@@ -170275,7 +170325,7 @@ pub static ASN_V6_DB: &str = r###"
 2a13:c007:8300::	2a13:c007:83ff:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
 2a13:c007:8400::	2a13:c007:8400:ffff:ffff:ffff:ffff:ffff	215855	SE	LINUXBURKEN
 2a13:c007:8401::	2a13:c007:84ff:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
-2a13:c007:8500::	2a13:c007:85ff:ffff:ffff:ffff:ffff:ffff	199186	Unknown	AS199186
+2a13:c007:8500::	2a13:c007:85ff:ffff:ffff:ffff:ffff:ffff	199186	GB	AS199186
 2a13:c007:8600::	2a13:c007:9006:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
 2a13:c007:9007::	2a13:c007:9007:ffff:ffff:ffff:ffff:ffff	215262	GB	CLOUDNORD-UKNODE-AS
 2a13:c007:9008::	2a13:c007:ffff:ffff:ffff:ffff:ffff:ffff	945	JP	SAMU
@@ -171641,7 +171691,7 @@ pub static ASN_V6_DB: &str = r###"
 2a14:67c1:b147::	2a14:67c1:b1ff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:67c1:b200::	2a14:67c1:b2ff:ffff:ffff:ffff:ffff:ffff	214478	US	SAKURACLOUDS-1
 2a14:67c1:b300::	2a14:67c1:b300:ffff:ffff:ffff:ffff:ffff	211038	BR	FANTASYHOST
-2a14:67c1:b301::	2a14:67c1:b3ff:ffff:ffff:ffff:ffff:ffff	210940	BR	SEASONCLOUD
+2a14:67c1:b301::	2a14:67c1:b3ff:ffff:ffff:ffff:ffff:ffff	210554	BR	METEORCLOUD
 2a14:67c1:b400::	2a14:67c1:b45f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:67c1:b460::	2a14:67c1:b463:ffff:ffff:ffff:ffff:ffff	211729	US	BAIYUEXIAO-PROJECT BAIYUEXIAO PROJECT
 2a14:67c1:b464::	2a14:67c1:b46f:ffff:ffff:ffff:ffff:ffff	211729	US	BAIYUEXIAO-PROJECT BAIYUEXIAO PROJECT
@@ -171887,7 +171937,9 @@ pub static ASN_V6_DB: &str = r###"
 2a14:6f44:f00d::	2a14:6f44:f00d:ffff:ffff:ffff:ffff:ffff	207118	PT	DIOGO
 2a14:6f44:f00e::	2a14:6f44:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:6f45::	2a14:6f45:102:ffff:ffff:ffff:ffff:ffff	50224	GB	MYTHICALKITTEN mythicalkitten
-2a14:6f45:103::	2a14:6f45:300:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a14:6f45:103::	2a14:6f45:21f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a14:6f45:220::	2a14:6f45:220:ffff:ffff:ffff:ffff:ffff	50224	GB	MYTHICALKITTEN mythicalkitten
+2a14:6f45:221::	2a14:6f45:300:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:6f45:301::	2a14:6f45:302:ffff:ffff:ffff:ffff:ffff	50224	GB	MYTHICALKITTEN mythicalkitten
 2a14:6f45:303::	2a14:6f45:30f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:6f45:310::	2a14:6f45:311:ffff:ffff:ffff:ffff:ffff	50224	GB	MYTHICALKITTEN mythicalkitten
@@ -172092,7 +172144,8 @@ pub static ASN_V6_DB: &str = r###"
 2a14:7580:ed42::	2a14:7580:ed43:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:7580:ed44::	2a14:7580:ed47:ffff:ffff:ffff:ffff:ffff	215956	BE	MYIP-AS MyIP.be ~ AS215956
 2a14:7580:ed48::	2a14:7580:ed4f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2a14:7580:ed50::	2a14:7580:ed65:ffff:ffff:ffff:ffff:ffff	215956	BE	MYIP-AS MyIP.be ~ AS215956
+2a14:7580:ed50::	2a14:7580:ed63:ffff:ffff:ffff:ffff:ffff	215956	BE	MYIP-AS MyIP.be ~ AS215956
+2a14:7580:ed64::	2a14:7580:ed65:ffff:ffff:ffff:ffff:ffff	215956	BE	MYIP-AS MyIP.be ~ AS215956
 2a14:7580:ed66::	2a14:7580:ed7f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:7580:ed80::	2a14:7580:ed83:ffff:ffff:ffff:ffff:ffff	215956	BE	MYIP-AS MyIP.be ~ AS215956
 2a14:7580:ed84::	2a14:7580:edbf:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
@@ -172888,8 +172941,7 @@ pub static ASN_V6_DB: &str = r###"
 2a14:c380:a00::	2a14:c380:bff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:c380:c00::	2a14:c380:c0f:ffff:ffff:ffff:ffff:ffff	214497	IL	WHITELABEL ASN for Whitelabel Solutions Portugal POP
 2a14:c380:c10::	2a14:c380:c11:ffff:ffff:ffff:ffff:ffff	206540	US	BEANSUMMERHOST f6f8ec39aa39ea342e16d0e3ba372cae4bb769fe
-2a14:c380:c12::	2a14:c380:c12:ffff:ffff:ffff:ffff:ffff	206540	US	BEANSUMMERHOST f6f8ec39aa39ea342e16d0e3ba372cae4bb769fe
-2a14:c380:c13::	2a14:c380:c14:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2a14:c380:c12::	2a14:c380:c14:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:c380:c15::	2a14:c380:c15:ffff:ffff:ffff:ffff:ffff	206540	US	BEANSUMMERHOST f6f8ec39aa39ea342e16d0e3ba372cae4bb769fe
 2a14:c380:c16::	2a14:c380:c18:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2a14:c380:c19::	2a14:c380:c1a:ffff:ffff:ffff:ffff:ffff	206540	US	BEANSUMMERHOST f6f8ec39aa39ea342e16d0e3ba372cae4bb769fe
@@ -173128,11 +173180,11 @@ pub static ASN_V6_DB: &str = r###"
 2c0f:740::	2c0f:740:0:ffff:ffff:ffff:ffff:ffff	37552	GM	Gamtel
 2c0f:740:1::	2c0f:740:6f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2c0f:740:70::	2c0f:740:70:ffff:ffff:ffff:ffff:ffff	37552	GM	Gamtel
-2c0f:740:71::	2c0f:7bf:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
-2c0f:7c0::	2c0f:7c0:1f:ffff:ffff:ffff:ffff:ffff	329057	NG	Smart-City-Tech
-2c0f:7c0:20::	2c0f:7c0:100f:ffff:ffff:ffff:ffff:ffff	329057	NG	Smart-City-Tech
-2c0f:7c0:1010::	2c0f:7c0:ffff:ffff:ffff:ffff:ffff:ffff	329057	NG	Smart-City-Tech
-2c0f:7c1::	2c0f:81f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2c0f:740:71::	2c0f:7c0:f:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2c0f:7c0:10::	2c0f:7c0:1f:ffff:ffff:ffff:ffff:ffff	329057	NG	Smart-City-Tech
+2c0f:7c0:20::	2c0f:7c0:fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
+2c0f:7c0:1000::	2c0f:7c0:100f:ffff:ffff:ffff:ffff:ffff	329057	NG	Smart-City-Tech
+2c0f:7c0:1010::	2c0f:81f:ffff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2c0f:820::	2c0f:820:ffff:ffff:ffff:ffff:ffff:ffff	329462	ZA	V-Dot-Net
 2c0f:821::	2c0f:880:4fff:ffff:ffff:ffff:ffff:ffff	0	None	Not routed
 2c0f:880:5000::	2c0f:880:5010:ffff:ffff:ffff:ffff:ffff	329033	KE	Systel-Limited
