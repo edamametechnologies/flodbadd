@@ -37,10 +37,8 @@ pub struct FimEvent {
     pub process_name: Option<String>,
     pub process_path: Option<String>,
     /// Parent process name when attribution is available (ES, lsof).
-    #[serde(default)]
     pub parent_process_name: Option<String>,
     /// Parent process path when attribution is available (ES, lsof).
-    #[serde(default)]
     pub parent_process_path: Option<String>,
     pub is_sensitive: bool,
     pub labels: Vec<String>,

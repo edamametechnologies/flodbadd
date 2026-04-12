@@ -3,44 +3,44 @@ use crate::open_files::is_sensitive_path;
 use crate::sensitive_paths::classify_sensitive_path_labels_sync;
 use anyhow::{Context, Result};
 use chrono::Utc;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use dashmap::DashMap;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::time::Instant;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use tracing::{debug, error, info, warn};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_MAX_ENTRIES: usize = 5_000;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL: u64 = 500;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 struct CachedAttribution {
     process_name: Option<String>,
     process_path: Option<String>,
     recorded_at: Instant,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 static FIM_ATTRIBUTION_CACHE: Lazy<DashMap<String, CachedAttribution>> = Lazy::new(DashMap::new);
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 static FIM_CACHE_INSERT_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn prune_attribution_cache() {
     let cutoff = Instant::now() - std::time::Duration::from_secs(FIM_ATTRIBUTION_CACHE_TTL_SECS);
     FIM_ATTRIBUTION_CACHE.retain(|_, v| v.recorded_at > cutoff);
@@ -58,7 +58,7 @@ fn prune_attribution_cache() {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &Option<String>) {
     FIM_ATTRIBUTION_CACHE.insert(
         path.to_string(),
@@ -75,7 +75,7 @@ fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &O
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn lookup_cache(path: &str) -> Option<(Option<String>, Option<String>)> {
     let entry = FIM_ATTRIBUTION_CACHE.get(path)?;
     if entry.recorded_at.elapsed().as_secs() > FIM_ATTRIBUTION_CACHE_TTL_SECS {
@@ -323,7 +323,44 @@ fn best_effort_process_attribution(
     result
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+fn best_effort_process_attribution(
+    path: &Path,
+    is_sensitive: bool,
+    event_type: FimEventType,
+) -> (Option<String>, Option<String>) {
+    if !should_attempt_process_attribution(path, is_sensitive, event_type) {
+        return (None, None);
+    }
+
+    let path_str = path.to_string_lossy();
+
+    // Tier 1: ETW file attribution table (when etw feature is enabled and running)
+    if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&path_str) {
+        return (Some(name), Some(proc_path));
+    }
+
+    // Tier 2: in-memory cache
+    if let Some((name, proc_path)) = lookup_cache(&path_str) {
+        if name.is_some() || proc_path.is_some() {
+            return (name, proc_path);
+        }
+    }
+
+    // Tier 3: Restart Manager + sysinfo
+    let (pid, fallback_name) = match lookup_pid_for_path(path) {
+        Some(details) => details,
+        None => return (None, None),
+    };
+
+    let result = lookup_process_details(pid, fallback_name);
+    if result.0.is_some() || result.1.is_some() {
+        cache_attribution(&path_str, &result.0, &result.1);
+    }
+    result
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn best_effort_process_attribution(
     _path: &Path,
     _is_sensitive: bool,
@@ -376,7 +413,7 @@ fn parse_lsof_pid_and_command(output: &str) -> Option<(u32, Option<String>)> {
     pid.map(|pid| (pid, command))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn lookup_process_details(
     pid: u32,
     fallback_name: Option<String>,
@@ -404,6 +441,71 @@ fn lookup_process_details(
         });
 
     (process_name, process_path)
+}
+
+#[cfg(target_os = "windows")]
+fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
+    use windows::Win32::System::RestartManager::{
+        RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+    };
+
+    let path_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut session: u32 = 0;
+        let mut session_key = [0u16; 256]; // CCH_RM_SESSION_KEY + 1
+        if RmStartSession(&mut session, 0, session_key.as_mut_ptr()).is_err() {
+            return None;
+        }
+
+        let file_ptr = windows::core::PCWSTR(path_wide.as_ptr());
+        let files = [file_ptr];
+        if RmRegisterResources(session, Some(&files), None, None).is_err() {
+            let _ = RmEndSession(session);
+            return None;
+        }
+
+        let mut needed: u32 = 0;
+        let mut count: u32 = 0;
+        let mut reason: u32 = 0;
+        // First call to get the required buffer size
+        let _ = RmGetList(session, &mut needed, &mut count, None, &mut reason);
+        if needed == 0 {
+            let _ = RmEndSession(session);
+            return None;
+        }
+
+        let mut buf =
+            vec![std::mem::zeroed::<windows::Win32::System::RestartManager::RM_PROCESS_INFO>(); needed as usize];
+        count = needed;
+        let result = RmGetList(
+            session,
+            &mut needed,
+            &mut count,
+            Some(buf.as_mut_ptr()),
+            &mut reason,
+        );
+        let _ = RmEndSession(session);
+
+        if result.is_err() || count == 0 {
+            return None;
+        }
+
+        let info = &buf[0];
+        let pid = info.Process.dwProcessId;
+        let name_slice = &info.strAppName;
+        let name_len = name_slice.iter().position(|&c| c == 0).unwrap_or(name_slice.len());
+        let app_name = if name_len > 0 {
+            Some(String::from_utf16_lossy(&name_slice[..name_len]))
+        } else {
+            None
+        };
+        Some((pid, app_name))
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -452,25 +554,76 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
     updated
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
+    let candidates = store.get_recent_events_missing_process_attribution(max_events);
+    let mut updated = 0;
+
+    for event in candidates {
+        if event.event_type == FimEventType::Delete {
+            continue;
+        }
+
+        // Tier 1: ETW file attribution table
+        if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&event.path) {
+            store.update_process_attribution(&event.uid, Some(name), Some(proc_path));
+            updated += 1;
+            continue;
+        }
+
+        // Tier 2: in-memory cache
+        if let Some((name, proc_path)) = lookup_cache(&event.path) {
+            if name.is_some() || proc_path.is_some() {
+                store.update_process_attribution(&event.uid, name, proc_path);
+                updated += 1;
+                continue;
+            }
+        }
+
+        // Tier 3: Restart Manager + sysinfo
+        let path = Path::new(&event.path);
+        let (pid, fallback_name) = match lookup_pid_for_path(path) {
+            Some(details) => details,
+            None => continue,
+        };
+
+        let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+        if process_name.is_none() && process_path.is_none() {
+            continue;
+        }
+
+        cache_attribution(&event.path, &process_name, &process_path);
+        store.update_process_attribution(&event.uid, process_name, process_path);
+        updated += 1;
+    }
+
+    updated
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn backfill_missing_process_attribution(_store: &FimEventStore, _max_events: usize) -> usize {
     0
 }
 
-/// Returns `(lsof_cache_size, es_available)` for diagnostic and benchmarking purposes.
+/// Returns `(cache_size, kernel_attribution_available)` for diagnostic purposes.
+/// On macOS the kernel source is ES; on Windows it is ETW.
 pub fn attribution_cache_stats() -> (usize, bool) {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         (FIM_ATTRIBUTION_CACHE.len(), crate::l7_es::is_available())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        (FIM_ATTRIBUTION_CACHE.len(), crate::l7_etw::is_available())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         (0, false)
     }
 }
 
 pub fn clear_attribution_cache() {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         FIM_ATTRIBUTION_CACHE.clear();
         FIM_CACHE_INSERT_COUNTER.store(0, Ordering::Relaxed);

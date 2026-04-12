@@ -1,11 +1,17 @@
-# ETW Layer 7 Process Attribution (Experimental -- Not Enabled)
+# ETW Process and File Attribution
 
 ## Status
 
-**The `etw` feature flag is not enabled by default.** Benchmarks show that
-`netstat2` (`GetExtendedTcpTable` from `iphlpapi.dll`) provides equivalent
-or better L7 resolution performance on Windows without any of ETW's
-operational complexity.
+**The `etw` feature flag is not enabled by default for L7 network
+attribution**, because `netstat2` (`GetExtendedTcpTable`) provides
+equivalent or better resolution. However, **ETW is the primary mechanism
+for FIM process attribution on Windows**, providing kernel-delivered
+file-to-PID mapping analogous to Endpoint Security on macOS.
+
+When the `etw` feature is enabled and the process runs as Administrator,
+the kernel trace session captures TCP/IP, Process, and FileIo events.
+The FileIo events populate a file attribution table used by the FIM
+subsystem in `fim.rs` to attribute file events to processes in real time.
 
 ### Why ETW is not useful for L7 socket attribution
 
@@ -30,21 +36,30 @@ In practice, `netstat2` always wins the resolution race.
 | Operational conflicts | None | Conflicts with PerfMon, Xperf, etc. |
 | Additional dependency | `iphlpapi.dll` (always present) | `windows` crate ETW APIs |
 
-### Where ETW could add value beyond L7
+### Where ETW adds value: FIM process attribution
 
-ETW is a powerful general-purpose kernel tracing facility. If EDAMAME needs
-Windows-specific telemetry beyond socket attribution in the future, ETW
-could be repurposed for:
+ETW's FileIo provider delivers `FileIo_Create` events (opcode 64) with
+the full file path and the PID of the process that opened the file. This
+is the Windows counterpart of macOS Endpoint Security file events.
+
+The FIM subsystem uses a three-tier attribution strategy on Windows:
+
+| Tier | Source | Latency | Requires |
+|---|---|---|---|
+| **1** | ETW FileIo table | Near-zero (event-driven) | `etw` feature + Administrator |
+| **2** | In-memory cache | Near-zero (DashMap lookup) | Previous successful attribution |
+| **3** | Restart Manager API | ~1-5 ms per file | None (no admin required) |
+
+When `etw` is not enabled or the process lacks Administrator privileges,
+Tier 2 + Tier 3 still provide basic attribution.
+
+### Other potential ETW uses
 
 - **DLL/image load tracking** (`IMAGE_LOAD` events) -- detect injected DLLs
-- **File I/O monitoring** (`FileIo` provider) -- track sensitive file access
 - **Registry access tracing** -- detect persistence mechanisms
 - **Thread injection detection** -- cross-process thread creation
 - **Process metadata for exited processes** -- command line, environment
   captured at process start, surviving process exit
-
-These use cases would require new event handlers beyond the current
-TCP/IP and Process providers.
 
 ## Overview
 
@@ -64,27 +79,32 @@ Windows Event Tracing for Windows (ETW) is a kernel-level tracing facility that 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           User Space                                      │
-│  ┌─────────────────┐    ┌───────────────────────────────────────────────┐  │
-│  │  flodbadd       │    │  l7_etw.rs                                    │  │
-│  │  l7.rs          │───>│  - ETW session singleton                      │  │
-│  │  resolver       │<───│  - DashMap process table                    │  │
-│  │                 │    │  - DashMap connection table                 │  │
-│  └─────────────────┘    └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ StartTraceW / OpenTraceW / ProcessTrace
-                                    │ EVENT_RECORD callbacks
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Kernel Space                                      │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  NT Kernel Logger trace session                                    │  │
-│  │  - Microsoft-Windows-Kernel-Network (TCP/IP Provider)            │  │
-│  │  - Microsoft-Windows-Kernel-Process (Process Provider)             │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            User Space                                     │
+│  ┌──────────────┐   ┌──────────────────────────────────────────────────┐  │
+│  │  flodbadd    │   │  l7_etw.rs                                       │  │
+│  │  l7.rs       │──>│  - ETW session singleton                         │  │
+│  │  resolver    │<──│  - DashMap process table                         │  │
+│  │              │   │  - DashMap connection table                      │  │
+│  └──────────────┘   │  - DashMap file attribution table (FIM)          │  │
+│  ┌──────────────┐   │                                                   │  │
+│  │  fim.rs      │──>│  get_file_attribution(path)                       │  │
+│  │  FIM watcher │<──│  -> (pid, process_name, process_path)            │  │
+│  └──────────────┘   └──────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │ StartTraceW / OpenTraceW / ProcessTrace
+                                     │ EVENT_RECORD callbacks
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          Kernel Space                                     │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  NT Kernel Logger trace session                                     │  │
+│  │  - Microsoft-Windows-Kernel-Network (TCP/IP Provider)               │  │
+│  │  - Microsoft-Windows-Kernel-Process (Process Provider)              │  │
+│  │  - FileIo Provider (File I/O events)                                │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Hybrid Resolution Strategy
@@ -140,6 +160,7 @@ ETW is not enabled in production. If re-enabled for experimentation:
 |---|---|---|
 | Microsoft-Windows-Kernel-Network (TCP/IP) | 9a280ac0-c8e0-11d1-84e2-00c04fb998a2 | TCP connect/accept/reconnect events with PIDs |
 | Microsoft-Windows-Kernel-Process | 3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c | Process start/end with image path, parent PID |
+| FileIo | 90cbdc39-4a3e-11d1-84f4-0000f80464e3 | File open/create events with PID and full path |
 
 ### Event Types
 
@@ -150,6 +171,7 @@ ETW is not enabled in production. If re-enabled for experimentation:
 | TcpIp/Reconnect | 16 | TCP reconnection with PID |
 | Process/Start | 1 | New process with image path, parent PID |
 | Process/End | 2 | Process exit -- garbage-collect from tables |
+| FileIo/Create | 64 | File open/create with full path and PID (FIM attribution) |
 
 ## Graceful Fallback
 
@@ -209,10 +231,11 @@ IPv6 TCP events use version >= 2 of the TCP/IP event format. Older Windows versi
 flodbadd/
   src/
     l7.rs          # L7 resolution dispatch (eBPF -> ES -> ETW -> netstat)
-    l7_etw.rs      # ETW session, process table, connection table (Windows only)
+    l7_etw.rs      # ETW session, process table, connection table, file attribution (Windows)
     l7_ebpf.rs     # eBPF-based resolution (Linux only)
-    l7_es.rs       # ES client, process table (macOS only)
+    l7_es.rs       # ES client, process/file attribution tables (macOS only)
     l7_macos.rs    # libproc socket-to-PID mapping (macOS)
+    fim.rs         # FIM watcher -- calls l7_etw::get_file_attribution() on Windows
     capture.rs     # Integrates L7 with packet capture
 ```
 
@@ -235,7 +258,11 @@ ETW kernel trace sessions require Administrator privileges. The helper Windows S
 
 ### Event Volume
 
-TCP/IP and Process events are moderate-frequency. DashMap provides efficient concurrent access. Process exit events garbage-collect stale entries.
+TCP/IP and Process events are moderate-frequency. FileIo events are
+high-frequency on active systems. DashMap provides efficient concurrent
+access. Process exit events garbage-collect stale process table entries.
+The file attribution table is pruned on insert (50K max entries, 30s TTL)
+to bound memory use.
 
 ### Session Exclusivity
 

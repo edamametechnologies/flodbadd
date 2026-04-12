@@ -1,9 +1,16 @@
-// Windows ETW (Event Tracing for Windows) process attribution.
+// Windows ETW (Event Tracing for Windows) process and file attribution.
 //
-// Uses the Windows kernel ETW providers (Microsoft-Windows-Kernel-Process
-// and TCP/IP) to maintain a live process table and connection-to-PID map.
-// This provides high-fidelity process metadata without the race conditions
-// inherent in polling netstat2/sysinfo after the fact.
+// Uses the Windows kernel ETW providers (Microsoft-Windows-Kernel-Process,
+// TCP/IP, and FileIo) to maintain:
+//   1. A live process table populated by kernel Process Start/End events.
+//   2. A connection-to-PID map from TCP/IP Connect/Accept events.
+//   3. A file attribution table populated by FileIo Create events, mapping
+//      recently-opened file paths to the responsible process.
+//
+// The file attribution table is the Windows counterpart of the ES file
+// attribution table on macOS (l7_es.rs).  It is consumed by the FIM
+// subsystem in fim.rs to attribute file events to processes at kernel-
+// delivered time, avoiding the race conditions inherent in polling.
 //
 // On non-Windows platforms or when the `etw` feature is not enabled,
 // all public functions gracefully fall back to no-op stubs so the rest of
@@ -22,12 +29,16 @@ mod win {
     use std::sync::Arc;
     use tracing::{debug, error, warn};
 
+    use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
+
     use windows::core::{GUID, PCWSTR};
     use windows::Win32::System::Diagnostics::Etw::{
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
         CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
-        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW,
-        EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+        EVENT_TRACE_FLAG_FILE_IO, EVENT_TRACE_FLAG_FILE_IO_INIT, EVENT_TRACE_FLAG_NETWORK_TCPIP,
+        EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
+        EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
         PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -46,9 +57,44 @@ mod win {
     const EVENT_TRACE_TYPE_START: u8 = 1; // Process/Start
     const EVENT_TRACE_TYPE_END: u8 = 2; // Process/End
 
-    // TCP/IP group GUIDs
+    // FileIo event opcode
+    const FILEIO_CREATE: u8 = 64; // FileIo/Create -- file open or create with full path
+
+    // Provider GUIDs
     const TCP_IP_GUID: GUID = GUID::from_u128(0x9a280ac0_c8e0_11d1_84e2_00c04fb998a2);
     const PROCESS_GUID: GUID = GUID::from_u128(0x3d6fa8d0_fe05_11d0_9dda_00c04fd7ba7c);
+    const FILEIO_GUID: GUID = GUID::from_u128(0x90cbdc39_4a3e_11d1_84f4_0000f80464e3);
+
+    // File attribution table limits -- same as ES on macOS (l7_es.rs)
+    const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
+    const FILE_ATTR_TTL_SECS: u64 = 30;
+    const FILE_ATTR_PRUNE_INTERVAL: u64 = 1_000;
+
+    // Fixed-size prefix of the FileIo_Create payload (64-bit Windows):
+    //   IrpPtr(8) + FileObject(8) + TTID(4) + CreateOptions(4) +
+    //   FileAttributes(4) + ShareAccess(4) = 32 bytes
+    // OpenPath (variable-length UTF-16) follows immediately.
+    const FILEIO_CREATE_FIXED_PREFIX: usize = 32;
+
+    #[derive(Clone, Debug)]
+    pub struct FimEtwAttribution {
+        pub pid: u32,
+        pub process_name: String,
+        pub process_path: String,
+        pub recorded_at: Instant,
+    }
+
+    pub struct FileEventCounters {
+        pub create_received: AtomicU64,
+    }
+
+    impl Default for FileEventCounters {
+        fn default() -> Self {
+            Self {
+                create_received: AtomicU64::new(0),
+            }
+        }
+    }
 
     #[derive(Clone, Debug)]
     pub struct EtwProcessInfo {
@@ -73,6 +119,9 @@ mod win {
     pub struct FlodbaddL7Etw {
         process_table: Arc<DashMap<u32, EtwProcessInfo>>,
         connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
+        file_attribution_table: Arc<DashMap<String, FimEtwAttribution>>,
+        file_insert_counter: Arc<AtomicU64>,
+        file_event_counters: Arc<FileEventCounters>,
         available: Arc<AtomicBool>,
         init_status: String,
     }
@@ -117,16 +166,21 @@ mod win {
         fn init() -> Self {
             let process_table = Arc::new(DashMap::new());
             let connection_table = Arc::new(DashMap::new());
+            let file_attribution_table = Arc::new(DashMap::new());
+            let file_insert_counter = Arc::new(AtomicU64::new(0));
+            let file_event_counters = Arc::new(FileEventCounters::default());
             let available = Arc::new(AtomicBool::new(false));
 
             let pt = Arc::clone(&process_table);
             let ct = Arc::clone(&connection_table);
+            let ft = Arc::clone(&file_attribution_table);
+            let fc = Arc::clone(&file_insert_counter);
             let av = Arc::clone(&available);
 
             if let Err(e) = std::thread::Builder::new()
                 .name("etw-client".into())
                 .spawn(move || {
-                    Self::run_etw_session(pt, ct, av);
+                    Self::run_etw_session(pt, ct, ft, fc, av);
                 })
             {
                 error!("Failed to spawn ETW client thread: {}", e);
@@ -136,21 +190,25 @@ mod win {
 
             let is_available = available.load(Ordering::Acquire);
             let init_status = if is_available {
-                "Enabled: Windows ETW kernel trace with TCP/IP and Process providers".to_string()
+                "Enabled: Windows ETW kernel trace with TCP/IP, Process, and FileIo providers"
+                    .to_string()
             } else {
                 "Disabled: ETW kernel trace session failed to start (need Administrator)"
                     .to_string()
             };
 
             if is_available {
-                info!("ETW L7 helper initialized: {}", init_status);
+                info!("ETW helper initialized: {}", init_status);
             } else {
-                warn!("ETW L7 helper: {}", init_status);
+                warn!("ETW helper: {}", init_status);
             }
 
             Self {
                 process_table,
                 connection_table,
+                file_attribution_table,
+                file_insert_counter,
+                file_event_counters,
                 available,
                 init_status,
             }
@@ -159,6 +217,8 @@ mod win {
         fn run_etw_session(
             process_table: Arc<DashMap<u32, EtwProcessInfo>>,
             connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
+            file_table: Arc<DashMap<String, FimEtwAttribution>>,
+            file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
         ) {
             // Store tables in thread-local for the callback
@@ -167,6 +227,12 @@ mod win {
             });
             THREAD_CONNECTION_TABLE.with(|t| {
                 *t.borrow_mut() = Some(Arc::clone(&connection_table));
+            });
+            THREAD_FILE_TABLE.with(|t| {
+                *t.borrow_mut() = Some(Arc::clone(&file_table));
+            });
+            THREAD_FILE_COUNTER.with(|t| {
+                *t.borrow_mut() = Some(Arc::clone(&file_counter));
             });
 
             unsafe {
@@ -200,7 +266,10 @@ mod win {
                 props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
                 props.Wnode.ClientContext = 1; // QPC for timestamps
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-                props.EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
+                props.EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP
+                    | EVENT_TRACE_FLAG_PROCESS
+                    | EVENT_TRACE_FLAG_FILE_IO
+                    | EVENT_TRACE_FLAG_FILE_IO_INIT;
                 props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
                 props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
 
@@ -368,6 +437,76 @@ mod win {
         pub fn connection_count(&self) -> usize {
             self.connection_table.len()
         }
+
+        pub fn get_file_attribution(&self, path: &str) -> Option<(u32, String, String)> {
+            let entry = self.file_attribution_table.get(path)?;
+            let attr = entry.value();
+            if attr.recorded_at.elapsed().as_secs() > FILE_ATTR_TTL_SECS {
+                return None;
+            }
+            Some((
+                attr.pid,
+                attr.process_name.clone(),
+                attr.process_path.clone(),
+            ))
+        }
+
+        pub fn file_attribution_count(&self) -> usize {
+            self.file_attribution_table.len()
+        }
+
+        pub fn file_event_stats(&self) -> u64 {
+            self.file_event_counters
+                .create_received
+                .load(Ordering::Relaxed)
+        }
+
+        fn record_file_attribution(
+            file_table: &DashMap<String, FimEtwAttribution>,
+            file_counter: &AtomicU64,
+            process_table: &DashMap<u32, EtwProcessInfo>,
+            path: String,
+            pid: u32,
+        ) {
+            let (process_name, process_path) =
+                if let Some(info) = process_table.get(&pid) {
+                    (info.process_name.clone(), info.process_path.clone())
+                } else {
+                    (format!("pid-{}", pid), String::new())
+                };
+
+            file_table.insert(
+                path,
+                FimEtwAttribution {
+                    pid,
+                    process_name,
+                    process_path,
+                    recorded_at: Instant::now(),
+                },
+            );
+
+            let count = file_counter.fetch_add(1, Ordering::Relaxed);
+            if count % FILE_ATTR_PRUNE_INTERVAL == 0 && count > 0 {
+                Self::prune_file_attribution_table(file_table);
+            }
+        }
+
+        fn prune_file_attribution_table(table: &DashMap<String, FimEtwAttribution>) {
+            let cutoff = Instant::now() - std::time::Duration::from_secs(FILE_ATTR_TTL_SECS);
+            table.retain(|_, v| v.recorded_at > cutoff);
+
+            if table.len() > FILE_ATTR_MAX_ENTRIES {
+                let mut entries: Vec<_> = table
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().recorded_at))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                let to_remove = entries.len() - FILE_ATTR_MAX_ENTRIES;
+                for (key, _) in entries.into_iter().take(to_remove) {
+                    table.remove(&key);
+                }
+            }
+        }
     }
 
     // Thread-local storage for the ETW callback to access the shared tables.
@@ -377,6 +516,10 @@ mod win {
         static THREAD_PROCESS_TABLE: std::cell::RefCell<Option<Arc<DashMap<u32, EtwProcessInfo>>>> =
             const { std::cell::RefCell::new(None) };
         static THREAD_CONNECTION_TABLE: std::cell::RefCell<Option<Arc<DashMap<TcpConnectionKey, u32>>>> =
+            const { std::cell::RefCell::new(None) };
+        static THREAD_FILE_TABLE: std::cell::RefCell<Option<Arc<DashMap<String, FimEtwAttribution>>>> =
+            const { std::cell::RefCell::new(None) };
+        static THREAD_FILE_COUNTER: std::cell::RefCell<Option<Arc<AtomicU64>>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -393,6 +536,8 @@ mod win {
             handle_tcp_event(event, opcode);
         } else if provider == PROCESS_GUID {
             handle_process_event(event, opcode);
+        } else if provider == FILEIO_GUID {
+            handle_fileio_event(event, opcode);
         }
     }
 
@@ -543,6 +688,68 @@ mod win {
         }
     }
 
+    unsafe fn handle_fileio_event(event: &EVENT_RECORD, opcode: u8) {
+        if opcode != FILEIO_CREATE {
+            return;
+        }
+
+        let data_ptr = event.UserData;
+        let data_len = event.UserDataLength as usize;
+
+        if data_ptr.is_null() || data_len <= FILEIO_CREATE_FIXED_PREFIX {
+            return;
+        }
+
+        let pid = event.EventHeader.ProcessId;
+        if pid == 0 {
+            return;
+        }
+
+        // Skip our own file I/O
+        let own_pid = GetCurrentProcessId();
+        if pid == own_pid {
+            return;
+        }
+
+        // OpenPath starts after the fixed prefix as a null-terminated UTF-16 string
+        let path_ptr = (data_ptr as *const u8).add(FILEIO_CREATE_FIXED_PREFIX) as *const u16;
+        let path_max_u16 = (data_len - FILEIO_CREATE_FIXED_PREFIX) / 2;
+        let path_slice = std::slice::from_raw_parts(path_ptr, path_max_u16);
+
+        let path = extract_utf16_path(path_slice);
+        if path.is_empty() {
+            return;
+        }
+
+        THREAD_FILE_TABLE.with(|ft| {
+            THREAD_FILE_COUNTER.with(|fc| {
+                THREAD_PROCESS_TABLE.with(|pt| {
+                    if let (Some(file_table), Some(file_counter), Some(proc_table)) = (
+                        ft.borrow().as_ref(),
+                        fc.borrow().as_ref(),
+                        pt.borrow().as_ref(),
+                    ) {
+                        FlodbaddL7Etw::record_file_attribution(
+                            file_table,
+                            file_counter,
+                            proc_table,
+                            path,
+                            pid,
+                        );
+                    }
+                });
+            });
+        });
+    }
+
+    fn extract_utf16_path(data: &[u16]) -> String {
+        let len = data.iter().position(|&c| c == 0).unwrap_or(data.len());
+        if len == 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&data[..len])
+    }
+
     fn extract_image_path(data: &[u8]) -> String {
         // The process image filename in kernel trace events is typically
         // a null-terminated ANSI string after the SID.
@@ -607,6 +814,18 @@ mod win {
         }
 
         pub fn connection_count(&self) -> usize {
+            0
+        }
+
+        pub fn get_file_attribution(&self, _path: &str) -> Option<(u32, String, String)> {
+            None
+        }
+
+        pub fn file_attribution_count(&self) -> usize {
+            0
+        }
+
+        pub fn file_event_stats(&self) -> u64 {
             0
         }
     }
@@ -686,6 +905,18 @@ pub fn process_count() -> usize {
 
 pub fn connection_count() -> usize {
     win::global().connection_count()
+}
+
+pub fn get_file_attribution(path: &str) -> Option<(u32, String, String)> {
+    win::global().get_file_attribution(path)
+}
+
+pub fn file_attribution_count() -> usize {
+    win::global().file_attribution_count()
+}
+
+pub fn file_event_stats() -> u64 {
+    win::global().file_event_stats()
 }
 
 #[cfg(test)]
