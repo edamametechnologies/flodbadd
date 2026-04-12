@@ -479,8 +479,11 @@ fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
             return None;
         }
 
-        let mut buf =
-            vec![std::mem::zeroed::<windows::Win32::System::RestartManager::RM_PROCESS_INFO>(); needed as usize];
+        let mut buf = vec![
+            std::mem::zeroed::<windows::Win32::System::RestartManager::RM_PROCESS_INFO>(
+            );
+            needed as usize
+        ];
         count = needed;
         let result = RmGetList(
             session,
@@ -498,7 +501,10 @@ fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
         let info = &buf[0];
         let pid = info.Process.dwProcessId;
         let name_slice = &info.strAppName;
-        let name_len = name_slice.iter().position(|&c| c == 0).unwrap_or(name_slice.len());
+        let name_len = name_slice
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(name_slice.len());
         let app_name = if name_len > 0 {
             Some(String::from_utf16_lossy(&name_slice[..name_len]))
         } else {

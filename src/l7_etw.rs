@@ -38,8 +38,8 @@ mod win {
         CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
         EVENT_TRACE_FLAG_FILE_IO, EVENT_TRACE_FLAG_FILE_IO_INIT, EVENT_TRACE_FLAG_NETWORK_TCPIP,
         EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
-        EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
-        PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+        EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
+        TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -468,12 +468,11 @@ mod win {
             path: String,
             pid: u32,
         ) {
-            let (process_name, process_path) =
-                if let Some(info) = process_table.get(&pid) {
-                    (info.process_name.clone(), info.process_path.clone())
-                } else {
-                    (format!("pid-{}", pid), String::new())
-                };
+            let (process_name, process_path) = if let Some(info) = process_table.get(&pid) {
+                (info.process_name.clone(), info.process_path.clone())
+            } else {
+                (format!("pid-{}", pid), String::new())
+            };
 
             file_table.insert(
                 path,
