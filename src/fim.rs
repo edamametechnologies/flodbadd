@@ -445,6 +445,7 @@ fn lookup_process_details(
 
 #[cfg(target_os = "windows")]
 fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
+    use windows::core::PWSTR;
     use windows::Win32::System::RestartManager::{
         RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
     };
@@ -458,7 +459,7 @@ fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
     unsafe {
         let mut session: u32 = 0;
         let mut session_key = [0u16; 256]; // CCH_RM_SESSION_KEY + 1
-        if RmStartSession(&mut session, 0, session_key.as_mut_ptr()).is_err() {
+        if RmStartSession(&mut session, None, PWSTR(session_key.as_mut_ptr())).is_err() {
             return None;
         }
 
