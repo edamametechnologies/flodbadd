@@ -3233,9 +3233,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.37"
+version = "0.23.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
+checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
 dependencies = [
  "once_cell",
  "ring",
@@ -3700,7 +3700,7 @@ dependencies = [
 [[package]]
 name = "threatmodels_rs"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#fc9c389a4795aae3a59be6739f43056abbd00843"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#febbdfc1b00d02104fdd55f1c166c12c2f072d48"
 dependencies = [
  "anyhow",
  "chrono",
