@@ -127,11 +127,11 @@ The ES client runs inside the `edamame_helper` LaunchDaemon:
 - No IPC overhead -- process table is in-process
 - No new daemon or System Extension needed
 
-The helper's `macos/edamame_helper.entitlements` includes the ES entitlement. The signing script (`macos/make-pkg.sh`) embeds it during code signing.
+The helper's `macos/edamame_helper.entitlements` includes the ES entitlement. The signing script (`macos/make-pkg.sh`) embeds it during code signing. The `.pkg` also includes the Apple provisioning profile (via `--provisioning-profile`) which AMFI requires at runtime to authorize the entitlement.
 
 ### edamame_posture (Standalone)
 
-`edamame_posture` runs as root on macOS (`ensure_admin()`), so it can also use ES directly when built with the `endpointsecurity` feature. No helper needed.
+`edamame_posture` runs as root on macOS (`ensure_admin()`), so it can also use ES directly when built with the `endpointsecurity` feature. No helper needed. Like the helper, the macOS `.pkg` embeds the provisioning profile so end users get ES authorization automatically on install.
 
 ### edamame_app (Flutter)
 
@@ -251,8 +251,8 @@ ES client creation failed: ERR_NOT_ENTITLED
 
 **Solutions:**
 1. Ensure running as root (helper LaunchDaemon or `sudo`)
-2. For development: disable SIP (`csrutil disable` from Recovery)
-3. For production: ensure Apple-approved entitlement is in the provisioning profile
+2. For development: disable SIP (`csrutil disable` from Recovery), or install the provisioning profile locally (`make install_provisioning` in `edamame_helper` or `edamame_posture`)
+3. For production: install via the notarized `.pkg` which includes the provisioning profile at `Library/MobileDevice/Provisioning Profiles/`
 
 ### Process Table Empty
 
@@ -289,7 +289,7 @@ flodbadd/
 edamame_helper/
   macos/
     edamame_helper.entitlements  # ES entitlement plist
-    make-pkg.sh                  # Signing script (uses entitlements)
+    make-pkg.sh                  # Signing + packaging (embeds entitlements + provisioning profile)
 ```
 
 ## Rust Crate
