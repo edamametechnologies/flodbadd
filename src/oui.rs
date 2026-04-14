@@ -16,17 +16,28 @@ lazy_static! {
         Arc::new(CustomRwLock::new(oui))
     };
 
-    // Cache of MAC string -> vendor string for fast repeat look-ups
     static ref VENDOR_CACHE: CustomDashMap<String, String> = CustomDashMap::new("vendor_cache");
+
+    /// OUI prefix cache keyed by the first 3 bytes of the MAC address.
+    /// Many devices on a LAN share the same vendor prefix (e.g. Apple, Intel),
+    /// so this avoids the OUI crate's linear scan for repeat-vendor lookups.
+    static ref PREFIX_CACHE: CustomDashMap<[u8; 3], String> = CustomDashMap::new("oui_prefix_cache");
 }
 
 pub async fn get_mac_address_vendor(mac_address: &MacAddr6) -> String {
-    // Convert to canonical string once
     let mac_str = mac_address.to_string();
 
-    // Check cache first
     if let Some(vendor_entry) = VENDOR_CACHE.get(&mac_str) {
         return vendor_entry.value().clone();
+    }
+
+    let octets = mac_address.as_bytes();
+    let prefix: [u8; 3] = [octets[0], octets[1], octets[2]];
+
+    if let Some(vendor_entry) = PREFIX_CACHE.get(&prefix) {
+        let vendor = vendor_entry.value().clone();
+        VENDOR_CACHE.insert(mac_str, vendor.clone());
+        return vendor;
     }
 
     let oui = OUI.read().await;
@@ -55,7 +66,7 @@ pub async fn get_mac_address_vendor(mac_address: &MacAddr6) -> String {
         }
     };
 
-    // Store in cache for subsequent fast access
+    PREFIX_CACHE.insert(prefix, vendor.clone());
     VENDOR_CACHE.insert(mac_str, vendor.clone());
 
     vendor

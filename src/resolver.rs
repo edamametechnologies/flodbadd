@@ -4,9 +4,9 @@ use hickory_resolver::{
 };
 use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, trace, warn};
 use undeadlock::*;
@@ -157,15 +157,15 @@ impl FlodbaddResolver {
         if !resolvers.is_empty() {
             let resolver_queue = self.resolver_queue.clone();
             let reverse_dns = self.reverse_dns.clone();
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_flag_clone = stop_flag.clone();
+            let (stop_tx, stop_rx) = watch::channel(false);
+            let stop_tx = Arc::new(stop_tx);
             let resolvers_clone = resolvers.clone();
 
             let resolver_handle = tokio::spawn(async move {
                 info!("Starting resolver task");
                 let mut cleanup_counter = 0u32;
 
-                while !stop_flag_clone.load(Ordering::Relaxed)
+                while !*stop_rx.borrow()
                     || !resolver_queue.read().await.is_empty()
                 {
                     // Get the IPs to resolve from the queue
@@ -223,14 +223,14 @@ impl FlodbaddResolver {
 
             *self.resolver_handle.write().await = Some(TaskHandle {
                 handle: resolver_handle,
-                stop_flag,
+                stop_tx,
             });
         }
     }
 
     pub async fn stop(&self) {
         if let Some(task_handle) = self.resolver_handle.write().await.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.stop_tx.send(true);
             let _ = task_handle.handle.await;
             info!("Stopped resolver task");
         } else {

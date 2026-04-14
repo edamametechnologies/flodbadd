@@ -60,10 +60,10 @@ use netstat2::{
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::{Pid, Process, ProcessRefreshKind, RefreshKind, System, Uid, Users};
+use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*;
@@ -185,7 +185,7 @@ impl FlodbaddL7 {
 
     pub async fn stop(&mut self) {
         if let Some(task_handle) = self.resolver_handle.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.stop_tx.send(true);
             let _ = task_handle.handle.await;
             info!("Stopped L7 resolver task");
         } else {
@@ -193,13 +193,13 @@ impl FlodbaddL7 {
         }
 
         if let Some(task_handle) = self.cache_cleanup_handle.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.stop_tx.send(true);
             let _ = task_handle.handle.await;
             info!("Stopped L7 cache cleanup task");
         }
 
         if let Some(task_handle) = self.sensitive_scan_handle.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.stop_tx.send(true);
             let _ = task_handle.handle.await;
             info!("Stopped sensitive file scan task");
         }
@@ -213,15 +213,15 @@ impl FlodbaddL7 {
         let port_process_cache = self.port_process_cache.clone();
         let host_service_cache = self.host_service_cache.clone();
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
         let resolver_handle = tokio::spawn(async move {
             info!("Starting L7 resolver task");
             let refresh_kind = RefreshKind::nothing()
                 .with_processes(ProcessRefreshKind::everything().without_cpu());
 
-            while !stop_flag_clone.load(Ordering::Relaxed) {
+            while !*stop_rx.borrow() {
                 let mut to_process_this_cycle: Vec<Session> = Vec::new();
                 let mut requeue_due_to_backoff: Vec<Session> = Vec::new();
 
@@ -889,7 +889,7 @@ impl FlodbaddL7 {
 
         self.resolver_handle = Some(TaskHandle {
             handle: resolver_handle,
-            stop_flag,
+            stop_tx,
         });
     }
 
@@ -898,13 +898,13 @@ impl FlodbaddL7 {
         let host_service_cache = self.host_service_cache.clone();
         let l7_map = self.l7_map.clone();
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
         let cleanup_handle = tokio::spawn(async move {
             info!("Starting L7 cache cleanup task");
 
-            while !stop_flag_clone.load(Ordering::Relaxed) {
+            loop {
                 // Clean up port process cache using retain to avoid per-key locking
                 port_process_cache.retain(|key, entry| {
                     let port = key.0;
@@ -990,19 +990,12 @@ impl FlodbaddL7 {
                     debug!("Evicted {} stale L7Resolution entries", evicted);
                 }
 
-                // Interruptible sleep -- check stop flag every 500ms so
-                // stop() doesn't have to wait up to 60s for this task.
-                let sleep_end = tokio::time::Instant::now() + Duration::from_secs(60);
-                loop {
-                    if stop_flag_clone.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let remaining =
-                        sleep_end.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    sleep(remaining.min(Duration::from_millis(500))).await;
+                // Wait for stop signal or 60s, whichever comes first
+                if tokio::time::timeout(Duration::from_secs(60), stop_rx.changed())
+                    .await
+                    .is_ok()
+                {
+                    break;
                 }
             }
 
@@ -1011,7 +1004,7 @@ impl FlodbaddL7 {
 
         self.cache_cleanup_handle = Some(TaskHandle {
             handle: cleanup_handle,
-            stop_flag,
+            stop_tx,
         });
     }
 
@@ -1041,8 +1034,8 @@ impl FlodbaddL7 {
 
         let l7_map = self.l7_map.clone();
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
         let handle = tokio::spawn(async move {
             info!(
@@ -1050,26 +1043,15 @@ impl FlodbaddL7 {
                 SENSITIVE_SCAN_INTERVAL_SECS, MAX_PIDS_PER_CYCLE
             );
 
-            while !stop_flag_clone.load(Ordering::Relaxed) {
-                // Interruptible sleep -- check stop flag every 500ms so
-                // stop() doesn't have to wait the full scan interval.
+            loop {
+                if tokio::time::timeout(
+                    Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS),
+                    stop_rx.changed(),
+                )
+                .await
+                .is_ok()
                 {
-                    let sleep_end = tokio::time::Instant::now()
-                        + Duration::from_secs(SENSITIVE_SCAN_INTERVAL_SECS);
-                    loop {
-                        if stop_flag_clone.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let remaining =
-                            sleep_end.saturating_duration_since(tokio::time::Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        sleep(remaining.min(Duration::from_millis(500))).await;
-                    }
-                    if stop_flag_clone.load(Ordering::Relaxed) {
-                        break;
-                    }
+                    break;
                 }
 
                 // Collect (pid, needs_full_scan) for resolved entries, dedup by
@@ -1175,7 +1157,7 @@ impl FlodbaddL7 {
             info!("Sensitive file scan task completed");
         });
 
-        self.sensitive_scan_handle = Some(TaskHandle { handle, stop_flag });
+        self.sensitive_scan_handle = Some(TaskHandle { handle, stop_tx });
     }
 
     async fn update_port_process_cache(
@@ -2461,11 +2443,11 @@ mod tests {
         if stop_result.is_err() {
             error!("Timeout occurred while stopping flodbadd_l7");
             if let Some(handle) = flodbadd_l7.resolver_handle.take() {
-                handle.stop_flag.store(true, Ordering::Relaxed);
+                let _ = handle.stop_tx.send(true);
                 handle.handle.abort();
             }
             if let Some(handle) = flodbadd_l7.cache_cleanup_handle.take() {
-                handle.stop_flag.store(true, Ordering::Relaxed);
+                let _ = handle.stop_tx.send(true);
                 handle.handle.abort();
             }
         }
@@ -2580,11 +2562,11 @@ mod tests {
         if stop_result.is_err() {
             error!("Timeout occurred while stopping flodbadd_l7");
             if let Some(handle) = flodbadd_l7.resolver_handle.take() {
-                handle.stop_flag.store(true, Ordering::Relaxed);
+                let _ = handle.stop_tx.send(true);
                 handle.handle.abort();
             }
             if let Some(handle) = flodbadd_l7.cache_cleanup_handle.take() {
-                handle.stop_flag.store(true, Ordering::Relaxed);
+                let _ = handle.stop_tx.send(true);
                 handle.handle.abort();
             }
         }

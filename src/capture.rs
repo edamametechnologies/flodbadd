@@ -41,6 +41,7 @@ use std::time::Instant;
     feature = "asyncpacketcapture"
 ))]
 use tokio::select;
+use tokio::sync::watch;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*; // Add this import // Add Duration import
@@ -1272,9 +1273,8 @@ impl FlodbaddCapture {
         let current_sessions = self.current_sessions.clone();
         let filter = self.filter.clone();
 
-        // Create a new stop flag for this interface's capture task
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
         // Clone the interface name for the async move block
         let interface_name_clone = interface.name.clone();
@@ -1393,16 +1393,16 @@ impl FlodbaddCapture {
                 let own_ips_clone = interface_ips.clone();
                 let filter_clone = filter.clone();
                 let l7_clone = l7.clone();
-                let stop_flag_processor = stop_flag_clone.clone();
-                let interface_processor = interface_name_clone.clone(); // Use cloned name for logging
+                let mut stop_rx_processor = stop_rx.clone();
+                let interface_processor = interface_name_clone.clone();
 
                 let processor_handle = tokio::spawn(async move {
                     info!("Starting packet processor task for {}", interface_processor);
                     loop {
                         tokio::select! {
-                            biased; // Check stop flag first
-                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)), if stop_flag_processor.load(Ordering::Relaxed) => {
-                                info!("Stop flag detected in processor task for {}, breaking loop.", interface_processor);
+                            biased;
+                            _ = stop_rx_processor.changed() => {
+                                info!("Stop signal received in processor task for {}, breaking loop.", interface_processor);
                                 break;
                             }
                             maybe_data = rx.recv() => {
@@ -1448,7 +1448,8 @@ impl FlodbaddCapture {
                 // --- End Packet Processing Task ---
 
                 // --- Pcap Reading Loop (Sync) ---
-                let pcap_stop_flag = stop_flag_clone.clone();
+                // The sync reader thread exits via mpsc channel closure when the
+                // processor task (which holds rx) stops after receiving the watch signal.
                 let interface_pcap = interface_name_clone.clone();
                 // Need to move `cap` into a blocking thread for the sync read
                 let capture_handle = std::thread::spawn(move || {
@@ -1456,11 +1457,10 @@ impl FlodbaddCapture {
                     let mut dropped_packets = 0;
                     let mut total_packets = 0;
                     let mut last_log_time = Instant::now();
-                    while !pcap_stop_flag.load(Ordering::Relaxed) {
+                    loop {
                         match cap.next_packet() {
                             Ok(packet) => {
                                 total_packets += 1;
-                                // Build timestamp from packet header
                                 let secs = packet.header.ts.tv_sec as i64;
                                 let usecs = packet.header.ts.tv_usec as u32;
                                 let ts_utc = chrono::DateTime::<chrono::Utc>::from_timestamp(
@@ -1471,13 +1471,11 @@ impl FlodbaddCapture {
                                     chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
                                 });
 
-                                // Send data to the processor task, handle potential channel closure/fullness
                                 match tx.try_send(SyncPacket {
                                     data: packet.data.to_vec(),
                                     ts: ts_utc,
                                 }) {
-                                    // Use try_send
-                                    Ok(_) => { /* Packet sent successfully */ }
+                                    Ok(_) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                         dropped_packets += 1;
                                         debug!(
@@ -1486,16 +1484,18 @@ impl FlodbaddCapture {
                                         );
                                     }
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                        warn!(
+                                        info!(
                                             "Packet processor channel closed for {}, stopping reader thread.",
                                             interface_pcap
                                         );
-                                        break; // Exit loop if channel is closed
+                                        break;
                                     }
                                 }
                             }
                             Err(pcap::Error::TimeoutExpired) => {
-                                // Read timeout occurred, check stop_flag and continue
+                                if tx.is_closed() {
+                                    break;
+                                }
                                 continue;
                             }
                             Err(e) => {
@@ -1503,7 +1503,7 @@ impl FlodbaddCapture {
                                     "Pcap read error on {}: {}. Stopping reader thread.",
                                     interface_pcap, e
                                 );
-                                break; // Exit on other pcap errors
+                                break;
                             }
                         }
 
@@ -1521,7 +1521,7 @@ impl FlodbaddCapture {
                         }
                     }
                     info!(
-                        "Stop flag detected in sync pcap reader thread for {}, loop finished.",
+                        "Sync pcap reader thread for {} finished.",
                         interface_pcap
                     );
                     // Sender tx is dropped here when the thread exits
@@ -1587,7 +1587,7 @@ impl FlodbaddCapture {
                     }
                 };
                 let mut packet_stream = cap_stream;
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+                let mut stop_rx_capture = stop_rx;
                 let mut stats_interval =
                     tokio::time::interval(tokio::time::Duration::from_secs(10));
                 let own_ips = interface_ips.clone();
@@ -1597,11 +1597,9 @@ impl FlodbaddCapture {
                 debug!("Starting async capture task for {}", interface_name_clone);
                 loop {
                     select! {
-                        _ = interval.tick() => {
-                            if stop_flag_clone.load(Ordering::Relaxed) {
-                                info!("Stop flag detected in async capture task for {}, breaking loop.", interface_name_clone);
-                                break;
-                            }
+                        _ = stop_rx_capture.changed() => {
+                            info!("Stop signal received in async capture task for {}, breaking loop.", interface_name_clone);
+                            break;
                         }
                         _ = stats_interval.tick() => {
                             // Report on packet processing every 10 seconds
@@ -1659,8 +1657,8 @@ impl FlodbaddCapture {
         });
         // Store the task handle and its stop flag
         self.capture_task_handles.insert(
-            interface.name.to_string(), // Use interface name as key
-            TaskHandle { handle, stop_flag },
+            interface.name.to_string(),
+            TaskHandle { handle, stop_tx },
         );
     }
 
@@ -1676,9 +1674,8 @@ impl FlodbaddCapture {
 
         for key in keys {
             if let Some((_, task_handle)) = self.capture_task_handles.remove(&key) {
-                debug!("Signalling stop flag for task {}", key);
-                task_handle.stop_flag.store(true, Ordering::Relaxed);
-                // Collect the handle instead of awaiting immediately
+                debug!("Signalling stop for task {}", key);
+                let _ = task_handle.stop_tx.send(true);
                 handles_to_await.push(task_handle.handle);
             } else {
                 warn!("Task handle for key {} was already removed?", key);
@@ -2468,23 +2465,19 @@ impl FlodbaddCapture {
             CLOUD_MODEL_UPDATE_INTERVAL
         );
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
-        // Clone the whitelist name for checking the whitelist state
         let whitelist_name = self.whitelist_name.clone();
 
         let handle = tokio::spawn(async move {
             let mut update_interval = interval(CLOUD_MODEL_UPDATE_INTERVAL);
-            let mut stop_interval = interval(Duration::from_secs(1));
 
             loop {
                 tokio::select! {
-                    _ = stop_interval.tick() => {
-                        if stop_flag_clone.load(Ordering::Relaxed) {
-                            debug!("Stop signal received in cloud model update task. Exiting.");
-                            break;
-                        }
+                    _ = stop_rx.changed() => {
+                        debug!("Stop signal received in cloud model update task. Exiting.");
+                        break;
                     }
                     _ = update_interval.tick() => {
                         // Perform the cloud model updates
@@ -2517,9 +2510,8 @@ impl FlodbaddCapture {
             info!("Cloud model update task terminated.");
         });
 
-        // Store the task handle
         *self.edamame_model_update_task_handle.write().await =
-            Some(TaskHandle { handle, stop_flag });
+            Some(TaskHandle { handle, stop_tx });
     }
 
     async fn stop_edamame_model_update_task(&self) {
@@ -2527,10 +2519,9 @@ impl FlodbaddCapture {
         let mut handle_option_guard = self.edamame_model_update_task_handle.write().await;
 
         if let Some(task_handle) = handle_option_guard.take() {
-            // take() removes the value
-            debug!("Signalling stop flag for cloud model update task.");
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
-            drop(handle_option_guard); // Release write lock before await
+            debug!("Signalling stop for cloud model update task.");
+            let _ = task_handle.stop_tx.send(true);
+            drop(handle_option_guard);
 
             debug!("Waiting for cloud model update task to complete...");
             if let Err(e) = task_handle.handle.await {

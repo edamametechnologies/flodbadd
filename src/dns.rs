@@ -2,9 +2,9 @@ use crate::dns_ebpf;
 use crate::task::TaskHandle;
 use dns_parser::Packet as DnsPacket;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::{debug, info, trace, warn};
 use undeadlock::*;
@@ -285,15 +285,15 @@ impl DnsPacketProcessor {
         let pending_dns_queries = self.pending_dns_queries.clone();
         let dns_resolutions = self.dns_resolutions.clone();
         let dns_resolutions_with_process = self.dns_resolutions_with_process.clone();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
 
         let handle = tokio::spawn(async move {
             let mut cleanup_interval = interval(Duration::from_secs(10));
             loop {
-                cleanup_interval.tick().await;
-                if stop_flag_clone.load(Ordering::Relaxed) {
-                    break;
+                tokio::select! {
+                    _ = stop_rx.changed() => break,
+                    _ = cleanup_interval.tick() => {}
                 }
                 let now = Instant::now();
 
@@ -351,12 +351,12 @@ impl DnsPacketProcessor {
             info!("DNS query cleanup task terminated");
         });
 
-        self.dns_query_cleanup_handle = Some(TaskHandle { handle, stop_flag });
+        self.dns_query_cleanup_handle = Some(TaskHandle { handle, stop_tx });
     }
 
     pub async fn stop_dns_query_cleanup_task(&mut self) {
         if let Some(task_handle) = self.dns_query_cleanup_handle.take() {
-            task_handle.stop_flag.store(true, Ordering::Relaxed);
+            let _ = task_handle.stop_tx.send(true);
             let _ = task_handle.handle.await;
         } else {
             warn!("DNS query cleanup task not running");
