@@ -252,7 +252,7 @@ ES client creation failed: ERR_NOT_ENTITLED
 **Solutions:**
 1. Ensure running as root (helper LaunchDaemon or `sudo`)
 2. For development: disable SIP (`csrutil disable` from Recovery), or install the provisioning profile locally (`make install_provisioning` in `edamame_helper` or `edamame_posture`)
-3. For production: install via the notarized `.pkg` which includes the provisioning profile at `Library/MobileDevice/Provisioning Profiles/`
+3. For production: install via the notarized `.pkg`, which wraps the ES client in an app-like bundle and embeds the provisioning profile at `Contents/embedded.provisionprofile`
 
 ### Process Table Empty
 
