@@ -1520,10 +1520,7 @@ impl FlodbaddCapture {
                             total_packets = 0;
                         }
                     }
-                    info!(
-                        "Sync pcap reader thread for {} finished.",
-                        interface_pcap
-                    );
+                    info!("Sync pcap reader thread for {} finished.", interface_pcap);
                     // Sender tx is dropped here when the thread exits
                 });
                 // --- End Pcap Reading Loop ---
@@ -1656,10 +1653,8 @@ impl FlodbaddCapture {
             info!("Capture task for {} terminated", interface_name_clone);
         });
         // Store the task handle and its stop flag
-        self.capture_task_handles.insert(
-            interface.name.to_string(),
-            TaskHandle { handle, stop_tx },
-        );
+        self.capture_task_handles
+            .insert(interface.name.to_string(), TaskHandle { handle, stop_tx });
     }
 
     async fn stop_capture_tasks(&self) {
@@ -2510,8 +2505,7 @@ impl FlodbaddCapture {
             info!("Cloud model update task terminated.");
         });
 
-        *self.edamame_model_update_task_handle.write().await =
-            Some(TaskHandle { handle, stop_tx });
+        *self.edamame_model_update_task_handle.write().await = Some(TaskHandle { handle, stop_tx });
     }
 
     async fn stop_edamame_model_update_task(&self) {

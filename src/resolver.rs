@@ -165,9 +165,7 @@ impl FlodbaddResolver {
                 info!("Starting resolver task");
                 let mut cleanup_counter = 0u32;
 
-                while !*stop_rx.borrow()
-                    || !resolver_queue.read().await.is_empty()
-                {
+                while !*stop_rx.borrow() || !resolver_queue.read().await.is_empty() {
                     // Get the IPs to resolve from the queue
                     let to_resolve: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
                     let to_resolve_len = to_resolve.len();
