@@ -2295,13 +2295,8 @@ mod tests {
     #[test]
     fn test_udp_dns_ipv4_produces_dns_session_packet() {
         let dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
-        let frame = build_udp_dns_ipv4_frame(
-            [192, 168, 1, 100],
-            [8, 8, 8, 8],
-            54321,
-            53,
-            dns_query,
-        );
+        let frame =
+            build_udp_dns_ipv4_frame([192, 168, 1, 100], [8, 8, 8, 8], 54321, 53, dns_query);
 
         let result = parse_packet_pcap(&frame, Utc::now());
         match result {
@@ -2312,23 +2307,15 @@ mod tests {
                 assert_eq!(sp.session.dst_ip, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
                 assert_eq!(dp.dns_payload, dns_query);
             }
-            other => panic!(
-                "Expected DnsSessionPacket for UDP DNS, got {:?}",
-                other
-            ),
+            other => panic!("Expected DnsSessionPacket for UDP DNS, got {:?}", other),
         }
     }
 
     #[test]
     fn test_tcp_dns_ipv4_produces_dns_session_packet() {
-        let dns_query = b"\xAB\xCD\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x03org\x00\x00\x01\x00\x01";
-        let frame = build_tcp_dns_ipv4_frame(
-            [10, 0, 0, 5],
-            [1, 1, 1, 1],
-            45678,
-            53,
-            dns_query,
-        );
+        let dns_query =
+            b"\xAB\xCD\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x03org\x00\x00\x01\x00\x01";
+        let frame = build_tcp_dns_ipv4_frame([10, 0, 0, 5], [1, 1, 1, 1], 45678, 53, dns_query);
 
         let result = parse_packet_pcap(&frame, Utc::now());
         match result {
@@ -2339,23 +2326,15 @@ mod tests {
                 assert_eq!(sp.session.dst_ip, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
                 assert_eq!(dp.dns_payload, dns_query);
             }
-            other => panic!(
-                "Expected DnsSessionPacket for TCP DNS, got {:?}",
-                other
-            ),
+            other => panic!("Expected DnsSessionPacket for TCP DNS, got {:?}", other),
         }
     }
 
     #[test]
     fn test_dns_response_from_port_53_produces_dns_session_packet() {
         let dns_response = b"\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
-        let frame = build_udp_dns_ipv4_frame(
-            [8, 8, 8, 8],
-            [192, 168, 1, 100],
-            53,
-            12345,
-            dns_response,
-        );
+        let frame =
+            build_udp_dns_ipv4_frame([8, 8, 8, 8], [192, 168, 1, 100], 53, 12345, dns_response);
 
         let result = parse_packet_pcap(&frame, Utc::now());
         match result {
@@ -2374,13 +2353,8 @@ mod tests {
     #[test]
     fn test_non_dns_udp_still_produces_session_packet() {
         let payload = b"not dns traffic";
-        let frame = build_udp_dns_ipv4_frame(
-            [192, 168, 1, 100],
-            [10, 0, 0, 1],
-            54321,
-            8080,
-            payload,
-        );
+        let frame =
+            build_udp_dns_ipv4_frame([192, 168, 1, 100], [10, 0, 0, 1], 54321, 8080, payload);
 
         let result = parse_packet_pcap(&frame, Utc::now());
         match result {
@@ -2388,10 +2362,7 @@ mod tests {
                 assert_eq!(sp.session.protocol, Protocol::UDP);
                 assert_eq!(sp.session.dst_port, 8080);
             }
-            other => panic!(
-                "Expected SessionPacket for non-DNS UDP, got {:?}",
-                other
-            ),
+            other => panic!("Expected SessionPacket for non-DNS UDP, got {:?}", other),
         }
     }
 
@@ -2399,13 +2370,8 @@ mod tests {
     #[serial]
     async fn test_dns_session_packet_creates_session_entry() {
         let dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
-        let frame = build_udp_dns_ipv4_frame(
-            [192, 168, 1, 100],
-            [8, 8, 8, 8],
-            54321,
-            53,
-            dns_query,
-        );
+        let frame =
+            build_udp_dns_ipv4_frame([192, 168, 1, 100], [8, 8, 8, 8], 54321, 53, dns_query);
 
         let parsed = parse_packet_pcap(&frame, Utc::now()).unwrap();
         let sp = match parsed {
@@ -2415,13 +2381,18 @@ mod tests {
 
         let sessions = Arc::new(CustomDashMap::new("dns_sessions"));
         let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
-        let own_ips: HashSet<IpAddr> =
-            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))].into_iter().collect();
+        let own_ips: HashSet<IpAddr> = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))]
+            .into_iter()
+            .collect();
         let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
 
         process_parsed_packet(sp, &sessions, &current_sessions, &own_ips, &filter, None).await;
 
-        assert_eq!(sessions.len(), 1, "DNS packet should create a session entry");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "DNS packet should create a session entry"
+        );
         let expected_key = Session {
             protocol: Protocol::UDP,
             src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
