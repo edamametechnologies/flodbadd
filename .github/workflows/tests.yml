@@ -292,13 +292,39 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $url = "https://npcap.com/dist/npcap-1.80.exe"
-          $installer = "$env:TEMP\npcap-installer.exe"
-          Write-Host "Downloading Npcap from $url"
-          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-          Write-Host "Installing Npcap silently..."
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
           $npcapDir = "C:\Windows\System32\Npcap"
+          if (Test-Path "$npcapDir\wpcap.dll") {
+            Write-Host "Npcap already installed at $npcapDir"
+            exit 0
+          }
+          $installer = "$env:TEMP\npcap-installer.exe"
+          $urls = @(
+            "https://web.archive.org/web/20220523140209id_/https://npcap.com/dist/npcap-0.96.exe",
+            "https://npcap.com/dist/npcap-0.96.exe"
+          )
+          $downloaded = $false
+          foreach ($url in $urls) {
+            Write-Host "Trying: $url"
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing -TimeoutSec 60
+              $bytes = [System.IO.File]::ReadAllBytes($installer)
+              if ($bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) {
+                Write-Host "Downloaded $($bytes.Length) bytes (valid PE)"
+                $downloaded = $true
+                break
+              }
+              Write-Host "Invalid PE header, trying next URL"
+            } catch {
+              Write-Host "Download failed: $_"
+            }
+          }
+          if (-not $downloaded) {
+            Write-Host "::warning::Could not download Npcap installer"
+            exit 0
+          }
+          Write-Host "Running installer with /S..."
+          $proc = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+          Write-Host "Installer exit code: $($proc.ExitCode)"
           $retries = 0
           while (-not (Test-Path "$npcapDir\wpcap.dll") -and $retries -lt 30) {
             Start-Sleep -Seconds 2
@@ -306,8 +332,11 @@ jobs:
           }
           if (Test-Path "$npcapDir\wpcap.dll") {
             Write-Host "Npcap installed successfully at $npcapDir"
+            Get-ChildItem $npcapDir | ForEach-Object { Write-Host "  $($_.Name)" }
           } else {
             Write-Host "::warning::Npcap DLL not found after install -- capture tests may fail"
+            Write-Host "Checking if driver was registered..."
+            sc.exe query npcap 2>&1 | ForEach-Object { Write-Host "  $_" }
           }
           Remove-Item -Force $installer -ErrorAction SilentlyContinue
 
