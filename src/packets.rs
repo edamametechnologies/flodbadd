@@ -35,6 +35,9 @@ const MAX_HISTORY_LENGTH: usize = 1000;
 pub enum ParsedPacket {
     SessionPacket(SessionPacketData),
     DnsPacket(DnsPacketData),
+    /// DNS traffic that is tracked both as a session (for anomaly/vulnerability
+    /// detection) and as a DNS payload (for passive domain resolution).
+    DnsSessionPacket(SessionPacketData, DnsPacketData),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -607,17 +610,31 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     let packet_length = tcp.payload().len();
 
                     if src_port == 53 || dst_port == 53 {
-                        // This is DNS over TCP
                         let mut dns_payload = tcp.payload().to_vec();
-                        // Ensure that the payload has at least 2 bytes for the length
                         if dns_payload.len() < 2 {
                             warn!("DNS-over-TCP payload too short: {:?}", dns_payload);
                             return None;
                         }
-                        // Strip the first two bytes (length prefix)
                         dns_payload.drain(0..2);
                         trace!("Found DNS over TCP for IPv4: {:?}", dns_payload);
-                        return Some(ParsedPacket::DnsPacket(DnsPacketData { dns_payload }));
+                        let session = Session {
+                            protocol: Protocol::TCP,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        };
+                        return Some(ParsedPacket::DnsSessionPacket(
+                            SessionPacketData {
+                                session,
+                                packet_length,
+                                ip_packet_length,
+                                flags: Some(flags),
+                                timestamp,
+                                tls_client_hello: None,
+                            },
+                            DnsPacketData { dns_payload },
+                        ));
                     }
 
                     let session = Session {
@@ -628,15 +645,9 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
-                    // Check for TLS ClientHello on port 443 (HTTPS)
-                    // We capture the payload if:
-                    // 1. Destination port is 443 (outgoing HTTPS)
-                    // 2. Payload starts with TLS handshake (0x16)
-                    // 3. Has enough data for SNI extraction
                     let tls_client_hello = if dst_port == 443
-                        && packet_length >= 43  // Minimum TLS ClientHello size
+                        && packet_length >= 43
                         && tcp.payload().first() == Some(&0x16)
-                    // TLS handshake content type
                     {
                         Some(tcp.payload().to_vec())
                     } else {
@@ -667,10 +678,26 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     let packet_length = udp.payload().len();
 
                     if src_port == 53 || dst_port == 53 {
-                        // This is DNS over UDP
                         let dns_payload = udp.payload().to_vec();
                         trace!("Found DNS over UDP for IPv4: {:?}", dns_payload);
-                        return Some(ParsedPacket::DnsPacket(DnsPacketData { dns_payload }));
+                        let session = Session {
+                            protocol: Protocol::UDP,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        };
+                        return Some(ParsedPacket::DnsSessionPacket(
+                            SessionPacketData {
+                                session,
+                                packet_length,
+                                ip_packet_length,
+                                flags: None,
+                                timestamp,
+                                tls_client_hello: None,
+                            },
+                            DnsPacketData { dns_payload },
+                        ));
                     }
 
                     let session = Session {
@@ -687,7 +714,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
-                        tls_client_hello: None, // UDP doesn't have TLS ClientHello
+                        tls_client_hello: None,
                     }))
                 }
                 _ => None,
@@ -720,17 +747,31 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     let packet_length = tcp.payload().len();
 
                     if src_port == 53 || dst_port == 53 {
-                        // This is DNS over TCP
                         let mut dns_payload = tcp.payload().to_vec();
-                        // Ensure that the payload has at least 2 bytes for the length
                         if dns_payload.len() < 2 {
                             warn!("DNS-over-TCP payload too short: {:?}", dns_payload);
                             return None;
                         }
-                        // Strip the first two bytes (length prefix)
                         dns_payload.drain(0..2);
                         trace!("Found DNS over TCP for IPv6: {:?}", dns_payload);
-                        return Some(ParsedPacket::DnsPacket(DnsPacketData { dns_payload }));
+                        let session = Session {
+                            protocol: Protocol::TCP,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        };
+                        return Some(ParsedPacket::DnsSessionPacket(
+                            SessionPacketData {
+                                session,
+                                packet_length,
+                                ip_packet_length,
+                                flags: Some(flags),
+                                timestamp,
+                                tls_client_hello: None,
+                            },
+                            DnsPacketData { dns_payload },
+                        ));
                     }
 
                     let session = Session {
@@ -741,7 +782,6 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
-                    // Check for TLS ClientHello on port 443 (HTTPS) - IPv6
                     let tls_client_hello = if dst_port == 443
                         && packet_length >= 43
                         && tcp.payload().first() == Some(&0x16)
@@ -775,10 +815,26 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     let packet_length = udp.payload().len();
 
                     if src_port == 53 || dst_port == 53 {
-                        // This is DNS over UDP
                         let dns_payload = udp.payload().to_vec();
                         trace!("Found DNS over UDP for IPv6: {:?}", dns_payload);
-                        return Some(ParsedPacket::DnsPacket(DnsPacketData { dns_payload }));
+                        let session = Session {
+                            protocol: Protocol::UDP,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port,
+                        };
+                        return Some(ParsedPacket::DnsSessionPacket(
+                            SessionPacketData {
+                                session,
+                                packet_length,
+                                ip_packet_length,
+                                flags: None,
+                                timestamp,
+                                tls_client_hello: None,
+                            },
+                            DnsPacketData { dns_payload },
+                        ));
                     }
 
                     let session = Session {
@@ -795,7 +851,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         ip_packet_length,
                         flags: None,
                         timestamp,
-                        tls_client_hello: None, // UDP doesn't have TLS ClientHello
+                        tls_client_hello: None,
                     }))
                 }
                 _ => None,
@@ -2129,5 +2185,253 @@ mod tests {
                 "Total outbound bytes should be 500 (200+300)"
             );
         }
+    }
+
+    fn build_udp_dns_ipv4_frame(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        dns_payload: &[u8],
+    ) -> Vec<u8> {
+        use pnet_packet::ethernet::MutableEthernetPacket;
+        use pnet_packet::ipv4::MutableIpv4Packet;
+        use pnet_packet::udp::MutableUdpPacket;
+        use pnet_packet::MutablePacket;
+
+        let udp_len = 8 + dns_payload.len();
+        let ip_total_len = 20 + udp_len;
+        let frame_len = 14 + ip_total_len;
+
+        let mut buf = vec![0u8; frame_len];
+
+        // Ethernet header (14 bytes)
+        {
+            let mut eth = MutableEthernetPacket::new(&mut buf[..14]).unwrap();
+            eth.set_ethertype(EtherTypes::Ipv4);
+        }
+
+        // IPv4 header (20 bytes)
+        {
+            let mut ip = MutableIpv4Packet::new(&mut buf[14..14 + 20]).unwrap();
+            ip.set_version(4);
+            ip.set_header_length(5);
+            ip.set_total_length(ip_total_len as u16);
+            ip.set_ttl(64);
+            ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+            ip.set_source(Ipv4Addr::from(src_ip));
+            ip.set_destination(Ipv4Addr::from(dst_ip));
+        }
+
+        // UDP header (8 bytes) + payload
+        {
+            let udp_start = 14 + 20;
+            let mut udp = MutableUdpPacket::new(&mut buf[udp_start..udp_start + udp_len]).unwrap();
+            udp.set_source(src_port);
+            udp.set_destination(dst_port);
+            udp.set_length(udp_len as u16);
+            udp.payload_mut()[..dns_payload.len()].copy_from_slice(dns_payload);
+        }
+
+        buf
+    }
+
+    fn build_tcp_dns_ipv4_frame(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        dns_payload: &[u8],
+    ) -> Vec<u8> {
+        use pnet_packet::ethernet::MutableEthernetPacket;
+        use pnet_packet::ipv4::MutableIpv4Packet;
+        use pnet_packet::tcp::MutableTcpPacket;
+        use pnet_packet::MutablePacket;
+
+        let tcp_header_len = 20;
+        // DNS-over-TCP has a 2-byte length prefix
+        let tcp_payload_len = 2 + dns_payload.len();
+        let tcp_total = tcp_header_len + tcp_payload_len;
+        let ip_total_len = 20 + tcp_total;
+        let frame_len = 14 + ip_total_len;
+
+        let mut buf = vec![0u8; frame_len];
+
+        {
+            let mut eth = MutableEthernetPacket::new(&mut buf[..14]).unwrap();
+            eth.set_ethertype(EtherTypes::Ipv4);
+        }
+
+        {
+            let mut ip = MutableIpv4Packet::new(&mut buf[14..14 + 20]).unwrap();
+            ip.set_version(4);
+            ip.set_header_length(5);
+            ip.set_total_length(ip_total_len as u16);
+            ip.set_ttl(64);
+            ip.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
+            ip.set_source(Ipv4Addr::from(src_ip));
+            ip.set_destination(Ipv4Addr::from(dst_ip));
+        }
+
+        {
+            let tcp_start = 14 + 20;
+            let mut tcp =
+                MutableTcpPacket::new(&mut buf[tcp_start..tcp_start + tcp_total]).unwrap();
+            tcp.set_source(src_port);
+            tcp.set_destination(dst_port);
+            tcp.set_data_offset(5); // 20-byte header = 5 * 4
+            tcp.set_flags(TcpFlags::ACK);
+            // TCP payload: 2-byte length prefix + DNS payload
+            let payload = tcp.payload_mut();
+            let dns_len = dns_payload.len() as u16;
+            payload[0] = (dns_len >> 8) as u8;
+            payload[1] = (dns_len & 0xff) as u8;
+            payload[2..2 + dns_payload.len()].copy_from_slice(dns_payload);
+        }
+
+        buf
+    }
+
+    #[test]
+    fn test_udp_dns_ipv4_produces_dns_session_packet() {
+        let dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+        let frame = build_udp_dns_ipv4_frame(
+            [192, 168, 1, 100],
+            [8, 8, 8, 8],
+            54321,
+            53,
+            dns_query,
+        );
+
+        let result = parse_packet_pcap(&frame, Utc::now());
+        match result {
+            Some(ParsedPacket::DnsSessionPacket(sp, dp)) => {
+                assert_eq!(sp.session.protocol, Protocol::UDP);
+                assert_eq!(sp.session.src_port, 54321);
+                assert_eq!(sp.session.dst_port, 53);
+                assert_eq!(sp.session.dst_ip, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+                assert_eq!(dp.dns_payload, dns_query);
+            }
+            other => panic!(
+                "Expected DnsSessionPacket for UDP DNS, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_tcp_dns_ipv4_produces_dns_session_packet() {
+        let dns_query = b"\xAB\xCD\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04test\x03org\x00\x00\x01\x00\x01";
+        let frame = build_tcp_dns_ipv4_frame(
+            [10, 0, 0, 5],
+            [1, 1, 1, 1],
+            45678,
+            53,
+            dns_query,
+        );
+
+        let result = parse_packet_pcap(&frame, Utc::now());
+        match result {
+            Some(ParsedPacket::DnsSessionPacket(sp, dp)) => {
+                assert_eq!(sp.session.protocol, Protocol::TCP);
+                assert_eq!(sp.session.src_port, 45678);
+                assert_eq!(sp.session.dst_port, 53);
+                assert_eq!(sp.session.dst_ip, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+                assert_eq!(dp.dns_payload, dns_query);
+            }
+            other => panic!(
+                "Expected DnsSessionPacket for TCP DNS, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_dns_response_from_port_53_produces_dns_session_packet() {
+        let dns_response = b"\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+        let frame = build_udp_dns_ipv4_frame(
+            [8, 8, 8, 8],
+            [192, 168, 1, 100],
+            53,
+            12345,
+            dns_response,
+        );
+
+        let result = parse_packet_pcap(&frame, Utc::now());
+        match result {
+            Some(ParsedPacket::DnsSessionPacket(sp, dp)) => {
+                assert_eq!(sp.session.src_port, 53);
+                assert_eq!(sp.session.dst_port, 12345);
+                assert_eq!(dp.dns_payload, dns_response);
+            }
+            other => panic!(
+                "Expected DnsSessionPacket for DNS response, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_non_dns_udp_still_produces_session_packet() {
+        let payload = b"not dns traffic";
+        let frame = build_udp_dns_ipv4_frame(
+            [192, 168, 1, 100],
+            [10, 0, 0, 1],
+            54321,
+            8080,
+            payload,
+        );
+
+        let result = parse_packet_pcap(&frame, Utc::now());
+        match result {
+            Some(ParsedPacket::SessionPacket(sp)) => {
+                assert_eq!(sp.session.protocol, Protocol::UDP);
+                assert_eq!(sp.session.dst_port, 8080);
+            }
+            other => panic!(
+                "Expected SessionPacket for non-DNS UDP, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_dns_session_packet_creates_session_entry() {
+        let dns_query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+        let frame = build_udp_dns_ipv4_frame(
+            [192, 168, 1, 100],
+            [8, 8, 8, 8],
+            54321,
+            53,
+            dns_query,
+        );
+
+        let parsed = parse_packet_pcap(&frame, Utc::now()).unwrap();
+        let sp = match parsed {
+            ParsedPacket::DnsSessionPacket(sp, _dp) => sp,
+            other => panic!("Expected DnsSessionPacket, got {:?}", other),
+        };
+
+        let sessions = Arc::new(CustomDashMap::new("dns_sessions"));
+        let current_sessions = Arc::new(CustomRwLock::new(Vec::new()));
+        let own_ips: HashSet<IpAddr> =
+            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))].into_iter().collect();
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+
+        process_parsed_packet(sp, &sessions, &current_sessions, &own_ips, &filter, None).await;
+
+        assert_eq!(sessions.len(), 1, "DNS packet should create a session entry");
+        let expected_key = Session {
+            protocol: Protocol::UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+            src_port: 54321,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            dst_port: 53,
+        };
+        assert!(
+            sessions.contains_key(&expected_key),
+            "DNS session should be stored with correct key"
+        );
     }
 }

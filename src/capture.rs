@@ -1410,22 +1410,40 @@ impl FlodbaddCapture {
                                     if let Some(parsed_packet) = parse_packet_pcap(&sp.data, sp.ts) {
                                         match parsed_packet {
                                             ParsedPacket::SessionPacket(cp) => {
-                                                // Call the original async processing function
-                                                                                        let l7_opt = {
-                                            let l7_guard = l7_clone.read().await;
-                                            l7_guard.clone()
-                                        };
-                                        process_parsed_packet(
-                                            cp,
-                                            &sessions_clone,
-                                            &current_sessions_clone,
-                                            &own_ips_clone,
-                                            &filter_clone,
-                                            l7_opt.as_ref(),
-                                        )
-                                        .await;
+                                                let l7_opt = {
+                                                    let l7_guard = l7_clone.read().await;
+                                                    l7_guard.clone()
+                                                };
+                                                process_parsed_packet(
+                                                    cp,
+                                                    &sessions_clone,
+                                                    &current_sessions_clone,
+                                                    &own_ips_clone,
+                                                    &filter_clone,
+                                                    l7_opt.as_ref(),
+                                                )
+                                                .await;
                                             }
                                             ParsedPacket::DnsPacket(dp) => {
+                                                let dns_guard = dns_packet_processor.read().await;
+                                                if let Some(dns_packet_processor) = dns_guard.as_ref() {
+                                                    dns_packet_processor.process_dns_packet(dp.dns_payload).await;
+                                                }
+                                            }
+                                            ParsedPacket::DnsSessionPacket(cp, dp) => {
+                                                let l7_opt = {
+                                                    let l7_guard = l7_clone.read().await;
+                                                    l7_guard.clone()
+                                                };
+                                                process_parsed_packet(
+                                                    cp,
+                                                    &sessions_clone,
+                                                    &current_sessions_clone,
+                                                    &own_ips_clone,
+                                                    &filter_clone,
+                                                    l7_opt.as_ref(),
+                                                )
+                                                .await;
                                                 let dns_guard = dns_packet_processor.read().await;
                                                 if let Some(dns_packet_processor) = dns_guard.as_ref() {
                                                     dns_packet_processor.process_dns_packet(dp.dns_payload).await;
@@ -1629,6 +1647,25 @@ impl FlodbaddCapture {
                                             .await;
                                         }
                                         Some(ParsedPacket::DnsPacket(dp)) => {
+                                            let dns_guard = dns_packet_processor.read().await;
+                                            if let Some(dns_packet_processor) = dns_guard.as_ref() {
+                                                dns_packet_processor.process_dns_packet(dp.dns_payload).await;
+                                            }
+                                        }
+                                        Some(ParsedPacket::DnsSessionPacket(cp, dp)) => {
+                                            let l7_opt = {
+                                                let l7_guard = l7.read().await;
+                                                l7_guard.clone()
+                                            };
+                                            process_parsed_packet(
+                                                cp,
+                                                &sessions,
+                                                &current_sessions,
+                                                &own_ips,
+                                                &filter,
+                                                l7_opt.as_ref(),
+                                            )
+                                            .await;
                                             let dns_guard = dns_packet_processor.read().await;
                                             if let Some(dns_packet_processor) = dns_guard.as_ref() {
                                                 dns_packet_processor.process_dns_packet(dp.dns_payload).await;
