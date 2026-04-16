@@ -6,8 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // Public constants (used by build.rs and callers)
-pub const NPCAP_INSTALLER_URL: &str =
-    "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe";
+pub const NPCAP_INSTALLER_URL: &str = "https://npcap.com/dist/npcap-1.80.exe";
 pub const NPCAP_SDK_URL: &str =
     "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-sdk-0.1.zip";
 
@@ -452,7 +451,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_constants() {
-        assert!(NPCAP_INSTALLER_URL.contains("web.archive.org"));
+        assert!(NPCAP_INSTALLER_URL.contains("npcap.com"));
         assert!(NPCAP_SDK_URL.contains("web.archive.org"));
     }
 }
