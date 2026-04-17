@@ -340,6 +340,22 @@ jobs:
           }
           Remove-Item -Force $installer -ErrorAction SilentlyContinue
 
+      - name: Configure Windows clang-cl toolchain
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
+          $llvmLib = 'C:\Program Files\LLVM\bin\llvm-lib.exe'
+          if (!(Test-Path $clang) -or !(Test-Path $llvmLib)) {
+            choco install llvm -y
+          }
+          if (!(Test-Path $clang) -or !(Test-Path $llvmLib)) {
+            throw "LLVM Windows toolchain not found"
+          }
+          "CC_x86_64_pc_windows_msvc=$clang" >> $env:GITHUB_ENV
+          "CXX_x86_64_pc_windows_msvc=$clang" >> $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_msvc=$llvmLib" >> $env:GITHUB_ENV
+
       - name: Run eBPF Diagnostic Test
         id: ebpf_test
         if: ${{ matrix.platform == 'linux' }}
