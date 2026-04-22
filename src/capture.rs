@@ -41,7 +41,7 @@ use std::time::Instant;
     feature = "asyncpacketcapture"
 ))]
 use tokio::select;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, trace, warn};
 use undeadlock::*; // Add this import // Add Duration import
@@ -89,11 +89,38 @@ pub struct FlodbaddCapture {
     edamame_model_update_task_handle: Arc<CustomRwLock<Option<TaskHandle>>>,
     update_in_progress: Arc<AtomicBool>,
     update_pending: Arc<AtomicBool>,
+    /// Wakes tasks that are waiting in `update_sessions_internal` for the
+    /// current owner to release `update_in_progress`. Paired with the RAII
+    /// `UpdateInProgressGuard` so waiters never spin and so a stuck flag
+    /// cannot survive a cancelled/panicked owner future.
+    update_notify: Arc<Notify>,
     last_update_completed: Arc<CustomRwLock<Instant>>,
     last_get_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_current_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_blacklisted_sessions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     last_get_whitelist_exceptions_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
+}
+
+/// RAII guard that ensures `update_in_progress` is cleared and waiters are
+/// notified even if the owning future is cancelled or panics mid-work.
+///
+/// Without this guard a long-running `update_sessions_internal` call that
+/// gets dropped – for example when a gRPC client times out and tonic drops
+/// the server-side task partway through the heavy work – would leave the
+/// atomic flag stuck at `true` forever. Every subsequent caller would then
+/// block indefinitely on the wait path, burning CPU and never returning
+/// sessions. The guard is intentionally tiny so it's safe to hold across
+/// all `.await` points inside `update_sessions_internal`.
+struct UpdateInProgressGuard {
+    in_progress: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for UpdateInProgressGuard {
+    fn drop(&mut self) {
+        self.in_progress.store(false, Ordering::Release);
+        self.notify.notify_waiters();
+    }
 }
 
 impl FlodbaddCapture {
@@ -244,6 +271,7 @@ impl FlodbaddCapture {
             edamame_model_update_task_handle: Arc::new(CustomRwLock::new(None)),
             update_in_progress: Arc::new(AtomicBool::new(false)),
             update_pending: Arc::new(AtomicBool::new(false)),
+            update_notify: Arc::new(Notify::new()),
             last_update_completed: Arc::new(CustomRwLock::new(
                 Instant::now() - Duration::from_secs(60),
             )),
@@ -2089,6 +2117,7 @@ impl FlodbaddCapture {
             self.blacklisted_sessions.clone(),
             self.update_in_progress.clone(),
             self.update_pending.clone(),
+            self.update_notify.clone(),
             self.last_update_completed.clone(),
         )
         .await;
@@ -2341,26 +2370,44 @@ impl FlodbaddCapture {
         blacklisted_sessions: Arc<CustomRwLock<Vec<Session>>>,
         update_in_progress: Arc<AtomicBool>,
         update_pending: Arc<AtomicBool>,
+        update_notify: Arc<Notify>,
         last_update_completed: Arc<CustomRwLock<Instant>>,
     ) {
         if update_in_progress.swap(true, Ordering::AcqRel) {
-            // Another thread is already doing the heavy work – just mark that
-            // one more pass is required and wait until it completes so callers
-            // that invoked update_sessions() observe a consistent view.
+            // Another task owns the update. Mark that one more pass is
+            // needed so the current owner loops, then park until that owner
+            // releases `update_in_progress` via its RAII guard.
             update_pending.store(true, Ordering::Release);
             debug!("update_sessions_internal: worker already running – waiting for completion");
-            while update_in_progress.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
+
+            // Wait using `Notify` instead of a `yield_now` busy-spin (which
+            // would burn CPU on every wake). We must register the `Notified`
+            // future *before* re-checking the flag – `enable()` primes it so
+            // a `notify_waiters()` call issued by the owner's guard drop
+            // between our flag check and our await still wakes us up.
+            loop {
+                let notified = update_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !update_in_progress.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.as_mut().await;
             }
             return;
         }
 
+        // We own the update. Attach an RAII guard so the in-progress flag
+        // is *always* cleared and waiters are woken when we leave this
+        // scope – including on task cancellation or panic partway through
+        // the heavy work below. This is what prevents the production hang
+        // where a cancelled gRPC server task left the flag stuck at `true`.
+        let _guard = UpdateInProgressGuard {
+            in_progress: update_in_progress.clone(),
+            notify: update_notify.clone(),
+        };
+
         loop {
-            // A second safety flag (kept for diagnostics) – but we do not spin any more.
-
-            // Set the flag to indicate update is starting
-            update_in_progress.store(true, Ordering::Relaxed);
-
             debug!("update_sessions started");
             // Update the sessions status and current sessions
             Self::update_sessions_status(&sessions, &current_sessions).await;
@@ -2432,15 +2479,12 @@ impl FlodbaddCapture {
             // Record completion time for the cooldown check
             *last_update_completed.write().await = Instant::now();
 
-            // If another thread queued work while we were busy we loop once more.
-            // Keep the in-progress flag set across iterations to avoid a window
-            // where waiters briefly observe completion between passes.
+            // If another task queued work while we were busy we loop once
+            // more. Keep the in-progress flag set across iterations – the
+            // RAII guard will clear it and wake waiters on the final break.
             if !update_pending.swap(false, Ordering::AcqRel) {
-                // No pending work – release the guard and exit
-                update_in_progress.store(false, Ordering::Release);
                 break;
             }
-            // Otherwise stay in the loop and process again immediately (flag remains true)
             debug!("update_sessions_internal: processing additional queued update");
         }
     }
