@@ -30,9 +30,12 @@ pub static SENSITIVE_PATHS_DB: &str = r#"{
     "/.config/solana/id.json",
     "/.bitmonero/",
     "/.litecoin/",
-    "/.dogecoin/"
+    "/.dogecoin/",
+    "/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/",
+    "/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/",
+    "/Local Extension Settings/aholpfdialjgjfhomihkjbmgjidlcdno/"
   ],
-  "date": "March 25th 2026",
+  "date": "April 22th 2026",
   "labels": {
     "aws": [
       "/.aws/"
@@ -58,10 +61,25 @@ pub static SENSITIVE_PATHS_DB: &str = r#"{
       "/.bitmonero/",
       "/.litecoin/",
       "/.dogecoin/",
+      "/.config/exodus/",
+      "/.config/exodus.wallet/",
+      "/.config/atomic/",
+      "/.config/phantom/",
       "/application support/bitcoin/",
       "/application support/ethereum/",
+      "/application support/exodus/",
+      "/application support/exodus.wallet/",
+      "/application support/atomic/",
+      "/application support/phantom/",
       "/appdata/local/bitcoin/",
-      "/appdata/local/ethereum/"
+      "/appdata/local/ethereum/",
+      "/appdata/roaming/exodus/",
+      "/appdata/roaming/exodus.wallet/",
+      "/appdata/roaming/atomic/",
+      "/appdata/roaming/phantom/",
+      "/local extension settings/nkbihfbeogaeaoehlefnkodbefgpgknn/",
+      "/local extension settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/",
+      "/local extension settings/aholpfdialjgjfhomihkjbmgjidlcdno/"
     ],
     "docker": [
       "/.docker/"
@@ -102,7 +120,11 @@ pub static SENSITIVE_PATHS_DB: &str = r#"{
     "linux": [
       "/etc/shadow",
       "/etc/gshadow",
-      "/etc/security/opasswd"
+      "/etc/security/opasswd",
+      "/.config/Exodus/",
+      "/.config/exodus.wallet/",
+      "/.config/atomic/",
+      "/.config/Phantom/"
     ],
     "macos": [
       "/Library/Keychains/",
@@ -111,7 +133,11 @@ pub static SENSITIVE_PATHS_DB: &str = r#"{
       "/Library/Application Support/Ethereum/keystore/",
       "/Library/Application Support/Litecoin/",
       "/Library/Application Support/Dogecoin/",
-      "/Library/Application Support/Monero/"
+      "/Library/Application Support/Monero/",
+      "/Library/Application Support/Exodus/",
+      "/Library/Application Support/exodus.wallet/",
+      "/Library/Application Support/atomic/",
+      "/Library/Application Support/Phantom/"
     ],
     "windows": [
       "/AppData/Roaming/Microsoft/Credentials/",
@@ -125,8 +151,12 @@ pub static SENSITIVE_PATHS_DB: &str = r#"{
       "/AppData/Local/Ethereum/keystore/",
       "/AppData/Roaming/Litecoin/",
       "/AppData/Roaming/Dogecoin/",
-      "/AppData/Local/bitmonero/"
+      "/AppData/Local/bitmonero/",
+      "/AppData/Roaming/Exodus/",
+      "/AppData/Roaming/exodus.wallet/",
+      "/AppData/Roaming/atomic/",
+      "/AppData/Roaming/Phantom/"
     ]
   },
-  "signature": "a5564cd83a710aea65d6ca99221b2be8e65198b7d2adb25f9039dcd1bc0afc30"
+  "signature": "3947b0b4f693ecc084a6ad3a7c2e362c3b873bb7d357c13d6a9f7c3d11207ebf"
 }"#;
