@@ -659,6 +659,94 @@ pub fn default_watch_paths(mode: FimMode) -> Vec<PathBuf> {
     }
 }
 
+/// Platform-specific temp directory roots to watch for staged-payload detection.
+///
+/// These correspond to `fim_temp_executable_patterns` in `vuln_detector_params`
+/// (the detector's `is_temp_directory_path` recognizes events from these roots
+/// as temp-staging candidates). This is the shared source of truth used by both
+/// standalone and helper-daemon FIM startup paths.
+pub fn default_temp_watch_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        // /tmp and /var/tmp are the canonical staging directories attackers use for
+        // dropped payloads, temp scripts, and intermediate artifacts. On macOS /tmp
+        // is a symlink to /private/tmp; the notify framework resolves it transparently.
+        for p in ["/tmp", "/var/tmp"] {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows per-user and system temp directories.
+        for key in ["TEMP", "TMP"] {
+            if let Ok(val) = std::env::var(key) {
+                let path = PathBuf::from(val);
+                if path.exists() && !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+/// Sensitive per-home watch directories (credentials, agent configs, platform
+/// key stores). Shared by standalone and helper-daemon startup paths so both
+/// paths monitor exactly the same default set.
+pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    let common_dirs = [
+        ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".cursor", ".claude",
+    ];
+    for dir in &common_dirs {
+        let p = home.join(dir);
+        if p.exists() {
+            paths.push(p);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mac_dirs = ["Library/Keychains"];
+        for dir in &mac_dirs {
+            let p = home.join(dir);
+            if p.exists() {
+                paths.push(p);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let linux_dirs = [".config", ".local/share"];
+        for dir in &linux_dirs {
+            let p = home.join(dir);
+            if p.exists() {
+                paths.push(p);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            paths.push(PathBuf::from(appdata));
+        }
+        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            paths.push(PathBuf::from(localappdata));
+        }
+    }
+
+    paths
+}
+
 fn ci_watch_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -668,22 +756,19 @@ fn ci_watch_paths() -> Vec<PathBuf> {
         paths.push(cwd);
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        paths.push(PathBuf::from("/tmp"));
-    }
     #[cfg(target_os = "macos")]
     {
         if let Ok(tmpdir) = std::env::var("TMPDIR") {
-            paths.push(PathBuf::from(tmpdir));
-        } else {
-            paths.push(PathBuf::from("/tmp"));
+            let p = PathBuf::from(tmpdir);
+            if p.exists() && !paths.contains(&p) {
+                paths.push(p);
+            }
         }
     }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(temp) = std::env::var("TEMP") {
-            paths.push(PathBuf::from(temp));
+
+    for p in default_temp_watch_paths() {
+        if !paths.contains(&p) {
+            paths.push(p);
         }
     }
 
@@ -704,48 +789,12 @@ fn desktop_watch_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     if let Some(home) = home_dir() {
-        let home = PathBuf::from(home);
+        paths.extend(default_sensitive_watch_paths_for_home(&PathBuf::from(home)));
+    }
 
-        let common_dirs = [
-            ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".cursor", ".claude",
-        ];
-        for dir in &common_dirs {
-            let p = home.join(dir);
-            if p.exists() {
-                paths.push(p);
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let mac_dirs = ["Library/Keychains"];
-            for dir in &mac_dirs {
-                let p = home.join(dir);
-                if p.exists() {
-                    paths.push(p);
-                }
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let linux_dirs = [".config", ".local/share"];
-            for dir in &linux_dirs {
-                let p = home.join(dir);
-                if p.exists() {
-                    paths.push(p);
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                paths.push(PathBuf::from(appdata));
-            }
-            if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-                paths.push(PathBuf::from(localappdata));
-            }
+    for p in default_temp_watch_paths() {
+        if !paths.contains(&p) {
+            paths.push(p);
         }
     }
 
