@@ -184,6 +184,16 @@ impl FimWatcher {
         &self.store
     }
 
+    /// Return a clonable handle to the event store so callers can drop any
+    /// outer guard (e.g. a `FIM_WATCHER` `RwLock` read guard) before doing
+    /// slow work like live process attribution probing or JSON serialization.
+    /// `FimEventStore` is internally lock-free (DashMap), so concurrent
+    /// readers are safe and writers (e.g. `start_file_monitor`) won't be
+    /// starved.
+    pub fn store_arc(&self) -> Arc<FimEventStore> {
+        self.store.clone()
+    }
+
     pub fn watch_paths(&self) -> &[PathBuf] {
         &self.watch_paths
     }
