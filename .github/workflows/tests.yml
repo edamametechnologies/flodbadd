@@ -409,8 +409,8 @@ jobs:
         if: always()
         uses: edamametechnologies/edamame_posture_action@v1
         with:
-          dump_vulnerability_findings: false
-          exit_on_vulnerability_findings: false
+          dump_vulnerability_findings: true
+          exit_on_vulnerability_findings: true
 
       - name: Slack alerts
         if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')
@@ -644,8 +644,8 @@ jobs:
         if: always()
         uses: edamametechnologies/edamame_posture_action@v1
         with:
-          dump_vulnerability_findings: false
-          exit_on_vulnerability_findings: false
+          dump_vulnerability_findings: true
+          exit_on_vulnerability_findings: true
 
       - name: Slack alerts
         # Won't work on 18.04 because of glibc version
