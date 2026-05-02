@@ -1,0 +1,9 @@
+[package]
+name = "strings_check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flodbadd = { path = "../.." }
+
+[workspace]

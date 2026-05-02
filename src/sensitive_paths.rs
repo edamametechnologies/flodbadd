@@ -94,7 +94,7 @@ lazy_static! {
     pub static ref SENSITIVE_PATHS: CloudModel<SensitivePathsDB> = {
         let model = CloudModel::initialize(
             SENSITIVE_PATHS_NAME.to_string(),
-            SENSITIVE_PATHS_DB,
+            &SENSITIVE_PATHS_DB,
             |data| {
                 let json: SensitivePathsJSON = serde_json::from_str(data)
                     .with_context(|| "Failed to parse sensitive paths JSON")?;
@@ -118,7 +118,7 @@ lazy_static! {
 }
 
 fn build_fallback_labels() -> HashMap<String, Vec<String>> {
-    match serde_json::from_str::<SensitivePathsJSON>(SENSITIVE_PATHS_DB) {
+    match serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB) {
         Ok(json) => json.labels,
         Err(_) => HashMap::new(),
     }
