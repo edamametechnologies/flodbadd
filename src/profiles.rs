@@ -84,7 +84,7 @@ impl DeviceTypeList {
 
 lazy_static! {
     pub static ref PROFILES: CloudModel<DeviceTypeList> = {
-        let model = CloudModel::initialize(PROFILES_NAME.to_string(), DEVICE_PROFILES, |data| {
+        let model = CloudModel::initialize(PROFILES_NAME.to_string(), &DEVICE_PROFILES, |data| {
             let profiles_list: DeviceTypeListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(DeviceTypeList::new_from_json(profiles_list))

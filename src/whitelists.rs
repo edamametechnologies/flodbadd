@@ -808,7 +808,7 @@ impl Whitelists {
 
 lazy_static! {
     static ref LISTS: CloudModel<Whitelists> = {
-        let model = CloudModel::initialize(WHITELISTS_FILE_NAME.to_string(), WHITELISTS, |data| {
+        let model = CloudModel::initialize(WHITELISTS_FILE_NAME.to_string(), &WHITELISTS, |data| {
             let whitelist_info_json: WhitelistsJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(Whitelists::new_from_json(whitelist_info_json))

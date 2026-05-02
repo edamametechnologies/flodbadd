@@ -135,7 +135,7 @@ impl CloudSignature for ServicePortsMap {
 
 lazy_static! {
     pub static ref VULNS: CloudModel<VulnerabilityPortInfoList> = {
-        let model = CloudModel::initialize(PORT_VULNS_NAME.to_string(), PORT_VULNS, |data| {
+        let model = CloudModel::initialize(PORT_VULNS_NAME.to_string(), &PORT_VULNS, |data| {
             let vuln_info_json: VulnerabilityPortInfoListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(VulnerabilityPortInfoList::new_from_json(vuln_info_json))

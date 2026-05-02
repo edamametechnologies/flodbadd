@@ -265,7 +265,7 @@ impl Blacklists {
 
 lazy_static! {
     static ref LISTS: CloudModel<Blacklists> = {
-        let model = CloudModel::initialize(BLACKLISTS_FILE_NAME.to_string(), BLACKLISTS, |data| {
+        let model = CloudModel::initialize(BLACKLISTS_FILE_NAME.to_string(), &BLACKLISTS, |data| {
             let blacklist_info_json: BlacklistsJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             // Filter local ranges for default/embedded blacklists

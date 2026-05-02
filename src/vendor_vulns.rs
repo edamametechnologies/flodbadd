@@ -80,7 +80,7 @@ impl VulnerabilityInfoList {
 
 lazy_static! {
     pub static ref VULNS: CloudModel<VulnerabilityInfoList> = {
-        let model = CloudModel::initialize(VENDOR_VULNS_NAME.to_string(), VENDOR_VULNS, |data| {
+        let model = CloudModel::initialize(VENDOR_VULNS_NAME.to_string(), &VENDOR_VULNS, |data| {
             let vuln_info_json: VulnerabilityVendorInfoListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(VulnerabilityInfoList::new_from_json(&vuln_info_json))
