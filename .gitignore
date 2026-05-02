@@ -13,3 +13,5 @@
 Thumbs.db 
 
 .cursor
+/tools/strings_check/target/
+/tools/strings_check/Cargo.lock

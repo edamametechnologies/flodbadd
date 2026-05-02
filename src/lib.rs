@@ -7,6 +7,7 @@ pub mod asn_v6_db;
 pub mod blacklists;
 pub mod blacklists_db;
 pub mod broadcast;
+pub mod cloud_model_fallback;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
     feature = "packetcapture"
