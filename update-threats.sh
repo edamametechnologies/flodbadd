@@ -180,36 +180,59 @@ update_blacklists_db() {
 update_sensitive_paths_db() {
     local is_local=${1:-false}
     local target=./src/sensitive_paths_db.rs
-    local header="// Built in default sensitive paths db\npub static SENSITIVE_PATHS_DB: &str = r#\""
-    local trailer="\"#;"
 
-    echo "Updating sensitive paths db"
+    # IMPORTANT: this DB is OBFUSCATED in the embedded fallback.
+    #
+    # Unlike the other *_db.rs files in this directory, sensitive_paths_db.rs
+    # is rendered by tools/encode_cloud_fallback.py rather than written as a
+    # `pub static FOO: &str = r#"..."#;` raw-string literal. The reason is
+    # Microsoft Defender's Stealc/Stealga ML model: this JSON contains the
+    # full credential-stealer reconnaissance corpus (Microsoft/Credentials,
+    # Microsoft/Protect / DPAPI master keys, browser User Data paths, SSH
+    # key file names, crypto-wallet locations, password manager extension
+    # IDs, etc.). Embedded as a plain UTF-8 string, the helper binary's
+    # rodata section reads as a textbook info-stealer fingerprint and trips
+    # `Trojan:Win32/Stealga.HAK!MTB` on signed builds. See
+    # `src/cloud_model_fallback.rs` for the runtime decoder.
+    #
+    # The published JSON in the threatmodels repo stays in plain form;
+    # only the *embedded fallback* gets gzip+XOR'd here.
 
-    # Delete the file if it exists
+    echo "Updating sensitive paths db (obfuscated CloudModel fallback)"
+
+    # Delete the file if it exists.
     if [ -f "$target" ]; then
         rm "$target"
     fi
 
+    local tmp_json
+    tmp_json=$(mktemp -t sensitive_paths_db.XXXXXX.json)
+    # Make sure the temp JSON is cleaned up even on early return.
+    trap 'rm -f "$tmp_json"' RETURN
+
     if [ "$is_local" = true ]; then
         echo "Using local sensitive paths db file"
-        local body="$(cat ../threatmodels/sensitive-paths-db.json)"
+        cp ../threatmodels/sensitive-paths-db.json "$tmp_json"
     else
         echo "Fetching sensitive paths db from GitHub"
         local branch=$(git rev-parse --abbrev-ref HEAD)
         # Only deal with main and dev branches, default to dev
-        if [ $branch != "dev" ] && [ $branch != "main" ]; then
+        if [ "$branch" != "dev" ] && [ "$branch" != "main" ]; then
           branch=dev
         fi
-        # Prevent bash parsing of escape chars
-        local body="$(wget --no-cache -qO- https://raw.githubusercontent.com/edamametechnologies/threatmodels/$branch/sensitive-paths-db.json)"
+        wget --no-cache -qO "$tmp_json" "https://raw.githubusercontent.com/edamametechnologies/threatmodels/$branch/sensitive-paths-db.json"
     fi
 
-    # Interpret escape chars
-    echo -n -e "$header" > "$target"
-    # Preserve escape chars
-    echo -n "$body" >> "$target"
-    # Interpret escape chars
-    echo -e $trailer >> "$target"
+    if [ ! -s "$tmp_json" ]; then
+        echo "ERROR: empty or missing sensitive paths source JSON ($tmp_json) -- aborting" >&2
+        return 1
+    fi
+
+    python3 ./tools/encode_cloud_fallback.py \
+        "$tmp_json" \
+        "$target" \
+        SENSITIVE_PATHS_DB \
+        "Built in default sensitive paths db (obfuscated)"
 }
 
 # Parse command line arguments
