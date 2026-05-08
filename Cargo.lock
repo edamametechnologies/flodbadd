@@ -490,9 +490,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.61"
+version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
+checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -905,7 +905,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 [[package]]
 name = "edamame_backend"
 version = "0.3.5"
-source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#94d8b0f0ecf01e3281e006743d907bebded15b2d"
+source = "git+https://github.com/edamametechnologies/edamame_backend.git?branch=main#a80c3bf165d498a484d1d2b050618123e07985b0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3377,7 +3377,7 @@ dependencies = [
 [[package]]
 name = "threatmodels_rs"
 version = "0.1.1"
-source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#7b152fdbda09ce91c89049eeff3ceb6ac06b3a09"
+source = "git+https://github.com/edamametechnologies/threatmodels-rs?branch=main#53b40496ed216191433814bbb4d8d82370031127"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3425,9 +3425,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.2"
+version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110a78583f19d5cdb2c5ccf321d1290344e71313c6c37d43520d386027d18386"
+checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
  "libc",
@@ -3603,7 +3603,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 [[package]]
 name = "undeadlock"
 version = "1.2.0"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#c7d37b1cf5a42265fab4396d7fc1c5dd5ebbc488"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#d51fa3a67d8237d7a2a95afb30e9071af50ff67c"
 dependencies = [
  "dashmap",
  "tokio",
