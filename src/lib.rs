@@ -84,6 +84,7 @@ pub mod vendor_vulns_db;
 pub mod vulnerability_info;
 pub mod whitelists;
 pub mod whitelists_db;
+pub mod win_path_normalize;
 
 // Automatic initialization for Windows tests - adds Npcap DLL directory to PATH
 #[cfg(all(test, target_os = "windows"))]

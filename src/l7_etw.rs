@@ -17,6 +17,8 @@
 // the codebase does not need to care whether ETW is available.
 
 use crate::sessions::{Session, SessionL7};
+#[cfg(all(target_os = "windows", feature = "etw"))]
+use crate::win_path_normalize::normalize_win_path;
 use tracing::info;
 
 #[cfg(all(target_os = "windows", feature = "etw"))]
@@ -214,6 +216,72 @@ mod win {
             }
         }
 
+        /// Pre-populate `process_table` with all currently-running processes
+        /// so subsequent FileIo/Create + TcpIp/Connect events can be attributed
+        /// to processes that predate the ETW session start.
+        ///
+        /// Without this, `FileIo/Create` for a long-running process (e.g. an
+        /// already-open Chrome / Edge that survives helper restart) gets
+        /// attributed as `pid-XXXX` because the `Process/Start` ETW event for
+        /// that process never fires (it happened before we started listening).
+        /// `pid-XXXX` defeats the detector's identity-token self-access
+        /// suppression because the token list `["pid", "XXXX"]` does not
+        /// overlap path tokens like `["chrome", "user", "data", ...]`.
+        ///
+        /// One-time cost: ~50-100 ms whole-system enumeration via sysinfo,
+        /// run on the helper's ETW worker thread before `ProcessTrace` blocks.
+        fn prime_process_table_from_running_processes(
+            process_table: &Arc<DashMap<u32, EtwProcessInfo>>,
+        ) {
+            use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System, Users};
+            let started = std::time::Instant::now();
+            let mut system = System::new_with_specifics(
+                RefreshKind::nothing()
+                    .with_processes(ProcessRefreshKind::everything().without_cpu()),
+            );
+            system.refresh_specifics(
+                RefreshKind::nothing()
+                    .with_processes(ProcessRefreshKind::everything().without_cpu()),
+            );
+            let users = Users::new_with_refreshed_list();
+
+            let mut primed = 0u64;
+            for (pid, proc_) in system.processes() {
+                let pid_u32 = pid.as_u32();
+                let process_name = proc_.name().to_string_lossy().to_string();
+                let process_path = proc_
+                    .exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let ppid = proc_.parent().map(Pid::as_u32).unwrap_or(0);
+                let username = proc_
+                    .user_id()
+                    .and_then(|uid| users.get_user_by_id(uid))
+                    .map(|u| u.name().to_string())
+                    .unwrap_or_default();
+                let session_id = proc_.session_id().map(Pid::as_u32).unwrap_or(0);
+
+                process_table.insert(
+                    pid_u32,
+                    EtwProcessInfo {
+                        pid: pid_u32,
+                        ppid,
+                        process_name,
+                        process_path,
+                        username,
+                        session_id,
+                        exit_code: None,
+                    },
+                );
+                primed += 1;
+            }
+            info!(
+                "ETW process_table primed with {} pre-existing processes in {:?}",
+                primed,
+                started.elapsed()
+            );
+        }
+
         fn run_etw_session(
             process_table: Arc<DashMap<u32, EtwProcessInfo>>,
             connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
@@ -221,7 +289,8 @@ mod win {
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
         ) {
-            // Store tables in thread-local for the callback
+            Self::prime_process_table_from_running_processes(&process_table);
+
             THREAD_PROCESS_TABLE.with(|t| {
                 *t.borrow_mut() = Some(Arc::clone(&process_table));
             });
@@ -439,7 +508,14 @@ mod win {
         }
 
         pub fn get_file_attribution(&self, path: &str) -> Option<(u32, String, String)> {
-            let entry = self.file_attribution_table.get(path)?;
+            // The lookup key is the canonical form. Callers from the
+            // `notify` side typically supply Win32-shaped paths
+            // (`C:\Users\...`), while ETW recorded NT-object paths
+            // (`\Device\HarddiskVolume3\Users\...`). Both sides are
+            // normalized through `normalize_win_path` so they collide
+            // on a single key.
+            let key = normalize_win_path(path);
+            let entry = self.file_attribution_table.get(&key)?;
             let attr = entry.value();
             if attr.recorded_at.elapsed().as_secs() > FILE_ATTR_TTL_SECS {
                 return None;
@@ -474,8 +550,13 @@ mod win {
                 (format!("pid-{}", pid), String::new())
             };
 
+            // Store the canonical form so lookups from any path shape
+            // (NT object manager, Win32, long-path-prefixed) collide on
+            // the same key.
+            let key = normalize_win_path(&path);
+
             file_table.insert(
-                path,
+                key,
                 FimEtwAttribution {
                     pid,
                     process_name,

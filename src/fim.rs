@@ -345,7 +345,10 @@ fn best_effort_process_attribution(
 
     let path_str = path.to_string_lossy();
 
-    // Tier 1: ETW file attribution table (when etw feature is enabled and running)
+    // Tier 1: ETW file attribution table (when etw feature is enabled and running).
+    // The lookup canonicalizes the path so it matches whichever shape ETW
+    // recorded (NT object manager `\Device\HarddiskVolumeN\...` or
+    // long-path-prefixed Win32).
     if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&path_str) {
         return (Some(name), Some(proc_path));
     }
@@ -357,17 +360,67 @@ fn best_effort_process_attribution(
         }
     }
 
-    // Tier 3: Restart Manager + sysinfo
-    let (pid, fallback_name) = match lookup_pid_for_path(path) {
-        Some(details) => details,
-        None => return (None, None),
-    };
-
-    let result = lookup_process_details(pid, fallback_name);
-    if result.0.is_some() || result.1.is_some() {
-        cache_attribution(&path_str, &result.0, &result.1);
+    // Tier 3: Restart Manager + sysinfo, on the artifact path itself.
+    // Only fires when a process is currently holding an open handle to the
+    // file. This works for persistently-open files (e.g. Edge `Cookies`)
+    // but misses atomic-rename writers (e.g. Chrome's `LevelDB`/`User Data`
+    // pattern, where Chrome writes to `<file>.tmp`, then renames over the
+    // real file and immediately closes the handle).
+    if let Some((pid, fallback_name)) = lookup_pid_for_path(path) {
+        let result = lookup_process_details(pid, fallback_name);
+        if result.0.is_some() || result.1.is_some() {
+            cache_attribution(&path_str, &result.0, &result.1);
+            return result;
+        }
     }
-    result
+
+    // Tier 3b: parent-directory Restart Manager probe for sensitive events.
+    //
+    // For sensitive FIM events the cost of an extra RM session is worth
+    // it. Atomic-rename writers (Chrome / Edge / Vivaldi browser
+    // profiles, Outlook `.ost`, sqlite WAL, etc.) typically keep the
+    // *parent directory* open even after the artifact handle is gone --
+    // they need it to enumerate siblings and stage tmp files for the
+    // next write cycle. Walking up at most two parents catches both
+    // common shapes:
+    //
+    //   `...\User Data\Default\Network\Cookies`
+    //                                  ^ artifact (handle gone)
+    //                          ^ parent (Network/, often held)
+    //                  ^ grandparent (Default/, profile root, always held)
+    //
+    // We treat any process holding an ancestor handle as the most
+    // plausible writer of the artifact. This is deliberately
+    // best-effort: we accept some false positives (e.g. attributing a
+    // FIM event to a process that just happened to be browsing the
+    // directory) in exchange for closing the systemic 0% attribution
+    // gap that produces the persistent self-access-suppression
+    // failures captured in FP-WIN-16.
+    if is_sensitive {
+        let mut current = path.parent();
+        let mut hops = 0u32;
+        while let Some(parent) = current {
+            // Skip the drive root (`C:\`) -- RM on a volume root would
+            // attribute every process holding the drive as the writer.
+            if parent.parent().is_none() {
+                break;
+            }
+            if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
+                let result = lookup_process_details(pid, fallback_name);
+                if result.0.is_some() || result.1.is_some() {
+                    cache_attribution(&path_str, &result.0, &result.1);
+                    return result;
+                }
+            }
+            hops += 1;
+            if hops >= 2 {
+                break;
+            }
+            current = parent.parent();
+        }
+    }
+
+    (None, None)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -581,7 +634,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             continue;
         }
 
-        // Tier 1: ETW file attribution table
+        // Tier 1: ETW file attribution table (canonicalizes path internally).
         if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&event.path) {
             store.update_process_attribution(&event.uid, Some(name), Some(proc_path));
             updated += 1;
@@ -597,21 +650,49 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             }
         }
 
-        // Tier 3: Restart Manager + sysinfo
+        // Tier 3: Restart Manager on the artifact path itself.
         let path = Path::new(&event.path);
-        let (pid, fallback_name) = match lookup_pid_for_path(path) {
-            Some(details) => details,
-            None => continue,
-        };
-
-        let (process_name, process_path) = lookup_process_details(pid, fallback_name);
-        if process_name.is_none() && process_path.is_none() {
-            continue;
+        if let Some((pid, fallback_name)) = lookup_pid_for_path(path) {
+            let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+            if process_name.is_some() || process_path.is_some() {
+                cache_attribution(&event.path, &process_name, &process_path);
+                store.update_process_attribution(&event.uid, process_name, process_path);
+                updated += 1;
+                continue;
+            }
         }
 
-        cache_attribution(&event.path, &process_name, &process_path);
-        store.update_process_attribution(&event.uid, process_name, process_path);
-        updated += 1;
+        // Tier 3b: parent-directory Restart Manager probe for sensitive
+        // events (atomic-rename writers like Chrome `User Data`). See
+        // `best_effort_process_attribution` for the rationale.
+        if event.is_sensitive {
+            let mut current = path.parent();
+            let mut hops = 0u32;
+            let mut found = false;
+            while let Some(parent) = current {
+                if parent.parent().is_none() {
+                    break;
+                }
+                if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
+                    let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+                    if process_name.is_some() || process_path.is_some() {
+                        cache_attribution(&event.path, &process_name, &process_path);
+                        store.update_process_attribution(&event.uid, process_name, process_path);
+                        updated += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                hops += 1;
+                if hops >= 2 {
+                    break;
+                }
+                current = parent.parent();
+            }
+            if found {
+                continue;
+            }
+        }
     }
 
     updated
