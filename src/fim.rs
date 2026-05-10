@@ -262,7 +262,7 @@ fn get_file_metadata(path: &Path, hash_threshold: u64) -> (Option<u64>, Option<S
         Ok(meta) => {
             let size = meta.len();
             let hash = if size <= hash_threshold {
-                match std::fs::read(path) {
+                match read_file_for_fim_hash(path) {
                     Ok(data) => Some(blake3::hash(&data).to_hex().to_string()),
                     Err(_) => None,
                 }
@@ -273,6 +273,36 @@ fn get_file_metadata(path: &Path, hash_threshold: u64) -> (Option<u64>, Option<S
         }
         Err(_) => (None, None),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn read_file_for_fim_hash(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = open_file_for_fim_hash(path)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    Ok(data)
+}
+
+#[cfg(target_os = "windows")]
+fn open_file_for_fim_hash(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_READ: u32 = 0x00000001;
+    const FILE_SHARE_WRITE: u32 = 0x00000002;
+    const FILE_SHARE_DELETE: u32 = 0x00000004;
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_file_for_fim_hash(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
 }
 
 fn should_attempt_process_attribution(
@@ -1039,6 +1069,20 @@ mod tests {
 
         let expected = blake3::hash(content).to_hex().to_string();
         assert_eq!(hash.unwrap(), expected);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_fim_hash_handle_allows_rename_while_open() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let test_file = temp.path().join("hashme.txt");
+        let renamed_file = temp.path().join("hashme-renamed.txt");
+        fs::write(&test_file, b"test content for hashing").expect("write");
+
+        let handle = open_file_for_fim_hash(&test_file).expect("open file for FIM hash");
+        fs::rename(&test_file, &renamed_file)
+            .expect("FIM hash handle should not block Windows rename/delete sharing");
+        drop(handle);
     }
 
     #[test]
