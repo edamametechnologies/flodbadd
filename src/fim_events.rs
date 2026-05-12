@@ -221,15 +221,13 @@ impl Default for FimEventStore {
     }
 }
 
-fn is_temp_directory_path(path: &str) -> bool {
+pub fn is_temp_directory_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.starts_with("/tmp/")
         || normalized.starts_with("/private/tmp/")
         || normalized.starts_with("/var/tmp/")
         || normalized.contains("/Temp/")
         || normalized.contains("/AppData/Local/Temp/")
-        || normalized.contains("\\Temp\\")
-        || normalized.contains("\\AppData\\Local\\Temp\\")
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
-use crate::fim_events::{FimEvent, FimEventStore, FimEventType, FIM_HASH_SIZE_THRESHOLD};
+use crate::fim_events::{
+    is_temp_directory_path, FimEvent, FimEventStore, FimEventType, FIM_HASH_SIZE_THRESHOLD,
+};
 use crate::open_files::is_sensitive_path;
-use crate::sensitive_paths::classify_sensitive_path_labels_sync;
+use crate::sensitive_paths::{classify_sensitive_path_labels_sync, is_fim_excluded_path};
 use anyhow::{Context, Result};
 use chrono::Utc;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -124,12 +126,44 @@ impl FimWatcher {
         #[cfg(target_os = "linux")]
         check_inotify_limits(paths.len());
 
+        // The watcher closure needs a forward-slash-normalized snapshot of
+        // the explicit watch roots so the early-drop gate
+        // (`should_keep_fim_event`) can accept any event under an operator-
+        // requested path even when that path is non-sensitive AND non-temp
+        // (e.g. a custom audit directory). Built once at start time so the
+        // closure does not need to re-walk `paths` on every event.
+        //
+        // We store BOTH the original path and the `canonicalize()` result
+        // for each input. macOS FSEvents reports events under the realpath
+        // (`/private/var/folders/...`) while `tempfile` and most callers
+        // pass the symlink-relative form (`/var/folders/...`); on Linux
+        // /tmp may also be a symlink in some distros. Storing both shapes
+        // makes the prefix match work under either reporting convention.
+        let mut explicit_set: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for p in &paths {
+            let raw = p.to_string_lossy().replace('\\', "/");
+            if !raw.is_empty() {
+                explicit_set.insert(raw);
+            }
+            if let Ok(canon) = std::fs::canonicalize(p) {
+                let canon_str = canon.to_string_lossy().replace('\\', "/");
+                if !canon_str.is_empty() {
+                    explicit_set.insert(canon_str);
+                }
+            }
+        }
+        let explicit_watch_roots: Arc<Vec<String>> = Arc::new(explicit_set.into_iter().collect());
+
         let store_clone = store.clone();
         let hash_threshold = config.hash_size_threshold;
+        let explicit_clone = explicit_watch_roots.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| match result {
                 Ok(event) => {
-                    if let Some(fim_events) = translate_notify_event(&event, hash_threshold) {
+                    if let Some(fim_events) =
+                        translate_notify_event(&event, hash_threshold, explicit_clone.as_ref())
+                    {
                         for fim_event in fim_events {
                             store_clone.insert(fim_event);
                         }
@@ -203,7 +237,66 @@ impl FimWatcher {
     }
 }
 
-fn translate_notify_event(event: &Event, hash_threshold: u64) -> Option<Vec<FimEvent>> {
+/// Decide whether a raw notify event for `path_str` is worth promoting to a
+/// `FimEvent`. The detector pipeline only consumes sensitive findings and
+/// suspicious temp staging, so churn from build trees, browser caches, and
+/// other dev-machine noise is dropped here BEFORE we hash the file or run
+/// process attribution -- both of which dominate FIM CPU on busy hosts
+/// (FP-FIM-CPU-1).
+///
+/// Accept rules (any one is enough):
+/// 1. The path matches a sensitive credential pattern shipped via the
+///    CloudModel (`is_sensitive_path`), OR
+/// 2. The path is in a temp-staging directory recognized by
+///    `is_temp_directory_path` (canonical malware drop sites), OR
+/// 3. The path is under one of the operator-requested explicit watch
+///    roots (`explicit_watch_roots`). Operators that hand a custom
+///    audit dir to `FimWatcher::start` deliberately want everything
+///    under it tracked.
+///
+/// Reject rule (overrides ALL accept rules):
+/// - The path matches one of the build-output / browser-cache patterns
+///   shipped via `sensitive-paths-db.json::fim_excluded_path_patterns`
+///   (`is_fim_excluded_path`). These are structurally noisy --
+///   `target/release/`, `node_modules/`, browser `Code Cache`, ... --
+///   and have no security-relevant signal even if they happen to live
+///   under a sensitive watch root.
+fn should_keep_fim_event(path_str: &str, explicit_watch_roots: &[String]) -> (bool, bool) {
+    if is_fim_excluded_path(path_str) {
+        return (false, false);
+    }
+
+    let sensitive = is_sensitive_path(path_str);
+    if sensitive {
+        return (true, true);
+    }
+
+    let normalized = path_str.replace('\\', "/");
+    if is_temp_directory_path(&normalized) {
+        return (true, false);
+    }
+
+    let lower_normalized = normalized.to_lowercase();
+    let under_explicit = explicit_watch_roots.iter().any(|root| {
+        if root.is_empty() {
+            return false;
+        }
+        let root_lower = root.to_lowercase();
+        lower_normalized == root_lower || lower_normalized.starts_with(&format!("{}/", root_lower))
+    });
+
+    if under_explicit {
+        return (true, false);
+    }
+
+    (false, false)
+}
+
+fn translate_notify_event(
+    event: &Event,
+    hash_threshold: u64,
+    explicit_watch_roots: &[String],
+) -> Option<Vec<FimEvent>> {
     let event_type = match &event.kind {
         EventKind::Create(_) => FimEventType::Create,
         EventKind::Modify(modify_kind) => match modify_kind {
@@ -218,13 +311,20 @@ fn translate_notify_event(event: &Event, hash_threshold: u64) -> Option<Vec<FimE
     for path in &event.paths {
         let path_str = path.to_string_lossy().to_string();
 
+        // Early-drop: skip hashing, attribution, and store insertion for
+        // events that fall outside the sensitive / temp / explicit-watch
+        // accept set, OR that match the build-output exclusion list.
+        let (keep, sensitive) = should_keep_fim_event(&path_str, explicit_watch_roots);
+        if !keep {
+            continue;
+        }
+
         let (size, hash) = if event_type != FimEventType::Delete && path.is_file() {
             get_file_metadata(path, hash_threshold)
         } else {
             (None, None)
         };
 
-        let sensitive = is_sensitive_path(&path_str);
         let labels = classify_sensitive_path_labels_sync(&[path_str.clone()]);
         // Attribution is expensive and platform-dependent, so only attempt it for
         // sensitive or temp-ish paths that are likely to matter for vuln correlation.
@@ -820,52 +920,14 @@ pub fn default_temp_watch_paths() -> Vec<PathBuf> {
 /// Sensitive per-home watch directories (credentials, agent configs, platform
 /// key stores). Shared by standalone and helper-daemon startup paths so both
 /// paths monitor exactly the same default set.
+///
+/// The directory list comes from `sensitive-paths-db.json::watch_roots`
+/// (CloudModel-tunable, embedded fallback in
+/// `flodbadd::sensitive_paths_db`) -- there is intentionally NO hardcoded
+/// path list in this function. See
+/// `crate::sensitive_paths::default_sensitive_watch_paths_for_home`.
 pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    let common_dirs = [
-        ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".cursor", ".claude",
-    ];
-    for dir in &common_dirs {
-        let p = home.join(dir);
-        if p.exists() {
-            paths.push(p);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mac_dirs = ["Library/Keychains"];
-        for dir in &mac_dirs {
-            let p = home.join(dir);
-            if p.exists() {
-                paths.push(p);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let linux_dirs = [".config", ".local/share"];
-        for dir in &linux_dirs {
-            let p = home.join(dir);
-            if p.exists() {
-                paths.push(p);
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            paths.push(PathBuf::from(appdata));
-        }
-        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-            paths.push(PathBuf::from(localappdata));
-        }
-    }
-
-    paths
+    crate::sensitive_paths::default_sensitive_watch_paths_for_home(home)
 }
 
 fn ci_watch_paths() -> Vec<PathBuf> {
@@ -1137,18 +1199,23 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_notify_event_create() {
+    fn test_translate_notify_event_create_with_explicit_watch() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let test_file = temp.path().join("new.txt");
         fs::write(&test_file, "new content").expect("write");
+
+        let explicit_roots = vec![temp.path().to_string_lossy().replace('\\', "/")];
 
         let event = Event {
             kind: EventKind::Create(notify::event::CreateKind::File),
             paths: vec![test_file.clone()],
             attrs: Default::default(),
         };
-        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD);
-        assert!(results.is_some());
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &explicit_roots);
+        assert!(
+            results.is_some(),
+            "Event under explicit watch root must be kept"
+        );
         let events = results.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, FimEventType::Create);
@@ -1156,14 +1223,17 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_notify_event_delete() {
+    fn test_translate_notify_event_delete_sensitive() {
         let event = Event {
             kind: EventKind::Remove(notify::event::RemoveKind::File),
-            paths: vec![PathBuf::from("/some/deleted/file.txt")],
+            paths: vec![PathBuf::from("/Users/me/.ssh/id_rsa")],
             attrs: Default::default(),
         };
-        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD);
-        assert!(results.is_some());
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &[]);
+        assert!(
+            results.is_some(),
+            "Sensitive delete must be kept even with no explicit roots"
+        );
         let events = results.unwrap();
         assert_eq!(events[0].event_type, FimEventType::Delete);
         assert!(events[0].hash.is_none());
@@ -1177,8 +1247,120 @@ mod tests {
             paths: vec![PathBuf::from("/some/file.txt")],
             attrs: Default::default(),
         };
-        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD);
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &[]);
         assert!(results.is_none());
+    }
+
+    #[test]
+    fn test_translate_notify_event_drops_non_sensitive_non_temp_non_explicit() {
+        let event = Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            paths: vec![PathBuf::from("/Users/me/Documents/random.txt")],
+            attrs: Default::default(),
+        };
+        // No explicit watch roots, path is not sensitive, not temp, not build
+        // exclusion -- gate must drop it BEFORE hashing. This is the FP-FIM-CPU-1
+        // hot path: dev machines generate enormous churn here from editor
+        // saves, language-server caches, etc., none of which is detector-relevant.
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &[]);
+        assert!(
+            results.is_none(),
+            "Random non-sensitive non-temp non-explicit event must be dropped early"
+        );
+    }
+
+    #[test]
+    fn test_translate_notify_event_drops_build_artifacts_under_explicit_watch() {
+        // Even when an operator explicitly watches the project root, build
+        // artifacts under it (cargo target/, node_modules/, ...) must still
+        // be dropped -- the exclusion list is the structural noise filter
+        // and overrides the explicit-watch accept.
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let target_dir = temp.path().join("target/release/deps");
+        fs::create_dir_all(&target_dir).expect("mkdir target/release/deps");
+        let bin_file = target_dir.join("libfoo.rlib");
+        fs::write(&bin_file, b"\0\0\0\0").expect("write");
+
+        let explicit_roots = vec![temp.path().to_string_lossy().replace('\\', "/")];
+
+        let event = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![bin_file.clone()],
+            attrs: Default::default(),
+        };
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &explicit_roots);
+        assert!(
+            results.is_none(),
+            "Build artifact under explicit watch root must be dropped by exclusion list. \
+             explicit_roots={:?}, bin_file={:?}",
+            explicit_roots,
+            bin_file
+        );
+    }
+
+    #[test]
+    fn test_translate_notify_event_keeps_temp_with_no_explicit_roots() {
+        let event = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![PathBuf::from("/tmp/dropper.sh")],
+            attrs: Default::default(),
+        };
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &[]);
+        assert!(
+            results.is_some(),
+            "Temp staging path must be kept even with no explicit watch root"
+        );
+    }
+
+    #[test]
+    fn test_should_keep_fim_event_classifications() {
+        // Sensitive + non-excluded -> keep (sensitive=true)
+        let (keep, sensitive) = should_keep_fim_event("/Users/me/.ssh/id_rsa", &[]);
+        assert!(keep);
+        assert!(sensitive);
+
+        // Temp + non-excluded -> keep (sensitive=false)
+        let (keep, sensitive) = should_keep_fim_event("/tmp/dropper.sh", &[]);
+        assert!(keep);
+        assert!(!sensitive);
+
+        // Non-sensitive + non-temp + no explicit + no exclusion match -> drop
+        let (keep, _) = should_keep_fim_event("/Users/me/Documents/notes.txt", &[]);
+        assert!(!keep);
+
+        // Non-sensitive + under explicit watch -> keep (sensitive=false)
+        let explicit = vec!["/Users/me/audit".to_string()];
+        let (keep, sensitive) = should_keep_fim_event("/Users/me/audit/log.txt", &explicit);
+        assert!(keep);
+        assert!(!sensitive);
+
+        // Build artifact (excluded) under explicit watch -> drop (exclusion wins)
+        let explicit = vec!["/Users/me/repo".to_string()];
+        let (keep, _) =
+            should_keep_fim_event("/Users/me/repo/target/release/deps/libfoo.rlib", &explicit);
+        assert!(!keep);
+
+        // Build artifact (excluded) that happens to look "sensitive" by suffix:
+        // exclusion still wins because excluded paths are structurally noisy
+        // regardless of name. node_modules/.bin/foo is the canonical example.
+        let (keep, _) =
+            should_keep_fim_event("/Users/me/repo/node_modules/.bin/credentials.json", &[]);
+        assert!(!keep);
+    }
+
+    #[test]
+    fn test_should_keep_fim_event_explicit_watch_does_not_substring_match() {
+        // Explicit roots must be matched as path prefixes, not substrings,
+        // so a watch on /Users/me/sshlogs does NOT accept events under
+        // /Users/me/.ssh/.
+        let explicit = vec!["/Users/me/sshlogs".to_string()];
+        let (keep, _) = should_keep_fim_event("/Users/me/sshlogs/foo.log", &explicit);
+        assert!(keep);
+
+        let (keep, _) = should_keep_fim_event("/Users/me/sshlogsplus/foo", &explicit);
+        assert!(!keep, "Sibling path with shared prefix must not match");
     }
 
     #[test]

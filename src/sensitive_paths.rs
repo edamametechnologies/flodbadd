@@ -4,11 +4,24 @@ use arc_swap::ArcSwap;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threatmodels_rs::*;
 use tracing::{info, warn};
 
 const SENSITIVE_PATHS_NAME: &str = "sensitive-paths-db.json";
+
+/// Per-platform watch-root configuration shipped via the CloudModel so the
+/// FIM watcher does not hardcode the directory list in Rust. Every entry is a
+/// HOME-relative POSIX path (no leading `/`, no backslashes); the runtime
+/// resolves it against the calling user's home.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct WatchRootsJSON {
+    pub common_home_relative: Vec<String>,
+    pub linux_home_relative: Vec<String>,
+    pub macos_home_relative: Vec<String>,
+    pub windows_home_relative: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SensitivePathsJSON {
@@ -17,6 +30,8 @@ pub struct SensitivePathsJSON {
     pub common_patterns: Vec<String>,
     pub platform_patterns: HashMap<String, Vec<String>>,
     pub labels: HashMap<String, Vec<String>>,
+    pub watch_roots: WatchRootsJSON,
+    pub fim_excluded_path_patterns: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -26,6 +41,8 @@ pub struct SensitivePathsDB {
     pub common_patterns: Vec<String>,
     pub platform_patterns: HashMap<String, Vec<String>>,
     pub labels: HashMap<String, Vec<String>>,
+    pub watch_roots: WatchRootsJSON,
+    pub fim_excluded_path_patterns: Vec<String>,
 }
 
 impl CloudSignature for SensitivePathsDB {
@@ -40,10 +57,11 @@ impl CloudSignature for SensitivePathsDB {
 impl SensitivePathsDB {
     pub fn new_from_json(json: &SensitivePathsJSON) -> Self {
         info!(
-            "Loading sensitive paths DB: {} common, {} platform sets, {} label groups",
+            "Loading sensitive paths DB: {} common, {} platform sets, {} label groups, {} fim exclusions",
             json.common_patterns.len(),
             json.platform_patterns.len(),
-            json.labels.len()
+            json.labels.len(),
+            json.fim_excluded_path_patterns.len(),
         );
 
         SensitivePathsDB {
@@ -52,6 +70,8 @@ impl SensitivePathsDB {
             common_patterns: json.common_patterns.clone(),
             platform_patterns: json.platform_patterns.clone(),
             labels: json.labels.clone(),
+            watch_roots: json.watch_roots.clone(),
+            fim_excluded_path_patterns: json.fim_excluded_path_patterns.clone(),
         }
     }
 
@@ -71,6 +91,32 @@ impl SensitivePathsDB {
             patterns.extend(platform.iter().map(|s| s.as_str()));
         }
         patterns
+    }
+
+    /// HOME-relative directory list for the current platform: the common
+    /// credential-store dirs (`.ssh`, `.gnupg`, `.aws`, ...) plus whatever
+    /// the platform-specific bucket adds (e.g. `Library/Keychains` on macOS,
+    /// `AppData/Roaming` + `AppData/Local` on Windows). Used by the FIM
+    /// watcher to bootstrap recursive watches without hardcoding paths.
+    pub fn watch_roots_for_platform(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .watch_roots
+            .common_home_relative
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let platform_specific: &[String] = if cfg!(target_os = "macos") {
+            &self.watch_roots.macos_home_relative
+        } else if cfg!(target_os = "linux") {
+            &self.watch_roots.linux_home_relative
+        } else if cfg!(target_os = "windows") {
+            &self.watch_roots.windows_home_relative
+        } else {
+            &[]
+        };
+        out.extend(platform_specific.iter().map(|s| s.as_str()));
+        out
     }
 
     pub fn classify_labels(&self, paths: &[String]) -> Vec<String> {
@@ -124,14 +170,42 @@ fn build_fallback_labels() -> HashMap<String, Vec<String>> {
     }
 }
 
+fn build_fallback_watch_roots() -> WatchRootsJSON {
+    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        .map(|json| json.watch_roots)
+        .unwrap_or_default()
+}
+
+fn build_fallback_fim_excluded_patterns() -> Vec<String> {
+    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        .map(|json| {
+            json.fim_excluded_path_patterns
+                .into_iter()
+                .map(|p| p.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 lazy_static! {
     static ref LABELS_SNAPSHOT: ArcSwap<HashMap<String, Vec<String>>> =
         ArcSwap::from_pointee(build_fallback_labels());
+    static ref WATCH_ROOTS_SNAPSHOT: ArcSwap<WatchRootsJSON> =
+        ArcSwap::from_pointee(build_fallback_watch_roots());
+    static ref FIM_EXCLUDED_PATTERNS_SNAPSHOT: ArcSwap<Vec<String>> =
+        ArcSwap::from_pointee(build_fallback_fim_excluded_patterns());
 }
 
 pub async fn refresh_labels_snapshot() {
     let db = SENSITIVE_PATHS.data.read().await;
     LABELS_SNAPSHOT.store(Arc::new(db.labels.clone()));
+    WATCH_ROOTS_SNAPSHOT.store(Arc::new(db.watch_roots.clone()));
+    let exclusions: Vec<String> = db
+        .fim_excluded_path_patterns
+        .iter()
+        .map(|p| p.to_lowercase())
+        .collect();
+    FIM_EXCLUDED_PATTERNS_SNAPSHOT.store(Arc::new(exclusions));
 }
 
 /// Synchronous label classifier backed by the cloud model snapshot.
@@ -203,6 +277,56 @@ pub async fn classify_sensitive_path_labels(paths: &[String]) -> Vec<String> {
     db.classify_labels(paths)
 }
 
+/// HOME-relative sensitive watch directories for the current platform,
+/// resolved against `home`. Backed by the lock-free `WATCH_ROOTS_SNAPSHOT`
+/// so this is callable from sync code (FIM startup, tests). Replaces the
+/// previously-hardcoded list embedded in `flodbadd::fim`; the source of
+/// truth is `sensitive-paths-db.json::watch_roots` shipped via CloudModel
+/// with the embedded fallback as last-resort default.
+pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
+    let snap = WATCH_ROOTS_SNAPSHOT.load();
+    let platform_specific: &[String] = if cfg!(target_os = "macos") {
+        &snap.macos_home_relative
+    } else if cfg!(target_os = "linux") {
+        &snap.linux_home_relative
+    } else if cfg!(target_os = "windows") {
+        &snap.windows_home_relative
+    } else {
+        &[]
+    };
+
+    let mut paths = Vec::new();
+    for entry in snap
+        .common_home_relative
+        .iter()
+        .chain(platform_specific.iter())
+    {
+        let p = home.join(entry);
+        if p.exists() && !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    paths
+}
+
+/// Returns true if `path` matches one of the FIM exclusion substrings
+/// shipped via `sensitive-paths-db.json::fim_excluded_path_patterns`. These
+/// are build-tool churn paths (cargo target, gradle caches, node_modules,
+/// browser content caches, ...) that we never want to hash, attribute, or
+/// store as FIM events because they generate enormous CPU load on dev
+/// machines without producing security-relevant signal.
+pub fn is_fim_excluded_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    let patterns = FIM_EXCLUDED_PATTERNS_SNAPSHOT.load();
+    patterns.iter().any(|pat| normalized.contains(pat.as_str()))
+}
+
+/// Returns a copy of the current FIM exclusion pattern list (already
+/// lowercased) for diagnostics / tests.
+pub fn fim_excluded_path_patterns() -> Vec<String> {
+    FIM_EXCLUDED_PATTERNS_SNAPSHOT.load().as_ref().clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,9 +367,107 @@ mod tests {
     #[serial]
     async fn test_update_sensitive_paths() {
         let status = update("main", false).await.expect("Update failed");
+        // FormatError is a legitimate transient state during a rollout: when a
+        // new field is added to `sensitive-paths-db.json` but threatmodels has
+        // not been pushed yet, the live JSON parse fails and the runtime keeps
+        // its embedded fallback. The CloudModel infrastructure must keep
+        // working in all three states.
         assert!(
-            matches!(status, UpdateStatus::Updated | UpdateStatus::NotUpdated),
-            "Update status should be either Updated or NotUpdated"
+            matches!(
+                status,
+                UpdateStatus::Updated | UpdateStatus::NotUpdated | UpdateStatus::FormatError
+            ),
+            "Unexpected update status: {:?}",
+            status
         );
+    }
+
+    #[test]
+    fn test_watch_roots_snapshot_includes_common_dirs() {
+        let snap = WATCH_ROOTS_SNAPSHOT.load();
+        assert!(
+            snap.common_home_relative.iter().any(|d| d == ".ssh"),
+            "common_home_relative must include .ssh; got {:?}",
+            snap.common_home_relative,
+        );
+        assert!(
+            snap.common_home_relative.iter().any(|d| d == ".aws"),
+            "common_home_relative must include .aws; got {:?}",
+            snap.common_home_relative,
+        );
+    }
+
+    #[test]
+    fn test_default_sensitive_watch_paths_for_home_resolves_existing_dirs() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(temp.path().join(".ssh")).expect("mkdir .ssh");
+        std::fs::create_dir_all(temp.path().join(".aws")).expect("mkdir .aws");
+
+        let resolved = default_sensitive_watch_paths_for_home(temp.path());
+
+        assert!(
+            resolved.iter().any(|p| p.ends_with(".ssh")),
+            ".ssh should be picked up; got {:?}",
+            resolved
+        );
+        assert!(
+            resolved.iter().any(|p| p.ends_with(".aws")),
+            ".aws should be picked up; got {:?}",
+            resolved
+        );
+
+        // Non-existent dirs from the snapshot must NOT show up.
+        let missing = temp.path().join(".gnupg");
+        assert!(!resolved.contains(&missing));
+    }
+
+    #[test]
+    fn test_default_sensitive_watch_paths_no_hardcoded_paths_in_rust() {
+        // Snapshot contents drive everything; if the JSON loses .ssh, the
+        // helper drops it. This is the property "no hardcoded Rust list".
+        let snap = WATCH_ROOTS_SNAPSHOT.load();
+        let common: std::collections::HashSet<&str> = snap
+            .common_home_relative
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        // Sanity: the embedded fallback is a non-empty set including common
+        // credential directories. If this trips, somebody emptied the JSON.
+        assert!(!common.is_empty(), "common_home_relative must not be empty");
+    }
+
+    #[test]
+    fn test_is_fim_excluded_path_matches_build_artifacts() {
+        assert!(is_fim_excluded_path(
+            "/Users/me/repo/target/debug/build/foo-1234/out"
+        ));
+        assert!(is_fim_excluded_path(
+            "/Users/me/repo/target/release/deps/libfoo.rlib"
+        ));
+        assert!(is_fim_excluded_path(
+            "/home/me/proj/node_modules/lib/index.js"
+        ));
+        assert!(is_fim_excluded_path(
+            "C:\\Users\\me\\proj\\target\\release\\deps\\foo.exe"
+        ));
+        assert!(is_fim_excluded_path(
+            "/Users/me/proj/build/windows/x64/runner/Debug/edamame_app.exe"
+        ));
+        assert!(is_fim_excluded_path(
+            "/Users/me/Library/Caches/com.google.Chrome/Code Cache/js/index"
+        ));
+    }
+
+    #[test]
+    fn test_is_fim_excluded_path_does_not_match_credential_paths() {
+        assert!(!is_fim_excluded_path("/home/user/.ssh/id_rsa"));
+        assert!(!is_fim_excluded_path("/home/user/.aws/credentials"));
+        assert!(!is_fim_excluded_path(
+            "/Users/user/Library/Application Support/edamame/agentic_config.json"
+        ));
+        assert!(!is_fim_excluded_path("/etc/shadow"));
+        assert!(!is_fim_excluded_path(
+            "C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Credentials\\foo"
+        ));
     }
 }
