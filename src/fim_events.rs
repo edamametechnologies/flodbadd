@@ -170,6 +170,18 @@ impl FimEventStore {
         }
     }
 
+    pub fn update_content_hash(&self, uid: &str, hash: Option<String>) {
+        let Some(hash) = hash else {
+            return;
+        };
+
+        if let Some(mut event) = self.events.get_mut(uid) {
+            if event.hash.is_none() {
+                event.hash = Some(hash);
+            }
+        }
+    }
+
     pub fn has_suspicious_events(&self) -> bool {
         self.events.iter().any(|e| {
             let ev = e.value();
@@ -410,6 +422,60 @@ mod tests {
             events[0].process_path.as_deref(),
             Some("/Applications/Cursor.app/Contents/MacOS/Cursor")
         );
+    }
+
+    #[test]
+    fn test_update_content_hash_backfills_missing_hash() {
+        let store = FimEventStore::new();
+        let ts = Utc::now();
+        let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: ts,
+            size: Some(12),
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+        });
+
+        store.update_content_hash(&uid, Some("abc123".to_string()));
+
+        let events = store.get_all_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_update_content_hash_preserves_existing_hash() {
+        let store = FimEventStore::new();
+        let ts = Utc::now();
+        let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: ts,
+            size: Some(12),
+            hash: Some("original".to_string()),
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+        });
+
+        store.update_content_hash(&uid, Some("replacement".to_string()));
+
+        let events = store.get_all_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].hash.as_deref(), Some("original"));
     }
 
     #[test]

@@ -27,6 +27,10 @@ const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
 const FIM_ATTRIBUTION_CACHE_MAX_ENTRIES: usize = 5_000;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL: u64 = 500;
+#[cfg(target_os = "windows")]
+const FIM_HASH_WORK_QUEUE_CAPACITY: usize = 2_048;
+#[cfg(target_os = "windows")]
+const FIM_HASH_QUIET_DELAY_MS: u64 = 250;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 struct CachedAttribution {
@@ -112,6 +116,8 @@ pub struct FimWatcher {
     store: Arc<FimEventStore>,
     watch_paths: Vec<PathBuf>,
     running: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    _hash_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 pub const FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT: usize = 128;
@@ -122,6 +128,14 @@ impl FimWatcher {
 
         let store = Arc::new(FimEventStore::new());
         let running = Arc::new(AtomicBool::new(true));
+
+        #[cfg(target_os = "windows")]
+        let (hash_tx, hash_rx) = std::sync::mpsc::sync_channel(FIM_HASH_WORK_QUEUE_CAPACITY);
+        #[cfg(target_os = "windows")]
+        let hash_worker = Some(
+            spawn_fim_hash_worker(store.clone(), running.clone(), hash_rx)
+                .context("Failed to spawn FIM hash worker")?,
+        );
 
         #[cfg(target_os = "linux")]
         check_inotify_limits(paths.len());
@@ -158,6 +172,8 @@ impl FimWatcher {
         let store_clone = store.clone();
         let hash_threshold = config.hash_size_threshold;
         let explicit_clone = explicit_watch_roots.clone();
+        #[cfg(target_os = "windows")]
+        let hash_tx_clone = hash_tx.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| match result {
                 Ok(event) => {
@@ -165,7 +181,14 @@ impl FimWatcher {
                         translate_notify_event(&event, hash_threshold, explicit_clone.as_ref())
                     {
                         for fim_event in fim_events {
+                            #[cfg(target_os = "windows")]
+                            let hash_work =
+                                fim_hash_work_item_for_event(&fim_event, hash_threshold);
                             store_clone.insert(fim_event);
+                            #[cfg(target_os = "windows")]
+                            if let Some(hash_work) = hash_work {
+                                queue_fim_hash_work(&hash_tx_clone, hash_work);
+                            }
                         }
                     }
                 }
@@ -206,6 +229,8 @@ impl FimWatcher {
             store,
             watch_paths: actual_paths,
             running,
+            #[cfg(target_os = "windows")]
+            _hash_worker: hash_worker,
         })
     }
 
@@ -297,6 +322,9 @@ fn translate_notify_event(
     hash_threshold: u64,
     explicit_watch_roots: &[String],
 ) -> Option<Vec<FimEvent>> {
+    #[cfg(target_os = "windows")]
+    let _ = hash_threshold;
+
     let event_type = match &event.kind {
         EventKind::Create(_) => FimEventType::Create,
         EventKind::Modify(modify_kind) => match modify_kind {
@@ -320,7 +348,14 @@ fn translate_notify_event(
         }
 
         let (size, hash) = if event_type != FimEventType::Delete && path.is_file() {
-            get_file_metadata(path, hash_threshold)
+            #[cfg(target_os = "windows")]
+            {
+                (get_file_size_metadata(path), None)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                get_file_metadata(path, hash_threshold)
+            }
         } else {
             (None, None)
         };
@@ -357,10 +392,144 @@ fn translate_notify_event(
     }
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct FimHashWorkItem {
+    uid: String,
+    path: PathBuf,
+    size: u64,
+    hash_threshold: u64,
+    ready_at: std::time::Instant,
+}
+
+#[cfg(target_os = "windows")]
+fn fim_hash_work_item_for_event(event: &FimEvent, hash_threshold: u64) -> Option<FimHashWorkItem> {
+    if event.event_type == FimEventType::Delete {
+        return None;
+    }
+
+    let size = event.size?;
+    if size > hash_threshold {
+        return None;
+    }
+
+    Some(FimHashWorkItem {
+        uid: event.uid.clone(),
+        path: PathBuf::from(&event.path),
+        size,
+        hash_threshold,
+        ready_at: std::time::Instant::now()
+            + std::time::Duration::from_millis(FIM_HASH_QUIET_DELAY_MS),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn queue_fim_hash_work(
+    hash_tx: &std::sync::mpsc::SyncSender<FimHashWorkItem>,
+    hash_work: FimHashWorkItem,
+) {
+    match hash_tx.try_send(hash_work) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            debug!("FIM: dropping content-hash work item because queue is full");
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            debug!("FIM: dropping content-hash work item because worker stopped");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_fim_hash_worker(
+    store: Arc<FimEventStore>,
+    running: Arc<AtomicBool>,
+    hash_rx: std::sync::mpsc::Receiver<FimHashWorkItem>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("fim-hash-worker".into())
+        .spawn(move || {
+            let mut pending = std::collections::VecDeque::new();
+            while running.load(Ordering::SeqCst) {
+                while let Ok(hash_work) = hash_rx.try_recv() {
+                    pending.push_back(hash_work);
+                }
+
+                if let Some(hash_work) = pending.pop_front() {
+                    let now = std::time::Instant::now();
+                    if hash_work.ready_at > now {
+                        let wait = hash_work
+                            .ready_at
+                            .duration_since(now)
+                            .min(std::time::Duration::from_millis(100));
+                        pending.push_front(hash_work);
+                        match hash_rx.recv_timeout(wait) {
+                            Ok(new_work) => pending.push_back(new_work),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        process_fim_hash_work_item(&store, hash_work);
+                    }
+                } else {
+                    match hash_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(hash_work) => pending.push_back(hash_work),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn process_fim_hash_work_item(store: &FimEventStore, hash_work: FimHashWorkItem) -> bool {
+    let Some(hash) = compute_hash_for_work_item(&hash_work) else {
+        return false;
+    };
+
+    store.update_content_hash(&hash_work.uid, Some(hash));
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn compute_hash_for_work_item(hash_work: &FimHashWorkItem) -> Option<String> {
+    if hash_work.size > hash_work.hash_threshold {
+        return None;
+    }
+
+    let current_size = get_file_size_metadata(&hash_work.path)?;
+    if current_size != hash_work.size || current_size > hash_work.hash_threshold {
+        return None;
+    }
+
+    match read_file_for_fim_hash(&hash_work.path) {
+        Ok(data) => Some(blake3::hash(&data).to_hex().to_string()),
+        Err(e) => {
+            if matches!(e.raw_os_error(), Some(32 | 33)) {
+                debug!(
+                    "FIM: skipped deferred content hash for {} due to sharing/lock violation",
+                    hash_work.path.display()
+                );
+            } else {
+                debug!(
+                    "FIM: skipped deferred content hash for {}: {}",
+                    hash_work.path.display(),
+                    e
+                );
+            }
+            None
+        }
+    }
+}
+
+fn get_file_size_metadata(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+#[cfg(not(target_os = "windows"))]
 fn get_file_metadata(path: &Path, hash_threshold: u64) -> (Option<u64>, Option<String>) {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let size = meta.len();
+    match get_file_size_metadata(path) {
+        Some(size) => {
             let hash = if size <= hash_threshold {
                 match read_file_for_fim_hash(path) {
                     Ok(data) => Some(blake3::hash(&data).to_hex().to_string()),
@@ -371,7 +540,7 @@ fn get_file_metadata(path: &Path, hash_threshold: u64) -> (Option<u64>, Option<S
             };
             (Some(size), hash)
         }
-        Err(_) => (None, None),
+        None => (None, None),
     }
 }
 
@@ -1118,6 +1287,7 @@ mod tests {
         watcher.stop();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_fim_hash_computation() {
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1147,6 +1317,7 @@ mod tests {
         drop(handle);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_fim_hash_skips_large_files() {
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1219,7 +1390,128 @@ mod tests {
         let events = results.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, FimEventType::Create);
+        #[cfg(target_os = "windows")]
+        assert!(
+            events[0].hash.is_none(),
+            "Windows FIM records events before deferred content hashing"
+        );
+        #[cfg(not(target_os = "windows"))]
         assert!(events[0].hash.is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_deferred_hash_worker_updates_stable_file() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let test_file = temp.path().join("stable.txt");
+        let content = b"stable content for deferred hashing";
+        fs::write(&test_file, content).expect("write");
+
+        let store = Arc::new(FimEventStore::new());
+        let ts = Utc::now();
+        let uid = FimEvent::compute_uid(&test_file.to_string_lossy(), &FimEventType::Create, &ts);
+        store.insert(FimEvent {
+            path: test_file.to_string_lossy().to_string(),
+            event_type: FimEventType::Create,
+            timestamp: ts,
+            size: Some(content.len() as u64),
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+        });
+
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker =
+            spawn_fim_hash_worker(store.clone(), running.clone(), rx).expect("spawn worker");
+
+        tx.send(FimHashWorkItem {
+            uid: uid.clone(),
+            path: test_file.clone(),
+            size: content.len() as u64,
+            hash_threshold: FIM_HASH_SIZE_THRESHOLD,
+            ready_at: std::time::Instant::now(),
+        })
+        .expect("send hash work");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let expected = blake3::hash(content).to_hex().to_string();
+        loop {
+            let events = store.get_all_events();
+            if events
+                .iter()
+                .any(|event| event.uid == uid && event.hash.as_deref() == Some(expected.as_str()))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deferred hash worker did not update the event"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        running.store(false, Ordering::SeqCst);
+        drop(tx);
+        worker.join().expect("join worker");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_deferred_hash_sharing_violation_leaves_hash_empty() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let test_file = temp.path().join("locked.txt");
+        let content = b"locked content";
+        fs::write(&test_file, content).expect("write");
+
+        let store = FimEventStore::new();
+        let ts = Utc::now();
+        let uid = FimEvent::compute_uid(&test_file.to_string_lossy(), &FimEventType::Create, &ts);
+        store.insert(FimEvent {
+            path: test_file.to_string_lossy().to_string(),
+            event_type: FimEventType::Create,
+            timestamp: ts,
+            size: Some(content.len() as u64),
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+        });
+
+        let _exclusive_handle = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&test_file)
+            .expect("open exclusive handle");
+
+        let updated = process_fim_hash_work_item(
+            &store,
+            FimHashWorkItem {
+                uid: uid.clone(),
+                path: test_file.clone(),
+                size: content.len() as u64,
+                hash_threshold: FIM_HASH_SIZE_THRESHOLD,
+                ready_at: std::time::Instant::now(),
+            },
+        );
+
+        assert!(!updated, "sharing violation must be a non-fatal skip");
+        let events = store.get_all_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].hash.is_none());
     }
 
     #[test]
