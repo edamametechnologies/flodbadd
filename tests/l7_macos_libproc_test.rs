@@ -38,6 +38,17 @@ fn test_struct_sizes_match_kernel() {
     let _ = entries;
 }
 
+#[test]
+fn test_process_identity_self() {
+    let pid = std::process::id();
+    let (name, path) = l7_macos::process_identity(pid).expect("self process identity");
+    eprintln!("process identity: pid={pid} name={name} path={path}");
+    assert!(
+        !name.is_empty() || !path.is_empty(),
+        "process identity should expose at least a name or a path"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TCP: self-connected loopback socket should be found
 // ---------------------------------------------------------------------------

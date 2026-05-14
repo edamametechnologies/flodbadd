@@ -395,47 +395,50 @@ impl FlodbaddL7 {
                                 &macos_session_map,
                                 &macos_all_entries,
                             ) {
-                                if let Some(process) = pid_to_process.get(&pid) {
-                                    if let Some((l7_data, start_time)) = Self::extract_l7_from_pid(
+                                let extracted = if let Some(process) = pid_to_process.get(&pid) {
+                                    Self::extract_l7_from_pid(
                                         pid,
                                         process,
                                         &pid_to_process,
                                         &uid_to_username,
                                     )
                                     .await
-                                    {
-                                        Self::update_port_process_cache(
-                                            &connection,
-                                            &l7_data,
-                                            start_time,
-                                            &port_process_cache,
-                                        )
-                                        .await;
-                                        let mut l7_data = l7_data;
-                                        l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
-                                        let source = if l7_es::is_available() {
-                                            L7ResolutionSource::EndpointSecurity
-                                        } else {
-                                            L7ResolutionSource::MacosLibproc
-                                        };
-                                        Self::merge_previous_sensitive(
-                                            &l7_map,
-                                            &connection,
-                                            &mut l7_data,
-                                        );
-                                        l7_map.insert(
-                                            connection.clone(),
-                                            L7Resolution {
-                                                l7: Some(l7_data),
-                                                date: Utc::now(),
-                                                retry_count: 0,
-                                                last_retry: None,
-                                                source,
-                                            },
-                                        );
-                                        successfully_resolved_count += 1;
-                                        continue;
-                                    }
+                                } else {
+                                    Self::extract_l7_from_pid_fresh(pid).await
+                                };
+
+                                if let Some((l7_data, start_time)) = extracted {
+                                    Self::update_port_process_cache(
+                                        &connection,
+                                        &l7_data,
+                                        start_time,
+                                        &port_process_cache,
+                                    )
+                                    .await;
+                                    let mut l7_data = l7_data;
+                                    l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
+                                    let source = if l7_es::is_available() {
+                                        L7ResolutionSource::EndpointSecurity
+                                    } else {
+                                        L7ResolutionSource::MacosLibproc
+                                    };
+                                    Self::merge_previous_sensitive(
+                                        &l7_map,
+                                        &connection,
+                                        &mut l7_data,
+                                    );
+                                    l7_map.insert(
+                                        connection.clone(),
+                                        L7Resolution {
+                                            l7: Some(l7_data),
+                                            date: Utc::now(),
+                                            retry_count: 0,
+                                            last_retry: None,
+                                            source,
+                                        },
+                                    );
+                                    successfully_resolved_count += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -1483,6 +1486,38 @@ impl FlodbaddL7 {
                 trace!("ES+libproc eager resolution for {:?}", connection);
                 return;
             }
+
+            #[cfg(target_os = "macos")]
+            if let Some(pid) = l7_macos::quick_lookup_session_pid(connection) {
+                if let Some((mut l7_data, start_time)) = Self::extract_l7_from_pid_fresh(pid).await
+                {
+                    Self::update_port_process_cache(
+                        connection,
+                        &l7_data,
+                        start_time,
+                        &self.port_process_cache,
+                    )
+                    .await;
+                    l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
+                    let source = if l7_es::is_available() {
+                        L7ResolutionSource::EndpointSecurity
+                    } else {
+                        L7ResolutionSource::MacosLibproc
+                    };
+                    self.l7_map.insert(
+                        connection.clone(),
+                        L7Resolution {
+                            l7: Some(l7_data),
+                            date: Utc::now(),
+                            retry_count: 0,
+                            last_retry: None,
+                            source,
+                        },
+                    );
+                    trace!("macOS libproc eager resolution for {:?}", connection);
+                    return;
+                }
+            }
         }
 
         self.l7_map.insert(
@@ -2036,6 +2071,88 @@ impl FlodbaddL7 {
                 spawned_from_tmp,
             },
             process_start_time,
+        ))
+    }
+
+    /// Build L7 data from a fresh process snapshot after libproc already
+    /// resolved a macOS socket to a PID. This covers short-lived children
+    /// that were not present in the resolver's cached sysinfo map yet.
+    #[cfg(target_os = "macos")]
+    async fn extract_l7_from_pid_fresh(pid: u32) -> Option<(SessionL7, u64)> {
+        let refresh_kind =
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu());
+        let fresh_system = System::new_with_specifics(refresh_kind);
+        let mut fresh_users = Users::new();
+        fresh_users.refresh();
+
+        let pid_to_process: HashMap<u32, &Process> = fresh_system
+            .processes()
+            .iter()
+            .map(|(pid, process)| (pid.as_u32(), process))
+            .collect();
+        let uid_to_username: HashMap<&Uid, &str> = fresh_users
+            .iter()
+            .map(|user| (user.id(), user.name()))
+            .collect();
+        if let Some(process) = pid_to_process.get(&pid) {
+            Self::extract_l7_from_pid(pid, process, &pid_to_process, &uid_to_username)
+                .await
+                .or_else(|| Self::extract_l7_from_macos_proc(pid))
+        } else {
+            Self::extract_l7_from_macos_proc(pid)
+        }
+    }
+
+    /// Last-resort macOS process metadata path for sockets that libproc has
+    /// already bound to a PID but sysinfo cannot snapshot before the child exits.
+    #[cfg(target_os = "macos")]
+    fn extract_l7_from_macos_proc(pid: u32) -> Option<(SessionL7, u64)> {
+        let (process_name, process_path) = l7_macos::process_identity(pid)?;
+        let process_name = if process_name.is_empty() {
+            std::path::Path::new(&process_path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            process_name
+        };
+        let cmd = if process_path.is_empty() {
+            Vec::new()
+        } else {
+            vec![process_path.clone()]
+        };
+        let open_files =
+            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
+        let spawned_from_tmp = Self::originates_from_tmp(&process_path, "", None, "", None, &cmd);
+
+        Some((
+            SessionL7 {
+                pid,
+                process_name,
+                process_path,
+                username: String::new(),
+                cmd,
+                cwd: None,
+                memory: 0,
+                start_time: 0,
+                run_time: 0,
+                cpu_usage: 0,
+                accumulated_cpu_time: 0,
+                disk_usage: SessionProcessDiskUsage::default(),
+                open_files,
+                parent_pid: None,
+                parent_process_name: String::new(),
+                parent_process_path: String::new(),
+                parent_cmd: Vec::new(),
+                parent_script_path: None,
+                grandparent_pid: None,
+                grandparent_process_name: String::new(),
+                grandparent_process_path: String::new(),
+                grandparent_cmd: Vec::new(),
+                grandparent_script_path: None,
+                spawned_from_tmp,
+            },
+            0,
         ))
     }
 

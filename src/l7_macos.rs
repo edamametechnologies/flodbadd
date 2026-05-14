@@ -12,8 +12,10 @@
 
 use crate::sessions::{Protocol, Session};
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::raw::c_char;
 use tracing::trace;
 
 // --- Constants from <sys/proc_info.h> ---
@@ -27,6 +29,7 @@ const IPPROTO_TCP: i32 = 6;
 const IPPROTO_UDP: i32 = 17;
 const SOCKINFO_TCP: i32 = 2;
 const SOCKINFO_IN: i32 = 1;
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
 // --- FFI struct definitions ---
 // Layouts validated against macOS arm64/x86_64 headers via offsetof/sizeof tests.
@@ -177,6 +180,52 @@ extern "C" {
         buffersize: i32,
     ) -> i32;
     fn proc_listallpids(buffer: *mut i32, buffersize: i32) -> i32;
+    fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+    fn proc_name(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+}
+
+/// Lightweight process identity from libproc. Unlike sysinfo's process
+/// snapshot, this can resolve very short-lived child processes immediately
+/// after socket-to-PID attribution.
+pub fn process_identity(pid: u32) -> Option<(String, String)> {
+    let mut name_buf = vec![0u8; 1024];
+    let name_len = unsafe {
+        proc_name(
+            pid as i32,
+            name_buf.as_mut_ptr() as *mut std::ffi::c_void,
+            name_buf.len() as u32,
+        )
+    };
+    let process_name = if name_len > 0 {
+        let len = (name_len as usize).min(name_buf.len());
+        String::from_utf8_lossy(&name_buf[..len])
+            .trim_end_matches('\0')
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let mut path_buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    let path_len = unsafe {
+        proc_pidpath(
+            pid as i32,
+            path_buf.as_mut_ptr() as *mut std::ffi::c_void,
+            path_buf.len() as u32,
+        )
+    };
+    let process_path = if path_len > 0 {
+        unsafe { CStr::from_ptr(path_buf.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    if process_name.is_empty() && process_path.is_empty() {
+        None
+    } else {
+        Some((process_name, process_path))
+    }
 }
 
 fn decode_addr(addr: &InAddr, vflag: u8, family: i32) -> Option<IpAddr> {
