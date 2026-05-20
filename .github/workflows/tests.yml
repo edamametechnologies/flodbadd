@@ -396,14 +396,36 @@ jobs:
           fi
           echo "--- Native Log Dump Complete ---"
 
-      - name: Clear FIM-sensitive test fixtures before gate
+      - name: Clear runtime vulnerability state (test artifacts)
         if: always()
         shell: bash
         run: |
           # flodbadd's FIM tests intentionally create sensitive-path fixtures
-          # (for example .ssh/id_rsa) to validate event classification. Those
-          # are test artifacts, not runner compromise evidence, and vulnerability
-          # history persists them until explicitly cleared.
+          # (for example .ssh/id_rsa under tempfile::tempdir() in /tmp) to
+          # validate event classification. Those are test artifacts, not
+          # runner compromise evidence, and vulnerability history persists
+          # them until explicitly cleared.
+          #
+          # Mirrors the FP-CI-13 v2.2 multi-path cleanup in
+          # edamame_core/.github/workflows/tests.yml. Three best-effort
+          # paths (set +e + || true throughout) because each platform has a
+          # different combination of working tools:
+          #
+          #   A) edamame_cli RPC -- preferred; truncates the FIM event ring,
+          #      vulnerability history, and forces an immediate tick.
+          #      Fails on hosts with glibc < 2.29 (musl-linked binary
+          #      requires /lib/ld-musl-x86_64.so.1).
+          #   B) edamame_posture background-* subcommands -- always available
+          #      on runners that ran Setup EDAMAME Posture.
+          #      background-clear-vulnerability-history (added in v1.3.12)
+          #      reaches the daemon's in-memory action_history.
+          #   C) On-disk JSON manipulation of agentic_config.json -- mirrors
+          #      self_hosted/clear_runner_vuln_history.sh; truncates the
+          #      persisted action_history's VulnerabilityDetection entries.
+          set +e
+          echo "::group::FP-CI-13 cleanup"
+
+          EDAMAME_CLI_OK=false
           CLI_EXE=""
           if command -v edamame_cli >/dev/null 2>&1; then
             CLI_EXE="$(command -v edamame_cli)"
@@ -411,28 +433,81 @@ jobs:
             CLI_EXE="/c/ProgramData/chocolatey/bin/edamame_cli.exe"
           elif [ -f "$HOME/edamame_cli.exe" ]; then
             CLI_EXE="$HOME/edamame_cli.exe"
+          elif [ -f "$HOME/edamame_cli" ]; then
+            CLI_EXE="$HOME/edamame_cli"
           fi
           if [ -z "$CLI_EXE" ]; then
             echo "Installing edamame_cli on demand via install.sh..."
             curl --proto '=https' --tlsv1.2 -sSf \
               https://raw.githubusercontent.com/edamametechnologies/edamame_cli/main/install.sh \
-              | sh -s -- || {
-              echo "edamame_cli install failed; skipping FIM fixture cleanup"
-              exit 0
-            }
+              | sh -s -- 2>&1 | sed 's/^/  /' || true
             if command -v edamame_cli >/dev/null 2>&1; then
               CLI_EXE="$(command -v edamame_cli)"
             elif [ -f "$HOME/edamame_cli.exe" ]; then
               CLI_EXE="$HOME/edamame_cli.exe"
+            elif [ -f "$HOME/edamame_cli" ]; then
+              CLI_EXE="$HOME/edamame_cli"
             fi
           fi
-          if [ -z "$CLI_EXE" ] || [ ! -f "$CLI_EXE" ]; then
-            echo "edamame_cli still missing; skipping FIM fixture cleanup"
-            exit 0
+          # Verify the binary actually executes -- on ubuntu:18.04 / older
+          # glibc the install lands but execve(2) fails with ENOENT
+          # (missing ld-musl loader). list-methods is a cheap end-to-end probe.
+          if [ -n "$CLI_EXE" ] && [ -x "$CLI_EXE" ] \
+              && "$CLI_EXE" list-methods >/dev/null 2>&1; then
+            EDAMAME_CLI_OK=true
+          else
+            echo "edamame_cli install verification failed (likely musl loader unavailable on this glibc); falling back"
           fi
-          "$CLI_EXE" rpc clear_vulnerability_history 2>/dev/null || true
-          "$CLI_EXE" rpc reset_vulnerability_suppressions 2>/dev/null || true
-          "$CLI_EXE" rpc get_vulnerability_detector_status --pretty 2>/dev/null || true
+
+          # ---- Path A: edamame_cli RPC ----
+          if [ "$EDAMAME_CLI_OK" = "true" ]; then
+            echo "-- using edamame_cli RPC for cleanup"
+            "$CLI_EXE" rpc clear_file_events || true
+            "$CLI_EXE" rpc clear_vulnerability_history || true
+            "$CLI_EXE" rpc reset_vulnerability_suppressions || true
+            "$CLI_EXE" rpc debug_run_vulnerability_detector_tick || true
+          fi
+
+          # ---- Path B: edamame_posture background-* subcommands ----
+          # Always run, even when Path A succeeded -- the second drain is
+          # cheap and protects against FIM events arriving in the small
+          # window between Path A and the gate.
+          POSTURE_CMD=""
+          if command -v edamame_posture >/dev/null 2>&1; then
+            POSTURE_CMD="edamame_posture"
+          elif [ -f "/c/ProgramData/chocolatey/bin/edamame_posture.exe" ]; then
+            POSTURE_CMD="/c/ProgramData/chocolatey/bin/edamame_posture.exe"
+          elif [ -f "$HOME/edamame_posture.exe" ]; then
+            POSTURE_CMD="$HOME/edamame_posture.exe"
+          elif [ -f "$HOME/edamame_posture" ]; then
+            POSTURE_CMD="$HOME/edamame_posture"
+          fi
+          if [ -n "$POSTURE_CMD" ]; then
+            echo "-- using $POSTURE_CMD background-* for FIM/suppression cleanup"
+            "$POSTURE_CMD" background-clear-file-events || true
+            "$POSTURE_CMD" background-vulnerability-reset-suppressions || true
+            "$POSTURE_CMD" background-clear-vulnerability-history || true
+          fi
+
+          # ---- Path C: on-disk vulnerability history truncation ----
+          # Required when Path A failed AND the runner's edamame_posture
+          # predates background-clear-vulnerability-history (v1.3.11 and
+          # earlier). Mirrors the Rust filter in
+          # CoreAgentic::clear_vulnerability_history_state.
+          if [ "$EDAMAME_CLI_OK" != "true" ] && command -v python3 >/dev/null 2>&1; then
+            echo "-- on-disk truncation of agentic_config.json::action_history"
+            SUDO=""
+            command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+            CANDIDATES=$($SUDO find / -name agentic_config.json 2>/dev/null | sort -u)
+            for f in $CANDIDATES; do
+              if $SUDO test -f "$f"; then
+                $SUDO python3 -c 'import json, sys; p=sys.argv[1]; d=json.load(open(p)); hist=d.get("action_history",[]) or []; orig=len(hist); kept=[x for x in hist if (x.get("action_type") or {}).get("type")!="VulnerabilityDetection"]; removed=orig-len(kept); print("  "+p+" orig="+str(orig)+" kept="+str(len(kept))+" removed="+str(removed)); d["action_history"]=kept; json.dump(d, open(p,"w")) if removed else None' "$f" || true
+              fi
+            done
+          fi
+
+          echo "::endgroup::"
+          set -e
 
       - name: EDAMAME Posture vulnerability gate
         if: always()
@@ -687,14 +762,26 @@ jobs:
           fi
           echo "--- Container Log Dump Complete ---"
 
-      - name: Clear FIM-sensitive test fixtures before gate
+      - name: Clear runtime vulnerability state (test artifacts)
         if: always()
         shell: bash
         run: |
           # flodbadd's FIM tests intentionally create sensitive-path fixtures
-          # (for example .ssh/id_rsa) to validate event classification. Those
-          # are test artifacts, not runner compromise evidence, and vulnerability
-          # history persists them until explicitly cleared.
+          # (for example .ssh/id_rsa under tempfile::tempdir() in /tmp) to
+          # validate event classification. Those are test artifacts, not
+          # runner compromise evidence, and vulnerability history persists
+          # them until explicitly cleared.
+          #
+          # Mirrors the FP-CI-13 v2.2 multi-path cleanup in
+          # edamame_core/.github/workflows/tests.yml (workspace.mdc ->
+          # Self-Hosted Runner Protection -> "Workflows that intentionally
+          # fire CVE / vulnerability scenarios"). Critical for ubuntu:18.04
+          # where edamame_cli's musl loader is unavailable, leaving Path A
+          # ineffective; Path B/C cover that case.
+          set +e
+          echo "::group::FP-CI-13 cleanup"
+
+          EDAMAME_CLI_OK=false
           CLI_EXE=""
           if command -v edamame_cli >/dev/null 2>&1; then
             CLI_EXE="$(command -v edamame_cli)"
@@ -703,25 +790,65 @@ jobs:
           fi
           if [ -z "$CLI_EXE" ]; then
             echo "Installing edamame_cli on demand via install.sh..."
+            SUDO=""
+            command -v sudo >/dev/null 2>&1 && SUDO="sudo -E"
             curl --proto '=https' --tlsv1.2 -sSf \
               https://raw.githubusercontent.com/edamametechnologies/edamame_cli/main/install.sh \
-              | sh -s -- || {
-              echo "edamame_cli install failed; skipping FIM fixture cleanup"
-              exit 0
-            }
+              | $SUDO sh -s -- 2>&1 | sed 's/^/  /' || true
             if command -v edamame_cli >/dev/null 2>&1; then
               CLI_EXE="$(command -v edamame_cli)"
             elif [ -f "$HOME/edamame_cli" ]; then
               CLI_EXE="$HOME/edamame_cli"
             fi
           fi
-          if [ -z "$CLI_EXE" ] || [ ! -f "$CLI_EXE" ]; then
-            echo "edamame_cli still missing; skipping FIM fixture cleanup"
-            exit 0
+          # Verify the binary actually executes -- on ubuntu:18.04 / older
+          # glibc the install lands but execve(2) fails with ENOENT
+          # (missing ld-musl loader). list-methods is a cheap end-to-end probe.
+          if [ -n "$CLI_EXE" ] && [ -x "$CLI_EXE" ] \
+              && "$CLI_EXE" list-methods >/dev/null 2>&1; then
+            EDAMAME_CLI_OK=true
+          else
+            echo "edamame_cli install verification failed (likely musl loader unavailable on this glibc); falling back"
           fi
-          "$CLI_EXE" rpc clear_vulnerability_history 2>/dev/null || true
-          "$CLI_EXE" rpc reset_vulnerability_suppressions 2>/dev/null || true
-          "$CLI_EXE" rpc get_vulnerability_detector_status --pretty 2>/dev/null || true
+
+          # ---- Path A: edamame_cli RPC ----
+          if [ "$EDAMAME_CLI_OK" = "true" ]; then
+            echo "-- using edamame_cli RPC for cleanup"
+            "$CLI_EXE" rpc clear_file_events || true
+            "$CLI_EXE" rpc clear_vulnerability_history || true
+            "$CLI_EXE" rpc reset_vulnerability_suppressions || true
+            "$CLI_EXE" rpc debug_run_vulnerability_detector_tick || true
+          fi
+
+          # ---- Path B: edamame_posture background-* subcommands ----
+          POSTURE_CMD=""
+          if command -v edamame_posture >/dev/null 2>&1; then
+            POSTURE_CMD="edamame_posture"
+          elif [ -f "$HOME/edamame_posture" ]; then
+            POSTURE_CMD="$HOME/edamame_posture"
+          fi
+          if [ -n "$POSTURE_CMD" ]; then
+            echo "-- using $POSTURE_CMD background-* for FIM/suppression cleanup"
+            "$POSTURE_CMD" background-clear-file-events || true
+            "$POSTURE_CMD" background-vulnerability-reset-suppressions || true
+            "$POSTURE_CMD" background-clear-vulnerability-history || true
+          fi
+
+          # ---- Path C: on-disk vulnerability history truncation ----
+          if [ "$EDAMAME_CLI_OK" != "true" ] && command -v python3 >/dev/null 2>&1; then
+            echo "-- on-disk truncation of agentic_config.json::action_history"
+            SUDO=""
+            command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+            CANDIDATES=$($SUDO find / -name agentic_config.json 2>/dev/null | sort -u)
+            for f in $CANDIDATES; do
+              if $SUDO test -f "$f"; then
+                $SUDO python3 -c 'import json, sys; p=sys.argv[1]; d=json.load(open(p)); hist=d.get("action_history",[]) or []; orig=len(hist); kept=[x for x in hist if (x.get("action_type") or {}).get("type")!="VulnerabilityDetection"]; removed=orig-len(kept); print("  "+p+" orig="+str(orig)+" kept="+str(len(kept))+" removed="+str(removed)); d["action_history"]=kept; json.dump(d, open(p,"w")) if removed else None' "$f" || true
+              fi
+            done
+          fi
+
+          echo "::endgroup::"
+          set -e
 
       - name: EDAMAME Posture vulnerability gate
         if: always()
