@@ -181,9 +181,20 @@ impl FimWatcher {
                         translate_notify_event(&event, hash_threshold, explicit_clone.as_ref())
                     {
                         for fim_event in fim_events {
+                            // FP-CI-2: only queue deferred content hashing for
+                            // sensitive paths. Non-sensitive events (temp-staging
+                            // and explicit-watch-root churn) bypass the hash
+                            // worker entirely, preventing the Win32 sharing
+                            // asymmetry where our FIM read-handle conflicts with
+                            // build-tool exclusive opens on transient artifacts
+                            // (Dart pub temp, MSBuild tlog, .vcxproj, target/,
+                            // MSIX intermediate files, ...).
                             #[cfg(target_os = "windows")]
-                            let hash_work =
-                                fim_hash_work_item_for_event(&fim_event, hash_threshold);
+                            let hash_work = if fim_event.is_sensitive {
+                                fim_hash_work_item_for_event(&fim_event, hash_threshold)
+                            } else {
+                                None
+                            };
                             store_clone.insert(fim_event);
                             #[cfg(target_os = "windows")]
                             if let Some(hash_work) = hash_work {
@@ -347,6 +358,15 @@ fn translate_notify_event(
             continue;
         }
 
+        // FP-CI-2: gate content hashing on `sensitive`. Non-sensitive
+        // events (temp-staging files, files under operator-specified
+        // explicit watch roots) get `hash = None` because the downstream
+        // detector only consumes the hash for change-tracking of
+        // *sensitive* findings -- it never alerts on non-sensitive hash
+        // values. Hashing them anyway opens a file handle that races
+        // with build-tool exclusive opens (Win32 sharing asymmetry),
+        // causing FP-CI-2 MSB8066 "process cannot access the file"
+        // failures on Windows runners, and is wasted I/O everywhere else.
         let (size, hash) = if event_type != FimEventType::Delete && path.is_file() {
             #[cfg(target_os = "windows")]
             {
@@ -354,7 +374,11 @@ fn translate_notify_event(
             }
             #[cfg(not(target_os = "windows"))]
             {
-                get_file_metadata(path, hash_threshold)
+                if sensitive {
+                    get_file_metadata(path, hash_threshold)
+                } else {
+                    (get_file_size_metadata(path), None)
+                }
             }
         } else {
             (None, None)
@@ -1390,13 +1414,110 @@ mod tests {
         let events = results.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, FimEventType::Create);
-        #[cfg(target_os = "windows")]
+        // FP-CI-2: a non-sensitive file kept only because it lives under
+        // an explicit watch root (operator-supplied audit dir) MUST NOT
+        // be hashed. The downstream detector only consumes hashes for
+        // sensitive findings; hashing non-sensitive churn races with
+        // build-tool exclusive opens on Windows and is wasted I/O on
+        // other platforms. We still record the event (size + path +
+        // attribution) so the operator can audit it via the FIM event
+        // stream -- we just leave `hash == None`.
+        assert!(
+            !events[0].is_sensitive,
+            "tempdir-created random filename is not a sensitive path",
+        );
         assert!(
             events[0].hash.is_none(),
-            "Windows FIM records events before deferred content hashing"
+            "Non-sensitive explicit-watch-root events must skip content hashing (FP-CI-2)",
         );
+        assert!(
+            events[0].size.is_some(),
+            "Size must still be populated for non-sensitive events (used for dedup)",
+        );
+    }
+
+    #[test]
+    fn test_translate_notify_event_non_sensitive_temp_skips_hash() {
+        // FP-CI-2 regression guard. Reproduces the canonical Windows build
+        // shape: a build tool (Dart pub, MSBuild, cargo, ...) writes a
+        // transient file under the OS temp dir, the notify watcher emits a
+        // Create event for it, the path is matched only by
+        // `is_temp_directory_path` (NOT by `is_sensitive_path`), and the
+        // detector pipeline does not need a content hash for it. The
+        // assertions below pin three properties that, if violated, would
+        // re-introduce the file-locking race on Windows runners:
+        //
+        //   1. `is_sensitive == false`        -- so the watcher's hash-work
+        //                                        queue gate (Windows side)
+        //                                        does NOT submit work for it.
+        //   2. `hash == None`                 -- so the synchronous
+        //                                        non-Windows hash gate
+        //                                        (Linux/macOS) does NOT
+        //                                        open and read it.
+        //   3. `size.is_some()`               -- size is still recorded so
+        //                                        the dedup key works.
+        //
+        // We construct the path ourselves under a real OS temp directory
+        // recognized by `is_temp_directory_path` (`/tmp/` on Unix,
+        // `%TEMP%\AppData\Local\Temp\` on Windows) -- `tempfile::tempdir()`
+        // resolves to `/var/folders/...` on macOS which is NOT matched.
         #[cfg(not(target_os = "windows"))]
-        assert!(events[0].hash.is_some());
+        let test_file = {
+            let name = format!(
+                "edamame_fim_fp_ci_2_{}_{}.tmp",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            );
+            PathBuf::from("/tmp").join(name)
+        };
+        #[cfg(target_os = "windows")]
+        let test_file = {
+            // tempfile::env::temp_dir() returns %TEMP% which is under
+            // AppData\Local\Temp on standard Windows installs.
+            let name = format!(
+                "edamame_fim_fp_ci_2_{}_{}.tmp",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            );
+            std::env::temp_dir().join(name)
+        };
+
+        fs::write(&test_file, b"non-sensitive churn").expect("write");
+        struct Cleanup<'a>(&'a Path);
+        impl<'a> Drop for Cleanup<'a> {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(self.0);
+            }
+        }
+        let _cleanup = Cleanup(&test_file);
+
+        // No explicit watch roots -- this event survives only because the
+        // path falls under an OS temp dir recognized by
+        // `is_temp_directory_path`.
+        let explicit_roots: Vec<String> = Vec::new();
+
+        let event = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![test_file.clone()],
+            attrs: Default::default(),
+        };
+
+        let results = translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &explicit_roots);
+        let events = results.expect("temp-staging event must be kept");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(
+            !event.is_sensitive,
+            "transient build artifact is NOT a sensitive path; the temp-staging accept rule must mark it non-sensitive",
+        );
+        assert!(
+            event.hash.is_none(),
+            "Non-sensitive temp-staging events must skip content hashing (FP-CI-2)",
+        );
+        assert!(
+            event.size.is_some(),
+            "Size must still be populated for non-sensitive events",
+        );
     }
 
     #[cfg(target_os = "windows")]

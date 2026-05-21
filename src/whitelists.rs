@@ -703,8 +703,8 @@ impl Whitelists {
             //   behavior for sessions where MaxMind lookup also failed (the
             //   safest fallback -- we'd rather over-fragment than over-merge
             //   when we have no aggregation signal at all).
-            let group_by_asn = domains_vec.is_empty()
-                && (ep.as_number.is_some() || ep.as_owner.is_some());
+            let group_by_asn =
+                domains_vec.is_empty() && (ep.as_number.is_some() || ep.as_owner.is_some());
             let key = Key {
                 domains: domains_vec.clone(),
                 ip: if domains_vec.is_empty() && !group_by_asn {
@@ -2099,8 +2099,16 @@ mod tests {
             .iter()
             .find(|e| e.domain.is_none() && e.as_number == Some(8075))
             .expect("Should have Microsoft AS 8075 fold");
-        let ms_ips = ms.ips.as_ref().expect("Microsoft fold should have ips list");
-        assert_eq!(ms_ips.len(), 3, "Microsoft fold should merge all 3 IPs, got {}", ms_ips.len());
+        let ms_ips = ms
+            .ips
+            .as_ref()
+            .expect("Microsoft fold should have ips list");
+        assert_eq!(
+            ms_ips.len(),
+            3,
+            "Microsoft fold should merge all 3 IPs, got {}",
+            ms_ips.len()
+        );
         assert!(ms_ips.contains(&"20.42.65.84".to_string()));
         assert!(ms_ips.contains(&"20.42.73.27".to_string()));
         assert!(ms_ips.contains(&"13.107.42.16".to_string()));
@@ -2265,10 +2273,17 @@ mod tests {
         // both so the downstream factorize step can fold them.
         assert_eq!(endpoints.len(), 2, "Expected 2 endpoints (one per session)");
         for ep in endpoints {
-            assert_eq!(ep.as_number, Some(8075), "ASN must be propagated from session");
+            assert_eq!(
+                ep.as_number,
+                Some(8075),
+                "ASN must be propagated from session"
+            );
             assert_eq!(ep.as_owner.as_deref(), Some("MICROSOFT-CORP-MSN-AS-BLOCK"));
             assert_eq!(ep.as_country.as_deref(), Some("US"));
-            assert!(ep.domain.is_none(), "Session has no domain -> endpoint IP-only");
+            assert!(
+                ep.domain.is_none(),
+                "Session has no domain -> endpoint IP-only"
+            );
         }
 
         // And now confirm the fold collapses them into a single entry with 2 IPs.
