@@ -348,6 +348,29 @@ impl Whitelists {
                 }
             };
 
+            // Propagate ASN info when the capture pipeline resolved it. The
+            // MaxMind lookup runs per-session, so the (owner, number, country)
+            // triple is available even when DNS attachment failed. This is the
+            // only reliable aggregator for IP-only endpoints behind rotating
+            // CDNs: without it, every new CDN IP becomes a new whitelist entry
+            // and the auto-whitelist never converges on hosted CI runners.
+            let (ep_as_number, ep_as_country, ep_as_owner) = match &session.dst_asn {
+                Some(asn) => {
+                    let country = if asn.country.is_empty() {
+                        None
+                    } else {
+                        Some(asn.country.clone())
+                    };
+                    let owner = if asn.owner.is_empty() {
+                        None
+                    } else {
+                        Some(asn.owner.clone())
+                    };
+                    (Some(asn.as_number), country, owner)
+                }
+                None => (None, None, None),
+            };
+
             let endpoint = WhitelistEndpoint {
                 // Only include domain if it's from a reliable source
                 domain: reliable_domain,
@@ -359,10 +382,9 @@ impl Whitelists {
                 port: Some(session.session.dst_port),
                 // Always include the protocol
                 protocol: Some(session.session.protocol.to_string()),
-                // Don't include AS info
-                as_number: None, // Session doesn't have AS info
-                as_country: None,
-                as_owner: None,
+                as_number: ep_as_number,
+                as_country: ep_as_country,
+                as_owner: ep_as_owner,
                 // Process name is set above (with validation when include_process is true)
                 process: process_name,
                 description: Some(format!(
@@ -663,12 +685,29 @@ impl Whitelists {
             domains_vec.sort();
             domains_vec.dedup();
 
+            // Grouping key strategy:
+            //
+            // - Domain present: key on the domain set, never on the IP. Multiple
+            //   IPs for the same domain accumulate into the `ips` list.
+            //   (Same behavior as before.)
+            //
+            // - Domain absent AND ASN populated: key on (protocol, ASN, process),
+            //   NOT on the IP. Multiple IPs that share the same ASN/owner
+            //   accumulate into the `ips` list. This is what lets the auto-
+            //   whitelist converge on hosted CI runners where the same handful
+            //   of vendor backends (GitHub, Azure, AWS) issue from a rotating
+            //   pool of IPs without consistent DNS attachment.
+            //
+            // - Domain absent AND ASN absent: fall back to keying on the IP
+            //   itself, one endpoint per literal IP. This preserves the prior
+            //   behavior for sessions where MaxMind lookup also failed (the
+            //   safest fallback -- we'd rather over-fragment than over-merge
+            //   when we have no aggregation signal at all).
+            let group_by_asn = domains_vec.is_empty()
+                && (ep.as_number.is_some() || ep.as_owner.is_some());
             let key = Key {
                 domains: domains_vec.clone(),
-                // Only use IP as grouping key when there's no domain (IP-only endpoints).
-                // When a domain is present, the IP should NOT be part of the key so that
-                // multiple IPs for the same domain get merged together.
-                ip: if domains_vec.is_empty() {
+                ip: if domains_vec.is_empty() && !group_by_asn {
                     ep.ip.clone().unwrap_or_default()
                 } else {
                     String::new()
@@ -1945,6 +1984,324 @@ mod tests {
             .find(|e| e.domain.is_none() && e.ip.as_deref() == Some("10.0.0.1"))
             .expect("Should have IP-only endpoint");
         assert_eq!(ip_only_ep.port, Some(8080));
+    }
+
+    /// Test that IP-only endpoints (no domain) that share the same ASN are
+    /// folded into a single endpoint with multiple IPs. This is what lets the
+    /// auto-whitelist converge on hosted CI runners where a handful of vendor
+    /// backends (GitHub, Azure, AWS) issue from a rotating pool of IPs without
+    /// consistent DNS attachment. Without this fold, every new CDN IP becomes
+    /// a new whitelist entry and the auto-whitelist never reaches stability
+    /// within the iteration budget.
+    #[test]
+    fn test_factorize_whitelist_folds_ip_only_by_asn() {
+        let info = WhitelistInfo {
+            name: "custom_whitelist".to_string(),
+            extends: None,
+            endpoints: vec![
+                // Three IP-only endpoints, all AS 8075 (Microsoft), same proto/port.
+                // These represent the typical Azure-hosted runner pattern where
+                // GitHub Actions reaches multiple Azure backend IPs without ever
+                // resolving a hostname (telemetry, blob storage, etc.).
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("20.42.65.84".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: Some(8075),
+                    as_country: Some("US".into()),
+                    as_owner: Some("MICROSOFT-CORP-MSN-AS-BLOCK".into()),
+                    process: None,
+                    description: Some("Azure IP 1".into()),
+                    ports: None,
+                    ips: None,
+                },
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("20.42.73.27".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: Some(8075),
+                    as_country: Some("US".into()),
+                    as_owner: Some("MICROSOFT-CORP-MSN-AS-BLOCK".into()),
+                    process: None,
+                    description: Some("Azure IP 2".into()),
+                    ports: None,
+                    ips: None,
+                },
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("13.107.42.16".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: Some(8075),
+                    as_country: Some("US".into()),
+                    as_owner: Some("MICROSOFT-CORP-MSN-AS-BLOCK".into()),
+                    process: None,
+                    description: Some("Azure IP 3".into()),
+                    ports: None,
+                    ips: None,
+                },
+                // Different ASN (GitHub, AS 36459) - must stay separate from
+                // the Microsoft fold above.
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("140.82.114.3".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: Some(36459),
+                    as_country: Some("US".into()),
+                    as_owner: Some("GITHUB".into()),
+                    process: None,
+                    description: Some("GitHub IP".into()),
+                    ports: None,
+                    ips: None,
+                },
+                // No ASN at all - must stay per-IP (the safe fallback when we
+                // have zero aggregation signal).
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("10.0.0.1".into()),
+                    port: Some(8080),
+                    protocol: Some("TCP".into()),
+                    as_number: None,
+                    as_country: None,
+                    as_owner: None,
+                    process: None,
+                    description: Some("Internal IP, no ASN".into()),
+                    ports: None,
+                    ips: None,
+                },
+            ],
+        };
+
+        let factored = Whitelists::factorize_whitelist(&info);
+
+        // Expected: 3 endpoints
+        //   1. Microsoft AS 8075 fold (3 IPs collapsed)
+        //   2. GitHub AS 36459 (1 IP)
+        //   3. Internal 10.0.0.1 (no ASN, kept per-IP)
+        assert_eq!(
+            factored.endpoints.len(),
+            3,
+            "Expected 3 endpoints after ASN fold, got {}",
+            factored.endpoints.len()
+        );
+
+        // Find the Microsoft fold: domain is None, AS 8075, contains all 3 IPs.
+        let ms = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.is_none() && e.as_number == Some(8075))
+            .expect("Should have Microsoft AS 8075 fold");
+        let ms_ips = ms.ips.as_ref().expect("Microsoft fold should have ips list");
+        assert_eq!(ms_ips.len(), 3, "Microsoft fold should merge all 3 IPs, got {}", ms_ips.len());
+        assert!(ms_ips.contains(&"20.42.65.84".to_string()));
+        assert!(ms_ips.contains(&"20.42.73.27".to_string()));
+        assert!(ms_ips.contains(&"13.107.42.16".to_string()));
+        assert_eq!(ms.port, Some(443));
+        assert_eq!(ms.as_owner.as_deref(), Some("MICROSOFT-CORP-MSN-AS-BLOCK"));
+
+        // GitHub stays separate (different ASN).
+        let gh = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.is_none() && e.as_number == Some(36459))
+            .expect("Should have GitHub AS 36459 endpoint");
+        assert_eq!(gh.ip.as_deref(), Some("140.82.114.3"));
+        assert_eq!(gh.as_owner.as_deref(), Some("GITHUB"));
+
+        // No-ASN endpoint stays separate, per-IP.
+        let nope = factored
+            .endpoints
+            .iter()
+            .find(|e| e.domain.is_none() && e.as_number.is_none())
+            .expect("Should have no-ASN IP-only endpoint");
+        assert_eq!(nope.ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(nope.port, Some(8080));
+    }
+
+    /// Test that IP-only endpoints with the same ASN but *different* protocols
+    /// or processes do NOT merge. The fold key is (proto, ASN, process), so
+    /// these axes must remain discriminators even within a single ASN.
+    #[test]
+    fn test_factorize_whitelist_asn_fold_preserves_proto_and_process() {
+        let info = WhitelistInfo {
+            name: "custom_whitelist".to_string(),
+            extends: None,
+            endpoints: vec![
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("8.8.8.8".into()),
+                    port: Some(53),
+                    protocol: Some("UDP".into()),
+                    as_number: Some(15169),
+                    as_country: Some("US".into()),
+                    as_owner: Some("GOOGLE".into()),
+                    process: None,
+                    description: None,
+                    ports: None,
+                    ips: None,
+                },
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("8.8.4.4".into()),
+                    port: Some(53),
+                    protocol: Some("UDP".into()),
+                    as_number: Some(15169),
+                    as_country: Some("US".into()),
+                    as_owner: Some("GOOGLE".into()),
+                    process: None,
+                    description: None,
+                    ports: None,
+                    ips: None,
+                },
+                // Same Google ASN but TCP/443 - different protocol slot.
+                WhitelistEndpoint {
+                    domain: None,
+                    domains: None,
+                    ip: Some("142.250.80.110".into()),
+                    port: Some(443),
+                    protocol: Some("TCP".into()),
+                    as_number: Some(15169),
+                    as_country: Some("US".into()),
+                    as_owner: Some("GOOGLE".into()),
+                    process: None,
+                    description: None,
+                    ports: None,
+                    ips: None,
+                },
+            ],
+        };
+
+        let factored = Whitelists::factorize_whitelist(&info);
+        // Expected: 2 endpoints (UDP/53 Google fold with 2 IPs, TCP/443 Google with 1 IP).
+        assert_eq!(factored.endpoints.len(), 2);
+
+        let udp = factored
+            .endpoints
+            .iter()
+            .find(|e| e.protocol.as_deref() == Some("UDP"))
+            .expect("UDP fold");
+        let udp_ips = udp.ips.as_ref().expect("UDP fold should have ips list");
+        assert_eq!(udp_ips.len(), 2);
+
+        let tcp = factored
+            .endpoints
+            .iter()
+            .find(|e| e.protocol.as_deref() == Some("TCP"))
+            .expect("TCP entry");
+        assert_eq!(tcp.ip.as_deref(), Some("142.250.80.110"));
+    }
+
+    /// Test that `new_from_sessions` propagates ASN from `SessionInfo.dst_asn`
+    /// onto the generated `WhitelistEndpoint`. Without this propagation,
+    /// `factorize_whitelist` has nothing to fold on for IP-only sessions and
+    /// the auto-whitelist degrades to one entry per IP.
+    #[test]
+    fn test_new_from_sessions_propagates_asn() {
+        use crate::asn_db::Record;
+        use crate::sessions::{
+            Protocol, Session, SessionInfo, SessionStats, SessionStatus, WhitelistState,
+        };
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+
+        // Two IP-only sessions to different Microsoft IPs (no DNS attachment,
+        // both carrying the same ASN record from the MaxMind lookup).
+        let make_ms_session = |dst_ip: Ipv4Addr, src_port: u16| SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                src_port,
+                dst_ip: IpAddr::V4(dst_ip),
+                dst_port: 443,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: false,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: None,
+            dst_service: Some("https".to_string()),
+            l7: None,
+            src_asn: None,
+            dst_asn: Some(Record {
+                as_number: 8075,
+                owner: "MICROSOFT-CORP-MSN-AS-BLOCK".to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+        };
+
+        let sessions = vec![
+            make_ms_session(Ipv4Addr::new(20, 42, 65, 84), 50000),
+            make_ms_session(Ipv4Addr::new(20, 42, 73, 27), 50001),
+        ];
+
+        let whitelist = Whitelists::new_from_sessions(&sessions);
+        let json = WhitelistsJSON::from(whitelist);
+        let endpoints = &json.whitelists[0].endpoints;
+
+        // 2 endpoints before factorize -- one per IP. ASN must be populated on
+        // both so the downstream factorize step can fold them.
+        assert_eq!(endpoints.len(), 2, "Expected 2 endpoints (one per session)");
+        for ep in endpoints {
+            assert_eq!(ep.as_number, Some(8075), "ASN must be propagated from session");
+            assert_eq!(ep.as_owner.as_deref(), Some("MICROSOFT-CORP-MSN-AS-BLOCK"));
+            assert_eq!(ep.as_country.as_deref(), Some("US"));
+            assert!(ep.domain.is_none(), "Session has no domain -> endpoint IP-only");
+        }
+
+        // And now confirm the fold collapses them into a single entry with 2 IPs.
+        let factored = Whitelists::factorize_whitelist(&WhitelistInfo {
+            name: "tmp".into(),
+            extends: None,
+            endpoints: endpoints
+                .iter()
+                .map(|e| WhitelistEndpoint {
+                    domain: e.domain.clone(),
+                    domains: e.domains.clone(),
+                    ip: e.ip.clone(),
+                    ips: e.ips.clone(),
+                    port: e.port,
+                    ports: e.ports.clone(),
+                    protocol: e.protocol.clone(),
+                    as_number: e.as_number,
+                    as_country: e.as_country.clone(),
+                    as_owner: e.as_owner.clone(),
+                    process: e.process.clone(),
+                    description: e.description.clone(),
+                })
+                .collect(),
+        });
+        assert_eq!(
+            factored.endpoints.len(),
+            1,
+            "Two same-ASN IP-only endpoints must fold into a single entry"
+        );
+        let folded = &factored.endpoints[0];
+        let ips = folded.ips.as_ref().expect("Fold should produce ips list");
+        assert_eq!(ips.len(), 2);
+        assert_eq!(folded.as_number, Some(8075));
     }
 
     #[tokio::test]
