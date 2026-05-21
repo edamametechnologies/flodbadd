@@ -52,13 +52,32 @@ src/
 `fim.rs` wraps the platform watcher backend from `notify`, translates raw
 filesystem events into `FimEvent`, and enriches them with:
 
-- File metadata (size and optional BLAKE3 hash)
+- File size (always populated -- needed for dedup keys)
+- BLAKE3 content hash (**only when `is_sensitive == true`**; see below)
 - Sensitive-path labels from `open_files.rs`
 - Best-effort process attribution on macOS/Linux via `lsof` plus `sysinfo`
 
 Process attribution is intentionally limited to sensitive or temp-ish paths so
 the watcher stays cheap on the common path while still giving the vulnerability
 detector enough context to correlate suspicious file activity.
+
+**Sensitive-gated content hashing (FP-CI-2).** Content hashing is gated on
+`is_sensitive == true` symmetrically across all platforms:
+
+- macOS / Linux: `translate_notify_event` computes the hash synchronously
+  only when `sensitive` is set; otherwise it returns `(Some(size), None)`.
+- Windows: the watcher closure submits a `FimHashWorkItem` to the deferred
+  hash worker only when `fim_event.is_sensitive` is true; otherwise the
+  hash work is skipped entirely.
+
+This prevents the FIM read-handle from racing with build-tool exclusive
+opens on transient temp-staging files (Dart pub temp tarballs, MSBuild
+`*.tlog`, in-flight `.vcxproj`, MSIX intermediate files, etc.) on Windows
+runners, and eliminates wasted I/O on Linux/macOS. The vulnerability
+detector only consumes `FimEvent.hash` for change-tracking of *sensitive*
+findings -- non-sensitive hash values are never alerted on, so the gate
+is lossless from the detector's perspective. See
+`../edamame_core/FALSEPOSITIVES.md` § FP-CI-2 for the case study.
 
 ## Data Flow
 
