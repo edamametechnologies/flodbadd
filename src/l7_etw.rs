@@ -38,7 +38,7 @@ mod win {
     use windows::Win32::System::Diagnostics::Etw::{
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
         CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
-        EVENT_TRACE_FLAG_FILE_IO, EVENT_TRACE_FLAG_FILE_IO_INIT, EVENT_TRACE_FLAG_NETWORK_TCPIP,
+        EVENT_TRACE_FLAG_FILE_IO_INIT, EVENT_TRACE_FLAG_NETWORK_TCPIP,
         EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
         EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
         TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
@@ -335,9 +335,21 @@ mod win {
                 props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
                 props.Wnode.ClientContext = 1; // QPC for timestamps
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+                // EVENT_TRACE_FLAG_FILE_IO_INIT alone is sufficient: it delivers
+                // the FileIo TypeGroup2 events (Create=64, Cleanup, Close, ...) and
+                // FILEIO_CREATE is the only opcode `handle_fileio_event` actually
+                // processes; every other opcode is dropped at the opcode check.
+                //
+                // EVENT_TRACE_FLAG_FILE_IO (TypeGroup1: Read/Write completion / OpEnd)
+                // was previously also enabled, which made the NT Kernel Logger emit
+                // an event for every file read/write completion across the entire
+                // system. On dogfood Windows hosts this produced ~6-7 MB/s of
+                // kernel->user event traffic that was 100% discarded in user space,
+                // pegging the helper at ~120% of one core with kernel-time dominant.
+                // Drop the flag -- correctness is unchanged because we never read
+                // those opcodes anyway.
                 props.EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP
                     | EVENT_TRACE_FLAG_PROCESS
-                    | EVENT_TRACE_FLAG_FILE_IO
                     | EVENT_TRACE_FLAG_FILE_IO_INIT;
                 props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
                 props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
