@@ -4,7 +4,8 @@ use crate::fim_events::{
 use crate::open_files::is_sensitive_path;
 use crate::sensitive_paths::{classify_sensitive_path_labels_sync, is_fim_excluded_path};
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use tokio::sync::RwLock as TokioRwLock;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use dashmap::DashMap;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -116,6 +117,12 @@ pub struct FimWatcher {
     store: Arc<FimEventStore>,
     watch_paths: Vec<PathBuf>,
     running: Arc<AtomicBool>,
+    /// Wall-clock time of the last `get_events(incremental=true)` call.
+    /// Mirrors `FlodbaddCapture::last_get_sessions_fetch_timestamp`. The next
+    /// incremental call returns only events whose `last_modified` is strictly
+    /// newer than this timestamp, so backfilled attribution / content-hash
+    /// updates on existing events are picked up alongside fresh inserts.
+    last_get_file_events_fetch_timestamp: Arc<TokioRwLock<DateTime<Utc>>>,
     #[cfg(target_os = "windows")]
     _hash_worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -240,6 +247,7 @@ impl FimWatcher {
             store,
             watch_paths: actual_paths,
             running,
+            last_get_file_events_fetch_timestamp: Arc::new(TokioRwLock::new(Utc::now())),
             #[cfg(target_os = "windows")]
             _hash_worker: hash_worker,
         })
@@ -270,6 +278,45 @@ impl FimWatcher {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Clone the cursor handle (`Arc<RwLock<DateTime<Utc>>>`) so callers can
+    /// drive the incremental fetch loop without holding any outer
+    /// `FIM_WATCHER` read guard while waiting on the cursor lock. The cursor
+    /// is shared with `get_events` and is advanced unconditionally on each
+    /// call to it.
+    pub fn fetch_cursor(&self) -> Arc<TokioRwLock<DateTime<Utc>>> {
+        self.last_get_file_events_fetch_timestamp.clone()
+    }
+
+    /// Return FIM events, optionally incrementally based on `last_modified`.
+    /// Mirrors `FlodbaddCapture::get_sessions(incremental: bool)`:
+    /// - read the cursor lock, capture `now = Utc::now()`
+    /// - call `store.get_events_modified_since(last_ts)` when `incremental`,
+    ///   else `store.get_all_events()`
+    /// - write `now` back into the cursor lock unconditionally so the next
+    ///   caller resumes from there
+    ///
+    /// Incremental callers must tolerate occasional duplicates around the
+    /// instant the cursor is advanced; the merge layer (helper-side or core-
+    /// side cache) keys by `uid` so re-emitting an event is idempotent.
+    pub async fn get_events(&self, incremental: bool) -> Vec<FimEvent> {
+        let now = Utc::now();
+        let last_fetch_ts = {
+            let reader = self.last_get_file_events_fetch_timestamp.read().await;
+            *reader
+        };
+
+        let events = if incremental {
+            self.store.get_events_modified_since(last_fetch_ts)
+        } else {
+            self.store.get_all_events()
+        };
+
+        let mut writer = self.last_get_file_events_fetch_timestamp.write().await;
+        *writer = now;
+
+        events
     }
 }
 
@@ -406,6 +453,7 @@ fn translate_notify_event(
             is_sensitive: sensitive,
             labels,
             uid,
+            last_modified: ts,
         });
     }
 
@@ -1544,6 +1592,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: uid.clone(),
+            last_modified: ts,
         });
 
         let running = Arc::new(AtomicBool::new(true));
@@ -1609,6 +1658,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: uid.clone(),
+            last_modified: ts,
         });
 
         let _exclusive_handle = OpenOptions::new()

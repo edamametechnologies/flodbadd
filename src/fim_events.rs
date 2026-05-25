@@ -43,6 +43,14 @@ pub struct FimEvent {
     pub is_sensitive: bool,
     pub labels: Vec<String>,
     pub uid: String,
+    /// Wall-clock time at which the event was last mutated -- either
+    /// when it was first inserted, or when one of its mutable fields
+    /// (`process_name` / `process_path` / `hash`) was backfilled by a
+    /// later attribution / content-hash pass. Used by the helper-to-app
+    /// incremental fetch pipeline so the app cache only needs to ship
+    /// events whose state has actually changed since the last tick.
+    #[serde(default = "Utc::now")]
+    pub last_modified: DateTime<Utc>,
 }
 
 impl FimEvent {
@@ -103,6 +111,23 @@ impl FimEventStore {
         events
     }
 
+    /// Return events whose `last_modified` is strictly newer than `since`.
+    /// Mirrors `FlodbaddCapture::get_sessions(incremental=true)` semantics:
+    /// the caller stores its own cursor (`since`) and asks the store "what
+    /// changed since I last looked", picking up both fresh inserts AND
+    /// later backfill updates (process attribution, content hash) on
+    /// existing events.
+    pub fn get_events_modified_since(&self, since: DateTime<Utc>) -> Vec<FimEvent> {
+        let mut events: Vec<FimEvent> = self
+            .events
+            .iter()
+            .filter(|e| e.value().last_modified > since)
+            .map(|e| e.value().clone())
+            .collect();
+        events.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        events
+    }
+
     pub fn get_sensitive_events(&self) -> Vec<FimEvent> {
         let mut events: Vec<FimEvent> = self
             .events
@@ -150,12 +175,16 @@ impl FimEventStore {
         }
 
         if let Some(mut event) = self.events.get_mut(uid) {
+            let mut changed = false;
             if event
                 .process_name
                 .as_deref()
                 .map(|value| value.trim().is_empty())
                 .unwrap_or(true)
             {
+                if process_name.is_some() {
+                    changed = true;
+                }
                 event.process_name = process_name;
             }
 
@@ -165,7 +194,14 @@ impl FimEventStore {
                 .map(|value| value.trim().is_empty())
                 .unwrap_or(true)
             {
+                if process_path.is_some() {
+                    changed = true;
+                }
                 event.process_path = process_path;
+            }
+
+            if changed {
+                event.last_modified = Utc::now();
             }
         }
     }
@@ -178,6 +214,7 @@ impl FimEventStore {
         if let Some(mut event) = self.events.get_mut(uid) {
             if event.hash.is_none() {
                 event.hash = Some(hash);
+                event.last_modified = Utc::now();
             }
         }
     }
@@ -279,6 +316,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/test/file.txt", &FimEventType::Create, &ts),
+            last_modified: ts,
         };
         store.insert(event.clone());
         assert_eq!(store.event_count(), 1);
@@ -305,6 +343,7 @@ mod tests {
             is_sensitive: true,
             labels: vec!["ssh".to_string()],
             uid: FimEvent::compute_uid("/home/user/.ssh/id_rsa", &FimEventType::Modify, &ts),
+            last_modified: ts,
         };
 
         let normal = FimEvent {
@@ -324,6 +363,7 @@ mod tests {
                 &FimEventType::Create,
                 &(ts + ChronoDuration::seconds(1)),
             ),
+            last_modified: ts + ChronoDuration::seconds(1),
         };
 
         store.insert(sensitive);
@@ -352,6 +392,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/tmp/with-process.txt", &FimEventType::Modify, &older_ts),
+            last_modified: older_ts,
         });
         store.insert(FimEvent {
             path: "/tmp/missing-older.txt".to_string(),
@@ -366,11 +407,11 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/tmp/missing-older.txt", &FimEventType::Modify, &older_ts),
+            last_modified: older_ts,
         });
         let newest_uid =
             FimEvent::compute_uid("/tmp/missing-newer.txt", &FimEventType::Create, &newer_ts);
-        store.insert(FimEvent {
-            path: "/tmp/missing-newer.txt".to_string(),
+        store.insert(FimEvent {path: "/tmp/missing-newer.txt".to_string(),
             event_type: FimEventType::Create,
             timestamp: newer_ts,
             size: None,
@@ -382,6 +423,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: newest_uid.clone(),
+            last_modified: newer_ts,
         });
 
         let missing = store.get_recent_events_missing_process_attribution(1);
@@ -394,8 +436,7 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {
-            path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: None,
@@ -407,6 +448,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: uid.clone(),
+            last_modified: ts,
         });
 
         store.update_process_attribution(
@@ -429,8 +471,7 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {
-            path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: Some(12),
@@ -442,6 +483,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: uid.clone(),
+            last_modified: ts,
         });
 
         store.update_content_hash(&uid, Some("abc123".to_string()));
@@ -456,8 +498,7 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {
-            path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: Some(12),
@@ -469,6 +510,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: uid.clone(),
+            last_modified: ts,
         });
 
         store.update_content_hash(&uid, Some("replacement".to_string()));
@@ -495,6 +537,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/test", &FimEventType::Create, &ts),
+            last_modified: ts,
         });
         assert_eq!(store.event_count(), 1);
         store.clear();
@@ -521,6 +564,7 @@ mod tests {
                 is_sensitive: false,
                 labels: vec![],
                 uid: FimEvent::compute_uid(&path, &FimEventType::Create, &ts),
+                last_modified: ts,
             });
         }
         assert!(store.event_count() <= 5);
@@ -543,6 +587,7 @@ mod tests {
             is_sensitive: true,
             labels: vec!["ssh".to_string()],
             uid: FimEvent::compute_uid("/home/user/.ssh/id_rsa", &FimEventType::Modify, &ts),
+            last_modified: ts,
         });
         assert!(store.has_suspicious_events());
     }
@@ -582,6 +627,7 @@ mod tests {
             is_sensitive: false,
             labels: vec!["env".to_string()],
             uid: FimEvent::compute_uid("/test/file.txt", &FimEventType::Create, &ts),
+            last_modified: ts,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let deserialized: FimEvent = serde_json::from_str(&json).expect("deserialize");
@@ -610,6 +656,7 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/old", &FimEventType::Create, &old_ts),
+            last_modified: old_ts,
         });
         store.insert(FimEvent {
             path: "/new".to_string(),
@@ -624,11 +671,186 @@ mod tests {
             is_sensitive: false,
             labels: vec![],
             uid: FimEvent::compute_uid("/new", &FimEventType::Modify, &new_ts),
+            last_modified: new_ts,
         });
 
         let since = base - ChronoDuration::hours(1);
         let recent = store.get_events_since(since);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].path, "/new");
+    }
+
+    /// F2 incremental fetch: a fresh insert after the cursor must be
+    /// returned by `get_events_modified_since`, and an event whose
+    /// `last_modified` predates the cursor must be filtered out.
+    #[test]
+    fn test_get_events_modified_since_returns_new_inserts() {
+        let store = FimEventStore::new();
+        let base = Utc::now();
+        let pre_ts = base - ChronoDuration::seconds(10);
+        let post_ts = base + ChronoDuration::seconds(10);
+
+        store.insert(FimEvent {
+            path: "/before".to_string(),
+            event_type: FimEventType::Create,
+            timestamp: pre_ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/before", &FimEventType::Create, &pre_ts),
+            last_modified: pre_ts,
+        });
+        store.insert(FimEvent {
+            path: "/after".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: post_ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/after", &FimEventType::Modify, &post_ts),
+            last_modified: post_ts,
+        });
+
+        let delta = store.get_events_modified_since(base);
+        assert_eq!(delta.len(), 1, "only the post-cursor insert should appear");
+        assert_eq!(delta[0].path, "/after");
+    }
+
+    /// F2: a backfilled process-attribution update on an already-inserted
+    /// event must bump `last_modified` so the next incremental tick picks
+    /// up the now-attributed event. Without this, the app-side cache never
+    /// learns about process_name / process_path attached after the fact by
+    /// `backfill_missing_process_attribution`.
+    #[test]
+    fn test_get_events_modified_since_picks_up_backfilled_process_attribution() {
+        let store = FimEventStore::new();
+        let insert_ts = Utc::now() - ChronoDuration::seconds(5);
+        let uid = FimEvent::compute_uid("/tmp/missing.txt", &FimEventType::Modify, &insert_ts);
+
+        store.insert(FimEvent {
+            path: "/tmp/missing.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: insert_ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+            last_modified: insert_ts,
+        });
+
+        // Cursor advances PAST the original insert, simulating "the app
+        // has already pulled this event in a previous incremental tick".
+        let cursor = Utc::now();
+
+        // Backfill happens AFTER the cursor.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.update_process_attribution(
+            &uid,
+            Some("cursor".to_string()),
+            Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
+        );
+
+        let delta = store.get_events_modified_since(cursor);
+        assert_eq!(
+            delta.len(),
+            1,
+            "the backfilled event should reappear in the delta"
+        );
+        assert_eq!(delta[0].uid, uid);
+        assert_eq!(delta[0].process_name.as_deref(), Some("cursor"));
+    }
+
+    /// F2: a backfilled content-hash update must bump `last_modified` for
+    /// the same reason as the process-attribution case above. The hashing
+    /// happens out-of-band (Tier-2/Tier-3 hash backfill in the FIM
+    /// watcher), so the app-side cache only learns the hash via the next
+    /// incremental delta.
+    #[test]
+    fn test_get_events_modified_since_picks_up_backfilled_content_hash() {
+        let store = FimEventStore::new();
+        let insert_ts = Utc::now() - ChronoDuration::seconds(5);
+        let uid = FimEvent::compute_uid("/tmp/needs-hash.txt", &FimEventType::Modify, &insert_ts);
+
+        store.insert(FimEvent {
+            path: "/tmp/needs-hash.txt".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: insert_ts,
+            size: Some(12),
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: uid.clone(),
+            last_modified: insert_ts,
+        });
+
+        let cursor = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.update_content_hash(&uid, Some("blake3-abc".to_string()));
+
+        let delta = store.get_events_modified_since(cursor);
+        assert_eq!(
+            delta.len(),
+            1,
+            "the now-hashed event should reappear in the delta"
+        );
+        assert_eq!(delta[0].uid, uid);
+        assert_eq!(delta[0].hash.as_deref(), Some("blake3-abc"));
+    }
+
+    /// F2: incremental fetches must be sorted newest-first on
+    /// `last_modified` so the cache merge order matches the helper-side
+    /// store order (most recent at index 0). Matches the
+    /// `get_all_events` sort contract.
+    #[test]
+    fn test_get_events_modified_since_sort_order() {
+        let store = FimEventStore::new();
+        let base = Utc::now();
+        let cursor = base - ChronoDuration::hours(1);
+
+        for offset in [1_i64, 5, 3] {
+            let ts = base + ChronoDuration::seconds(offset);
+            let path = format!("/tmp/file_{}.txt", offset);
+            store.insert(FimEvent {
+                path: path.clone(),
+                event_type: FimEventType::Create,
+                timestamp: ts,
+                size: None,
+                hash: None,
+                process_name: None,
+                process_path: None,
+                parent_process_name: None,
+                parent_process_path: None,
+                is_sensitive: false,
+                labels: vec![],
+                uid: FimEvent::compute_uid(&path, &FimEventType::Create, &ts),
+                last_modified: ts,
+            });
+        }
+
+        let delta = store.get_events_modified_since(cursor);
+        assert_eq!(delta.len(), 3);
+        // Newest first: offset=5 then 3 then 1.
+        assert!(delta[0].path.contains("file_5"), "{}", delta[0].path);
+        assert!(delta[1].path.contains("file_3"), "{}", delta[1].path);
+        assert!(delta[2].path.contains("file_1"), "{}", delta[2].path);
     }
 }
