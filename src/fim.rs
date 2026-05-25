@@ -5,7 +5,6 @@ use crate::open_files::is_sensitive_path;
 use crate::sensitive_paths::{classify_sensitive_path_labels_sync, is_fim_excluded_path};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock as TokioRwLock;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use dashmap::DashMap;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -20,6 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, error, info, warn};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

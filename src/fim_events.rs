@@ -411,7 +411,8 @@ mod tests {
         });
         let newest_uid =
             FimEvent::compute_uid("/tmp/missing-newer.txt", &FimEventType::Create, &newer_ts);
-        store.insert(FimEvent {path: "/tmp/missing-newer.txt".to_string(),
+        store.insert(FimEvent {
+            path: "/tmp/missing-newer.txt".to_string(),
             event_type: FimEventType::Create,
             timestamp: newer_ts,
             size: None,
@@ -436,7 +437,8 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: None,
@@ -471,7 +473,8 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: Some(12),
@@ -498,7 +501,8 @@ mod tests {
         let store = FimEventStore::new();
         let ts = Utc::now();
         let uid = FimEvent::compute_uid("/tmp/event.txt", &FimEventType::Modify, &ts);
-        store.insert(FimEvent {path: "/tmp/event.txt".to_string(),
+        store.insert(FimEvent {
+            path: "/tmp/event.txt".to_string(),
             event_type: FimEventType::Modify,
             timestamp: ts,
             size: Some(12),
