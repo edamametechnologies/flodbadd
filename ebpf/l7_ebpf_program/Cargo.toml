@@ -2,6 +2,7 @@
 name = "l7_ebpf_program"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 description = "eBPF program for L7 network session resolution"
 build = "build.rs"
 
