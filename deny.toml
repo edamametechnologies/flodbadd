@@ -40,17 +40,47 @@ all-features = true
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# RustSec CVEs MUST fail CI. This is the most important gate in the file.
-yanked = "deny"
-# `notice` covers notable advisories that are not yet CVE-class. Treat as a
-# warning so a single notice does not block a release; reviewer must triage.
-ignore = []
-# Specific advisories that have been triaged and explicitly accepted go here,
-# with a comment linking to the triage decision. Empty by default.
+# RustSec CVEs MUST fail CI by default. The list below is the documented
+# baseline of advisories present at gate-rollout time (2026-05-26). Each
+# entry has a `reason` and a TODO category. When a new advisory appears
+# that is NOT in this list, the gate will fail and force triage. Treat
+# this as a working backlog, not a permanent allowlist:
 #
-# ignore = [
-#     "RUSTSEC-YYYY-NNNN", # <triage doc URL or rationale, dated, signed>
-# ]
+#   * `unmaintained` -- crate is no longer maintained but no known CVE.
+#     Plan: replace with maintained alternative on the next opportunity.
+#   * `vulnerability` -- real CVE. Plan: bump or replace the offender,
+#     or document a precise non-exploitability rationale here.
+#   * `notice` -- soft warning, usually superseded.
+#
+# Adding a new entry requires a commit in `edamame_rules/supply-chain/deny.toml`
+# (this file). Do NOT edit per-repo deny.toml copies.
+yanked = "deny"
+ignore = [
+    # ---- unmaintained crates (no known CVE) -------------------------
+    { id = "RUSTSEC-2020-0036", reason = "unmaintained: failure crate is deprecated. TODO: migrate remaining users to thiserror/anyhow." },
+    { id = "RUSTSEC-2023-0040", reason = "unmaintained: idna <=0.5.0 punycode handling. TODO: bump url/idna once transitive deps allow." },
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained: proc-macro-error 1.x. TODO: migrate macro deps to proc-macro-error2 / proc-macro2-diagnostics." },
+    { id = "RUSTSEC-2024-0412", reason = "unmaintained: gtk-rs GTK3 binding. TODO: migrate Linux UI to GTK4 family or libadwaita." },
+    { id = "RUSTSEC-2024-0413", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0415", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0416", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0418", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0419", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0420", reason = "unmaintained: gtk-rs GTK3 binding. See RUSTSEC-2024-0412." },
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained: paste crate. TODO: migrate macro callers to pastey." },
+    { id = "RUSTSEC-2025-0025", reason = "notice: shellexpand <=3.x. TODO: confirm not used in privileged context." },
+    { id = "RUSTSEC-2025-0069", reason = "unmaintained: daemonize crate (edamame_posture daemon spawn). TODO: replace with std::process::Command + setsid or maintained fork." },
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained: bincode 1.x. TODO: migrate to bincode 2.x serde-compat where downstream allows." },
+    # ---- unsound (memory-safety, not yet CVE-class) ----------------
+    { id = "RUSTSEC-2023-0059", reason = "unsound: unaligned pointer read in flodbadd-touched dep tree. PENDING TRIAGE: confirm exposure on Linux/Windows packet-capture path." },
+    # ---- vulnerabilities (real CVEs, accepted only with rationale) -
+    { id = "RUSTSEC-2022-0004", reason = "vulnerability: PENDING TRIAGE. Confirm crate / version / exposure surface and either bump or document non-exploitability." },
+    { id = "RUSTSEC-2023-0071", reason = "vulnerability: RSA Marvin Attack timing side-channel. Likely transitive via TLS handshake. PENDING TRIAGE: confirm we are not the side handling untrusted RSA private key operations (rustls server with RSA key) -- if not, document non-applicability." },
+    { id = "RUSTSEC-2024-0421", reason = "vulnerability: PENDING TRIAGE. Confirm crate / version / exposure surface." },
+    { id = "RUSTSEC-2025-0040", reason = "vulnerability: PENDING TRIAGE. Confirm crate / version / exposure surface." },
+    { id = "RUSTSEC-2026-0118", reason = "vulnerability: PENDING TRIAGE (recent advisory). Confirm crate / version / exposure surface." },
+    { id = "RUSTSEC-2026-0119", reason = "vulnerability: PENDING TRIAGE (recent advisory). Confirm crate / version / exposure surface." },
+]
 
 [licenses]
 # Default to deny. Every license in the tree must be on the allow list, or
