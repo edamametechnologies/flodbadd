@@ -667,6 +667,19 @@ fn should_attempt_process_attribution(
         || path_str.contains("\\AppData\\Local\\Temp\\")
 }
 
+fn should_backfill_process_attribution(event: &FimEvent) -> bool {
+    if event.event_type == FimEventType::Delete {
+        return false;
+    }
+
+    // Backfill runs whenever callers ask for FIM snapshots. Keep it for
+    // sensitive files, where attribution materially changes the security
+    // decision, but do not repeatedly probe old temp/explicit-watch churn.
+    // Temp events still get the immediate best-effort attribution attempt
+    // when the notify event arrives.
+    event.is_sensitive
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn best_effort_process_attribution(
     path: &Path,
@@ -955,7 +968,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
     let mut updated = 0;
 
     for event in candidates {
-        if event.event_type == FimEventType::Delete {
+        if !should_backfill_process_attribution(&event) {
             continue;
         }
 
@@ -1001,7 +1014,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
     let mut updated = 0;
 
     for event in candidates {
-        if event.event_type == FimEventType::Delete {
+        if !should_backfill_process_attribution(&event) {
             continue;
         }
 
@@ -1848,6 +1861,44 @@ mod tests {
             false,
             FimEventType::Modify
         ));
+    }
+
+    #[test]
+    fn test_should_backfill_process_attribution_only_for_sensitive_events() {
+        fn event(path: &str, event_type: FimEventType, is_sensitive: bool) -> FimEvent {
+            let ts = Utc::now();
+            FimEvent {
+                path: path.to_string(),
+                event_type,
+                timestamp: ts,
+                size: None,
+                hash: None,
+                process_name: None,
+                process_path: None,
+                parent_process_name: None,
+                parent_process_path: None,
+                is_sensitive,
+                labels: vec![],
+                uid: FimEvent::compute_uid(path, &event_type, &ts),
+                last_modified: ts,
+            }
+        }
+
+        assert!(should_backfill_process_attribution(&event(
+            "/Users/test/.ssh/id_rsa",
+            FimEventType::Modify,
+            true,
+        )));
+        assert!(!should_backfill_process_attribution(&event(
+            "/tmp/apt.data.abcdef",
+            FimEventType::Modify,
+            false,
+        )));
+        assert!(!should_backfill_process_attribution(&event(
+            "/Users/test/.ssh/id_rsa",
+            FimEventType::Delete,
+            true,
+        )));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
