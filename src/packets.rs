@@ -612,7 +612,10 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     if src_port == 53 || dst_port == 53 {
                         let mut dns_payload = tcp.payload().to_vec();
                         if dns_payload.len() < 2 {
-                            warn!("DNS-over-TCP payload too short: {:?}", dns_payload);
+                            // Sub-2-byte port-53 TCP segments are normal control
+                            // frames (SYN/ACK/FIN with no DNS length prefix), not an
+                            // error. Demoted from warn! to avoid ~1.5k log lines/day.
+                            trace!("DNS-over-TCP payload too short: {:?}", dns_payload);
                             return None;
                         }
                         dns_payload.drain(0..2);
@@ -749,7 +752,10 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                     if src_port == 53 || dst_port == 53 {
                         let mut dns_payload = tcp.payload().to_vec();
                         if dns_payload.len() < 2 {
-                            warn!("DNS-over-TCP payload too short: {:?}", dns_payload);
+                            // Sub-2-byte port-53 TCP segments are normal control
+                            // frames (SYN/ACK/FIN with no DNS length prefix), not an
+                            // error. Demoted from warn! to avoid ~1.5k log lines/day.
+                            trace!("DNS-over-TCP payload too short: {:?}", dns_payload);
                             return None;
                         }
                         dns_payload.drain(0..2);

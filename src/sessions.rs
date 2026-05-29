@@ -17,10 +17,24 @@ pub const L7_DETAIL_OUTBOUND: &str = "OutboundConnection";
 pub static CONNECTION_ACTIVITY_TIMEOUT: ChronoDuration = ChronoDuration::seconds(60);
 // A session is considered current if it has been active in the last 180 seconds
 pub static CONNECTION_CURRENT_TIMEOUT: ChronoDuration = ChronoDuration::seconds(180);
-// Keep 8 hours of history
-pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(28800);
+// Keep 2 hours of in-memory session history. This bounds N, which directly drives
+// the cost of every update_sessions() pass (O(N) status/domain/conformance scans),
+// the get_sessions() serialize payload, and resident memory. 2h covers live security
+// monitoring and UI scrollback; anomaly scoring is independently bounded by the
+// analyzer's own buffer cap, and security findings survive session expiry via the
+// action-history carry-forward (vulnerability finding persistence invariant).
+pub static CONNECTION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(7200);
 // Hard cap on tracked sessions to bound memory under sustained high traffic
 pub const MAX_TRACKED_SESSIONS: usize = 100_000;
+// Sessions carrying an unresolved security verdict (whitelist NonConforming or a
+// "blacklist:" criticality tag) are exempt from the benign 2h retention so an
+// end-of-workflow whitelist/blacklist policy check (edamame_posture check-policy,
+// background-get-sessions --fail-on-whitelist / --fail-on-blacklist) still observes
+// them regardless of how long a long-running CI/CD workflow lasted. They are still
+// bounded by this longer cap (1 week) so a long-lived daemon cannot accumulate them
+// without limit; this comfortably covers any realistic workflow duration.
+pub static CONNECTION_VIOLATION_RETENTION_TIMEOUT: ChronoDuration =
+    ChronoDuration::seconds(604800);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd)]
 pub enum Protocol {

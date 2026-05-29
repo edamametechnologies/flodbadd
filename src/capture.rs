@@ -2002,6 +2002,18 @@ impl FlodbaddCapture {
         }
     }
 
+    /// A session carries an unresolved security verdict when it is whitelist
+    /// NonConforming or tagged blacklisted (`criticality` contains `blacklist:`).
+    /// Such sessions are exempt from the benign retention timeout -- they are kept
+    /// until the much longer `CONNECTION_VIOLATION_RETENTION_TIMEOUT` and are evicted
+    /// from the hard cap only after benign sessions -- so an end-of-workflow
+    /// whitelist/blacklist policy check still observes them regardless of how long a
+    /// long-running CI/CD workflow lasted.
+    fn session_has_unresolved_verdict(info: &SessionInfo) -> bool {
+        info.is_whitelisted == WhitelistState::NonConforming
+            || info.criticality.contains("blacklist:")
+    }
+
     async fn update_sessions_status(
         sessions: &CustomDashMap<Session, SessionInfo>,
         current_sessions: &Arc<CustomRwLock<Vec<Session>>>,
@@ -2046,8 +2058,17 @@ impl FlodbaddCapture {
                     updated_current_sessions.push(session_info.session.clone());
                 }
 
-                // Flag sessions that are older than the retention timeout
-                if now > session_info.stats.last_activity + CONNECTION_RETENTION_TIMEOUT {
+                // Flag sessions older than the retention timeout. Benign sessions use
+                // the short benign timeout (bounds N for CPU/memory/battery); sessions
+                // carrying an unresolved security verdict use the much longer violation
+                // timeout so an end-of-workflow whitelist/blacklist policy check still
+                // sees them, while staying bounded so memory cannot grow without limit.
+                let retention = if Self::session_has_unresolved_verdict(session_info) {
+                    CONNECTION_VIOLATION_RETENTION_TIMEOUT
+                } else {
+                    CONNECTION_RETENTION_TIMEOUT
+                };
+                if now > session_info.stats.last_activity + retention {
                     sessions_to_remove.push(key.clone());
                 }
             }
@@ -2074,15 +2095,25 @@ impl FlodbaddCapture {
         let remaining = sessions.len();
         if remaining > MAX_TRACKED_SESSIONS {
             let overflow = remaining - MAX_TRACKED_SESSIONS;
-            let mut candidates: Vec<(Session, DateTime<Utc>)> = sessions
+            let mut candidates: Vec<(Session, bool, DateTime<Utc>)> = sessions
                 .iter()
                 .filter(|entry| !entry.value().status.active)
-                .map(|entry| (entry.key().clone(), entry.value().stats.last_activity))
+                .map(|entry| {
+                    (
+                        entry.key().clone(),
+                        Self::session_has_unresolved_verdict(entry.value()),
+                        entry.value().stats.last_activity,
+                    )
+                })
                 .collect();
-            candidates.sort_by_key(|(_, last_activity)| *last_activity);
+            // Evict benign sessions before sessions carrying an unresolved verdict;
+            // within each class, oldest (least-recently-active) first. A verdict-bearing
+            // session is only dropped under the hard cap when benign inactive sessions
+            // cannot cover the overflow.
+            candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
             let to_evict = candidates.into_iter().take(overflow);
             let mut evicted = 0;
-            for (key, _) in to_evict {
+            for (key, _, _) in to_evict {
                 sessions.remove(&key);
                 evicted += 1;
             }
@@ -3013,6 +3044,117 @@ mod tests {
         if let Some(resolver) = resolver_guard.as_ref() {
             resolver.stop().await;
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_eviction_retains_violating_sessions() {
+        // Benign sessions evict at CONNECTION_RETENTION_TIMEOUT; sessions carrying an
+        // unresolved security verdict (whitelist NonConforming or blacklist-tagged)
+        // survive until CONNECTION_VIOLATION_RETENTION_TIMEOUT so an end-of-workflow
+        // whitelist/blacklist policy check still sees them on long CI/CD runs.
+        let capture = Arc::new(FlodbaddCapture::new());
+        capture.set_filter(SessionFilter::All).await;
+
+        let now = Utc::now();
+        let make_session = |last_octet: u8, dst_port: u16| Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, last_octet)),
+            src_port: 1000 + last_octet as u16,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, last_octet)),
+            dst_port,
+        };
+        let make_info = |session: &Session,
+                         wl: WhitelistState,
+                         crit: &str,
+                         last_activity: DateTime<Utc>| {
+            let mut stats = SessionStats::new(last_activity);
+            stats.last_activity = last_activity;
+            SessionInfo {
+                session: session.clone(),
+                stats,
+                status: SessionStatus::default(),
+                is_local_src: false,
+                is_local_dst: false,
+                is_self_src: false,
+                is_self_dst: false,
+                src_domain: None,
+                dst_domain: None,
+                dst_service: None,
+                l7: None,
+                src_asn: None,
+                dst_asn: None,
+                is_whitelisted: wl,
+                criticality: crit.to_string(),
+                dismissed: false,
+                whitelist_reason: None,
+                src_domain_type: DomainResolutionType::None,
+                dst_domain_type: DomainResolutionType::None,
+                uid: Uuid::new_v4().to_string(),
+                last_modified: last_activity,
+            }
+        };
+
+        // All three are idle past the benign retention window but well under the
+        // violation retention window.
+        let aged = now - CONNECTION_RETENTION_TIMEOUT - ChronoDuration::seconds(600);
+        let benign = make_session(10, 80);
+        let nonconforming = make_session(11, 443);
+        let blacklisted = make_session(12, 443);
+
+        capture.sessions.insert(
+            benign.clone(),
+            make_info(&benign, WhitelistState::Conforming, "", aged),
+        );
+        capture.sessions.insert(
+            nonconforming.clone(),
+            make_info(&nonconforming, WhitelistState::NonConforming, "", aged),
+        );
+        capture.sessions.insert(
+            blacklisted.clone(),
+            make_info(
+                &blacklisted,
+                WhitelistState::Unknown,
+                "blacklist:firehol_level1",
+                aged,
+            ),
+        );
+
+        FlodbaddCapture::update_sessions_status(&capture.sessions, &capture.current_sessions).await;
+
+        assert!(
+            capture.sessions.get(&benign).is_none(),
+            "benign session idle past the benign retention timeout should be evicted"
+        );
+        assert!(
+            capture.sessions.get(&nonconforming).is_some(),
+            "NonConforming session must be retained past the benign retention timeout"
+        );
+        assert!(
+            capture.sessions.get(&blacklisted).is_some(),
+            "blacklisted session must be retained past the benign retention timeout"
+        );
+
+        // Age the two violations past the violation retention window: now they evict too.
+        let very_aged =
+            now - CONNECTION_VIOLATION_RETENTION_TIMEOUT - ChronoDuration::seconds(3600);
+        if let Some(mut e) = capture.sessions.get_mut(&nonconforming) {
+            e.value_mut().stats.last_activity = very_aged;
+        }
+        if let Some(mut e) = capture.sessions.get_mut(&blacklisted) {
+            e.value_mut().stats.last_activity = very_aged;
+        }
+
+        FlodbaddCapture::update_sessions_status(&capture.sessions, &capture.current_sessions).await;
+
+        assert!(
+            capture.sessions.get(&nonconforming).is_none(),
+            "NonConforming session must evict once past the violation retention cap"
+        );
+        assert!(
+            capture.sessions.get(&blacklisted).is_none(),
+            "blacklisted session must evict once past the violation retention cap"
+        );
     }
 
     #[tokio::test]
