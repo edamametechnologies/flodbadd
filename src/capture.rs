@@ -3064,36 +3064,34 @@ mod tests {
             dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, last_octet)),
             dst_port,
         };
-        let make_info = |session: &Session,
-                         wl: WhitelistState,
-                         crit: &str,
-                         last_activity: DateTime<Utc>| {
-            let mut stats = SessionStats::new(last_activity);
-            stats.last_activity = last_activity;
-            SessionInfo {
-                session: session.clone(),
-                stats,
-                status: SessionStatus::default(),
-                is_local_src: false,
-                is_local_dst: false,
-                is_self_src: false,
-                is_self_dst: false,
-                src_domain: None,
-                dst_domain: None,
-                dst_service: None,
-                l7: None,
-                src_asn: None,
-                dst_asn: None,
-                is_whitelisted: wl,
-                criticality: crit.to_string(),
-                dismissed: false,
-                whitelist_reason: None,
-                src_domain_type: DomainResolutionType::None,
-                dst_domain_type: DomainResolutionType::None,
-                uid: Uuid::new_v4().to_string(),
-                last_modified: last_activity,
-            }
-        };
+        let make_info =
+            |session: &Session, wl: WhitelistState, crit: &str, last_activity: DateTime<Utc>| {
+                let mut stats = SessionStats::new(last_activity);
+                stats.last_activity = last_activity;
+                SessionInfo {
+                    session: session.clone(),
+                    stats,
+                    status: SessionStatus::default(),
+                    is_local_src: false,
+                    is_local_dst: false,
+                    is_self_src: false,
+                    is_self_dst: false,
+                    src_domain: None,
+                    dst_domain: None,
+                    dst_service: None,
+                    l7: None,
+                    src_asn: None,
+                    dst_asn: None,
+                    is_whitelisted: wl,
+                    criticality: crit.to_string(),
+                    dismissed: false,
+                    whitelist_reason: None,
+                    src_domain_type: DomainResolutionType::None,
+                    dst_domain_type: DomainResolutionType::None,
+                    uid: Uuid::new_v4().to_string(),
+                    last_modified: last_activity,
+                }
+            };
 
         // All three are idle past the benign retention window but well under the
         // violation retention window.

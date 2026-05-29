@@ -33,8 +33,7 @@ pub const MAX_TRACKED_SESSIONS: usize = 100_000;
 // them regardless of how long a long-running CI/CD workflow lasted. They are still
 // bounded by this longer cap (1 week) so a long-lived daemon cannot accumulate them
 // without limit; this comfortably covers any realistic workflow duration.
-pub static CONNECTION_VIOLATION_RETENTION_TIMEOUT: ChronoDuration =
-    ChronoDuration::seconds(604800);
+pub static CONNECTION_VIOLATION_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::seconds(604800);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize, Ord, PartialOrd)]
 pub enum Protocol {
