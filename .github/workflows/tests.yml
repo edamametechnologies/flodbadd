@@ -84,7 +84,6 @@ jobs:
           edamame_pin: ${{ secrets.EDAMAME_POSTURE_PIN }}
           edamame_id: ${{ github.run_id }}
           checkout: true
-          # Runtime runner protection. See workspace.mdc.
           packet_capture: true
           vulnerability_detection: true
           vulnerability_detection_interval: "60"
@@ -653,9 +652,9 @@ jobs:
           checkout: false
           wait_for_api: true
           wait_for_https: true
-          # Runtime runner protection. Inside Docker containers
-          # packet_capture has limited host visibility but FIM and
-          # process introspection still detect tampering / exfil.
+          # Inside Docker containers packet_capture has limited host
+          # visibility but FIM and process introspection still detect
+          # tampering / exfil.
           packet_capture: true
           vulnerability_detection: true
           vulnerability_detection_interval: "60"
@@ -773,11 +772,9 @@ jobs:
           # them until explicitly cleared.
           #
           # Mirrors the FP-CI-13 v2.2 multi-path cleanup in
-          # edamame_core/.github/workflows/tests.yml (workspace.mdc ->
-          # Self-Hosted Runner Protection -> "Workflows that intentionally
-          # fire CVE / vulnerability scenarios"). Critical for ubuntu:18.04
-          # where edamame_cli's musl loader is unavailable, leaving Path A
-          # ineffective; Path B/C cover that case.
+          # edamame_core/.github/workflows/tests.yml. Critical for
+          # ubuntu:18.04 where edamame_cli's musl loader is unavailable,
+          # leaving Path A ineffective; Path B/C cover that case.
           set +e
           echo "::group::FP-CI-13 cleanup"
 

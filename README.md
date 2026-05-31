@@ -195,6 +195,10 @@ flodbadd = { path = ".", features = ["packetcapture"] }
 - `packetcapture` - Enable live packet capture (requires elevated privileges)
 - `asyncpacketcapture` - Async packet capture mode (Linux/macOS/Windows)
 - `ebpf` - Linux eBPF acceleration for L7 attribution
+- `fim` - File integrity monitoring via notify + BLAKE3 hashing
+- `endpointsecurity` - macOS Endpoint Security framework (optional, requires entitlements)
+- `etw` - Windows ETW stub (empty; requires native ETW dependencies to build)
+- `examples` - Build the bundled example binaries (pulls in `clap` and `tracing-subscriber`)
 
 ### Basic Usage
 
