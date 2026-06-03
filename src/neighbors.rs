@@ -204,23 +204,22 @@ mod platform_impl {
         // discovery (and therefore the whole lanscan) indefinitely. kill_on_drop
         // reaps the child when the timeout fires.
         cmd.kill_on_drop(true);
-        let output = match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
-            .await
-        {
-            Ok(result) => result.map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to execute 'ip neigh': {e}"),
-                )
-            })?,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "'ip neigh' timed out after 10s",
-                )
-                .into())
-            }
-        };
+        let output =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await {
+                Ok(result) => result.map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to execute 'ip neigh': {e}"),
+                    )
+                })?,
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "'ip neigh' timed out after 10s",
+                    )
+                    .into())
+                }
+            };
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         let raw_neighbors = stdout_str.lines().filter_map(parse).collect();
@@ -254,7 +253,10 @@ mod platform_impl {
         .await
         {
             Ok(result) => result.map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Failed to execute {cmd}: {e}"))
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to execute {cmd}: {e}"),
+                )
             })?,
             Err(_) => {
                 return Err(io::Error::new(
