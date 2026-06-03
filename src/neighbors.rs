@@ -200,12 +200,27 @@ mod platform_impl {
             cmd.arg("show").arg("dev").arg(iface_name);
         }
 
-        let output = cmd.output().await.map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to execute 'ip neigh': {e}"),
-            )
-        })?;
+        // Bound the subprocess so a wedged `ip neigh` can't freeze neighbor
+        // discovery (and therefore the whole lanscan) indefinitely. kill_on_drop
+        // reaps the child when the timeout fires.
+        cmd.kill_on_drop(true);
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
+            .await
+        {
+            Ok(result) => result.map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to execute 'ip neigh': {e}"),
+                )
+            })?,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "'ip neigh' timed out after 10s",
+                )
+                .into())
+            }
+        };
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         let raw_neighbors = stdout_str.lines().filter_map(parse).collect();
@@ -219,17 +234,36 @@ mod platform_impl {
     use super::*;
     use tokio::process::Command;
 
+    /// A neighbor-table dump (`ndp`/`arp`) completes in milliseconds normally;
+    /// bound it so a wedged subprocess can never freeze neighbor discovery (and
+    /// therefore the whole lanscan) indefinitely. This was the root of the
+    /// observed dogfood "scan stuck at 0%" hang.
+    const NEIGHBOR_CMD_TIMEOUT_SECS: u64 = 10;
+
     /// Run a command with args, returning stdout as String.
     async fn run(cmd: &str, args: &[&str]) -> Result<String> {
         let mut c = Command::new(cmd);
         c.args(args);
+        // Reap the child if the timeout below fires before it exits.
+        c.kill_on_drop(true);
 
-        let output = c.output().await.map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to execute {cmd}: {e}"),
-            )
-        })?;
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(NEIGHBOR_CMD_TIMEOUT_SECS),
+            c.output(),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Failed to execute {cmd}: {e}"))
+            })?,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{cmd} timed out after {NEIGHBOR_CMD_TIMEOUT_SECS}s"),
+                )
+                .into())
+            }
+        };
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
