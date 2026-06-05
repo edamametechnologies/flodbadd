@@ -273,7 +273,14 @@ impl FlodbaddCapture {
             update_pending: Arc::new(AtomicBool::new(false)),
             update_notify: Arc::new(Notify::new()),
             last_update_completed: Arc::new(CustomRwLock::new(
-                Instant::now() - Duration::from_secs(60),
+                // `Instant` is monotonic-from-boot (QPC on Windows), so a bare
+                // `Instant::now() - 60s` panics ("overflow when subtracting
+                // duration from instant") when the process starts < 60s after
+                // boot. Saturate instead; worst case the first update waits one
+                // cooldown.
+                Instant::now()
+                    .checked_sub(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now),
             )),
             last_get_sessions_fetch_timestamp: Arc::new(CustomRwLock::new(DateTime::<Utc>::from(
                 std::time::UNIX_EPOCH,
@@ -297,7 +304,11 @@ impl FlodbaddCapture {
     /// Reset the update cooldown so the next `update_sessions()` call runs immediately.
     /// Must be called whenever whitelist/blacklist configuration changes.
     pub async fn invalidate_update_cooldown(&self) {
-        *self.last_update_completed.write().await = Instant::now() - Duration::from_secs(60);
+        // Saturate (see `new()`): bare `Instant` subtraction panics within 60s
+        // of boot on a monotonic-from-boot clock (QPC on Windows).
+        *self.last_update_completed.write().await = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
     }
 
     pub async fn reset_whitelist(&self) {

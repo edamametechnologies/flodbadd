@@ -344,6 +344,17 @@ mod tests {
     use std::sync::Once;
     use threatmodels_rs::UpdateStatus;
 
+    /// Regression guard (helper/app/posture startup): the embedded device-
+    /// profiles snapshot MUST decode and parse. If a bad regen makes it
+    /// unparseable, the `PROFILES` CloudModel `lazy_static` panics on its first
+    /// deref and the daemon dies at startup. This catches it in CI instead.
+    /// See also whitelists/blacklists/sensitive_paths/port_vulns/vendor_vulns.
+    #[test]
+    fn test_embedded_profiles_snapshot_parses() {
+        serde_json::from_str::<DeviceTypeListJSON>(&DEVICE_PROFILES)
+            .expect("embedded device profiles snapshot must parse as DeviceTypeListJSON");
+    }
+
     // Initialize logging or other necessary setup here
     static INIT: Once = Once::new();
 

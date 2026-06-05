@@ -1452,7 +1452,12 @@ pub async fn recompute_whitelist_for_sessions(
 
     // Snapshot last run timestamp (used to decide incremental vs. full recompute)
     let last_run_ts = {
-        let guard = LAST_WHITELIST_RUN.lock().unwrap();
+        // Recover from poisoning instead of panicking: a poisoned lock here
+        // would kill every subsequent whitelist recompute. The protected value
+        // is just a timestamp, so the recovered inner value is safe to use.
+        let guard = LAST_WHITELIST_RUN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard
     };
 
@@ -1659,7 +1664,10 @@ pub async fn recompute_whitelist_for_sessions(
 
     // Update last run timestamp
     {
-        let mut guard = LAST_WHITELIST_RUN.lock().unwrap();
+        // Recover from poisoning instead of panicking (see the read site above).
+        let mut guard = LAST_WHITELIST_RUN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = Utc::now();
     }
 
@@ -1711,6 +1719,17 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
+
+    /// Regression guard (helper/app/posture startup): the embedded whitelists
+    /// snapshot MUST decode and parse. If a bad regen of `whitelists_db.bin`
+    /// makes it unparseable, the `LISTS` CloudModel `lazy_static` panics on its
+    /// first deref and the daemon dies at startup. This catches it in CI
+    /// instead. See also blacklists/sensitive_paths/threats/cve_params.
+    #[test]
+    fn test_embedded_whitelists_snapshot_parses() {
+        serde_json::from_str::<WhitelistsJSON>(&WHITELISTS)
+            .expect("embedded whitelists snapshot must parse as WhitelistsJSON");
+    }
 
     /// Test that WhitelistInfo serialization includes name and extends fields
     #[test]

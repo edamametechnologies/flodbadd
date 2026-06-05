@@ -244,8 +244,14 @@ mod macos {
         }
 
         fn prune_file_attribution_table(table: &DashMap<String, FimEsAttribution>) {
-            let cutoff = Instant::now() - std::time::Duration::from_secs(FILE_ATTR_TTL_SECS);
-            table.retain(|_, v| v.recorded_at > cutoff);
+            // `Instant::now() - TTL` panics within TTL seconds of boot
+            // (monotonic-from-boot clock underflow); keep all entries when
+            // uptime < TTL since nothing can be older than the window.
+            if let Some(cutoff) =
+                Instant::now().checked_sub(std::time::Duration::from_secs(FILE_ATTR_TTL_SECS))
+            {
+                table.retain(|_, v| v.recorded_at > cutoff);
+            }
 
             if table.len() > FILE_ATTR_MAX_ENTRIES {
                 let mut entries: Vec<_> = table

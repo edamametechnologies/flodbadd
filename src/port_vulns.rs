@@ -397,6 +397,17 @@ mod tests {
     use serial_test::serial;
     use std::sync::Once;
 
+    /// Regression guard (helper/app/posture startup): the embedded port-vulns
+    /// snapshot MUST decode and parse. If a bad regen makes it unparseable, the
+    /// `VULNS` CloudModel `lazy_static` panics on its first deref and the daemon
+    /// dies at startup. This catches it in CI instead. See also
+    /// whitelists/blacklists/sensitive_paths/profiles/vendor_vulns.
+    #[test]
+    fn test_embedded_port_vulns_snapshot_parses() {
+        serde_json::from_str::<VulnerabilityPortInfoListJSON>(&PORT_VULNS)
+            .expect("embedded port vulns snapshot must parse as VulnerabilityPortInfoListJSON");
+    }
+
     static INIT: Once = Once::new();
 
     fn setup() {

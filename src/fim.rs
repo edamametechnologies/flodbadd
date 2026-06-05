@@ -49,8 +49,14 @@ static FIM_CACHE_INSERT_COUNTER: std::sync::atomic::AtomicU64 =
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn prune_attribution_cache() {
-    let cutoff = Instant::now() - std::time::Duration::from_secs(FIM_ATTRIBUTION_CACHE_TTL_SECS);
-    FIM_ATTRIBUTION_CACHE.retain(|_, v| v.recorded_at > cutoff);
+    // `Instant::now() - TTL` panics within TTL seconds of boot (monotonic-from-
+    // boot clock underflow). When uptime < TTL nothing can be older than the
+    // window, so skip the age prune and keep all entries.
+    if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(
+        FIM_ATTRIBUTION_CACHE_TTL_SECS,
+    )) {
+        FIM_ATTRIBUTION_CACHE.retain(|_, v| v.recorded_at > cutoff);
+    }
 
     if FIM_ATTRIBUTION_CACHE.len() > FIM_ATTRIBUTION_CACHE_MAX_ENTRIES {
         let mut entries: Vec<_> = FIM_ATTRIBUTION_CACHE

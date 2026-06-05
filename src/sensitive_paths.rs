@@ -332,6 +332,17 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Regression guard (helper/app/posture startup): the embedded sensitive-
+    /// paths snapshot MUST decode and parse. If a bad regen makes it
+    /// unparseable, the `SENSITIVE_PATHS` CloudModel `lazy_static` panics on its
+    /// first deref and the daemon dies at startup. This catches it in CI
+    /// instead. See also whitelists/blacklists/threats/cve_params.
+    #[test]
+    fn test_embedded_sensitive_paths_snapshot_parses() {
+        serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+            .expect("embedded sensitive paths snapshot must parse as SensitivePathsJSON");
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_sensitive_paths_loaded() {

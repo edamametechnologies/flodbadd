@@ -810,6 +810,17 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Regression guard (helper/app/posture startup): the embedded blacklists
+    /// snapshot MUST decode and parse. If a bad regen of `blacklists-db.bin`
+    /// makes it unparseable, the `LISTS` CloudModel `lazy_static` panics on its
+    /// first deref and the daemon dies at startup. This catches it in CI
+    /// instead. See also whitelists/sensitive_paths/threats/cve_params.
+    #[test]
+    fn test_embedded_blacklists_snapshot_parses() {
+        serde_json::from_str::<BlacklistsJSON>(&BLACKLISTS)
+            .expect("embedded blacklists snapshot must parse as BlacklistsJSON");
+    }
+
     async fn initialize_test_blacklists() {
         IP_CACHE.clear();
         BLACKLIST_REVISION.store(0, Ordering::SeqCst);

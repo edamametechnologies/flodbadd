@@ -240,6 +240,17 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Regression guard (helper/app/posture startup): the embedded vendor-vulns
+    /// snapshot MUST decode and parse. If a bad regen makes it unparseable, the
+    /// `VULNS` CloudModel `lazy_static` panics on its first deref and the daemon
+    /// dies at startup. This catches it in CI instead. See also
+    /// whitelists/blacklists/sensitive_paths/port_vulns/profiles.
+    #[test]
+    fn test_embedded_vendor_vulns_snapshot_parses() {
+        serde_json::from_str::<VulnerabilityVendorInfoListJSON>(&VENDOR_VULNS)
+            .expect("embedded vendor vulns snapshot must parse as VulnerabilityVendorInfoListJSON");
+    }
+
     // Initialize logging or other necessary setup here
     fn setup() {
         // Setup code here if needed
