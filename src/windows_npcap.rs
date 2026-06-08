@@ -44,7 +44,7 @@ pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response
     let mut attempts = 0;
     let max_attempts = 10;
     let max_wait_secs = 300; // 5 minutes
-    // Assigned on every loop path before the failure branch reads it.
+                             // Assigned on every loop path before the failure branch reads it.
     let mut last_error: String;
     loop {
         match reqwest::blocking::get(url) {
