@@ -38,6 +38,11 @@ const FALLBACK_COMMON: &[&str] = &[
     "/.bitmonero/",
     "/.litecoin/",
     "/.dogecoin/",
+    "/CLAUDE.md",
+    "/AGENTS.md",
+    "/.cursorrules",
+    "/mcp.json",
+    "/.cursor/rules/",
 ];
 
 #[cfg(target_os = "macos")]
