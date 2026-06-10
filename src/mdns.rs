@@ -298,6 +298,15 @@ async fn process_host(host: Host, service_name: String) {
     }
 }
 
+/// mDNS/DNS names are limited to 63-byte labels and 255 bytes total
+/// (RFC 1035 section 3.1). Service and host names learned from the network can
+/// violate this, and forwarding such a name to the query builder would build an
+/// oversized label. Skip clearly invalid names before resolving them so a
+/// malformed or hostile advertisement cannot disrupt discovery.
+fn is_resolvable_dns_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && name.split('.').all(|label| label.len() <= 63)
+}
+
 async fn fetch_mdns_info_task() {
     let pause_duration = Duration::from_secs(5);
 
@@ -341,6 +350,13 @@ async fn fetch_mdns_info_task() {
             let service_name = service.name.clone();
             let service_name_clone = service_name.clone();
             trace!("Found service: {}", service_name);
+            if !is_resolvable_dns_name(&service_name) {
+                warn!(
+                    "Skipping mDNS service with invalid DNS name (label/length out of range): {:?}",
+                    service_name
+                );
+                continue;
+            }
             // Now discover all the instances of this service
             let responses = match wez_mdns::resolve(
                 service_name.clone(),
@@ -377,6 +393,13 @@ async fn fetch_mdns_info_task() {
                 // Check if we have a host name
                 if let Some(hostname) = host_clone.host_name {
                     process_host(host, service_name_clone.clone()).await;
+                    if !is_resolvable_dns_name(&hostname) {
+                        warn!(
+                            "Skipping mDNS host resolve for invalid DNS name (label/length out of range): {:?}",
+                            hostname
+                        );
+                        continue;
+                    }
                     // Now resolve the host to get all the A and AAAA records (IPv6 addresses) to extrapolate the MAC address
                     let responses =
                         match wez_mdns::resolve(hostname.clone(), QueryParameters::HOST_LOOKUP)
