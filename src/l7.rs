@@ -2876,8 +2876,7 @@ mod tests {
         // the 1-second start_time granularity sysinfo uses.
         sleep(Duration::from_millis(2500)).await;
 
-        let refresh_kind =
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
+        let refresh_kind = RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
         let system = System::new_with_specifics(refresh_kind);
         let mut sys_users = Users::new();
         sys_users.refresh();
@@ -2913,8 +2912,7 @@ mod tests {
             "sysinfo did not enumerate spawned child pid {child_pid}; the process map is empty \
              (macOS: apple-app-store/apple-sandbox makes refresh_processes a no-op)"
         );
-        let (l7, _) =
-            resolved.expect("extract_l7_from_pid returned None for an enumerated child");
+        let (l7, _) = resolved.expect("extract_l7_from_pid returned None for an enumerated child");
         assert_eq!(
             l7.parent_pid,
             Some(our_pid),
