@@ -2825,6 +2825,146 @@ mod tests {
         };
         assert!(!FlodbaddL7::is_likely_ephemeral(&server_connection));
     }
+
+    /// Spawn a long-lived child whose direct parent is this test process.
+    /// The binary is spawned directly (not via a shell) so the child's parent
+    /// PID is the test binary itself, which is what the lineage guards assert.
+    /// `sleep` (Unix) and `ping` (Windows) are always present on every runner.
+    fn spawn_long_lived_child() -> std::process::Child {
+        use std::process::{Command, Stdio};
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new("sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("failed to spawn `sleep` child")
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // `ping -n 31 127.0.0.1` runs ~30s (1s between echoes) and is a
+            // direct child of this process.
+            Command::new("ping")
+                .args(["-n", "31", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("failed to spawn `ping` child")
+        }
+    }
+
+    /// Cross-platform guard for the parent-lineage contract that the macOS
+    /// `apple-app-store` / `apple-sandbox` sysinfo feature silently broke:
+    /// a spawned child MUST be enumerable by sysinfo, and its resolved
+    /// `SessionL7` MUST carry `parent_pid` plus a non-zero `run_time`.
+    ///
+    /// Why this runs on Linux and Windows too: the specific apple-app-store
+    /// no-op cannot occur there (the feature is Apple-only), but the same
+    /// `extract_l7_from_pid` path resolves lineage on every OS via
+    /// `sysinfo::Process::parent()`. Running the guard everywhere means a
+    /// future sysinfo upgrade, feature change, or enumeration regression that
+    /// blanks `parent_pid` / `run_time` on Linux or Windows is caught the same
+    /// way the macOS regression now is.
+    #[tokio::test]
+    async fn lineage_resolution_populates_parent_for_spawned_child() {
+        let mut child = spawn_long_lived_child();
+        let child_pid = child.id();
+        let our_pid = std::process::id();
+
+        // Let the child settle so it is enumerable and run_time advances past
+        // the 1-second start_time granularity sysinfo uses.
+        sleep(Duration::from_millis(2500)).await;
+
+        let refresh_kind =
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
+        let system = System::new_with_specifics(refresh_kind);
+        let mut sys_users = Users::new();
+        sys_users.refresh();
+
+        let pid_to_process: HashMap<u32, &Process> = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| (pid.as_u32(), process))
+            .collect();
+        let uid_to_username: HashMap<&Uid, &str> = sys_users
+            .iter()
+            .map(|user| (user.id(), user.name()))
+            .collect();
+
+        // Enumeration guard: the child MUST be present. On a broken macOS build
+        // (apple-app-store / apple-sandbox) refresh_processes is a no-op and the
+        // process map is empty, so this is the first thing that fails.
+        let child_present = pid_to_process.contains_key(&child_pid);
+        let resolved = if let Some(process) = pid_to_process.get(&child_pid) {
+            FlodbaddL7::extract_l7_from_pid(child_pid, process, &pid_to_process, &uid_to_username)
+                .await
+        } else {
+            None
+        };
+
+        // Tear the child down before asserting so a failed assertion never
+        // leaks the process.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            child_present,
+            "sysinfo did not enumerate spawned child pid {child_pid}; the process map is empty \
+             (macOS: apple-app-store/apple-sandbox makes refresh_processes a no-op)"
+        );
+        let (l7, _) =
+            resolved.expect("extract_l7_from_pid returned None for an enumerated child");
+        assert_eq!(
+            l7.parent_pid,
+            Some(our_pid),
+            "resolved L7 parent_pid {:?} did not match the spawning test process {our_pid}",
+            l7.parent_pid
+        );
+        assert!(
+            l7.run_time >= 1,
+            "resolved L7 run_time was {} (expected >= 1s after a 2.5s settle); sysinfo did not \
+             snapshot the process start_time",
+            l7.run_time
+        );
+    }
+
+    /// macOS-specific guard for the exact entry point the `apple-app-store`
+    /// regression degraded: `extract_l7_from_pid_fresh` builds a fresh sysinfo
+    /// snapshot and must resolve parent lineage for a live child. With
+    /// apple-app-store enabled, the empty process map forced a fall-through to
+    /// the libproc path (`extract_l7_from_macos_proc`), which hard-codes
+    /// `parent_pid = None` and `run_time = 0`.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_fresh_pid_resolution_populates_parent_lineage() {
+        let mut child = spawn_long_lived_child();
+        let child_pid = child.id();
+        let our_pid = std::process::id();
+
+        sleep(Duration::from_millis(2500)).await;
+
+        let resolved = FlodbaddL7::extract_l7_from_pid_fresh(child_pid).await;
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let (l7, _) = resolved
+            .expect("extract_l7_from_pid_fresh returned None for a live child (sysinfo empty?)");
+        assert_eq!(
+            l7.parent_pid,
+            Some(our_pid),
+            "macOS fresh resolution parent_pid {:?} did not match spawning pid {our_pid} \
+             (apple-app-store regression returns None here)",
+            l7.parent_pid
+        );
+        assert!(
+            l7.run_time >= 1,
+            "macOS fresh resolution run_time was {} (expected >= 1s); the libproc fallback \
+             hard-codes run_time = 0",
+            l7.run_time
+        );
+    }
 }
 
 // Feature-specific tests that will only run on Linux with eBPF enabled

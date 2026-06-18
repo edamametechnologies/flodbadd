@@ -24,6 +24,16 @@ endpointsecurity = [ "endpoint-sec" ]
 etw = [ "dep:sysinfo" ]
 fim = [ "dep:notify", "dep:blake3", "dep:sysinfo" ]
 examples = ["clap", "tracing-subscriber"]
+# App Store eligibility ONLY. Enables sysinfo's `apple-app-store` (a.k.a.
+# `apple-sandbox`) restriction so sysinfo does NOT reference the private
+# `proc_listallpids` process-enumeration API -- required for the macOS/iOS
+# EDAMAME app to pass Apple's static analysis. As a side effect sysinfo's
+# process map is empty under this feature, so process lineage (parent/grand-
+# parent PID, run_time) is unavailable. The privileged helper and the
+# standalone posture CLI MUST be built WITHOUT this feature so they get full
+# process enumeration. `sysinfo?/` so this never force-enables the optional
+# sysinfo dep on its own.
+appstore = [ "sysinfo?/apple-app-store" ]
 
 [dependencies]
 # Core dependencies
@@ -104,7 +114,11 @@ pcap = { version = "2.3.0", optional = true, features = ["capture-stream"] }
 hickory-resolver = { version = "0.25.2", optional = true }
 dns-parser = { git = "https://github.com/edamametechnologies/dns-parser", branch = "pr47", optional = true }
 pnet_packet = { version = "0.35.0", optional = true }
-sysinfo = { version = "0.37.0", default-features = false, features = ["system", "user", "apple-app-store"], optional = true }
+# NOTE: `apple-app-store` is intentionally NOT enabled here. It is only enabled
+# via the opt-in `appstore` feature (App Store builds), because it makes sysinfo
+# return an empty process map on macOS/iOS (no proc_listallpids), which breaks
+# process lineage enumeration needed by the helper/standalone capture paths.
+sysinfo = { version = "0.37.0", default-features = false, features = ["system", "user"], optional = true }
 netstat2 = { version = "0.11.2", optional = true }
 
 # Clap dependencies (optional)
