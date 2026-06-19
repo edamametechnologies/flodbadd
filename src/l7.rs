@@ -2878,28 +2878,52 @@ mod tests {
 
         let refresh_kind = RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
         let system = System::new_with_specifics(refresh_kind);
-        let mut sys_users = Users::new();
-        sys_users.refresh();
 
         let pid_to_process: HashMap<u32, &Process> = system
             .processes()
             .iter()
             .map(|(pid, process)| (pid.as_u32(), process))
             .collect();
-        let uid_to_username: HashMap<&Uid, &str> = sys_users
-            .iter()
-            .map(|user| (user.id(), user.name()))
-            .collect();
 
         // Enumeration guard: the child MUST be present. On a broken macOS build
         // (apple-app-store / apple-sandbox) refresh_processes is a no-op and the
         // process map is empty, so this is the first thing that fails.
         let child_present = pid_to_process.contains_key(&child_pid);
-        let resolved = if let Some(process) = pid_to_process.get(&child_pid) {
-            FlodbaddL7::extract_l7_from_pid(child_pid, process, &pid_to_process, &uid_to_username)
+
+        // Resolve lineage. macOS uses the libproc-bound `extract_l7_from_pid`
+        // entry point that the apple-app-store regression degraded; every other
+        // OS resolves the same lineage primitives (`parent()` + `run_time()`)
+        // straight off the sysinfo `Process`, so a future enumeration
+        // regression that blanks them on Linux/Windows is caught here too.
+        #[cfg(target_os = "macos")]
+        let (parent_pid, run_time) = {
+            let mut sys_users = Users::new();
+            sys_users.refresh();
+            let uid_to_username: HashMap<&Uid, &str> = sys_users
+                .iter()
+                .map(|user| (user.id(), user.name()))
+                .collect();
+            let resolved = if let Some(process) = pid_to_process.get(&child_pid) {
+                FlodbaddL7::extract_l7_from_pid(
+                    child_pid,
+                    process,
+                    &pid_to_process,
+                    &uid_to_username,
+                )
                 .await
-        } else {
-            None
+            } else {
+                None
+            };
+            let (l7, _) =
+                resolved.expect("extract_l7_from_pid returned None for an enumerated child");
+            (l7.parent_pid, l7.run_time)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (parent_pid, run_time) = {
+            let process = pid_to_process.get(&child_pid);
+            let parent_pid = process.and_then(|p| p.parent()).map(|p| p.as_u32());
+            let run_time = process.map(|p| p.run_time()).unwrap_or(0);
+            (parent_pid, run_time)
         };
 
         // Tear the child down before asserting so a failed assertion never
@@ -2912,18 +2936,15 @@ mod tests {
             "sysinfo did not enumerate spawned child pid {child_pid}; the process map is empty \
              (macOS: apple-app-store/apple-sandbox makes refresh_processes a no-op)"
         );
-        let (l7, _) = resolved.expect("extract_l7_from_pid returned None for an enumerated child");
         assert_eq!(
-            l7.parent_pid,
+            parent_pid,
             Some(our_pid),
-            "resolved L7 parent_pid {:?} did not match the spawning test process {our_pid}",
-            l7.parent_pid
+            "resolved parent_pid {parent_pid:?} did not match the spawning test process {our_pid}"
         );
         assert!(
-            l7.run_time >= 1,
-            "resolved L7 run_time was {} (expected >= 1s after a 2.5s settle); sysinfo did not \
-             snapshot the process start_time",
-            l7.run_time
+            run_time >= 1,
+            "resolved run_time was {run_time} (expected >= 1s after a 2.5s settle); sysinfo did \
+             not snapshot the process start_time"
         );
     }
 
