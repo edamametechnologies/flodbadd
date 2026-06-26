@@ -1357,7 +1357,7 @@ impl FlodbaddCapture {
                     };
 
                     error!(
-                        "Failed to create capture on device: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, planned_settings={{immediate_mode=true, promisc=false, timeout_ms=100}}, available_devices={:?}",
+                        "Failed to create capture on device: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, planned_settings={{immediate_mode=(linux:false,other:true), promisc=false, timeout_ms=100}}, available_devices={:?}",
                         e,
                         e,
                         device_name,
@@ -1370,8 +1370,30 @@ impl FlodbaddCapture {
                 }
             };
 
-            // Set immediate mode
-            cap = cap.immediate_mode(true);
+            // Capture delivery mode.
+            //
+            // On Linux, immediate_mode(true) makes libpcap return from each
+            // read as soon as a single packet is available. Combined with the
+            // kernel coalescing TCP segments via GRO into large "super
+            // packets", a busy interface then drives one userspace wakeup +
+            // syscall per delivered packet, which shows up as sustained
+            // capture-thread CPU (observed at ~40% of a core on the Linux
+            // dogfood host). Disabling immediate mode and giving the kernel an
+            // 8 MiB capture ring lets packets be delivered in batches; the
+            // 100ms read timeout below still bounds delivery latency on quiet
+            // links, so session/DNS/L7 processing is unaffected.
+            //
+            // macOS (BPF) and Windows (Npcap) do not exhibit the same
+            // per-packet syscall storm in the dogfood perf data, so they keep
+            // immediate mode for the lowest-latency delivery.
+            #[cfg(target_os = "linux")]
+            {
+                cap = cap.immediate_mode(false).buffer_size(8 * 1024 * 1024);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                cap = cap.immediate_mode(true);
+            }
 
             // Open the capture
             // Type is changing from Inactive to Active, we need a let
@@ -1395,7 +1417,7 @@ impl FlodbaddCapture {
                     };
 
                     error!(
-                        "Failed to open pcap capture: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, settings={{immediate_mode=true, promisc=false, timeout_ms=100}}, available_devices={:?}",
+                        "Failed to open pcap capture: {} (debug={:?}); device='{}', interface='{}', addresses={:?}, settings={{immediate_mode=(linux:false,other:true), promisc=false, timeout_ms=100}}, available_devices={:?}",
                         e,
                         e,
                         device_name,
