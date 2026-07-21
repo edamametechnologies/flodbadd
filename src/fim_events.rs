@@ -527,8 +527,7 @@ mod tests {
         let any_missing = store.get_recent_events_missing_process_attribution(10);
         assert_eq!(any_missing.len(), 3);
 
-        let sensitive_missing =
-            store.get_recent_sensitive_events_missing_process_attribution(10);
+        let sensitive_missing = store.get_recent_sensitive_events_missing_process_attribution(10);
         assert_eq!(sensitive_missing.len(), 1);
         assert_eq!(sensitive_missing[0].uid, keychain_uid);
     }

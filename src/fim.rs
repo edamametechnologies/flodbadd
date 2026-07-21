@@ -1156,7 +1156,11 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             if process_name.is_some() || process_path.is_some() {
                 cache_attribution(&path, &process_name, &process_path);
                 for uid in &uids {
-                    store.update_process_attribution(uid, process_name.clone(), process_path.clone());
+                    store.update_process_attribution(
+                        uid,
+                        process_name.clone(),
+                        process_path.clone(),
+                    );
                     updated += 1;
                 }
                 continue;
