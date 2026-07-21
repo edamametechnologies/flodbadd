@@ -24,10 +24,21 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
+/// Negative (miss) entries live longer: Keychain atomic-rename staging leaves
+/// no open FD, so re-probing every 1 Hz drain just burns `lsof` / RM budget.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+const FIM_ATTRIBUTION_NEGATIVE_CACHE_TTL_SECS: u64 = 60;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_MAX_ENTRIES: usize = 5_000;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL: u64 = 500;
+/// Hard cap on live OS probes (`lsof` / Restart Manager) per drain-time
+/// backfill pass. Candidate selection can still examine up to
+/// [`FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT`] events, but Tier-3 work is
+/// bounded so a Keychain rename storm cannot stall `get_file_events` for
+/// seconds on every 1 Hz sync.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub const FIM_BACKFILL_TIER3_PROBE_LIMIT: usize = 4;
 #[cfg(target_os = "windows")]
 const FIM_HASH_WORK_QUEUE_CAPACITY: usize = 2_048;
 #[cfg(target_os = "windows")]
@@ -41,6 +52,21 @@ struct CachedAttribution {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl CachedAttribution {
+    fn is_negative(&self) -> bool {
+        self.process_name.is_none() && self.process_path.is_none()
+    }
+
+    fn ttl_secs(&self) -> u64 {
+        if self.is_negative() {
+            FIM_ATTRIBUTION_NEGATIVE_CACHE_TTL_SECS
+        } else {
+            FIM_ATTRIBUTION_CACHE_TTL_SECS
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 static FIM_ATTRIBUTION_CACHE: Lazy<DashMap<String, CachedAttribution>> = Lazy::new(DashMap::new);
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -51,12 +77,13 @@ static FIM_CACHE_INSERT_COUNTER: std::sync::atomic::AtomicU64 =
 fn prune_attribution_cache() {
     // `Instant::now() - TTL` panics within TTL seconds of boot (monotonic-from-
     // boot clock underflow). When uptime < TTL nothing can be older than the
-    // window, so skip the age prune and keep all entries.
-    if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(
-        FIM_ATTRIBUTION_CACHE_TTL_SECS,
-    )) {
-        FIM_ATTRIBUTION_CACHE.retain(|_, v| v.recorded_at > cutoff);
-    }
+    // window, so keep the entry.
+    FIM_ATTRIBUTION_CACHE.retain(|_, v| {
+        Instant::now()
+            .checked_sub(std::time::Duration::from_secs(v.ttl_secs()))
+            .map(|cutoff| v.recorded_at > cutoff)
+            .unwrap_or(true)
+    });
 
     if FIM_ATTRIBUTION_CACHE.len() > FIM_ATTRIBUTION_CACHE_MAX_ENTRIES {
         let mut entries: Vec<_> = FIM_ATTRIBUTION_CACHE
@@ -88,13 +115,40 @@ fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &O
     }
 }
 
+/// Record that a live OS probe found no holder for `path`, so the next
+/// drain(s) skip Tier-3 for this path until the negative TTL expires.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn cache_attribution_miss(path: &str) {
+    cache_attribution(path, &None, &None);
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn lookup_cache(path: &str) -> Option<(Option<String>, Option<String>)> {
     let entry = FIM_ATTRIBUTION_CACHE.get(path)?;
-    if entry.recorded_at.elapsed().as_secs() > FIM_ATTRIBUTION_CACHE_TTL_SECS {
+    if entry.recorded_at.elapsed().as_secs() > entry.ttl_secs() {
         return None;
     }
     Some((entry.process_name.clone(), entry.process_path.clone()))
+}
+
+/// Group backfill candidates by path, preserving first-seen (most recent)
+/// path order. Many Keychain rename UIDs share one artifact path; probing
+/// once and applying the result to every UID is the whole point of dedupe.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn group_backfill_candidates_by_path(
+    candidates: &[FimEvent],
+) -> (Vec<String>, std::collections::HashMap<String, Vec<String>>) {
+    let mut path_order: Vec<String> = Vec::new();
+    let mut uids_by_path: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for event in candidates {
+        let entry = uids_by_path.entry(event.path.clone()).or_default();
+        if entry.is_empty() {
+            path_order.push(event.path.clone());
+        }
+        entry.push(event.uid.clone());
+    }
+    (path_order, uids_by_path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,22 +757,25 @@ fn best_effort_process_attribution(
         return (Some(name), Some(proc_path));
     }
 
-    // Tier 2: in-memory lsof result cache
+    // Tier 2: in-memory lsof result cache (positive or negative)
     if let Some((name, proc_path)) = lookup_cache(&path_str) {
-        if name.is_some() || proc_path.is_some() {
-            return (name, proc_path);
-        }
+        return (name, proc_path);
     }
 
     // Tier 3: live lsof + sysinfo
     let (pid, fallback_name) = match lookup_pid_for_path(path) {
         Some(details) => details,
-        None => return (None, None),
+        None => {
+            cache_attribution_miss(&path_str);
+            return (None, None);
+        }
     };
 
     let result = lookup_process_details(pid, fallback_name);
     if result.0.is_some() || result.1.is_some() {
         cache_attribution(&path_str, &result.0, &result.1);
+    } else {
+        cache_attribution_miss(&path_str);
     }
     result
 }
@@ -743,11 +800,9 @@ fn best_effort_process_attribution(
         return (Some(name), Some(proc_path));
     }
 
-    // Tier 2: in-memory cache
+    // Tier 2: in-memory cache (positive or negative)
     if let Some((name, proc_path)) = lookup_cache(&path_str) {
-        if name.is_some() || proc_path.is_some() {
-            return (name, proc_path);
-        }
+        return (name, proc_path);
     }
 
     // Tier 3: Restart Manager + sysinfo, on the artifact path itself.
@@ -810,6 +865,7 @@ fn best_effort_process_attribution(
         }
     }
 
+    cache_attribution_miss(&path_str);
     (None, None)
 }
 
@@ -970,45 +1026,76 @@ fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
-    let candidates = store.get_recent_events_missing_process_attribution(max_events);
-    let mut updated = 0;
+    // Store selector already prefers sensitive/non-delete events so `/tmp`
+    // churn cannot starve the window; re-apply `should_backfill_*` here as the
+    // single policy gate shared with unit tests.
+    let candidates: Vec<FimEvent> = store
+        .get_recent_sensitive_events_missing_process_attribution(max_events)
+        .into_iter()
+        .filter(should_backfill_process_attribution)
+        .collect();
+    if candidates.is_empty() {
+        return 0;
+    }
 
-    for event in candidates {
-        if !should_backfill_process_attribution(&event) {
+    let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
+    let mut updated = 0;
+    let mut tier3_probes = 0usize;
+
+    for path in path_order {
+        let Some(uids) = uids_by_path.remove(&path) else {
             continue;
-        }
+        };
 
         // Tier 1: ES file attribution table
-        if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&event.path) {
-            store.update_process_attribution(&event.uid, Some(name), Some(proc_path));
-            updated += 1;
+        if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&path) {
+            let name = Some(name);
+            let proc_path = Some(proc_path);
+            cache_attribution(&path, &name, &proc_path);
+            for uid in &uids {
+                store.update_process_attribution(uid, name.clone(), proc_path.clone());
+                updated += 1;
+            }
             continue;
         }
 
-        // Tier 2: in-memory lsof result cache
-        if let Some((name, proc_path)) = lookup_cache(&event.path) {
+        // Tier 2: in-memory cache (positive or negative)
+        if let Some((name, proc_path)) = lookup_cache(&path) {
             if name.is_some() || proc_path.is_some() {
-                store.update_process_attribution(&event.uid, name, proc_path);
-                updated += 1;
-                continue;
+                for uid in &uids {
+                    store.update_process_attribution(uid, name.clone(), proc_path.clone());
+                    updated += 1;
+                }
             }
+            continue;
         }
 
-        // Tier 3: live lsof + sysinfo
-        let path = Path::new(&event.path);
-        let (pid, fallback_name) = match lookup_pid_for_path(path) {
+        // Tier 3: budgeted live lsof + sysinfo (one probe per unique path)
+        if tier3_probes >= FIM_BACKFILL_TIER3_PROBE_LIMIT {
+            continue;
+        }
+        tier3_probes += 1;
+
+        let fs_path = Path::new(&path);
+        let (pid, fallback_name) = match lookup_pid_for_path(fs_path) {
             Some(details) => details,
-            None => continue,
+            None => {
+                cache_attribution_miss(&path);
+                continue;
+            }
         };
 
         let (process_name, process_path) = lookup_process_details(pid, fallback_name);
         if process_name.is_none() && process_path.is_none() {
+            cache_attribution_miss(&path);
             continue;
         }
 
-        cache_attribution(&event.path, &process_name, &process_path);
-        store.update_process_attribution(&event.uid, process_name, process_path);
-        updated += 1;
+        cache_attribution(&path, &process_name, &process_path);
+        for uid in &uids {
+            store.update_process_attribution(uid, process_name.clone(), process_path.clone());
+            updated += 1;
+        }
     }
 
     updated
@@ -1016,72 +1103,99 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
 
 #[cfg(target_os = "windows")]
 pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
-    let candidates = store.get_recent_events_missing_process_attribution(max_events);
-    let mut updated = 0;
+    let candidates: Vec<FimEvent> = store
+        .get_recent_sensitive_events_missing_process_attribution(max_events)
+        .into_iter()
+        .filter(should_backfill_process_attribution)
+        .collect();
+    if candidates.is_empty() {
+        return 0;
+    }
 
-    for event in candidates {
-        if !should_backfill_process_attribution(&event) {
+    let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
+    let mut updated = 0;
+    let mut tier3_probes = 0usize;
+
+    for path in path_order {
+        let Some(uids) = uids_by_path.remove(&path) else {
             continue;
-        }
+        };
 
         // Tier 1: ETW file attribution table (canonicalizes path internally).
-        if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&event.path) {
-            store.update_process_attribution(&event.uid, Some(name), Some(proc_path));
-            updated += 1;
+        if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&path) {
+            let name = Some(name);
+            let proc_path = Some(proc_path);
+            cache_attribution(&path, &name, &proc_path);
+            for uid in &uids {
+                store.update_process_attribution(uid, name.clone(), proc_path.clone());
+                updated += 1;
+            }
             continue;
         }
 
-        // Tier 2: in-memory cache
-        if let Some((name, proc_path)) = lookup_cache(&event.path) {
+        // Tier 2: in-memory cache (positive or negative)
+        if let Some((name, proc_path)) = lookup_cache(&path) {
             if name.is_some() || proc_path.is_some() {
-                store.update_process_attribution(&event.uid, name, proc_path);
-                updated += 1;
-                continue;
+                for uid in &uids {
+                    store.update_process_attribution(uid, name.clone(), proc_path.clone());
+                    updated += 1;
+                }
             }
+            continue;
         }
 
-        // Tier 3: Restart Manager on the artifact path itself.
-        let path = Path::new(&event.path);
-        if let Some((pid, fallback_name)) = lookup_pid_for_path(path) {
+        // Tier 3 (+ optional 3b parent walk): one budgeted probe per unique path.
+        if tier3_probes >= FIM_BACKFILL_TIER3_PROBE_LIMIT {
+            continue;
+        }
+        tier3_probes += 1;
+
+        let fs_path = Path::new(&path);
+        if let Some((pid, fallback_name)) = lookup_pid_for_path(fs_path) {
             let (process_name, process_path) = lookup_process_details(pid, fallback_name);
             if process_name.is_some() || process_path.is_some() {
-                cache_attribution(&event.path, &process_name, &process_path);
-                store.update_process_attribution(&event.uid, process_name, process_path);
-                updated += 1;
+                cache_attribution(&path, &process_name, &process_path);
+                for uid in &uids {
+                    store.update_process_attribution(uid, process_name.clone(), process_path.clone());
+                    updated += 1;
+                }
                 continue;
             }
         }
 
         // Tier 3b: parent-directory Restart Manager probe for sensitive
-        // events (atomic-rename writers like Chrome `User Data`). See
-        // `best_effort_process_attribution` for the rationale.
-        if event.is_sensitive {
-            let mut current = path.parent();
-            let mut hops = 0u32;
-            let mut found = false;
-            while let Some(parent) = current {
-                if parent.parent().is_none() {
-                    break;
-                }
-                if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
-                    let (process_name, process_path) = lookup_process_details(pid, fallback_name);
-                    if process_name.is_some() || process_path.is_some() {
-                        cache_attribution(&event.path, &process_name, &process_path);
-                        store.update_process_attribution(&event.uid, process_name, process_path);
+        // atomic-rename writers (Chrome `User Data`, etc.).
+        let mut current = fs_path.parent();
+        let mut hops = 0u32;
+        let mut found = false;
+        while let Some(parent) = current {
+            if parent.parent().is_none() {
+                break;
+            }
+            if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
+                let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+                if process_name.is_some() || process_path.is_some() {
+                    cache_attribution(&path, &process_name, &process_path);
+                    for uid in &uids {
+                        store.update_process_attribution(
+                            uid,
+                            process_name.clone(),
+                            process_path.clone(),
+                        );
                         updated += 1;
-                        found = true;
-                        break;
                     }
-                }
-                hops += 1;
-                if hops >= 2 {
+                    found = true;
                     break;
                 }
-                current = parent.parent();
             }
-            if found {
-                continue;
+            hops += 1;
+            if hops >= 2 {
+                break;
             }
+            current = parent.parent();
+        }
+        if !found {
+            cache_attribution_miss(&path);
         }
     }
 
@@ -1912,5 +2026,64 @@ mod tests {
     fn test_parse_lsof_pid_and_command_extracts_first_process() {
         let parsed = parse_lsof_pid_and_command("p4242\nccursor\nf4\n");
         assert_eq!(parsed, Some((4242, Some("cursor".to_string()))));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn test_negative_attribution_cache_hit_and_positive_overwrite() {
+        clear_attribution_cache();
+        let path = "/Users/test/Library/Keychains/login.keychain-db";
+
+        cache_attribution_miss(path);
+        assert_eq!(lookup_cache(path), Some((None, None)));
+
+        cache_attribution(
+            path,
+            &Some("securityd".to_string()),
+            &Some("/usr/sbin/securityd".to_string()),
+        );
+        let hit = lookup_cache(path).expect("positive cache hit");
+        assert_eq!(hit.0.as_deref(), Some("securityd"));
+        assert_eq!(hit.1.as_deref(), Some("/usr/sbin/securityd"));
+        clear_attribution_cache();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn test_group_backfill_candidates_dedupes_path_and_keeps_recency_order() {
+        fn event(path: &str, secs_ago: i64) -> FimEvent {
+            let ts = Utc::now() - chrono::Duration::seconds(secs_ago);
+            FimEvent {
+                path: path.to_string(),
+                event_type: FimEventType::Modify,
+                timestamp: ts,
+                size: None,
+                hash: None,
+                process_name: None,
+                process_path: None,
+                parent_process_name: None,
+                parent_process_path: None,
+                is_sensitive: true,
+                labels: vec![],
+                uid: FimEvent::compute_uid(path, &FimEventType::Modify, &ts),
+                last_modified: ts,
+            }
+        }
+
+        let keychain = "/Users/test/Library/Keychains/login.keychain-db";
+        let ssh = "/Users/test/.ssh/id_rsa";
+        // Candidates arrive newest-first (as the store selector returns them).
+        let candidates = vec![
+            event(keychain, 0),
+            event(keychain, 1),
+            event(ssh, 2),
+            event(keychain, 3),
+        ];
+
+        let (path_order, uids_by_path) = group_backfill_candidates_by_path(&candidates);
+        assert_eq!(path_order, vec![keychain.to_string(), ssh.to_string()]);
+        assert_eq!(uids_by_path.get(keychain).map(|v| v.len()), Some(3));
+        assert_eq!(uids_by_path.get(ssh).map(|v| v.len()), Some(1));
+        assert_eq!(FIM_BACKFILL_TIER3_PROBE_LIMIT, 4);
     }
 }

@@ -164,6 +164,36 @@ impl FimEventStore {
         events
     }
 
+    /// Like [`Self::get_recent_events_missing_process_attribution`], but only
+    /// returns events that the drain-time backfill will actually probe:
+    /// sensitive, non-delete, attribution still missing.
+    ///
+    /// Selecting at the store layer (instead of taking any missing-attribution
+    /// event and filtering later) keeps `/tmp` / explicit-watch churn from
+    /// occupying the backfill window and starving Keychain / credential-store
+    /// candidates that need Tier-3 `lsof` / Restart Manager probes.
+    pub fn get_recent_sensitive_events_missing_process_attribution(
+        &self,
+        max_events: usize,
+    ) -> Vec<FimEvent> {
+        let mut events: Vec<FimEvent> = self
+            .events
+            .iter()
+            .filter(|e| {
+                let event = e.value();
+                process_attribution_missing(event)
+                    && event.is_sensitive
+                    && event.event_type != FimEventType::Delete
+            })
+            .map(|e| e.value().clone())
+            .collect();
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        if events.len() > max_events {
+            events.truncate(max_events);
+        }
+        events
+    }
+
     pub fn update_process_attribution(
         &self,
         uid: &str,
@@ -233,7 +263,8 @@ impl FimEventStore {
         // Remove expired events
         self.events.retain(|_, v| v.timestamp > cutoff);
 
-        // If still over limit, remove oldest
+        // Cap by snapshot length with saturating_sub: concurrent DashMap
+        // mutations can shrink live len below max_events after the check.
         if self.events.len() > self.max_events {
             let mut events: Vec<(String, DateTime<Utc>)> = self
                 .events
@@ -242,7 +273,7 @@ impl FimEventStore {
                 .collect();
             events.sort_by(|a, b| a.1.cmp(&b.1));
 
-            let to_remove = self.events.len() - self.max_events;
+            let to_remove = events.len().saturating_sub(self.max_events);
             for (uid, _) in events.into_iter().take(to_remove) {
                 self.events.remove(&uid);
                 debug!("FIM: pruned event {}", uid);
@@ -433,6 +464,76 @@ mod tests {
     }
 
     #[test]
+    fn test_get_recent_sensitive_events_missing_skips_temp_and_delete() {
+        let store = FimEventStore::new();
+        let now = Utc::now();
+        let older = now - chrono::Duration::seconds(5);
+
+        // Non-sensitive /tmp churn -- must not occupy the sensitive window.
+        store.insert(FimEvent {
+            path: "/tmp/churn.bin".to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: now,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/tmp/churn.bin", &FimEventType::Modify, &now),
+            last_modified: now,
+        });
+
+        // Sensitive delete -- backfill skips deletes.
+        store.insert(FimEvent {
+            path: "/Users/test/.ssh/id_rsa".to_string(),
+            event_type: FimEventType::Delete,
+            timestamp: now,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: true,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/Users/test/.ssh/id_rsa", &FimEventType::Delete, &now),
+            last_modified: now,
+        });
+
+        let keychain_uid = FimEvent::compute_uid(
+            "/Users/test/Library/Keychains/login.keychain-db",
+            &FimEventType::Rename,
+            &older,
+        );
+        store.insert(FimEvent {
+            path: "/Users/test/Library/Keychains/login.keychain-db".to_string(),
+            event_type: FimEventType::Rename,
+            timestamp: older,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: true,
+            labels: vec![],
+            uid: keychain_uid.clone(),
+            last_modified: older,
+        });
+
+        let any_missing = store.get_recent_events_missing_process_attribution(10);
+        assert_eq!(any_missing.len(), 3);
+
+        let sensitive_missing =
+            store.get_recent_sensitive_events_missing_process_attribution(10);
+        assert_eq!(sensitive_missing.len(), 1);
+        assert_eq!(sensitive_missing[0].uid, keychain_uid);
+    }
+
+    #[test]
     fn test_update_process_attribution_backfills_missing_fields() {
         let store = FimEventStore::new();
         let ts = Utc::now();
@@ -572,6 +673,47 @@ mod tests {
             });
         }
         assert!(store.event_count() <= 5);
+    }
+
+    #[test]
+    fn test_fim_event_store_concurrent_prune_does_not_overflow() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(FimEventStore::with_limits(32, FIM_EVENT_RETENTION_TIMEOUT));
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                let base = Utc::now();
+                for i in 0..200 {
+                    if i % 17 == 0 {
+                        store.clear();
+                    }
+                    let ts = base + ChronoDuration::milliseconds(i);
+                    let path = format!("/test/t{}_{}.txt", t, i);
+                    store.insert(FimEvent {
+                        path: path.clone(),
+                        event_type: FimEventType::Create,
+                        timestamp: ts,
+                        size: None,
+                        hash: None,
+                        process_name: None,
+                        process_path: None,
+                        parent_process_name: None,
+                        parent_process_path: None,
+                        is_sensitive: false,
+                        labels: vec![],
+                        uid: FimEvent::compute_uid(&path, &FimEventType::Create, &ts),
+                        last_modified: ts,
+                    });
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("prune worker panicked");
+        }
+        assert!(store.event_count() <= 32);
     }
 
     #[test]
