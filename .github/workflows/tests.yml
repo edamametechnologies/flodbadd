@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/tests.yml'
   workflow_dispatch:
   push:
     branches:
@@ -16,6 +17,7 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/tests.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -34,6 +36,12 @@ env:
   LAMBDA_SIGNATURE: ${{ secrets.LAMBDA_SIGNATURE }}
   # Debug mode
   EDAMAME_LOG_LEVEL: debug
+  # Pinned nightly. The 2026-07-23 nightly (89c61a754) has a codegen ICE
+  # (rustc_codegen_ssa/src/mir/operand.rs:291, "not immediate") that panics
+  # compiling tokio's runtime::task::Notified for the x86_64-linux-android
+  # target. 2026-07-22 (6f72b5dd5) is the last known-good across all targets.
+  # Bump deliberately once the upstream regression is fixed.
+  RUST_NIGHTLY: nightly-2026-07-22
 
 jobs:
   test-native:
@@ -171,18 +179,19 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
           targets: ${{ matrix.target }}
 
       - name: Set Rust toolchain
         shell: bash
         run: |
           # For ebpf
-          rustup toolchain install nightly --component rust-src
-          rustup component add --toolchain nightly llvm-tools-preview
-          # Use nightly by default so that build.rs picks it up automatically
-          echo "RUSTUP_TOOLCHAIN=nightly" >> $HOME/.cargo/env
+          rustup toolchain install "${RUST_NIGHTLY}" --component rust-src
+          rustup component add --toolchain "${RUST_NIGHTLY}" llvm-tools-preview
+          # Use the pinned nightly by default so that build.rs picks it up automatically
+          echo "RUSTUP_TOOLCHAIN=${RUST_NIGHTLY}" >> $HOME/.cargo/env
 
       - name: iOS add-ons
         if: matrix.platform == 'ios'
