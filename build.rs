@@ -29,6 +29,15 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(L7_EBPF_EMBEDDED)");
     println!("cargo::rustc-check-cfg=cfg(DNS_EBPF_EMBEDDED)");
 
+    // Marks the *library* crate compilation (as opposed to this build script,
+    // which is compiled before it runs and never sees this cfg). windows_npcap.rs
+    // is shared between the library and this build script via a `#[path]` include;
+    // the library routes Npcap downloads through the shared `threatmodels_rs::tls`
+    // helper while the build script keeps a plain reqwest client (threatmodels_rs
+    // is deliberately not a build-dependency here).
+    println!("cargo::rustc-check-cfg=cfg(flodbadd_lib)");
+    println!("cargo::rustc-cfg=flodbadd_lib");
+
     // Always execute the Npcap download logic on Windows
     #[cfg(target_os = "windows")]
     {

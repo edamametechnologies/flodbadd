@@ -40,14 +40,39 @@ pub fn ensure_wayback_raw(url: &str) -> String {
     url.to_string()
 }
 
+/// Builds the blocking HTTP client used for Npcap downloads.
+///
+/// In the compiled flodbadd *library* (marked by the `flodbadd_lib` cfg emitted
+/// from build.rs) with `platform_certs` enabled, this routes through the shared
+/// workspace TLS helper so the download trusts the platform certificate store
+/// (system CAs, incl. enterprise TLS-inspection proxies such as Netskope). In
+/// the `build.rs` include context -- where `threatmodels_rs` is intentionally
+/// NOT a build-dependency to keep the build script light -- and when the feature
+/// is off, it falls back to a plain reqwest blocking client (bundled webpki
+/// roots).
+#[cfg(all(flodbadd_lib, feature = "platform_certs"))]
+fn npcap_blocking_client() -> Result<reqwest::blocking::Client, String> {
+    threatmodels_rs::tls::blocking_client_builder()
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+#[cfg(not(all(flodbadd_lib, feature = "platform_certs")))]
+fn npcap_blocking_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
 pub fn download_file_with_retry(url: &str) -> Result<reqwest::blocking::Response, String> {
     let mut attempts = 0;
     let max_attempts = 10;
     let max_wait_secs = 300; // 5 minutes
                              // Assigned on every loop path before the failure branch reads it.
     let mut last_error: String;
+    let client = npcap_blocking_client()?;
     loop {
-        match reqwest::blocking::get(url) {
+        match client.get(url).send() {
             Ok(response) => {
                 if response.status().is_success() {
                     return Ok(response);

@@ -14,7 +14,12 @@ links = "flodbadd_npcap"
 async_fn_in_trait = "allow"
 
 [features]
-default = []
+default = ["platform_certs"]
+# Trust the OS/platform certificate store (system CAs, including enterprise
+# TLS-inspection proxies such as Netskope or Zscaler) for outbound HTTPS,
+# via the shared threatmodels_rs::tls helper. Covers CloudModel (whitelist/
+# blacklist) updates and the Windows Npcap installer download. No-op on Android.
+platform_certs = ["threatmodels_rs/platform_certs"]
 # Async channel-based packet delivery API; depends on packetcapture being enabled in the consuming crate
 asyncpacketcapture = []
 # Live packet capture via pcap/Npcap; pulls in DNS, process attribution, and packet parsing deps
@@ -44,8 +49,8 @@ edamame_backend = { git = "https://github.com/edamametechnologies/edamame_backen
 #undeadlock = { path = "../undeadlock" }
 undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 # Local copy in order to allow rapid development/debug
-#threatmodels_rs = { path = "../threatmodels-rs" }
-threatmodels_rs = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main" }
+#threatmodels_rs = { path = "../threatmodels-rs", default-features = false, features = ["blocking"] }
+threatmodels_rs = { git = "https://github.com/edamametechnologies/threatmodels-rs", branch = "main", default-features = false, features = ["blocking"] }
 
 # Global statics w/ mutex
 lazy_static = "1.5"
