@@ -1,6 +1,6 @@
 [package]
 name = "flodbadd"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
 description = "Network scanning and session monitoring library"
