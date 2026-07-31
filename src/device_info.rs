@@ -8,9 +8,45 @@ use edamame_backend::lanscan_vulnerability_info_backend::VulnerabilityInfoBacken
 use macaddr::MacAddr6;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, warn};
+
+/// Upper bound on open ports for a standard-breadth scan (the ~5099-port DB).
+/// Real phones, IoT, and routers sit well below this; a standard scan that
+/// falsely marks nearly the entire DB as open lands far above it.
+pub const MAX_REASONABLE_OPEN_PORTS: usize = 256;
+
+/// Upper bound on open ports for a deep-breadth scan (0..=65535), and the
+/// ceiling applied to community import and share.
+///
+/// A deep sweep probes ~13x more ports than the standard DB, so it legitimately
+/// discovers more listeners: a Docker host publishing many container ports, or a
+/// server with a wide service surface, can plausibly exceed
+/// [`MAX_REASONABLE_OPEN_PORTS`]. Nothing on a LAN plausibly exceeds this.
+/// Import and share use this same value so that a port count we accept from a
+/// first-hand local deep scan is also a port count we are willing to store,
+/// publish, and accept from a peer -- otherwise local state and the published
+/// payload silently disagree.
+pub const MAX_REASONABLE_OPEN_PORTS_DEEP: usize = 1024;
+
+/// Probed-port count above which a sweep counts as deep-breadth.
+///
+/// Sits well above the standard port DB (which may grow over time) and far
+/// below a full 0..=65535 sweep, so the classification stays correct without
+/// tracking which scan mode produced a given device.
+pub const DEEP_PROBE_BREADTH_THRESHOLD: usize = 8192;
+
+/// Pick the open-port ceiling appropriate to how many ports were actually
+/// probed for a device. Breadth varies *within* one scan: the host's own IP is
+/// always deep-scanned even when neighbors get the standard port list.
+pub fn max_reasonable_open_ports_for_probed(probed_ports: usize) -> usize {
+    if probed_ports > DEEP_PROBE_BREADTH_THRESHOLD {
+        MAX_REASONABLE_OPEN_PORTS_DEEP
+    } else {
+        MAX_REASONABLE_OPEN_PORTS
+    }
+}
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum DeviceCriticality {
@@ -1249,7 +1285,8 @@ impl DeviceInfo {
             }
         }
 
-        // Merge open ports
+        // Merge open ports (union only — local scans must call
+        // `reconcile_open_ports_after_scan` first so closed ports can be pruned).
         if !new_device.open_ports.is_empty() {
             // We need to do it manually as the services or banners might be different as it can include timestamps
             for new_port in new_device.open_ports.iter() {
@@ -1412,6 +1449,91 @@ impl DeviceInfo {
             device.deleted = new_device.deleted;
             device.last_modified = new_device.last_modified;
         }
+    }
+
+    /// Reconcile `open_ports` after a local port scan.
+    ///
+    /// Result:
+    /// ```text
+    /// open_ports = open_this_scan
+    ///            ∪ { existing ports whose port ∉ definitely_closed }
+    /// ```
+    ///
+    /// `definitely_closed` carries only the ports the target *actively refused*
+    /// (TCP RST, i.e. `ECONNREFUSED`). A port that timed out, errored, or was
+    /// never reached because the scan was cancelled or throttled is absent from
+    /// that set and is therefore carried forward: silence is not evidence of
+    /// closure, and treating it as such makes ports flap in and out on every
+    /// scan of a filtered or rate-limited host.
+    ///
+    /// Retraction being evidence-driven leaves one gap by design: a host that
+    /// silently drops every probe refuses nothing, so a cached list that is
+    /// already wrong stays wrong. That case is the anomaly guard's job
+    /// ([`Self::strip_anomalous_open_ports_with_limit`] applied to the
+    /// reconciled record), not this function's.
+    ///
+    /// Per-port `dismissed` is preserved for survivors.
+    pub fn reconcile_open_ports_after_scan(
+        &mut self,
+        open_this_scan: &[PortInfo],
+        definitely_closed: &HashSet<u16>,
+    ) {
+        let previous_dismissed: HashMap<u16, bool> = self
+            .open_ports
+            .iter()
+            .map(|p| (p.port, p.dismissed))
+            .collect();
+
+        let mut carried: Vec<PortInfo> = self
+            .open_ports
+            .iter()
+            .filter(|p| !definitely_closed.contains(&p.port))
+            .cloned()
+            .collect();
+
+        let mut next: Vec<PortInfo> = open_this_scan.to_vec();
+        for port in next.iter_mut() {
+            if let Some(dismissed) = previous_dismissed.get(&port.port) {
+                port.dismissed = *dismissed;
+            }
+        }
+
+        // A fresh open verdict supersedes the carried-forward entry for the same
+        // port, so the service name and banner reflect this scan.
+        let open_ports_set: HashSet<u16> = next.iter().map(|p| p.port).collect();
+        carried.retain(|p| !open_ports_set.contains(&p.port));
+        next.extend(carried);
+        next.sort_by(|a, b| a.port.cmp(&b.port));
+        self.open_ports = next;
+    }
+
+    /// Clear `open_ports` when the count exceeds `limit`.
+    /// Returns true when ports were stripped.
+    pub fn strip_anomalous_open_ports_with_limit(&mut self, limit: usize) -> bool {
+        if self.open_ports.len() > limit {
+            warn!(
+                "Stripping anomalous open_ports ({} > {}) for {:?}",
+                self.open_ports.len(),
+                limit,
+                self.get_ip_address()
+            );
+            self.open_ports.clear();
+            self.non_std_ports = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear `open_ports` when the count exceeds the deep-scan ceiling
+    /// [`MAX_REASONABLE_OPEN_PORTS_DEEP`].
+    ///
+    /// This is the community-boundary guard, used on import and share. It is
+    /// deliberately the loosest ceiling any local scan can produce, so a device
+    /// we store from a first-hand deep scan is never silently dropped when it
+    /// crosses the boundary.
+    pub fn strip_anomalous_open_ports(&mut self) -> bool {
+        self.strip_anomalous_open_ports_with_limit(MAX_REASONABLE_OPEN_PORTS_DEEP)
     }
 
     pub fn clear(&mut self) {
@@ -4779,5 +4901,235 @@ mod tests {
             local_device.last_seen <= now + chrono::Duration::seconds(1),
             "last_seen should not be in the future after merge"
         );
+    }
+
+    fn make_port(port: u16, dismissed: bool) -> PortInfo {
+        PortInfo {
+            port,
+            protocol: "tcp".to_string(),
+            service: String::new(),
+            banner: String::new(),
+            dismissed,
+        }
+    }
+
+    #[test]
+    fn test_reconcile_open_ports_prunes_refused_ports() {
+        // Cached device poisoned with ~5000 false opens. The host refuses every
+        // port it does not actually serve, so a clean rescan collapses it to the
+        // real service surface in one pass.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let probed: HashSet<u16> = (1u16..=5000).collect();
+        device.open_ports = probed.iter().copied().map(|p| make_port(p, false)).collect();
+        // Port 22 was dismissed by the user before the poison episode.
+        if let Some(p) = device.open_ports.iter_mut().find(|p| p.port == 22) {
+            p.dismissed = true;
+        }
+
+        let open_this_scan = vec![make_port(22, false), make_port(80, false)];
+        let refused: HashSet<u16> = probed
+            .iter()
+            .copied()
+            .filter(|p| *p != 22 && *p != 80)
+            .collect();
+        device.reconcile_open_ports_after_scan(&open_this_scan, &refused);
+
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![22, 80]);
+        let port22 = device.open_ports.iter().find(|p| p.port == 22).unwrap();
+        assert!(
+            port22.dismissed,
+            "dismissed flag must survive reconcile on survivors"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_open_ports_keeps_unrefused_ports() {
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        device.open_ports = vec![
+            make_port(80, false),
+            make_port(443, false),
+            make_port(65000, true), // never probed (e.g. community-only discovery)
+        ];
+        // 443 was refused this scan; 65000 was not probed at all.
+        let refused: HashSet<u16> = [443u16].into_iter().collect();
+        let open_this_scan = vec![make_port(80, false)];
+
+        device.reconcile_open_ports_after_scan(&open_this_scan, &refused);
+
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![80, 65000]);
+        assert!(
+            device
+                .open_ports
+                .iter()
+                .find(|p| p.port == 65000)
+                .unwrap()
+                .dismissed
+        );
+    }
+
+    #[test]
+    fn test_reconcile_open_ports_does_not_prune_on_silence() {
+        // A host that drops probes (filtered, rate-limited, or a scan that was
+        // cancelled mid-flight) refuses nothing. Without an explicit refusal
+        // there is no evidence to retract on, so the cached list must survive
+        // intact rather than flap to empty and back.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 148))));
+        device.open_ports = vec![make_port(22, false), make_port(80, true)];
+
+        device.reconcile_open_ports_after_scan(&[], &HashSet::new());
+
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![22, 80]);
+        assert!(
+            device
+                .open_ports
+                .iter()
+                .find(|p| p.port == 80)
+                .unwrap()
+                .dismissed,
+            "dismissed flag must survive a no-evidence scan"
+        );
+    }
+
+    #[test]
+    fn test_strip_anomalous_open_ports() {
+        // The default entry point is the community-boundary guard, which uses
+        // the deep ceiling so a first-hand deep scan we store is also a payload
+        // we are willing to publish.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        device.open_ports = (1u16..=(MAX_REASONABLE_OPEN_PORTS_DEEP as u16 + 1))
+            .map(|p| make_port(p, false))
+            .collect();
+        device.non_std_ports = true;
+
+        assert!(device.strip_anomalous_open_ports());
+        assert!(device.open_ports.is_empty());
+        assert!(!device.non_std_ports);
+
+        device.open_ports = vec![make_port(80, false)];
+        assert!(!device.strip_anomalous_open_ports());
+        assert_eq!(device.open_ports.len(), 1);
+
+        // A count between the two ceilings is anomalous for a standard sweep
+        // but plausible for a deep one.
+        let between = MAX_REASONABLE_OPEN_PORTS as u16 + 1;
+        device.open_ports = (1u16..=between).map(|p| make_port(p, false)).collect();
+        assert!(!device.strip_anomalous_open_ports());
+        assert_eq!(device.open_ports.len(), between as usize);
+        assert!(device.strip_anomalous_open_ports_with_limit(MAX_REASONABLE_OPEN_PORTS));
+        assert!(device.open_ports.is_empty());
+    }
+
+    #[test]
+    fn test_max_reasonable_open_ports_for_probed() {
+        // Standard port DB breadth keeps the tight ceiling.
+        assert_eq!(
+            max_reasonable_open_ports_for_probed(5099),
+            MAX_REASONABLE_OPEN_PORTS
+        );
+        // A full 0..=65535 sweep -- including the always-deep self scan -- gets
+        // the loose one.
+        assert_eq!(
+            max_reasonable_open_ports_for_probed(65536),
+            MAX_REASONABLE_OPEN_PORTS_DEEP
+        );
+        assert_eq!(
+            max_reasonable_open_ports_for_probed(DEEP_PROBE_BREADTH_THRESHOLD),
+            MAX_REASONABLE_OPEN_PORTS
+        );
+        assert_eq!(
+            max_reasonable_open_ports_for_probed(DEEP_PROBE_BREADTH_THRESHOLD + 1),
+            MAX_REASONABLE_OPEN_PORTS_DEEP
+        );
+    }
+
+    #[test]
+    fn test_merge_alone_cannot_shrink_poisoned_ports() {
+        // Documents why reconcile must run before merge: union never drops.
+        let mut cached = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        cached.open_ports = (1u16..=500).map(|p| make_port(p, false)).collect();
+
+        let mut fresh = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        fresh.is_local = true;
+        fresh.open_ports = vec![make_port(80, false)];
+
+        DeviceInfo::merge(&mut cached, &fresh);
+        assert_eq!(
+            cached.open_ports.len(),
+            500,
+            "merge unions; without reconcile poison persists"
+        );
+    }
+
+    #[test]
+    fn test_dropping_host_poisoned_cache_converges_via_guard() {
+        // The measured worst case: a host that silently drops every probe.
+        // Nothing is refused, so reconcile has no evidence and carries the whole
+        // poisoned list forward. The breadth-scaled guard on the *cached* record
+        // is the only thing that clears it, which is why it cannot be applied
+        // only to the freshly scanned device (that one holds zero ports here, so
+        // it never trips the guard).
+        //
+        // Sequenced as merge_and_post_process_devices does it: reconcile the
+        // cached record, guard it, then merge the fresh device in.
+        let mut cached = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 148))));
+        cached.open_ports = (1u16..=5005).map(|p| make_port(p, false)).collect();
+        cached.non_std_ports = true;
+
+        // Fresh scan of a dropping host: no opens, no refusals.
+        let fresh = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 148))));
+
+        cached.reconcile_open_ports_after_scan(&fresh.open_ports, &HashSet::new());
+        assert_eq!(
+            cached.open_ports.len(),
+            5005,
+            "silence retracts nothing -- the guard is the backstop, not reconcile"
+        );
+
+        // Standard sweep breadth, so the tight ceiling applies.
+        let limit = max_reasonable_open_ports_for_probed(5099);
+        assert!(cached.strip_anomalous_open_ports_with_limit(limit));
+        assert!(cached.open_ports.is_empty());
+        assert!(!cached.non_std_ports);
+
+        // The merge that follows must not undo the guard. It re-unions the fresh
+        // device, which passed the scan-site guard, so the record stays bounded.
+        DeviceInfo::merge(&mut cached, &fresh);
+        assert!(
+            cached.open_ports.is_empty(),
+            "post-guard merge must not re-poison the record"
+        );
+    }
+
+    #[test]
+    fn test_ourselves_community_ports_survive_scan_reconcile() {
+        // Our own record is merged with the community view before reconcile, so
+        // reconcile must not treat "the community reported it and our sweep did
+        // not confirm it" as a retraction. Only a refusal retracts.
+        let mut ourselves = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        ourselves.open_ports = vec![
+            make_port(22, false),
+            make_port(631, false),
+            make_port(49152, false), // community-reported, no longer listening
+        ];
+
+        // Our own deep sweep sees 22 only; 631 is genuinely gone (refused).
+        let open_this_scan = vec![make_port(22, false)];
+        let refused: HashSet<u16> = [631u16].into_iter().collect();
+        ourselves.reconcile_open_ports_after_scan(&open_this_scan, &refused);
+
+        let ports: Vec<u16> = ourselves.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(
+            ports,
+            vec![22, 49152],
+            "refused port drops, unconfirmed community port stays"
+        );
+
+        // A plausible count stays put under the deep ceiling the self scan earns.
+        let limit = max_reasonable_open_ports_for_probed(65536);
+        assert!(!ourselves.strip_anomalous_open_ports_with_limit(limit));
+        assert_eq!(ourselves.open_ports.len(), 2);
     }
 }
