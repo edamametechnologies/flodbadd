@@ -4920,7 +4920,11 @@ mod tests {
         // real service surface in one pass.
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
         let probed: HashSet<u16> = (1u16..=5000).collect();
-        device.open_ports = probed.iter().copied().map(|p| make_port(p, false)).collect();
+        device.open_ports = probed
+            .iter()
+            .copied()
+            .map(|p| make_port(p, false))
+            .collect();
         // Port 22 was dismissed by the user before the poison episode.
         if let Some(p) = device.open_ports.iter_mut().find(|p| p.port == 22) {
             p.dismissed = true;
