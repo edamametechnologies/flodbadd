@@ -167,7 +167,8 @@ lazy_static! {
     // Cache for HTTPS port lists
     static ref HTTPS_PORT_LIST_CACHE: Arc<CustomRwLock<Vec<u16>>> = Arc::new(CustomRwLock::new(Vec::new()));
 
-    // Cache for device criticality computations – key is a comma-separated sorted list of ports
+    // Cache for device criticality computations. The key covers every scoring
+    // input, not just the ports -- see `get_device_criticality`.
     // Stored as a lock-free snapshot to avoid DashMap shard contention on hot reads.
     static ref CRITICALITY_CACHE_PTR: ArcSwap<HashMap<String, String>> = ArcSwap::from_pointee(HashMap::new());
 
@@ -312,55 +313,153 @@ pub async fn get_vulns_names_of_port(port: u16) -> Vec<String> {
     vulns.iter().map(|vuln| vuln.name.clone()).collect()
 }
 
-pub async fn get_device_criticality(port_info_list: &[PortInfo]) -> String {
-    ensure_port_vulns_initialized();
-    // Build a deterministic key – sorted list of ports
-    let mut ports: Vec<u16> = port_info_list.iter().map(|p| p.port).collect();
-    ports.sort_unstable();
-    let key = ports
-        .iter()
-        .map(|p| p.to_string())
-        .collect::<Vec<String>>()
-        .join(",");
+/// A single port whose vulnerability count reaches this on its own makes the
+/// device `High`. Only 80 and 443 clear it in the current database, which is the
+/// point: a reachable web server is the one service where one open port is
+/// enough to call a device high-criticality.
+pub const CRITICALITY_HIGH_PORT_VULN_COUNT: u32 = 8;
 
-    // Check cache first via ArcSwap-loaded pointer
+/// This many *distinct* ports carrying known vulnerabilities makes the device
+/// `High` regardless of any individual count. This is what lets a broad host
+/// reach `High` without a web server, and it is deliberately a count of
+/// vulnerable ports rather than of open ports -- breadth of unremarkable ports
+/// (a speaker exposing seven proprietary services with no CVE history) is not
+/// the same risk as breadth of known-vulnerable ones.
+pub const CRITICALITY_HIGH_VULNERABLE_PORTS: usize = 3;
+
+/// This many open ports makes the device at least `Medium` even when none of
+/// them carry a known vulnerability: attack surface we cannot attribute is
+/// still attack surface.
+pub const CRITICALITY_MEDIUM_OPEN_PORTS: usize = 4;
+
+/// A vendor needs at least this many known vulnerabilities before its history
+/// alone lifts a device to `Medium`. The floor exists because the count measures
+/// the size of a vendor's CVE catalogue, which tracks how heavily researched the
+/// vendor is at least as much as how exposed the device is -- so single-digit
+/// catalogues are noise. Vendor history can never reach `High` on its own for
+/// the same reason.
+pub const CRITICALITY_MEDIUM_VENDOR_VULNS: usize = 10;
+
+/// Everything criticality is derived from. Grouped into a struct because the
+/// three inputs must travel together: scoring ports without the vendor and
+/// scan-evidence context is what made the previous scale report `Low` for hosts
+/// we had simply failed to scan.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceCriticalityInputs<'a> {
+    /// Open ports the operator has not dismissed.
+    pub ports: &'a [PortInfo],
+    /// Known vulnerabilities for the device's vendor, already resolved through
+    /// the vendor-name fallback walk.
+    pub vendor_vuln_count: usize,
+    /// Whether any scan has ever returned a definite verdict for this device.
+    /// False means `Unknown`: absence of open ports is not evidence of safety.
+    pub has_port_scan_evidence: bool,
+}
+
+/// Rate a device's criticality as the strongest tier any single signal supports.
+///
+/// Tiers, in order of precedence:
+///
+/// | Tier | Claim |
+/// |---|---|
+/// | `Unknown` | No ports, no port evidence, and no vendor history -- nothing can be claimed |
+/// | `High` | One port with [`CRITICALITY_HIGH_PORT_VULN_COUNT`]+ known vulns, or [`CRITICALITY_HIGH_VULNERABLE_PORTS`]+ distinct vulnerable ports |
+/// | `Medium` | Any vulnerable port, or [`CRITICALITY_MEDIUM_OPEN_PORTS`]+ open ports, or a vendor with [`CRITICALITY_MEDIUM_VENDOR_VULNS`]+ known vulns |
+/// | `Low` | Scanned, and none of the above |
+///
+/// Taking the maximum over independent signals rather than summing weights is
+/// deliberate. A weighted sum needs every signal calibrated against every other
+/// one, and the underlying data will not support that: 44 of the port database's
+/// weight sits on port 80 alone, and vendor counts span 1 to 211 while measuring
+/// something only loosely related to risk. Under a sum, both distortions leak
+/// into every verdict and weak signals accumulate into strong ones. Under a max,
+/// each rule stands or falls on its own claim and every verdict traces to one
+/// rule that fired.
+pub async fn get_device_criticality(inputs: DeviceCriticalityInputs<'_>) -> String {
+    ensure_port_vulns_initialized();
+
+    let mut ports: Vec<u16> = inputs.ports.iter().map(|p| p.port).collect();
+    ports.sort_unstable();
+    ports.dedup();
+
+    // The key spans every input, not just the ports. Keying on ports alone let
+    // two devices with identical ports but different vendors collide, so
+    // whichever was scored first decided for both.
+    let key = format!(
+        "{}|v{}|e{}",
+        ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<String>>()
+            .join(","),
+        inputs.vendor_vuln_count,
+        u8::from(inputs.has_port_scan_evidence),
+    );
+
     let criticality_cache = CRITICALITY_CACHE_PTR.load();
     if let Some(entry) = criticality_cache.get(&key) {
         return entry.clone();
     }
 
-    // Get current map through lock-free pointer
-    let port_vulns = PORT_VULNS_PTR.load();
-
-    // Compute sum of counts
-    let count_sum = ports.iter().fold(0, |acc, port| {
-        if let Some(count) = PORT_COUNTS_CACHE.get(port) {
-            acc + *count
-        } else {
-            // If not in cache, use the already retrieved port_vulns
-            if let Some(port_info) = port_vulns.get(port) {
-                let count = port_info.count;
-                PORT_COUNTS_CACHE.insert(*port, count);
-                acc + count
-            } else {
-                acc
-            }
-        }
-    });
-
-    let criticality = if count_sum >= 10 {
-        "High".to_string()
-    } else if !ports.is_empty() {
-        "Medium".to_string()
-    } else {
-        "Low".to_string()
-    };
+    let criticality = classify_criticality(&ports, inputs);
 
     // Update the cache snapshot; concurrent writers can overwrite each other, which is fine for a cache.
     let mut updated_cache: HashMap<String, String> = CRITICALITY_CACHE_PTR.load().as_ref().clone();
     updated_cache.insert(key, criticality.clone());
     CRITICALITY_CACHE_PTR.store(Arc::new(updated_cache));
     criticality
+}
+
+/// Tier decision for an already-normalised port list. Split out from
+/// [`get_device_criticality`] so the rules can be tested without the cache.
+fn classify_criticality(ports: &[u16], inputs: DeviceCriticalityInputs<'_>) -> String {
+    // `Unknown` requires the absence of *every* signal, not just of ports.
+    // `DeviceCriticality::Unknown` sorts below `Low`, so it is the least visible
+    // bucket in the UI; anything routed there is in practice deprioritised
+    // below a host we scanned and found clean. That is the right home for a
+    // sleeping thermostat we know nothing about, and the wrong home for a
+    // vendor with a 211-CVE history whose surface we merely failed to measure.
+    // So a vendor history that clears the `Medium` bar scores on its own, and
+    // only a host with no ports, no scan evidence, and no vendor history is
+    // reported as unrated.
+    if ports.is_empty()
+        && !inputs.has_port_scan_evidence
+        && inputs.vendor_vuln_count < CRITICALITY_MEDIUM_VENDOR_VULNS
+    {
+        return "Unknown".to_string();
+    }
+
+    let port_vulns = PORT_VULNS_PTR.load();
+    let vuln_count_of = |port: &u16| -> u32 {
+        if let Some(count) = PORT_COUNTS_CACHE.get(port) {
+            return *count;
+        }
+        let count = port_vulns.get(port).map_or(0, |info| info.count);
+        PORT_COUNTS_CACHE.insert(*port, count);
+        count
+    };
+
+    let vulnerable: Vec<u32> = ports
+        .iter()
+        .map(vuln_count_of)
+        .filter(|count| *count > 0)
+        .collect();
+    let worst = vulnerable.iter().copied().max().unwrap_or(0);
+
+    if worst >= CRITICALITY_HIGH_PORT_VULN_COUNT
+        || vulnerable.len() >= CRITICALITY_HIGH_VULNERABLE_PORTS
+    {
+        return "High".to_string();
+    }
+
+    if !vulnerable.is_empty()
+        || ports.len() >= CRITICALITY_MEDIUM_OPEN_PORTS
+        || inputs.vendor_vuln_count >= CRITICALITY_MEDIUM_VENDOR_VULNS
+    {
+        return "Medium".to_string();
+    }
+
+    "Low".to_string()
 }
 
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
@@ -477,33 +576,231 @@ mod tests {
         );
     }
 
+    fn port(port: u16) -> PortInfo {
+        PortInfo {
+            port,
+            protocol: "tcp".to_string(),
+            banner: "".to_string(),
+            service: "".to_string(),
+            dismissed: false,
+        }
+    }
+
+    /// Inputs for a device that has been scanned, with no vendor CVE history --
+    /// isolates whichever port rule the test is about.
+    fn scanned(ports: &[PortInfo]) -> DeviceCriticalityInputs<'_> {
+        DeviceCriticalityInputs {
+            ports,
+            vendor_vuln_count: 0,
+            has_port_scan_evidence: true,
+        }
+    }
+
+    /// The headline product claim: a reachable web server makes a device `High`.
+    /// Port 80 carries by far the largest vulnerability catalogue in the DB, so
+    /// it clears the single-port threshold on its own.
     #[tokio::test]
     #[serial]
     async fn test_get_device_criticality() {
         setup();
         clear_caches().await;
-        let port_info_list = vec![
-            PortInfo {
-                port: 80,
-                protocol: "tcp".to_string(),
-                banner: "".to_string(),
-                service: "http".to_string(),
-                dismissed: false,
-            },
-            PortInfo {
-                port: 22,
-                protocol: "tcp".to_string(),
-                banner: "".to_string(),
-                service: "ssh".to_string(),
-                dismissed: false,
-            },
-        ];
-        let criticality = get_device_criticality(&port_info_list).await;
+
+        let http_count = PORT_VULNS_PTR.load().get(&80).map_or(0, |info| info.count);
         assert!(
-            criticality == "Medium" || criticality == "High",
-            "Criticality should be 'Medium' or 'High', got '{}'",
-            criticality
+            http_count >= CRITICALITY_HIGH_PORT_VULN_COUNT,
+            "port 80 has {} known vulns, below the {} needed for a lone port to rate High -- \
+             either the DB shrank or the threshold moved",
+            http_count,
+            CRITICALITY_HIGH_PORT_VULN_COUNT
         );
+
+        let ports = vec![port(80), port(22)];
+        assert_eq!(get_device_criticality(scanned(&ports)).await, "High");
+    }
+
+    /// A silent host and a genuinely closed-up host both have zero open ports.
+    /// Only the scan-evidence flag separates them, and conflating the two is what
+    /// made unreachable devices report `Low`.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_unknown_without_scan_evidence() {
+        setup();
+        clear_caches().await;
+
+        assert_eq!(
+            get_device_criticality(DeviceCriticalityInputs {
+                ports: &[],
+                vendor_vuln_count: 0,
+                has_port_scan_evidence: false,
+            })
+            .await,
+            "Unknown"
+        );
+        assert_eq!(get_device_criticality(scanned(&[])).await, "Low");
+    }
+
+    /// Vendor history rates an unscanned host, because `Unknown` sorts below
+    /// `Low` and would bury it. Failing to measure a heavily-CVE'd vendor's
+    /// attack surface is not a reason to file it under the bucket the operator
+    /// reads last.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_vendor_history_rates_unscanned_host() {
+        setup();
+        clear_caches().await;
+        assert_eq!(
+            get_device_criticality(DeviceCriticalityInputs {
+                ports: &[],
+                vendor_vuln_count: CRITICALITY_MEDIUM_VENDOR_VULNS * 10,
+                has_port_scan_evidence: false,
+            })
+            .await,
+            "Medium"
+        );
+        // Just below the bar is still unrated: a small catalogue is noise, so it
+        // is not enough on its own to claim anything about an unscanned host.
+        assert_eq!(
+            get_device_criticality(DeviceCriticalityInputs {
+                ports: &[],
+                vendor_vuln_count: CRITICALITY_MEDIUM_VENDOR_VULNS - 1,
+                has_port_scan_evidence: false,
+            })
+            .await,
+            "Unknown"
+        );
+    }
+
+    /// Vendor CVE history is a real signal on a scanned host, but capped at
+    /// `Medium`: the count tracks how researched a vendor is as much as how
+    /// exposed this device is.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_vendor_history_lifts_scanned_host_to_medium() {
+        setup();
+        clear_caches().await;
+
+        let heavy = DeviceCriticalityInputs {
+            ports: &[],
+            vendor_vuln_count: CRITICALITY_MEDIUM_VENDOR_VULNS,
+            has_port_scan_evidence: true,
+        };
+        assert_eq!(get_device_criticality(heavy).await, "Medium");
+
+        let light = DeviceCriticalityInputs {
+            vendor_vuln_count: CRITICALITY_MEDIUM_VENDOR_VULNS - 1,
+            ..heavy
+        };
+        assert_eq!(get_device_criticality(light).await, "Low");
+    }
+
+    /// Open ports carrying no known vulnerability still count as attack surface,
+    /// but breadth alone must not reach `High` -- otherwise a speaker exposing
+    /// proprietary services outranks a host with a known-vulnerable service.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_open_port_breadth_caps_at_medium() {
+        setup();
+        clear_caches().await;
+
+        // Ports chosen from the high range so they carry no entry in the DB.
+        let wide: Vec<PortInfo> = (0..CRITICALITY_MEDIUM_OPEN_PORTS as u16)
+            .map(|i| port(61000 + i))
+            .collect();
+        assert_eq!(get_device_criticality(scanned(&wide)).await, "Medium");
+        assert_eq!(
+            get_device_criticality(scanned(&wide[..CRITICALITY_MEDIUM_OPEN_PORTS - 1])).await,
+            "Low"
+        );
+    }
+
+    /// Distinct duplicate ports must not inflate the breadth rule.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_duplicate_ports_do_not_inflate_breadth() {
+        setup();
+        clear_caches().await;
+        let dupes: Vec<PortInfo> = std::iter::repeat_with(|| port(61000))
+            .take(CRITICALITY_MEDIUM_OPEN_PORTS + 2)
+            .collect();
+        assert_eq!(get_device_criticality(scanned(&dupes)).await, "Low");
+    }
+
+    /// The cache key must span every input. Keying on ports alone let two devices
+    /// with identical ports but different vendors collide, so whichever was
+    /// scored first silently decided for both.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_cache_distinguishes_non_port_inputs() {
+        setup();
+        clear_caches().await;
+
+        let ports = [port(61000)];
+        let plain = DeviceCriticalityInputs {
+            ports: &ports,
+            vendor_vuln_count: 0,
+            has_port_scan_evidence: true,
+        };
+        assert_eq!(get_device_criticality(plain).await, "Low");
+
+        let heavy_vendor = DeviceCriticalityInputs {
+            vendor_vuln_count: CRITICALITY_MEDIUM_VENDOR_VULNS,
+            ..plain
+        };
+        assert_eq!(get_device_criticality(heavy_vendor).await, "Medium");
+    }
+
+    /// Ports the live DB rates as vulnerable but below the single-port `High`
+    /// threshold. Sourced from the DB rather than hardcoded so the breadth tests
+    /// assert the rule and not a snapshot of the vulnerability data.
+    fn mildly_vulnerable_ports(n: usize) -> Vec<PortInfo> {
+        ensure_port_vulns_initialized();
+        let vulns = PORT_VULNS_PTR.load();
+        let mut candidates: Vec<u16> = vulns
+            .iter()
+            .filter(|(_, info)| info.count > 0 && info.count < CRITICALITY_HIGH_PORT_VULN_COUNT)
+            .map(|(port, _)| *port)
+            .collect();
+        // Sorted so the selection is deterministic across runs; the DB is a HashMap.
+        candidates.sort_unstable();
+        assert!(
+            candidates.len() >= n,
+            "port vulns DB has only {} ports with a count in 1..{}, need {} to exercise \
+             the vulnerable-port breadth rule",
+            candidates.len(),
+            CRITICALITY_HIGH_PORT_VULN_COUNT,
+            n
+        );
+        candidates.into_iter().take(n).map(port).collect()
+    }
+
+    /// Breadth of *known-vulnerable* ports reaches `High` on its own, even when no
+    /// single port does. This is the path a broad host takes to `High` without a
+    /// web server.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_vulnerable_port_breadth_reaches_high() {
+        setup();
+        clear_caches().await;
+
+        let ports = mildly_vulnerable_ports(CRITICALITY_HIGH_VULNERABLE_PORTS);
+        assert_eq!(get_device_criticality(scanned(&ports)).await, "High");
+
+        // One short of the threshold stays Medium: still vulnerable, not yet broad.
+        assert_eq!(
+            get_device_criticality(scanned(&ports[..CRITICALITY_HIGH_VULNERABLE_PORTS - 1])).await,
+            "Medium"
+        );
+    }
+
+    /// A single known-vulnerable port is enough for `Medium` regardless of how
+    /// small its count is.
+    #[tokio::test]
+    #[serial]
+    async fn test_criticality_single_vulnerable_port_is_medium() {
+        setup();
+        clear_caches().await;
+        let ports = mildly_vulnerable_ports(1);
+        assert_eq!(get_device_criticality(scanned(&ports)).await, "Medium");
     }
 
     // Modify the signature to zeros, perform an update, and check the signature changes

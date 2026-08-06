@@ -1,3 +1,4 @@
+use crate::ip::is_identity_bearing_ipv4;
 use crate::port_info::*;
 use crate::port_vulns::*;
 use crate::vendor_vulns::*;
@@ -46,6 +47,19 @@ pub fn max_reasonable_open_ports_for_probed(probed_ports: usize) -> usize {
     } else {
         MAX_REASONABLE_OPEN_PORTS
     }
+}
+
+/// Whether a MAC address is evidence of one specific network interface.
+///
+/// A multicast address (I/G bit set, which includes broadcast) names a
+/// destination group, never an interface's own address, and a nil address names
+/// nothing at all. Capture parsing can still surface either as a device's
+/// address. Such an address is unusable as identity in *both* directions: it can
+/// split one device across records, and -- because any number of unrelated
+/// records can hold the same group address -- it can also merge unrelated
+/// devices on a shared "identity" that identifies nothing.
+pub fn is_identity_bearing_mac(mac: &MacAddr6) -> bool {
+    !mac.is_multicast() && !mac.is_nil()
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -158,6 +172,14 @@ pub struct DeviceInfo {
     pub device_type: String,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
+    // Last time a scan returned a definite port verdict (an open port or a
+    // refusal) for this device. `None` means no port evidence has ever been
+    // obtained, which is what separates criticality `Unknown` from `Low`: a
+    // host that silently drops every probe looks identical to a host with a
+    // genuinely minimal attack surface if you only count open ports.
+    // `serde(default)` so caches written before this field existed still load.
+    #[serde(default)]
+    pub last_port_scan: Option<DateTime<Utc>>,
     // Origin tracking for community sharing
     pub origin_ip: String, // IP of the device that first discovered this device
     pub origin_network: String, // Network identifier of where the device was first discovered
@@ -219,6 +241,8 @@ impl DeviceInfo {
             // Initialize the times to UNIX_EPOCH
             first_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
             last_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
+            // No port evidence yet -- distinct from "scanned, nothing found".
+            last_port_scan: None,
             last_seen_community: None,
             community_active: false,
             // Origin tracking for community sharing
@@ -303,6 +327,14 @@ impl DeviceInfo {
 
     // Helper method to add IPv4 entry with timestamp (updates if exists)
     pub(crate) fn add_ipv4_entry(&mut self, addr: Ipv4Addr, timestamp: DateTime<Utc>) {
+        // This list is identity evidence for merge decisions, so keep addresses that
+        // name no single host out of it. A record that accumulates several
+        // 169.254.0.0/16 addresses (one per DHCP failure) would otherwise start
+        // matching every other host that ever fell back to link-local.
+        if !is_identity_bearing_ipv4(&addr) {
+            return;
+        }
+
         // Check if address already exists, update timestamp if it does
         if let Some(entry) = self.ip_addresses_v4.iter_mut().find(|e| e.address == addr) {
             if timestamp > entry.last_seen {
@@ -348,6 +380,17 @@ impl DeviceInfo {
 
     // Helper method to add MAC address entry with timestamp (updates if exists)
     pub(crate) fn add_mac_entry(&mut self, addr: MacAddr6, timestamp: DateTime<Utc>) {
+        // Reject addresses that name no interface. Capture parsing surfaces group
+        // addresses (broadcast included) as device addresses, and once stored they act
+        // as identity: the same group address can appear in any number of unrelated
+        // records, so a later merge reads it as shared hardware and fuses hosts that
+        // have nothing in common. This is the chokepoint every path funnels through,
+        // including merge re-importing a peer's entries, so filtering here keeps the
+        // garbage out rather than having each caller remember to.
+        if !is_identity_bearing_mac(&addr) {
+            return;
+        }
+
         // Check if address already exists, update timestamp if it does
         if let Some(entry) = self.mac_addresses.iter_mut().find(|e| e.address == addr) {
             if timestamp > entry.last_seen {
@@ -545,6 +588,27 @@ impl DeviceInfo {
         self.mdns_services.truncate(MAX_MDNS_SERVICES);
     }
 
+    // Drop mDNS services not re-observed within `max_age`.
+    //
+    // The cap above bounds how MANY services we keep, not how OLD they may be, and
+    // merging only ever adds. A service that stopped answering therefore stayed
+    // forever and kept feeding classification, so a device could keep being typed
+    // off a service it no longer ran.
+    //
+    // Expiry is sound here because these are true observation times, not copy
+    // times: the discovery loop re-queries continuously rather than waiting on
+    // announcements, and `add_mdns_entry` only ever moves `last_seen` forward. A
+    // stale entry means the service really did stop answering, not that we stopped
+    // asking. Callers pick `max_age`; it must stay well above the discovery period
+    // so a live-but-briefly-quiet responder is not dropped.
+    //
+    // A timestamp in the future (clock skew) gives a negative age and is kept.
+    pub fn retain_fresh_mdns_services(&mut self, max_age: chrono::Duration) {
+        let now = Utc::now();
+        self.mdns_services
+            .retain(|entry| now.signed_duration_since(entry.last_seen) <= max_age);
+    }
+
     // Truncate MAC addresses to keep only the most recently seen (by timestamp)
     fn truncate_mac_addresses(&mut self) {
         const MAX_MAC_ADDRESSES: usize = 10;
@@ -732,8 +796,9 @@ impl DeviceInfo {
         mac_addresses: Vec<MacAddr6>,
         timestamp: DateTime<Utc>,
     ) {
-        // Ignore nil mac addresses
-        if mac_address.is_nil() {
+        // A primary that names no interface is worse than no primary: it becomes the
+        // record's identity for conflict checks and for the vendor OUI lookup.
+        if !is_identity_bearing_mac(&mac_address) {
             return;
         }
         self.mac_address = Some(mac_address);
@@ -741,11 +806,9 @@ impl DeviceInfo {
         // Add the primary MAC address
         self.add_mac_entry(mac_address, timestamp);
 
-        // Add additional MAC addresses
+        // Add additional MAC addresses. add_mac_entry rejects non-identity addresses.
         for addr in mac_addresses {
-            if !addr.is_nil() {
-                self.add_mac_entry(addr, timestamp);
-            }
+            self.add_mac_entry(addr, timestamp);
         }
 
         // Deduplicate and truncate
@@ -841,11 +904,20 @@ impl DeviceInfo {
         while i < devices.len() {
             let mut j = i + 1;
             while j < devices.len() {
-                let primary_ip_match = devices[i].ip_address == devices[j].ip_address;
+                // A shared primary address only means "same endpoint" when the address
+                // itself names one host. Two hosts that both fell back to link-local,
+                // or two records that both ended up holding a broadcast address, are
+                // not the same device.
+                let primary_ip_match = devices[i].ip_address == devices[j].ip_address
+                    && Self::is_identity_bearing_ip(&devices[i].ip_address);
 
-                let ipv4_overlap = !devices[i].ip_addresses_v4.is_empty()
-                    && !devices[j].ip_addresses_v4.is_empty()
-                    && devices[i].ip_addresses_v4.iter().any(|entry| {
+                // Records persisted before add_ipv4_entry started filtering may still
+                // hold non-host addresses, so screen them here as well.
+                let ipv4_overlap = devices[i]
+                    .ip_addresses_v4
+                    .iter()
+                    .filter(|entry| is_identity_bearing_ipv4(&entry.address))
+                    .any(|entry| {
                         devices[j]
                             .ip_addresses_v4
                             .iter()
@@ -939,13 +1011,17 @@ impl DeviceInfo {
             let mut found = false;
 
             for device in devices.iter_mut() {
-                // Primary IP address match
-                let primary_ip_match = new_device.ip_address == device.ip_address;
+                // Primary IP address match, only when the address names one host
+                // (see the equivalent guard in dedup_vec).
+                let primary_ip_match = new_device.ip_address == device.ip_address
+                    && Self::is_identity_bearing_ip(&new_device.ip_address);
 
                 // Overlapping IP addresses in the lists
-                let ipv4_overlap = !new_device.ip_addresses_v4.is_empty()
-                    && !device.ip_addresses_v4.is_empty()
-                    && new_device.ip_addresses_v4.iter().any(|entry| {
+                let ipv4_overlap = new_device
+                    .ip_addresses_v4
+                    .iter()
+                    .filter(|entry| is_identity_bearing_ipv4(&entry.address))
+                    .any(|entry| {
                         device
                             .ip_addresses_v4
                             .iter()
@@ -1059,14 +1135,49 @@ impl DeviceInfo {
         let mac_conflict = if safe_hostname_match {
             // Safe hostname match - no MAC conflict even if different
             false
-        } else if vendor_known(device1) && vendor_known(device2) {
-            // Both vendors known - check for MAC conflicts using timestamp-aware logic
-            Self::has_mac_conflict(device1, device2)
         } else {
-            false
+            // A differing MAC is evidence of a distinct physical device whether or not
+            // we managed to resolve a vendor for either side. Gating this on vendor
+            // knowledge let unvendored records absorb unrelated hosts.
+            Self::has_mac_conflict(device1, device2)
         };
 
         vendor_conflict || mac_conflict
+    }
+
+    /// Whether an address is evidence of one specific host.
+    ///
+    /// The IPv4 half is delegated to `ip::is_identity_bearing_ipv4`. For IPv6 only
+    /// unspecified, loopback, and multicast are rejected. Link-local IPv6 is
+    /// deliberately kept: unlike `169.254.0.0/16`, an `fe80::` address carries a
+    /// 64-bit interface identifier that is either MAC-derived or random, so two
+    /// records holding the same one really are the same interface.
+    fn is_identity_bearing_ip(ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => is_identity_bearing_ipv4(v4),
+            IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_loopback() && !v6.is_multicast(),
+        }
+    }
+
+    /// Every universally administered address this record has ever carried.
+    ///
+    /// These are the only addresses that pin a record to physical hardware: they are
+    /// burned into the NIC and globally unique, so two records with disjoint
+    /// non-empty sets cannot be the same device. Locally administered addresses are
+    /// excluded because they are exactly the ones a device rotates, and group
+    /// addresses because they identify no interface at all.
+    ///
+    /// The current primary is unioned in rather than assumed present: the history
+    /// list is capped and keeps the most recently seen entries, so a primary that is
+    /// stale relative to the rest can fall off it.
+    fn universal_mac_identity_set(device: &DeviceInfo) -> HashSet<MacAddr6> {
+        device
+            .mac_addresses
+            .iter()
+            .map(|entry| entry.address)
+            .chain(device.get_mac_address())
+            .filter(|mac| mac.is_universal() && is_identity_bearing_mac(mac))
+            .collect()
     }
 
     // Check if two devices have conflicting MAC addresses using timestamp-aware logic
@@ -1074,16 +1185,49 @@ impl DeviceInfo {
     fn has_mac_conflict(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
         match (device1.get_mac_address(), device2.get_mac_address()) {
             (Some(mac1), Some(mac2)) if mac1 != mac2 => {
-                // Different primary MACs - check if they could be the same device
+                // Different primary MACs - check if they could be the same device.
+                //
+                // A universally administered MAC is burned into the NIC and is globally
+                // unique, so two records holding disjoint sets of them hold distinct
+                // NICs. Neither the historical-overlap escape (1) nor the rotation
+                // escape (3) may fire in that case: both model MAC *rotation*, which
+                // only a locally administered (randomized/virtual) MAC can do.
+                //
+                // The comparison spans each record's whole MAC history, not just its
+                // current primary. Comparing primaries alone leaves a record whose
+                // primary happens to be locally administered free to absorb a
+                // universally administered one, because a single local address on
+                // either side made rotation look possible and waved the guard through
+                // -- even when the record already held hardware addresses that
+                // contradict the merge. Once that happens the newly absorbed hardware
+                // address can become the primary, so the next comparison is against a
+                // MAC that arrived by the same bypass, and the record keeps growing.
+                let uaa1 = Self::universal_mac_identity_set(device1);
+                let uaa2 = Self::universal_mac_identity_set(device2);
+
+                if !uaa1.is_empty() && !uaa2.is_empty() && uaa1.is_disjoint(&uaa2) {
+                    debug!(
+                        "MAC conflict: universally administered MAC sets are disjoint ({:?} vs {:?}), distinct NICs",
+                        uaa1, uaa2
+                    );
+                    return true;
+                }
 
                 // 1. Check for MAC overlap in the historical lists
-                // If any MAC appears in both devices, they're likely the same device at different times
-                let mac_overlap = device1.mac_addresses.iter().any(|entry1| {
-                    device2
-                        .mac_addresses
-                        .iter()
-                        .any(|entry2| entry1.address == entry2.address)
-                });
+                // If any MAC appears in both devices, they're likely the same device at
+                // different times. Group addresses are excluded: any number of
+                // unrelated records can hold the same one, so treating it as shared
+                // identity merges devices that have nothing in common.
+                let mac_overlap = device1
+                    .mac_addresses
+                    .iter()
+                    .filter(|entry| is_identity_bearing_mac(&entry.address))
+                    .any(|entry1| {
+                        device2
+                            .mac_addresses
+                            .iter()
+                            .any(|entry2| entry1.address == entry2.address)
+                    });
 
                 if mac_overlap {
                     debug!(
@@ -1443,6 +1587,15 @@ impl DeviceInfo {
             device.origin_network.clone_from(&new_device.origin_network);
         }
 
+        // Port-scan evidence is monotonic: keep the newer stamp from either side.
+        // A peer's record counts, because a peer that got a definite verdict for
+        // this device did observe its ports even if we never could.
+        if let Some(new_stamp) = new_device.last_port_scan {
+            if device.last_port_scan.is_none_or(|cur| new_stamp > cur) {
+                device.last_port_scan = Some(new_stamp);
+            }
+        }
+
         // Merge user properties based on the last modified date
         if new_device.last_modified > device.last_modified {
             device.custom_name.clone_from(&new_device.custom_name);
@@ -1473,11 +1626,21 @@ impl DeviceInfo {
     /// reconciled record), not this function's.
     ///
     /// Per-port `dismissed` is preserved for survivors.
+    ///
+    /// Also stamps [`Self::last_port_scan`] when this scan produced at least one
+    /// definite verdict -- an open port or a refusal. A pass where the target was
+    /// silent on everything it was asked deliberately does *not* stamp: we learned
+    /// nothing, and recording it as scanned would let criticality report `Low`
+    /// ("minimal attack surface") for a host that is merely undetectable.
     pub fn reconcile_open_ports_after_scan(
         &mut self,
         open_this_scan: &[PortInfo],
         definitely_closed: &HashSet<u16>,
     ) {
+        if !open_this_scan.is_empty() || !definitely_closed.is_empty() {
+            self.last_port_scan = Some(Utc::now());
+        }
+
         let previous_dismissed: HashMap<u16, bool> = self
             .open_ports
             .iter()
@@ -3540,6 +3703,88 @@ mod tests {
     }
 
     #[test]
+    fn test_retain_fresh_mdns_services_drops_only_stale() {
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        let now = Utc::now();
+        let max_age = chrono::Duration::seconds(1200);
+
+        device.mdns_services = vec![
+            MdnsServiceEntry {
+                service: "_fresh.local".to_string(),
+                last_seen: now - chrono::Duration::seconds(60),
+            },
+            MdnsServiceEntry {
+                // Just inside the window. Not tested at exact equality: the function
+                // reads its own Utc::now(), which is microseconds past the one here,
+                // so an entry built at exactly `now - max_age` is already outside by
+                // the time it is evaluated. Straddling the boundary by a second each
+                // way is what is actually observable.
+                service: "_boundary.local".to_string(),
+                last_seen: now - max_age + chrono::Duration::seconds(1),
+            },
+            MdnsServiceEntry {
+                service: "_stale.local".to_string(),
+                last_seen: now - max_age - chrono::Duration::seconds(1),
+            },
+        ];
+
+        device.retain_fresh_mdns_services(max_age);
+
+        let kept: Vec<&str> = device
+            .mdns_services
+            .iter()
+            .map(|e| e.service.as_str())
+            .collect();
+        assert!(kept.contains(&"_fresh.local"), "kept: {:?}", kept);
+        assert!(kept.contains(&"_boundary.local"), "kept: {:?}", kept);
+        assert!(
+            !kept.contains(&"_stale.local"),
+            "service past the window must be dropped, kept: {:?}",
+            kept
+        );
+    }
+
+    #[test]
+    fn test_retain_fresh_mdns_services_keeps_future_timestamps() {
+        // Clock skew (NTP step, a responder reporting ahead) yields a negative age.
+        // Treat that as fresh rather than expiring a service we just saw -- dropping
+        // it would make classification depend on clock drift.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        device.mdns_services = vec![MdnsServiceEntry {
+            service: "_skewed.local".to_string(),
+            last_seen: Utc::now() + chrono::Duration::seconds(300),
+        }];
+
+        device.retain_fresh_mdns_services(chrono::Duration::seconds(1200));
+
+        assert_eq!(
+            device.mdns_services.len(),
+            1,
+            "a future timestamp must not be treated as stale"
+        );
+    }
+
+    #[test]
+    fn test_retain_fresh_mdns_services_expires_classification_input() {
+        // The case this exists for: a device kept being typed off a service it no
+        // longer ran, because merging only ever added and the count cap does not
+        // bound age. Once the stale entry is gone the device has no service left to
+        // be classified on.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        device.mdns_services = vec![MdnsServiceEntry {
+            service: "_workstation._tcp.local".to_string(),
+            last_seen: Utc::now() - chrono::Duration::seconds(7200),
+        }];
+
+        device.retain_fresh_mdns_services(chrono::Duration::seconds(1200));
+
+        assert!(
+            device.mdns_services.is_empty(),
+            "long-dead service must stop feeding classification"
+        );
+    }
+
+    #[test]
     fn test_ipv6_deduplication_preserves_most_recent() {
         // Test that deduplication keeps the most recent occurrence
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
@@ -3968,7 +4213,7 @@ mod tests {
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
 
         // Set first primary MAC
-        let mac1 = MacAddr6::new(0x11, 0x11, 0x11, 0x11, 0x11, 0x11);
+        let mac1 = MacAddr6::new(0x10, 0x11, 0x11, 0x11, 0x11, 0x11);
         device.set_mac_address(mac1, vec![]);
         assert_eq!(
             device.get_mac_address(),
@@ -3998,7 +4243,7 @@ mod tests {
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
 
         // Set an old primary MAC
-        let primary_mac = MacAddr6::new(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+        let primary_mac = MacAddr6::new(0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
         let old_timestamp = Utc.with_ymd_and_hms(2023, 1, 1, 12, 0, 0).unwrap();
         device.set_mac_address_with_timestamp(primary_mac, vec![], old_timestamp);
         assert_eq!(device.get_mac_address(), Some(primary_mac));
@@ -4064,6 +4309,298 @@ mod tests {
         assert_eq!(
             device.mac_addresses[0].last_seen, t3,
             "Should keep the most recent timestamp"
+        );
+    }
+
+    #[test]
+    fn test_group_and_nil_macs_are_never_stored_as_identity() {
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        let now = Utc::now();
+
+        // Broadcast, an arbitrary multicast address, and nil. Capture parsing can
+        // surface any of these as a device's address; none names an interface.
+        for rejected in [
+            MacAddr6::broadcast(),
+            MacAddr6::new(0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB), // IPv4 multicast
+            MacAddr6::nil(),
+        ] {
+            device.add_mac_entry(rejected, now);
+            device.set_mac_address_with_timestamp(rejected, vec![], now);
+        }
+
+        assert!(
+            device.mac_addresses.is_empty(),
+            "group and nil addresses must not enter the MAC history, got {:?}",
+            device.mac_addresses
+        );
+        assert_eq!(
+            device.get_mac_address(),
+            None,
+            "an address that names no interface must not become the primary"
+        );
+
+        // A real unicast address still lands normally.
+        let real = MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+        device.set_mac_address_with_timestamp(real, vec![], now);
+        assert_eq!(device.get_mac_address(), Some(real));
+        assert_eq!(device.mac_addresses.len(), 1);
+    }
+
+    #[test]
+    fn test_mac_conflict_across_full_history_not_just_primaries() {
+        // The loophole this covers: a record whose *primary* is locally administered
+        // used to reach the "MAC rotation" escape, letting it absorb a record holding
+        // a hardware address that its own history already contradicts. Observed live
+        // on 192.168.1.72, which had a randomized primary and had swallowed a
+        // universally administered NIC that was simultaneously ARP-reachable at a
+        // different address.
+        //
+        // The timestamps are set far enough apart that the rotation escape would fire
+        // and declare "no conflict", so a pass here can only come from comparing the
+        // full hardware-address history.
+        let now = Utc::now();
+
+        let mut absorber = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 72))));
+        absorber.device_vendor = "Apple, Inc.".to_string();
+        let absorber_hardware = MacAddr6::new(0x00, 0x1B, 0x63, 0x84, 0x45, 0xE6);
+        let absorber_randomized = MacAddr6::new(0x9E, 0x2A, 0x77, 0x10, 0x33, 0x0C);
+        absorber.add_mac_entry(absorber_hardware, now - chrono::Duration::days(5));
+        absorber.add_mac_entry(absorber_randomized, now - chrono::Duration::days(3));
+        // The randomized address is the current primary, which is what used to hide
+        // the hardware address above from the conflict check.
+        absorber.mac_address = Some(absorber_randomized);
+        absorber.last_seen = now - chrono::Duration::days(3);
+
+        let mut distinct = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 193))));
+        distinct.device_vendor = "Apple, Inc.".to_string();
+        let distinct_hardware = MacAddr6::new(0xA4, 0xFC, 0x14, 0x2C, 0xA6, 0xCB);
+        distinct.add_mac_entry(distinct_hardware, now);
+        distinct.mac_address = Some(distinct_hardware);
+        distinct.last_seen = now;
+
+        assert!(
+            DeviceInfo::has_mac_conflict(&absorber, &distinct),
+            "disjoint hardware addresses across the full history are distinct NICs, \
+             even when one record's primary is randomized and the two were last seen \
+             days apart"
+        );
+        assert!(
+            DeviceInfo::has_conflicting_characteristics(&absorber, &distinct),
+            "the conflict must survive to the merge decision"
+        );
+    }
+
+    #[test]
+    fn test_shared_hardware_mac_still_merges_across_history() {
+        // The converse of the test above: the widened comparison must not block a
+        // genuine merge. One NIC, two records, each having also seen a randomized
+        // address, so neither hardware set is disjoint from the other.
+        let now = Utc::now();
+        let shared_hardware = MacAddr6::new(0x00, 0x1B, 0x63, 0x84, 0x45, 0xE6);
+
+        let mut earlier = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        earlier.device_vendor = "Apple, Inc.".to_string();
+        earlier.add_mac_entry(shared_hardware, now - chrono::Duration::days(2));
+        earlier.add_mac_entry(
+            MacAddr6::new(0x9E, 0x2A, 0x77, 0x10, 0x33, 0x0C),
+            now - chrono::Duration::days(2),
+        );
+        earlier.mac_address = Some(shared_hardware);
+        earlier.last_seen = now - chrono::Duration::days(2);
+
+        let mut later = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        later.device_vendor = "Apple, Inc.".to_string();
+        let later_randomized = MacAddr6::new(0x6A, 0x55, 0x01, 0xAB, 0xCD, 0xEF);
+        later.add_mac_entry(shared_hardware, now);
+        later.add_mac_entry(later_randomized, now);
+        later.mac_address = Some(later_randomized);
+        later.last_seen = now;
+
+        assert!(
+            !DeviceInfo::has_mac_conflict(&earlier, &later),
+            "records sharing a hardware address are the same NIC and must still merge"
+        );
+    }
+
+    #[test]
+    fn test_randomized_only_records_still_rotate() {
+        // Two records that have only ever carried locally administered addresses
+        // carry no hardware evidence either way, so the rotation escape must remain
+        // reachable -- this is the ordinary iOS/Android privacy case. No hostname is
+        // set on either side, because a matching specific hostname would short-circuit
+        // the MAC comparison and the test would prove nothing about it.
+        let now = Utc::now();
+
+        let mut earlier = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        earlier.device_vendor = "Apple, Inc.".to_string();
+        let earlier_mac = MacAddr6::new(0x02, 0x11, 0x22, 0x33, 0x44, 0x55);
+        earlier.add_mac_entry(earlier_mac, now - chrono::Duration::days(3));
+        earlier.mac_address = Some(earlier_mac);
+        earlier.last_seen = now - chrono::Duration::days(3);
+
+        let mut later = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))));
+        later.device_vendor = "Apple, Inc.".to_string();
+        let later_mac = MacAddr6::new(0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE);
+        later.add_mac_entry(later_mac, now);
+        later.mac_address = Some(later_mac);
+        later.last_seen = now;
+
+        assert!(
+            !DeviceInfo::has_mac_conflict(&earlier, &later),
+            "randomized-only records carry no hardware evidence and must still rotate"
+        );
+    }
+
+    #[test]
+    fn test_non_host_ipv4_is_not_stored_as_identity() {
+        // The history list is merge evidence, so an address that names no single
+        // host must never reach it. A record that collected one 169.254 address per
+        // DHCP failure would otherwise start matching every other host that ever
+        // fell back to link-local.
+        let now = Utc::now();
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        let baseline = device.ip_addresses_v4.len();
+
+        let refused = [
+            Ipv4Addr::new(169, 254, 13, 7),     // DHCP-failure fallback
+            Ipv4Addr::new(255, 255, 255, 255),  // global broadcast
+            Ipv4Addr::new(224, 0, 0, 251),      // mDNS multicast
+            Ipv4Addr::new(127, 0, 0, 1),        // loopback
+            Ipv4Addr::new(0, 0, 0, 0),          // unspecified
+        ];
+        for addr in refused {
+            device.add_ipv4_entry(addr, now);
+        }
+        assert_eq!(
+            device.ip_addresses_v4.len(),
+            baseline,
+            "non-host addresses must be refused at ingestion, got {:?}",
+            device.ip_addresses_v4
+        );
+        for addr in refused {
+            assert!(
+                !device.ip_addresses_v4.iter().any(|e| e.address == addr),
+                "{addr} names no single host and must not appear in identity history"
+            );
+        }
+
+        device.add_ipv4_entry(Ipv4Addr::new(192, 168, 9, 50), now);
+        assert!(
+            device
+                .ip_addresses_v4
+                .iter()
+                .any(|e| e.address == Ipv4Addr::new(192, 168, 9, 50)),
+            "a real host address must still be recorded"
+        );
+    }
+
+    #[test]
+    fn test_shared_link_local_ipv4_does_not_merge_distinct_devices() {
+        // Two unrelated hosts that both fell back to the same link-local address.
+        // Distinct hardware MACs, distinct hostnames -- nothing but the fallback
+        // address in common, which is not enough.
+        let now = Utc::now();
+
+        let mut a = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(169, 254, 13, 7))));
+        a.hostname = "printer-a.local".to_string();
+        let mac_a = MacAddr6::new(0x3C, 0x22, 0xFB, 0x11, 0x11, 0x11);
+        a.set_mac_address_with_timestamp(mac_a, vec![], now);
+        a.last_seen = now;
+
+        let mut b = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(169, 254, 13, 7))));
+        b.hostname = "laptop-b.local".to_string();
+        let mac_b = MacAddr6::new(0xB8, 0x27, 0xEB, 0x22, 0x22, 0x22);
+        b.set_mac_address_with_timestamp(mac_b, vec![], now);
+        b.last_seen = now;
+
+        let mut devices = vec![a, b];
+        DeviceInfo::dedup_vec(&mut devices);
+        assert_eq!(
+            devices.len(),
+            2,
+            "a shared DHCP-failure fallback address is not evidence of one device"
+        );
+    }
+
+    #[test]
+    fn test_shared_routable_ipv4_still_merges() {
+        // Same shape as the link-local case above but on a routable address, which
+        // does name one endpoint. This is the guard against over-tightening: the
+        // ordinary "same IP, same host" merge must keep working.
+        let now = Utc::now();
+
+        let mut a = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        a.hostname = "nas.local".to_string();
+        a.last_seen = now - chrono::Duration::minutes(5);
+
+        let mut b = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        b.hostname = "nas.local".to_string();
+        b.last_seen = now;
+
+        let mut devices = vec![a, b];
+        DeviceInfo::dedup_vec(&mut devices);
+        assert_eq!(
+            devices.len(),
+            1,
+            "a shared routable address with a matching hostname is one device"
+        );
+    }
+
+    #[test]
+    fn test_legacy_non_host_ipv4_history_is_screened_at_merge_time() {
+        // Records persisted before ingestion filtering existed still hold non-host
+        // addresses, so the merge path has to screen them too.
+        //
+        // The two cases below are the same fixture except for the class of the
+        // shared historical address, and the shared hostname is deliberately
+        // generic so is_safe_hostname_merge refuses the hostname-only path. That
+        // leaves ipv4_confirmed as the only route to a merge, so the differing
+        // outcomes isolate exactly the address-class check.
+        let build_pair = |shared: Ipv4Addr| {
+            let now = Utc::now();
+
+            let mut a = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 61))));
+            a.hostname = "printer".to_string();
+            a.device_vendor = "Acme".to_string();
+            a.last_seen = now;
+            // Bypass add_ipv4_entry to model a record written by an older build.
+            a.ip_addresses_v4.push(IpAddressEntry {
+                address: shared,
+                last_seen: now,
+            });
+
+            let mut b = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 62))));
+            b.hostname = "printer".to_string();
+            b.device_vendor = "Acme".to_string();
+            b.last_seen = now;
+            b.ip_addresses_v4.push(IpAddressEntry {
+                address: shared,
+                last_seen: now,
+            });
+
+            // Sanity: the records really do overlap on the shared historical address.
+            assert!(a
+                .ip_addresses_v4
+                .iter()
+                .any(|e| b.ip_addresses_v4.iter().any(|o| o.address == e.address)));
+
+            vec![a, b]
+        };
+
+        let mut stale = build_pair(Ipv4Addr::new(169, 254, 13, 7));
+        DeviceInfo::dedup_vec(&mut stale);
+        assert_eq!(
+            stale.len(),
+            2,
+            "stale non-host history must not supply the overlap that confirms a merge"
+        );
+
+        let mut routable = build_pair(Ipv4Addr::new(192, 168, 77, 7));
+        DeviceInfo::dedup_vec(&mut routable);
+        assert_eq!(
+            routable.len(),
+            1,
+            "a shared host address in history must still confirm the merge"
         );
     }
 
@@ -4995,6 +5532,70 @@ mod tests {
                 .dismissed,
             "dismissed flag must survive a no-evidence scan"
         );
+    }
+
+    #[test]
+    fn test_reconcile_stamps_port_scan_evidence() {
+        // Either kind of definite verdict counts as evidence the host answered
+        // probes. A refusal-only scan is the important case: it produces no open
+        // ports, so without the stamp the device would be indistinguishable from
+        // one that was never reached and would keep reading as criticality
+        // `Unknown` forever.
+        let mut opened = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(opened.last_port_scan.is_none(), "starts with no evidence");
+        opened.reconcile_open_ports_after_scan(&[make_port(80, false)], &HashSet::new());
+        assert!(opened.last_port_scan.is_some());
+
+        let mut refused = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11))));
+        refused.reconcile_open_ports_after_scan(&[], &[443u16].into_iter().collect());
+        assert!(
+            refused.last_port_scan.is_some(),
+            "a host that refuses a port has demonstrably been reached"
+        );
+        assert!(refused.open_ports.is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_silence_does_not_stamp_port_scan_evidence() {
+        // A dropped-probe scan proves nothing, so it must not claim to have
+        // observed the port surface.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 12))));
+        device.reconcile_open_ports_after_scan(&[], &HashSet::new());
+        assert!(device.last_port_scan.is_none());
+    }
+
+    #[test]
+    fn test_merge_port_scan_evidence_is_monotonic() {
+        // The stamp only moves forward, and it moves forward from either side: a
+        // peer that got a verdict for this device did observe its ports even if
+        // we never could. This is the one field where accepting a remote record
+        // is safe -- it records that a scan happened, not what it found.
+        let older = Utc.with_ymd_and_hms(2026, 8, 1, 10, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 8, 2, 10, 0, 0).unwrap();
+
+        let mut current = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 13))));
+        current.last_port_scan = Some(older);
+        let mut incoming = current.clone();
+        incoming.last_port_scan = Some(newer);
+        DeviceInfo::merge(&mut current, &incoming);
+        assert_eq!(current.last_port_scan, Some(newer));
+
+        // Reverse direction: an older peer stamp must not roll ours back.
+        incoming.last_port_scan = Some(older);
+        DeviceInfo::merge(&mut current, &incoming);
+        assert_eq!(current.last_port_scan, Some(newer));
+
+        // A peer with evidence seeds a device that has none.
+        let mut unscanned = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 14))));
+        let mut peer = unscanned.clone();
+        peer.last_port_scan = Some(older);
+        DeviceInfo::merge(&mut unscanned, &peer);
+        assert_eq!(unscanned.last_port_scan, Some(older));
+
+        // And a peer without evidence never clears ours.
+        peer.last_port_scan = None;
+        DeviceInfo::merge(&mut unscanned, &peer);
+        assert_eq!(unscanned.last_port_scan, Some(older));
     }
 
     #[test]

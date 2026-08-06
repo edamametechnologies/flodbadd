@@ -147,6 +147,28 @@ pub async fn get_description_from_vendor(vendor: &str) -> String {
         .map_or_else(|| "".to_string(), |v| v.vendor.clone())
 }
 
+/// Walk one level up a vendor name for the fallback lookup: drop the last
+/// whitespace-separated token, then any punctuation that split left dangling.
+///
+/// The second step is what makes comma-separated legal suffixes resolve.
+/// `"Apple, Inc."` splits to `"Apple,"`, which matches no key in the database
+/// even though `"Apple"` is present with 70 vulnerabilities; same for
+/// `"Sonos, Inc."` -> `"Sonos"`. Names whose suffix carries no comma
+/// (`"HP Inc."` -> `"HP"`) were unaffected, which is why the bug stayed
+/// invisible for the vendors that happened to be spelled that way.
+///
+/// Always returns a strictly shorter string than its input, so callers can
+/// loop on it until empty without risking a non-terminating walk.
+fn parent_vendor_name(vendor: &str) -> String {
+    match vendor.rfind(' ') {
+        Some(pos) => vendor[..pos]
+            .trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | ':'))
+            .trim_end()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
 pub async fn get_vulns_of_vendor(vendor: &str) -> Vec<VulnerabilityInfo> {
     let mut vendor_name = vendor.to_string();
     while !vendor_name.is_empty() {
@@ -167,12 +189,7 @@ pub async fn get_vulns_of_vendor(vendor: &str) -> Vec<VulnerabilityInfo> {
             return vulns_sorted;
         }
 
-        // Fallback to parent vendor name
-        if let Some(pos) = vendor_name.rfind(' ') {
-            vendor_name.truncate(pos);
-        } else {
-            vendor_name.clear();
-        }
+        vendor_name = parent_vendor_name(&vendor_name);
     }
     Vec::new()
 }
@@ -199,12 +216,7 @@ pub async fn get_vulns_names_of_vendor(vendor: &str) -> Vec<String> {
             return vuln_names;
         }
 
-        // Fallback to parent vendor name
-        if let Some(pos) = vendor_name.rfind(' ') {
-            vendor_name.truncate(pos);
-        } else {
-            vendor_name.clear();
-        }
+        vendor_name = parent_vendor_name(&vendor_name);
     }
     Vec::new()
 }
@@ -254,6 +266,84 @@ mod tests {
     // Initialize logging or other necessary setup here
     fn setup() {
         // Setup code here if needed
+    }
+
+    #[test]
+    fn test_parent_vendor_name_drops_dangling_punctuation() {
+        // The regression this guards: dropping the last token off a
+        // comma-separated legal suffix leaves the comma behind, and
+        // "Apple," matches no key even though "Apple" does.
+        assert_eq!(parent_vendor_name("Apple, Inc."), "Apple");
+        assert_eq!(parent_vendor_name("Sonos, Inc."), "Sonos");
+        // Suffixes with no comma were always fine; keep them that way.
+        assert_eq!(parent_vendor_name("HP Inc."), "HP");
+        assert_eq!(parent_vendor_name("Raspberry Pi Foundation"), "Raspberry Pi");
+        // Repeated separators must not leave trailing whitespace behind.
+        assert_eq!(parent_vendor_name("Apple  Inc."), "Apple");
+        assert_eq!(parent_vendor_name("Philips Lighting BV"), "Philips Lighting");
+    }
+
+    #[test]
+    fn test_parent_vendor_name_always_shortens() {
+        // Callers loop until empty, so every step must strictly shorten or the
+        // walk never terminates.
+        for input in [
+            "Apple, Inc.",
+            "Samsung Electronics Co.,Ltd",
+            "Withings",
+            ", Inc.",
+            " x",
+            "Apple ",
+            "",
+        ] {
+            let parent = parent_vendor_name(input);
+            assert!(
+                parent.len() < input.len() || input.is_empty(),
+                "{input:?} -> {parent:?} did not shorten"
+            );
+        }
+        // And the walk itself terminates from every fleet-observed shape.
+        for input in ["Apple, Inc.", "Guangdong Hongqin Telecom Technology Co.,Ltd."] {
+            let mut name = input.to_string();
+            let mut steps = 0;
+            while !name.is_empty() {
+                name = parent_vendor_name(&name);
+                steps += 1;
+                assert!(steps < 32, "walk from {input:?} did not terminate");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_comma_suffixed_vendor_resolves_to_parent() {
+        setup();
+        clear_caches().await;
+
+        // "Apple, Inc." is what the OUI database actually reports for every
+        // Apple device on a LAN, and it used to resolve to zero
+        // vulnerabilities while the bare "Apple" key carries 70.
+        let bare = get_vulns_of_vendor("Apple").await;
+        assert!(
+            !bare.is_empty(),
+            "the embedded snapshot must carry an 'Apple' key for this test to mean anything"
+        );
+
+        clear_caches().await;
+        let suffixed = get_vulns_of_vendor("Apple, Inc.").await;
+        assert_eq!(
+            suffixed.len(),
+            bare.len(),
+            "'Apple, Inc.' must resolve to the same vulnerabilities as 'Apple'"
+        );
+
+        clear_caches().await;
+        let names = get_vulns_names_of_vendor("Apple, Inc.").await;
+        assert_eq!(
+            names.len(),
+            bare.len(),
+            "the names variant must fall back identically"
+        );
     }
 
     #[tokio::test]

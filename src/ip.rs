@@ -99,6 +99,39 @@ pub fn is_link_local_ipv6(ip: &Ipv6Addr) -> bool {
     (segs[0] & 0xffc0) == 0xfe80
 }
 
+/// Whether an IPv4 address can name exactly one host interface, and is therefore
+/// usable as device identity when deciding whether two records describe the same
+/// physical device.
+///
+/// Rejects the ranges that either name no host at all or that several unrelated
+/// hosts can hold simultaneously:
+/// - `0.0.0.0` (unspecified) and `255.255.255.255` (global broadcast)
+/// - `127.0.0.0/8` loopback -- every host answers for itself
+/// - `224.0.0.0/4` multicast and `240.0.0.0/4` reserved -- group, not interface
+/// - `169.254.0.0/16` link-local -- self-assigned on DHCP failure, re-picked on
+///   every retry, so two records sharing one is coincidence rather than identity
+pub fn is_identity_bearing_ipv4(ip: &Ipv4Addr) -> bool {
+    let val = ipv4_to_u32(ip);
+
+    // Unspecified and global broadcast.
+    if val == 0 || val == 0xFFFFFFFF {
+        return false;
+    }
+    // Loopback: 127.0.0.0/8
+    if (val >> 24) == 127 {
+        return false;
+    }
+    // Multicast 224.0.0.0/4 and reserved 240.0.0.0/4.
+    if (val >> 28) >= 0xE {
+        return false;
+    }
+    // Link-local: 169.254.0.0/16
+    if (val >> 16) == 0xA9FE {
+        return false;
+    }
+    true
+}
+
 pub fn is_private_ipv6(ip: &IpAddr) -> bool {
     match ip {
         // fc00::/7
@@ -318,6 +351,40 @@ mod tests {
         let num = ipv6_to_u128(&ip);
         let expected = u128::from_be_bytes(ip.octets());
         assert_eq!(num, expected);
+    }
+
+    #[test]
+    fn test_is_identity_bearing_ipv4() {
+        // Addresses that name one host.
+        for ip in [
+            Ipv4Addr::new(192, 168, 1, 42),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(172, 16, 5, 9),
+            Ipv4Addr::new(82, 64, 124, 164), // public, still one host
+        ] {
+            assert!(
+                is_identity_bearing_ipv4(&ip),
+                "{ip} names a host and must count as identity"
+            );
+        }
+
+        // Addresses that name no single host.
+        for ip in [
+            Ipv4Addr::new(0, 0, 0, 0),             // unspecified
+            Ipv4Addr::new(255, 255, 255, 255),     // global broadcast
+            Ipv4Addr::new(127, 0, 0, 1),           // loopback
+            Ipv4Addr::new(127, 255, 255, 254),     // loopback, upper end
+            Ipv4Addr::new(224, 0, 0, 251),         // mDNS multicast
+            Ipv4Addr::new(239, 255, 255, 250),     // SSDP multicast
+            Ipv4Addr::new(240, 0, 0, 1),           // reserved
+            Ipv4Addr::new(169, 254, 13, 7),        // DHCP-failure fallback
+            Ipv4Addr::new(169, 254, 255, 255),     // fallback, upper end
+        ] {
+            assert!(
+                !is_identity_bearing_ipv4(&ip),
+                "{ip} names no single host and must not count as identity"
+            );
+        }
     }
 
     #[test]
