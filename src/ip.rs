@@ -370,15 +370,15 @@ mod tests {
 
         // Addresses that name no single host.
         for ip in [
-            Ipv4Addr::new(0, 0, 0, 0),             // unspecified
-            Ipv4Addr::new(255, 255, 255, 255),     // global broadcast
-            Ipv4Addr::new(127, 0, 0, 1),           // loopback
-            Ipv4Addr::new(127, 255, 255, 254),     // loopback, upper end
-            Ipv4Addr::new(224, 0, 0, 251),         // mDNS multicast
-            Ipv4Addr::new(239, 255, 255, 250),     // SSDP multicast
-            Ipv4Addr::new(240, 0, 0, 1),           // reserved
-            Ipv4Addr::new(169, 254, 13, 7),        // DHCP-failure fallback
-            Ipv4Addr::new(169, 254, 255, 255),     // fallback, upper end
+            Ipv4Addr::new(0, 0, 0, 0),         // unspecified
+            Ipv4Addr::new(255, 255, 255, 255), // global broadcast
+            Ipv4Addr::new(127, 0, 0, 1),       // loopback
+            Ipv4Addr::new(127, 255, 255, 254), // loopback, upper end
+            Ipv4Addr::new(224, 0, 0, 251),     // mDNS multicast
+            Ipv4Addr::new(239, 255, 255, 250), // SSDP multicast
+            Ipv4Addr::new(240, 0, 0, 1),       // reserved
+            Ipv4Addr::new(169, 254, 13, 7),    // DHCP-failure fallback
+            Ipv4Addr::new(169, 254, 255, 255), // fallback, upper end
         ] {
             assert!(
                 !is_identity_bearing_ipv4(&ip),

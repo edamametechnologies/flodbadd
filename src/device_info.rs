@@ -4462,11 +4462,11 @@ mod tests {
         let baseline = device.ip_addresses_v4.len();
 
         let refused = [
-            Ipv4Addr::new(169, 254, 13, 7),     // DHCP-failure fallback
-            Ipv4Addr::new(255, 255, 255, 255),  // global broadcast
-            Ipv4Addr::new(224, 0, 0, 251),      // mDNS multicast
-            Ipv4Addr::new(127, 0, 0, 1),        // loopback
-            Ipv4Addr::new(0, 0, 0, 0),          // unspecified
+            Ipv4Addr::new(169, 254, 13, 7),    // DHCP-failure fallback
+            Ipv4Addr::new(255, 255, 255, 255), // global broadcast
+            Ipv4Addr::new(224, 0, 0, 251),     // mDNS multicast
+            Ipv4Addr::new(127, 0, 0, 1),       // loopback
+            Ipv4Addr::new(0, 0, 0, 0),         // unspecified
         ];
         for addr in refused {
             device.add_ipv4_entry(addr, now);

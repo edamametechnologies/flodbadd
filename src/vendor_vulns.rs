@@ -277,10 +277,16 @@ mod tests {
         assert_eq!(parent_vendor_name("Sonos, Inc."), "Sonos");
         // Suffixes with no comma were always fine; keep them that way.
         assert_eq!(parent_vendor_name("HP Inc."), "HP");
-        assert_eq!(parent_vendor_name("Raspberry Pi Foundation"), "Raspberry Pi");
+        assert_eq!(
+            parent_vendor_name("Raspberry Pi Foundation"),
+            "Raspberry Pi"
+        );
         // Repeated separators must not leave trailing whitespace behind.
         assert_eq!(parent_vendor_name("Apple  Inc."), "Apple");
-        assert_eq!(parent_vendor_name("Philips Lighting BV"), "Philips Lighting");
+        assert_eq!(
+            parent_vendor_name("Philips Lighting BV"),
+            "Philips Lighting"
+        );
     }
 
     #[test]
@@ -303,7 +309,10 @@ mod tests {
             );
         }
         // And the walk itself terminates from every fleet-observed shape.
-        for input in ["Apple, Inc.", "Guangdong Hongqin Telecom Technology Co.,Ltd."] {
+        for input in [
+            "Apple, Inc.",
+            "Guangdong Hongqin Telecom Technology Co.,Ltd.",
+        ] {
             let mut name = input.to_string();
             let mut steps = 0;
             while !name.is_empty() {
