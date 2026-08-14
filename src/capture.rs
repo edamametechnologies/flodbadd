@@ -1662,13 +1662,21 @@ impl FlodbaddCapture {
                         return;
                     }
                 };
+                // A persistently failing stream (typically the interface going away)
+                // yields errors as fast as it can be polled, so back off between
+                // failures and give up once recovery is clearly not happening.
+                const CAPTURE_ERROR_BACKOFF: Duration = Duration::from_millis(50);
+                const MAX_CONSECUTIVE_CAPTURE_ERRORS: u32 = 100;
+
                 let mut packet_stream = cap_stream;
                 let mut stop_rx_capture = stop_rx;
                 let mut stats_interval =
                     tokio::time::interval(tokio::time::Duration::from_secs(10));
+                stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let own_ips = interface_ips.clone();
                 let mut total_packets = 0;
                 let mut total_processed = 0;
+                let mut consecutive_errors: u32 = 0;
 
                 debug!("Starting async capture task for {}", interface_name_clone);
                 loop {
@@ -1691,6 +1699,7 @@ impl FlodbaddCapture {
                             match packet_owned {
                                 Some(Ok(packet_owned)) => {
                                     total_packets += 1;
+                                    consecutive_errors = 0;
                                     match parse_packet_pcap(&packet_owned.data, packet_owned.ts) {
                                         Some(ParsedPacket::SessionPacket(cp)) => {
                                             let l7_opt = {
@@ -1737,11 +1746,28 @@ impl FlodbaddCapture {
                                         }
                                     }
                                 }
+                                Some(Err(pcap::Error::TimeoutExpired)) => {
+                                    // Non-blocking read with nothing ready yet, not a failure.
+                                    trace!("Capture timeout on {}", interface_name_clone);
+                                }
                                 Some(Err(e)) => {
-                                    warn!("Error capturing packet on {}: {}", interface_name_clone, e);
+                                    consecutive_errors += 1;
+                                    if consecutive_errors >= MAX_CONSECUTIVE_CAPTURE_ERRORS {
+                                        error!(
+                                            "Capture on {} failed {} consecutive times, last error: {}. Stopping capture task.",
+                                            interface_name_clone, consecutive_errors, e
+                                        );
+                                        break;
+                                    }
+                                    // Only the first failure of a burst is worth a line.
+                                    if consecutive_errors == 1 {
+                                        warn!("Error capturing packet on {}: {}", interface_name_clone, e);
+                                    }
+                                    tokio::time::sleep(CAPTURE_ERROR_BACKOFF).await;
                                 }
                                 None => {
-                                    warn!("Packet stream ended for {}", interface_name_clone);
+                                    info!("Packet stream ended for {}, stopping capture task.", interface_name_clone);
+                                    break;
                                 }
                             }
                         }
