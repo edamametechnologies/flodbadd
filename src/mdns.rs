@@ -277,8 +277,6 @@ async fn process_host(host: Host, service_name: String) {
             // Check if the instance name contains a MAC address
             if let Some(mac_str) = extract_mac_address(&instance) {
                 if let Ok(mac) = mac_str.parse::<MacAddr6>() {
-                    info!("Extracted MAC {} from instance {}", mac, instance);
-
                     // Add or update MAC with current timestamp
                     if let Some(entry) = mdns_info
                         .mac_addresses
@@ -287,6 +285,7 @@ async fn process_host(host: Host, service_name: String) {
                     {
                         entry.last_seen = now;
                     } else {
+                        debug!("Extracted MAC {} from instance {}", mac, instance);
                         mdns_info.mac_addresses.push(MacAddressEntry {
                             address: mac,
                             last_seen: now,
