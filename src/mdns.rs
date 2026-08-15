@@ -475,3 +475,29 @@ pub async fn get_mdns_by_hostname(hostname: &str) -> Option<mDNSInfo> {
         None => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_resolvable_dns_name;
+
+    #[test]
+    fn resolvable_dns_name_accepts_normal_host() {
+        assert!(is_resolvable_dns_name("printer.local"));
+        assert!(is_resolvable_dns_name("_http._tcp.local"));
+    }
+
+    #[test]
+    fn resolvable_dns_name_rejects_empty_or_oversized() {
+        assert!(!is_resolvable_dns_name(""));
+        let label_64 = "a".repeat(64);
+        assert!(!is_resolvable_dns_name(&format!("{}.local", label_64)));
+        let too_long = format!("{}.local", "a".repeat(250));
+        assert!(!is_resolvable_dns_name(&too_long));
+    }
+
+    #[test]
+    fn resolvable_dns_name_allows_rfc_max_label() {
+        let label_63 = "a".repeat(63);
+        assert!(is_resolvable_dns_name(&format!("{}.local", label_63)));
+    }
+}
