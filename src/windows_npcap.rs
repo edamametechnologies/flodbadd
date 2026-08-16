@@ -7,11 +7,39 @@ use std::path::{Path, PathBuf};
 
 // Public constants (used by build.rs and callers)
 
-/// Npcap 0.96 installer. Archive-only by necessity: upstream rotated this
-/// version away and `npcap.com/dist/npcap-0.96.exe` answers 404, so there is no
-/// direct source to fall back to.
-pub const NPCAP_INSTALLER_URL: &str =
-    "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe";
+/// Npcap 0.96 installer sources, tried in order.
+///
+/// The version is pinned because 0.96 is the last release whose free edition
+/// honours `/S`. Silent install is an OEM-only feature in every later version
+/// (Npcap Users' Guide, "Installation"), and Wireshark's bundled copy is no
+/// help because its own `/S` explicitly skips Npcap -- so an unattended install
+/// on a fresh Windows host has exactly this one option.
+///
+/// Upstream still serves it, just not from `/dist/`, which now carries only the
+/// 1.x line; `/dist-old/` is where the pre-1.0 releases moved. Preferring that
+/// over an archived snapshot matters more than availability: it is the vendor's
+/// own HTTPS origin, the same one the SDK comes from. Archived snapshots follow
+/// as fallbacks, and `NPCAP_INSTALLER_URL` overrides the list for an operator
+/// running a local mirror.
+pub const NPCAP_INSTALLER_URLS: &[&str] = &[
+    "https://npcap.com/dist-old/npcap-0.96.exe",
+    "https://web.archive.org/web/20220523140209/https://npcap.com/dist/npcap-0.96.exe",
+    "https://web.archive.org/web/2022/https://npcap.com/dist/npcap-0.96.exe",
+];
+
+/// Primary source. Prefer `NPCAP_INSTALLER_URLS` so the fallbacks are used.
+pub const NPCAP_INSTALLER_URL: &str = NPCAP_INSTALLER_URLS[0];
+
+/// SHA256 of `npcap-0.96.exe` (718600 bytes) as served by `npcap.com/dist-old/`:
+/// an NSIS 2.51 installer requesting `requireAdministrator`, Authenticode-signed
+/// through DigiCert's EV code-signing chain.
+///
+/// This one is load-bearing in a way the SDK pin is not. The SDK is bytes we
+/// link; this is an executable we hand elevated privileges to. Multiple sources
+/// -- one of them a third-party archive -- must not mean multiple things we are
+/// willing to run, so a mismatch aborts before execution rather than after.
+pub const NPCAP_INSTALLER_SHA256: &str =
+    "83667e1306fdcf7f9967c10277b36b87e50ee8812e1ee2bb9443bdd065dc04a1";
 
 /// Npcap SDK 0.1 sources, tried in order. Every download is verified against
 /// `NPCAP_SDK_SHA256`, so whichever source answers first cannot change what we
@@ -314,18 +342,73 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
 
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir.join("npcap-installer.exe");
-    let raw_url = installer_url.unwrap_or_else(|| NPCAP_INSTALLER_URL.to_string());
-    let url = ensure_wayback_raw(&raw_url);
 
-    let response = download_file_with_retry(&url).map_err(|e| format!("download failed: {}", e))?;
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("read failed: {}", e))?;
-    if !bytes.starts_with(b"MZ") {
-        return Err(
-            "downloaded installer is not a valid Windows executable (missing MZ header)".into(),
-        );
+    // Caller argument wins, then the environment override, then the source list.
+    // An override is an operator pointing at their own mirror, so it is exempt
+    // from the hash pin -- pinning it would make the escape hatch unusable for
+    // any build but ours.
+    let (sources, pinned): (Vec<String>, bool) =
+        match installer_url.or_else(|| env::var("NPCAP_INSTALLER_URL").ok()) {
+            Some(explicit) => (vec![explicit], false),
+            None => (
+                NPCAP_INSTALLER_URLS.iter().map(|u| u.to_string()).collect(),
+                true,
+            ),
+        };
+
+    let mut bytes = None;
+    let mut failures = Vec::new();
+    for raw_url in &sources {
+        let url = ensure_wayback_raw(raw_url);
+        tracing::info!("Npcap installer: fetching {}", url);
+        // Short per-source budget: draining the full backoff against a dead
+        // source is how a reachable fallback never gets reached.
+        let fetched = download_file_with_attempts(&url, 3)
+            .and_then(|r| r.bytes().map_err(|e| format!("read failed: {e}")));
+        match fetched {
+            Ok(body) if !body.starts_with(b"MZ") => {
+                failures.push(format!("{url}: not a Windows executable (missing MZ header)"));
+            }
+            Ok(body) => {
+                // Verify before this ever reaches disk as something we execute.
+                let digest = sha256_hex(&body);
+                if pinned && digest != NPCAP_INSTALLER_SHA256 {
+                    tracing::error!(
+                        "Npcap installer: {} served unexpected content (sha256 {})",
+                        url,
+                        digest
+                    );
+                    failures.push(format!(
+                        "{url}: sha256 mismatch (expected {NPCAP_INSTALLER_SHA256}, got {digest})"
+                    ));
+                    continue;
+                }
+                tracing::info!(
+                    "Npcap installer: fetched {} bytes from {} (sha256 {})",
+                    body.len(),
+                    url,
+                    digest
+                );
+                bytes = Some(body);
+                break;
+            }
+            Err(e) => failures.push(format!("{url}: {e}")),
+        }
     }
+
+    let bytes = match bytes {
+        Some(b) => b,
+        None => {
+            let detail = failures.join("; ");
+            tracing::error!("Npcap installer: every source failed: {}", detail);
+            return Err(format!(
+                "Npcap installer download failed from all {} source(s): {detail}. \
+                 Set NPCAP_INSTALLER_URL to a reachable npcap-0.96.exe, or install \
+                 Npcap manually from https://npcap.com",
+                sources.len()
+            ));
+        }
+    };
 
     {
         let mut f =
@@ -372,10 +455,15 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
     }
     let _ = std::fs::remove_file(&installer_path);
     if installed {
+        tracing::info!("Npcap installed at {}", npcap_dir.display());
         let _ = configure_npcap_runtime();
         Ok(())
     } else {
-        Err("Npcap installation failed".to_string())
+        Err(format!(
+            "Npcap installer ran but {} never appeared; \
+             silent install may have been refused (only Npcap 0.96 free honours /S)",
+            dll_to_check.display()
+        ))
     }
 }
 
@@ -631,6 +719,39 @@ mod tests {
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_installer_sources_keep_a_first_party_origin_first() {
+        assert!(!NPCAP_INSTALLER_URLS.is_empty());
+        assert_eq!(NPCAP_INSTALLER_URL, NPCAP_INSTALLER_URLS[0]);
+        assert!(NPCAP_INSTALLER_URLS
+            .iter()
+            .all(|u| u.starts_with("https://")));
+        assert!(NPCAP_INSTALLER_URLS
+            .iter()
+            .all(|u| u.ends_with("npcap-0.96.exe")));
+
+        // The regression this guards: the list was once archive-only, so a
+        // third-party outage took packet capture on Windows with it. The vendor
+        // origin has to stay ahead of any snapshot, and at least one entry must
+        // not be a snapshot at all.
+        assert!(
+            !NPCAP_INSTALLER_URLS[0].contains("web.archive.org"),
+            "primary installer source must be a first-party origin, not an archive snapshot"
+        );
+        assert!(NPCAP_INSTALLER_URLS
+            .iter()
+            .any(|u| u.contains("npcap.com") && !u.contains("web.archive.org")));
+
+        assert_eq!(NPCAP_INSTALLER_SHA256.len(), 64);
+        assert!(NPCAP_INSTALLER_SHA256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(
+            NPCAP_INSTALLER_SHA256, NPCAP_SDK_SHA256,
+            "installer and SDK pins must not be copy-paste duplicates"
         );
     }
 }

@@ -179,13 +179,29 @@ impl FlodbaddCapture {
             use crate::npcap_utils;
 
             if !npcap_utils::is_npcap_installed() {
-                let npcap_dir = npcap_utils::get_npcap_dir();
-                return Err(anyhow!(
-                    "Npcap is not installed. Network capture will be disabled.\n\
-                     Please install Npcap from https://npcap.com to enable packet capture.\n\
-                     Expected location: {}",
-                    npcap_dir.display()
-                ));
+                // Self-heal once per process rather than refusing outright: every
+                // consumer (app, helper, posture daemon) reaches capture through
+                // here, so putting the recovery attempt at this choke point means
+                // none of them has to remember to pre-install.
+                static INSTALL_ATTEMPTED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !INSTALL_ATTEMPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    warn!("Npcap missing; attempting automatic install");
+                    match crate::windows_npcap::auto_install_npcap_silent(None) {
+                        Ok(_) => info!("Npcap installed automatically"),
+                        Err(e) => error!("Npcap automatic install failed: {}", e),
+                    }
+                }
+
+                if !npcap_utils::is_npcap_installed() {
+                    let npcap_dir = npcap_utils::get_npcap_dir();
+                    return Err(anyhow!(
+                        "Npcap is not installed. Network capture will be disabled.\n\
+                         Please install Npcap from https://npcap.com to enable packet capture.\n\
+                         Expected location: {}",
+                        npcap_dir.display()
+                    ));
+                }
             }
 
             let npcap_dir = npcap_utils::get_npcap_dir();
