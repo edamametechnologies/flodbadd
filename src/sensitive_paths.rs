@@ -486,6 +486,105 @@ mod tests {
         }
     }
 
+    /// A catalog pattern with no matching label is detected by FIM but counts for
+    /// nothing in `credential_harvest`, which thresholds on the number of
+    /// *distinct labels*. That gap is invisible from the pattern list alone,
+    /// which is how `~/.npmrc` and the Windows/Linux OS credential stores ended
+    /// up flagged-but-uncounted while the macOS keychain counted.
+    ///
+    /// Directory-prefix patterns are exempt when a label matches files *inside*
+    /// them (e.g. `browser_store` matches `/cookies`, which fires on
+    /// `.../User Data/Default/Network/Cookies`), so the check is on the label
+    /// substrings, not on the pattern strings being equal.
+    #[tokio::test]
+    async fn test_catalog_patterns_carry_a_label_or_are_documented() {
+        // Patterns that intentionally carry no label. Each entry needs a reason:
+        // either a label matches files beneath it, or labeling it would regress a
+        // known false-positive case.
+        const LABELLESS_BY_DESIGN: &[&str] = &[
+            // browser_store matches the credential files inside these dirs
+            // (/cookies, /login data, /web data, /key4.db, /logins.json).
+            // Windows-only today; the macOS/Linux profile roots are absent from
+            // the catalog, so browser credential stores are classified as
+            // sensitive on Windows only. Tracked as a residual BS-12 gap rather
+            // than widened here, since adding the profile roots makes every
+            // browser's own cookie/login-data access sensitive-flagged and needs
+            // a dogfood FP pass first.
+            "/AppData/Local/Google/Chrome/User Data/",
+            "/AppData/Roaming/Mozilla/Firefox/Profiles/",
+            // Ubiquitous in ordinary developer and CI workflows (git over
+            // HTTPS, psql, curl). Labeling them would push routine tooling over
+            // credential_harvest's distinct-label threshold. Tracked as a
+            // deliberate gap rather than an oversight.
+            "/.netrc",
+            "/.pgpass",
+            // Generic container/orchestrator secret mount. The Kubernetes
+            // service-account subtree is labeled `kube`; the bare mount point
+            // is too generic to attribute to a credential category.
+            "/run/secrets/",
+        ];
+
+        let db = SENSITIVE_PATHS.data.read().await;
+
+        // Every label pattern, lowercased once (classify_labels lowercases the
+        // haystack before matching).
+        let label_patterns: Vec<String> = db
+            .labels
+            .values()
+            .flatten()
+            .map(|p| p.to_ascii_lowercase())
+            .collect();
+        assert!(!label_patterns.is_empty(), "catalog publishes no labels");
+
+        let mut tables: Vec<(&str, &Vec<String>)> = vec![("common", &db.common_patterns)];
+        tables.extend(db.platform_patterns.iter().map(|(k, v)| (k.as_str(), v)));
+
+        let mut unlabeled: Vec<String> = Vec::new();
+        for (table, patterns) in tables {
+            for pat in patterns {
+                if LABELLESS_BY_DESIGN.contains(&pat.as_str()) {
+                    continue;
+                }
+                let lowered = pat.to_ascii_lowercase();
+                // A label covers the pattern if the label pattern appears in it
+                // (label is a file/leaf under a directory pattern) or if the
+                // pattern appears in the label pattern (label is more specific).
+                let covered = label_patterns
+                    .iter()
+                    .any(|lp| lowered.contains(lp.as_str()) || lp.contains(lowered.as_str()));
+                if !covered {
+                    unlabeled.push(format!("{table}:{pat}"));
+                }
+            }
+        }
+        unlabeled.sort();
+        assert!(
+            unlabeled.is_empty(),
+            "sensitive-path patterns carry no label, so they contribute nothing \
+             to credential_harvest's distinct-label threshold: {unlabeled:?}. \
+             Add a label in sensitive-paths-db.json, or add the pattern to \
+             LABELLESS_BY_DESIGN with a reason."
+        );
+
+        // Guard the exemption list itself against drift: an entry that no longer
+        // exists in the catalog is stale and hides the next real gap.
+        let all_patterns: Vec<&String> = db
+            .common_patterns
+            .iter()
+            .chain(db.platform_patterns.values().flatten())
+            .collect();
+        let mut stale: Vec<&str> = LABELLESS_BY_DESIGN
+            .iter()
+            .copied()
+            .filter(|e| !all_patterns.iter().any(|p| p.as_str() == *e))
+            .collect();
+        stale.sort();
+        assert!(
+            stale.is_empty(),
+            "LABELLESS_BY_DESIGN entries are no longer in the catalog: {stale:?}"
+        );
+    }
+
     /// `classify_labels` lowercases the haystack (`to_ascii_lowercase()`), so any label
     /// pattern containing an uppercase character is dead -- it can never match. This is
     /// the exact failure shape for Windows label entries, whose real on-disk paths are
