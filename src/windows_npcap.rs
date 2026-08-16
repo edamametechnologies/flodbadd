@@ -367,7 +367,9 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
             .and_then(|r| r.bytes().map_err(|e| format!("read failed: {e}")));
         match fetched {
             Ok(body) if !body.starts_with(b"MZ") => {
-                failures.push(format!("{url}: not a Windows executable (missing MZ header)"));
+                failures.push(format!(
+                    "{url}: not a Windows executable (missing MZ header)"
+                ));
             }
             Ok(body) => {
                 // Verify before this ever reaches disk as something we execute.
