@@ -90,7 +90,8 @@ lazy_static::lazy_static! {
 }
 
 /// Refresh the sync-accessible pattern snapshot from the cloud model.
-/// Called after `sensitive_paths::update()` succeeds.
+/// Called after every `sensitive_paths::update()` attempt, regardless of status --
+/// see the comment there for why `Updated`-only refreshing was wrong.
 pub async fn refresh_patterns_snapshot() {
     let db = SENSITIVE_PATHS.data.read().await;
     let patterns: Vec<String> = db

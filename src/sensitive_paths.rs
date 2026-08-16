@@ -238,17 +238,22 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
         .await?;
 
     match status {
-        UpdateStatus::Updated => {
-            info!("Sensitive paths were successfully updated.");
-            crate::open_files::refresh_patterns_snapshot().await;
-            refresh_labels_snapshot().await;
-        }
+        UpdateStatus::Updated => info!("Sensitive paths were successfully updated."),
         UpdateStatus::NotUpdated => info!("Sensitive paths are already up to date."),
         UpdateStatus::FormatError => warn!("There was a format error in the sensitive paths data."),
         UpdateStatus::SkippedCustom => {
             info!("Update skipped because custom sensitive paths are in use.")
         }
     }
+
+    // Refresh for every status, not just Updated. `SENSITIVE_PATHS.data` always holds
+    // at least the embedded snapshot, whereas the sync snapshots are seeded from the
+    // much smaller hardcoded `FALLBACK_*` consts. Refreshing only on Updated left a
+    // healthy install (embedded signature == remote, so NotUpdated) permanently
+    // serving those consts, silently dropping every pattern that exists only in the
+    // model.
+    crate::open_files::refresh_patterns_snapshot().await;
+    refresh_labels_snapshot().await;
 
     Ok(status)
 }
@@ -391,6 +396,123 @@ mod tests {
             "Unexpected update status: {:?}",
             status
         );
+    }
+
+    /// Regression guard: after an `update()` attempt the sync snapshot MUST serve
+    /// the model's patterns, not the smaller hardcoded `FALLBACK_*` consts.
+    ///
+    /// `refresh_patterns_snapshot()` used to run only on `UpdateStatus::Updated`.
+    /// A healthy install whose embedded signature already matches remote returns
+    /// `NotUpdated`, so the refresh never fired and `is_sensitive_path()` kept
+    /// serving the consts for the whole process lifetime -- silently dropping
+    /// every pattern that exists only in the model (at the time of the fix, 23 of
+    /// 63, including the dir-form `/.aws/` and the browser-extension wallet
+    /// paths). Asserting the invariant rather than a specific pattern string
+    /// keeps this test valid if a pattern is later promoted into the consts.
+    #[tokio::test]
+    #[serial]
+    async fn test_sync_snapshot_covers_every_model_pattern() {
+        let _ = update("main", false).await.expect("update failed");
+
+        let model_patterns: Vec<String> = {
+            let db = SENSITIVE_PATHS.data.read().await;
+            db.get_patterns_for_platform()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(
+            !model_patterns.is_empty(),
+            "model must expose patterns for this platform"
+        );
+
+        let missing: Vec<&String> = model_patterns
+            .iter()
+            .filter(|pat| !crate::open_files::is_sensitive_path(&format!("/home/user{pat}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "sync snapshot is missing {} model pattern(s): {:?}",
+            missing.len(),
+            missing,
+        );
+    }
+
+    /// Cross-platform well-formedness guard for patterns this host cannot exercise.
+    ///
+    /// `is_sensitive_path` normalizes the *haystack* with `replace('\\', "/")` but
+    /// preserves its case, so a pattern carrying a literal backslash can never match
+    /// on any platform, and a Windows pattern must use real on-disk casing. Only the
+    /// running platform's table is covered by
+    /// `test_sync_snapshot_covers_every_model_pattern`, so a typo in the `windows`
+    /// table would otherwise ship undetected from a macOS or Linux dev box.
+    #[tokio::test]
+    #[serial]
+    async fn test_every_platform_pattern_is_well_formed() {
+        let db = SENSITIVE_PATHS.data.read().await;
+
+        // Assert presence explicitly: the loop below iterates whatever keys exist, so a
+        // dropped `windows` table would otherwise skip silently on a macOS dev box.
+        for platform in ["macos", "linux", "windows"] {
+            assert!(
+                db.platform_patterns.contains_key(platform),
+                "platform_patterns is missing the {platform:?} table; got {:?}",
+                db.platform_patterns.keys().collect::<Vec<_>>(),
+            );
+        }
+
+        let mut tables: Vec<(&str, &Vec<String>)> = vec![("common", &db.common_patterns)];
+        tables.extend(db.platform_patterns.iter().map(|(k, v)| (k.as_str(), v)));
+
+        for (table, patterns) in tables {
+            assert!(!patterns.is_empty(), "{table} pattern table is empty");
+            for pat in patterns {
+                assert!(
+                    !pat.contains('\\'),
+                    "{table} pattern {pat:?} contains a backslash; the haystack is \
+                     normalized to forward slashes so this can never match",
+                );
+                assert_eq!(
+                    pat.trim(),
+                    pat.as_str(),
+                    "{table} pattern {pat:?} has leading/trailing whitespace",
+                );
+                assert!(
+                    pat.starts_with('/'),
+                    "{table} pattern {pat:?} must start with '/' to anchor at a path \
+                     component boundary",
+                );
+            }
+        }
+    }
+
+    /// `classify_labels` lowercases the haystack (`to_ascii_lowercase()`), so any label
+    /// pattern containing an uppercase character is dead -- it can never match. This is
+    /// the exact failure shape for Windows label entries, whose real on-disk paths are
+    /// mixed-case (`/AppData/Roaming/...`) and so tempt a copy-paste from the
+    /// case-sensitive `platform_patterns` table.
+    #[tokio::test]
+    #[serial]
+    async fn test_every_label_pattern_is_lowercase_and_forward_slashed() {
+        let db = SENSITIVE_PATHS.data.read().await;
+        assert!(!db.labels.is_empty(), "label table is empty");
+
+        for (label, patterns) in &db.labels {
+            assert!(!patterns.is_empty(), "label {label:?} has no patterns");
+            for pat in patterns {
+                assert_eq!(
+                    pat.to_ascii_lowercase(),
+                    pat.as_str(),
+                    "label {label:?} pattern {pat:?} is not lowercase; classify_labels \
+                     lowercases the haystack so this can never match",
+                );
+                assert!(
+                    !pat.contains('\\'),
+                    "label {label:?} pattern {pat:?} contains a backslash; the haystack \
+                     is normalized to forward slashes so this can never match",
+                );
+            }
+        }
     }
 
     #[test]
