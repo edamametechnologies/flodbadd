@@ -89,6 +89,34 @@ pub fn ensure_wayback_raw(url: &str) -> String {
     url.to_string()
 }
 
+/// Logging shims usable from both compilation contexts of this file.
+///
+/// This file is shared with `build.rs` through `#[path = "src/windows_npcap.rs"]`,
+/// and a build script only sees `[build-dependencies]`. `tracing` is deliberately
+/// not one, so a bare `tracing::info!` here resolves in the library and fails to
+/// resolve in the build script -- but only when the *host* is Windows, since the
+/// enclosing blocks are `#[cfg(target_os = "windows")]`. A macOS or Linux
+/// cross-check therefore compiles cleanly while a Windows runner does not. Route
+/// every message through these macros; in the build script they become
+/// `cargo:warning=` lines, the only channel cargo surfaces from a build script.
+#[cfg(flodbadd_lib)]
+macro_rules! npcap_info {
+    ($($arg:tt)*) => { tracing::info!($($arg)*) };
+}
+#[cfg(not(flodbadd_lib))]
+macro_rules! npcap_info {
+    ($($arg:tt)*) => { println!("cargo:warning={}", format_args!($($arg)*)) };
+}
+
+#[cfg(flodbadd_lib)]
+macro_rules! npcap_error {
+    ($($arg:tt)*) => { tracing::error!($($arg)*) };
+}
+#[cfg(not(flodbadd_lib))]
+macro_rules! npcap_error {
+    ($($arg:tt)*) => { println!("cargo:warning={}", format_args!($($arg)*)) };
+}
+
 /// Builds the blocking HTTP client used for Npcap downloads.
 ///
 /// In the compiled flodbadd *library* (marked by the `flodbadd_lib` cfg emitted
@@ -360,7 +388,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
     let mut failures = Vec::new();
     for raw_url in &sources {
         let url = ensure_wayback_raw(raw_url);
-        tracing::info!("Npcap installer: fetching {}", url);
+        npcap_info!("Npcap installer: fetching {}", url);
         // Short per-source budget: draining the full backoff against a dead
         // source is how a reachable fallback never gets reached.
         let fetched = download_file_with_attempts(&url, 3)
@@ -375,7 +403,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
                 // Verify before this ever reaches disk as something we execute.
                 let digest = sha256_hex(&body);
                 if pinned && digest != NPCAP_INSTALLER_SHA256 {
-                    tracing::error!(
+                    npcap_error!(
                         "Npcap installer: {} served unexpected content (sha256 {})",
                         url,
                         digest
@@ -385,7 +413,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
                     ));
                     continue;
                 }
-                tracing::info!(
+                npcap_info!(
                     "Npcap installer: fetched {} bytes from {} (sha256 {})",
                     body.len(),
                     url,
@@ -402,7 +430,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
         Some(b) => b,
         None => {
             let detail = failures.join("; ");
-            tracing::error!("Npcap installer: every source failed: {}", detail);
+            npcap_error!("Npcap installer: every source failed: {}", detail);
             return Err(format!(
                 "Npcap installer download failed from all {} source(s): {detail}. \
                  Set NPCAP_INSTALLER_URL to a reachable npcap-0.96.exe, or install \
@@ -457,7 +485,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
     }
     let _ = std::fs::remove_file(&installer_path);
     if installed {
-        tracing::info!("Npcap installed at {}", npcap_dir.display());
+        npcap_info!("Npcap installed at {}", npcap_dir.display());
         let _ = configure_npcap_runtime();
         Ok(())
     } else {
