@@ -709,8 +709,15 @@ mod tests {
     use super::*;
     #[test]
     fn test_constants() {
-        // Archive-pinned because upstream 404s for this installer version.
-        assert!(NPCAP_INSTALLER_URL.contains("web.archive.org"));
+        // Primary installer is first-party (`npcap.com/dist-old/`); archived
+        // snapshots stay in NPCAP_INSTALLER_URLS as fallbacks. The dedicated
+        // test_installer_sources_keep_a_first_party_origin_first covers that
+        // ordering; here we only pin the primary alias and the checksum.
+        assert_eq!(NPCAP_INSTALLER_URL, NPCAP_INSTALLER_URLS[0]);
+        assert!(!NPCAP_INSTALLER_URL.contains("web.archive.org"));
+        assert!(NPCAP_INSTALLER_URLS
+            .iter()
+            .any(|u| u.contains("web.archive.org")));
 
         // A single SDK source is what wedged Windows CI: when it answered 503,
         // every Windows build failed at link time with
