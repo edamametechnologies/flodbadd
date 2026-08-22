@@ -15,3 +15,8 @@ Thumbs.db
 .cursor
 /tools/strings_check/target/
 /tools/strings_check/Cargo.lock
+
+# AI rules: dev-only symlinks into ../edamame_rules, recreated by edamame_rules/setup.sh
+.claude/
+CLAUDE.md
+AGENTS.md
