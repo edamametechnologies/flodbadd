@@ -1389,6 +1389,18 @@ impl DeviceInfo {
             device.add_ipv6_entry(entry.address, entry.last_seen);
         }
 
+        // Bound the merged lists. `add_ipv*_entry` only dedupes-by-address and
+        // appends; the two ingest paths that call it
+        // (`add_ip_addresses_with_timestamp`, mDNS discovery) follow up with
+        // this call, but the MERGE path did not -- so a device merged on every
+        // scan cycle grew without limit. On a macOS host, which rotates RFC 4941
+        // privacy addresses, the self-device accumulated 675 IPv6 entries
+        // (66 KB, oldest three weeks old) against a MAX_IPV6_ADDRESSES of 10.
+        // Truncation keeps the most-recently-seen entries, so it runs BEFORE
+        // `update_primary_ip_from_entries` and cannot change which address is
+        // selected as primary.
+        device.deduplicate_and_truncate_ips();
+
         // Update primary IP based on the most recently seen entry timestamps
         // IPv4 takes precedence over IPv6 (more stable), but we use entry timestamps
         // to determine which specific address to use
@@ -5736,5 +5748,44 @@ mod tests {
         let limit = max_reasonable_open_ports_for_probed(65536);
         assert!(!ourselves.strip_anomalous_open_ports_with_limit(limit));
         assert_eq!(ourselves.open_ports.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod ipv6_merge_bounds_tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    /// A device merged repeatedly (every lanscan cycle) must not accumulate
+    /// unbounded IPv6 entries. macOS rotates RFC 4941 privacy addresses, so the
+    /// self-device grew to 675 entries before the merge path truncated.
+    #[test]
+    fn merge_bounds_accumulated_ipv6_addresses() {
+        let ip: IpAddr = "192.168.1.10".parse().unwrap();
+        let mut device = DeviceInfo::new(Some(ip));
+
+        let base = Utc::now();
+        for i in 0..200u16 {
+            let mut incoming = DeviceInfo::new(Some(ip));
+            incoming.add_ipv6_entry(
+                Ipv6Addr::new(0x2a01, 0xe0a, 0x17f, 0xa660, 0, 0, 0, i),
+                base + chrono::Duration::seconds(i as i64),
+            );
+            DeviceInfo::merge(&mut device, &incoming);
+        }
+
+        assert!(
+            device.ip_addresses_v6.len() <= 10,
+            "merge path left {} IPv6 entries (expected <= 10)",
+            device.ip_addresses_v6.len()
+        );
+        // The retained entries must be the most recent ones.
+        let newest = device
+            .ip_addresses_v6
+            .iter()
+            .map(|e| e.last_seen)
+            .max()
+            .expect("entries retained");
+        assert_eq!(newest, base + chrono::Duration::seconds(199));
     }
 }

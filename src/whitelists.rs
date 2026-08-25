@@ -1,6 +1,5 @@
+use crate::dns_patterns::is_reverse_dns_pattern;
 use crate::sessions::{DomainResolutionType, Session, SessionInfo, WhitelistState};
-#[cfg(feature = "packetcapture")]
-use crate::sni::is_reverse_dns_pattern;
 use crate::whitelists_db::WHITELISTS;
 use anyhow::{anyhow, Context, Result};
 use chrono;
@@ -238,15 +237,18 @@ impl Whitelists {
             // Check if domain came from reverse DNS and looks like a reverse DNS pattern
             // (e.g., "cdn-185-199-111-133.github.com" or "51.241.186.35.bc.googleusercontent.com")
             // These are unreliable for CDN providers as they don't represent the actual requested domain
-            #[cfg(feature = "packetcapture")]
+            // Not feature-gated: `is_reverse_dns_pattern` is pure string analysis
+            // (see `crate::dns_patterns`). It used to be imported from the
+            // `packetcapture`-gated `sni` module, so every build without that
+            // feature -- including the default `edamame_core` build the EDAMAME
+            // app ships -- hardcoded this to `false` and silently disabled the
+            // CDN reverse-DNS skip below.
             let domain_is_reverse_pattern = session.dst_domain_type
                 == DomainResolutionType::Reverse
                 && session
                     .dst_domain
                     .as_ref()
                     .map_or(false, |d| is_reverse_dns_pattern(d));
-            #[cfg(not(feature = "packetcapture"))]
-            let domain_is_reverse_pattern = false;
 
             // For CDN providers, Forward DNS or SNI is preferred for reliable domain resolution.
             // However, we must support environments without eBPF (Windows, macOS, containers):
@@ -332,14 +334,15 @@ impl Whitelists {
             {
                 session.dst_domain.clone()
             } else {
-                // Reverse DNS - only use if it doesn't look like a reverse DNS pattern
-                #[cfg(feature = "packetcapture")]
+                // Reverse DNS - only use if it doesn't look like a reverse DNS
+                // pattern. Same fail-open as above when this was gated on
+                // `packetcapture`: `use_domain = true` accepted EVERY reverse-DNS
+                // name as a reliable whitelist domain, including per-edge-IP CDN
+                // names that cannot match on the next connection.
                 let use_domain = session
                     .dst_domain
                     .as_ref()
                     .map_or(false, |d| !is_reverse_dns_pattern(d));
-                #[cfg(not(feature = "packetcapture"))]
-                let use_domain = true;
 
                 if use_domain {
                     session.dst_domain.clone()
