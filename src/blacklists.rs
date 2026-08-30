@@ -64,19 +64,39 @@ impl CloudSignature for Blacklists {
 }
 
 lazy_static! {
+    // Ranges that are NOT globally routable. A public reputation feed (firehol_level1
+    // and friends) carries these as "bogon" entries, which is meaningful for an
+    // internet-edge filter -- seeing one as a destination there implies spoofing. It is
+    // NOT meaningful for a host-based egress sensor, where talking to your own LAN or to
+    // a VPN overlay peer is the normal case. Keeping them turns every such session into
+    // a `blacklist:firehol_level1` hit.
+    //
+    // This is a scope judgement, not an allowlist: no operator-visible address or vendor
+    // is named, only address space that cannot carry a public-reputation verdict.
     static ref LOCAL_IPV4_RANGES_TO_FILTER: Vec<IpNet> = vec![
         "0.0.0.0/8".parse().expect("Failed to parse 0.0.0.0/8"),       // Unspecified range
         "10.0.0.0/8".parse().expect("Failed to parse 10.0.0.0/8"),      // Private Class A
+        "100.64.0.0/10".parse().expect("Failed to parse 100.64.0.0/10"),   // RFC 6598 CGNAT / overlay VPNs
         "127.0.0.0/8".parse().expect("Failed to parse 127.0.0.0/8"),     // Loopback
         "169.254.0.0/16".parse().expect("Failed to parse 169.254.0.0/16"),  // Link-Local
         "172.16.0.0/12".parse().expect("Failed to parse 172.16.0.0/12"),   // Private Class B
         "192.168.0.0/16".parse().expect("Failed to parse 192.168.0.0/16"),  // Private Class C
+        "224.0.0.0/4".parse().expect("Failed to parse 224.0.0.0/4"),     // Multicast
+        "240.0.0.0/4".parse().expect("Failed to parse 240.0.0.0/4"),     // Reserved (incl. broadcast)
     ];
+    // NOTE: the documentation / benchmarking ranges (192.0.2.0/24, 198.51.100.0/24,
+    // 203.0.113.0/24, 198.18.0.0/15, 2001:db8::/32) are deliberately NOT filtered.
+    // They are non-routable too, but they are the conventional stand-ins for a PUBLIC
+    // address in tests and attack fixtures -- this crate's own filter test uses
+    // 203.0.113.45 and 2001:db8::cafe as the "should remain" cases. Filtering them
+    // would silently stop simulated-attack destinations from ever matching a blacklist.
     static ref LOCAL_IPV6_RANGES_TO_FILTER: Vec<IpNet> = vec![
         "::/128".parse().expect("Failed to parse ::/128"),          // Unspecified
         "::1/128".parse().expect("Failed to parse ::1/128"),         // Loopback
+        "100::/64".parse().expect("Failed to parse 100::/64"),        // Discard-only
         "fc00::/7".parse().expect("Failed to parse fc00::/7"),        // Unique Local Address (ULA)
         "fe80::/10".parse().expect("Failed to parse fe80::/10"),       // Link-Local
+        "ff00::/8".parse().expect("Failed to parse ff00::/8"),        // Multicast
     ];
 }
 
@@ -1138,6 +1158,7 @@ mod tests {
                 ip_ranges: vec![
                     "192.168.0.0/16".to_string(),     // Local CIDR, should be filtered
                     "10.0.0.1".to_string(), // Local single IP (becomes /32), should be filtered
+                    "100.64.0.0/10".to_string(), // RFC 6598 CGNAT (overlay VPNs), should be filtered
                     "8.8.8.8/32".to_string(), // Non-local CIDR (effectively single IP), should remain
                     "172.16.0.0/12".to_string(), // Local CIDR, should be filtered
                     "203.0.113.45".to_string(), // Non-local single IP (becomes /32), should remain
@@ -1194,6 +1215,14 @@ mod tests {
         assert!(
             !remaining_ip_cidrs.contains(&"fc00::/7".to_string()),
             "Local IPv6 range fc00::/7 should be filtered."
+        );
+        // FP-A regression: CGNAT is the address space ZeroTier / Tailscale / NetBird
+        // overlays hand out. firehol_level1 carries 100.64.0.0/10 as a bogon, which made
+        // every overlay-peer session on a dogfood host read as `blacklist:firehol_level1`
+        // (74 of fmba-3's 161 blacklisted sessions). It must be filtered like RFC1918.
+        assert!(
+            !remaining_ip_cidrs.contains(&"100.64.0.0/10".to_string()),
+            "CGNAT range 100.64.0.0/10 should be filtered."
         );
         assert_eq!(
             ranges_for_list.len(),
