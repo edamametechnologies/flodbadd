@@ -2089,6 +2089,90 @@ impl FlodbaddCapture {
             || info.criticality.contains("blacklist:")
     }
 
+    /// Evaluate `SessionFilter` against a borrowed session (no clone).
+    fn session_matches_filter(filter: &SessionFilter, info: &SessionInfo) -> bool {
+        match filter {
+            SessionFilter::All => true,
+            SessionFilter::LocalOnly => is_local_session!(info),
+            SessionFilter::GlobalOnly => is_global_session!(info),
+        }
+    }
+
+    /// Evict sessions down to `max_tracked`.
+    ///
+    /// Pass 1 removes inactive sessions (benign before verdict-bearing; oldest
+    /// first within each class). Pass 2 removes active sessions with the same
+    /// ordering when inactive alone cannot cover the overflow.
+    fn evict_sessions_to_cap(
+        sessions: &CustomDashMap<Session, SessionInfo>,
+        max_tracked: usize,
+    ) -> usize {
+        let remaining = sessions.len();
+        if remaining <= max_tracked {
+            return 0;
+        }
+        let overflow = remaining - max_tracked;
+
+        let mut inactive: Vec<(Session, bool, DateTime<Utc>)> = sessions
+            .iter()
+            .filter(|entry| !entry.value().status.active)
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    Self::session_has_unresolved_verdict(entry.value()),
+                    entry.value().stats.last_activity,
+                )
+            })
+            .collect();
+        // Evict benign before verdict-bearing; within each class, oldest first.
+        inactive.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+
+        let mut inactive_evicted = 0;
+        for (key, _, _) in inactive.into_iter().take(overflow) {
+            sessions.remove(&key);
+            inactive_evicted += 1;
+        }
+
+        if inactive_evicted > 0 {
+            warn!(
+                "Session cap eviction: removed {} oldest inactive sessions (was {} > {})",
+                inactive_evicted, remaining, max_tracked
+            );
+        }
+
+        let still_over = sessions.len().saturating_sub(max_tracked);
+        if still_over == 0 {
+            return inactive_evicted;
+        }
+
+        let mut active: Vec<(Session, bool, DateTime<Utc>)> = sessions
+            .iter()
+            .filter(|entry| entry.value().status.active)
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    Self::session_has_unresolved_verdict(entry.value()),
+                    entry.value().stats.last_activity,
+                )
+            })
+            .collect();
+        active.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+
+        let mut active_evicted = 0;
+        for (key, _, _) in active.into_iter().take(still_over) {
+            sessions.remove(&key);
+            active_evicted += 1;
+        }
+        if active_evicted > 0 {
+            warn!(
+                "Session cap eviction: removed {} oldest active sessions after inactive pass could not cover overflow (was {} > {})",
+                active_evicted, remaining, max_tracked
+            );
+        }
+
+        inactive_evicted + active_evicted
+    }
+
     async fn update_sessions_status(
         sessions: &CustomDashMap<Session, SessionInfo>,
         current_sessions: &Arc<CustomRwLock<Vec<Session>>>,
@@ -2166,39 +2250,8 @@ impl FlodbaddCapture {
             sessions.remove(key);
         }
 
-        // Evict oldest inactive sessions if count exceeds hard cap
-        let remaining = sessions.len();
-        if remaining > MAX_TRACKED_SESSIONS {
-            let overflow = remaining - MAX_TRACKED_SESSIONS;
-            let mut candidates: Vec<(Session, bool, DateTime<Utc>)> = sessions
-                .iter()
-                .filter(|entry| !entry.value().status.active)
-                .map(|entry| {
-                    (
-                        entry.key().clone(),
-                        Self::session_has_unresolved_verdict(entry.value()),
-                        entry.value().stats.last_activity,
-                    )
-                })
-                .collect();
-            // Evict benign sessions before sessions carrying an unresolved verdict;
-            // within each class, oldest (least-recently-active) first. A verdict-bearing
-            // session is only dropped under the hard cap when benign inactive sessions
-            // cannot cover the overflow.
-            candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
-            let to_evict = candidates.into_iter().take(overflow);
-            let mut evicted = 0;
-            for (key, _, _) in to_evict {
-                sessions.remove(&key);
-                evicted += 1;
-            }
-            if evicted > 0 {
-                warn!(
-                    "Session cap eviction: removed {} oldest inactive sessions (was {} > {})",
-                    evicted, remaining, MAX_TRACKED_SESSIONS
-                );
-            }
-        }
+        // Evict down to the hard cap (inactive first, then active if needed)
+        Self::evict_sessions_to_cap(sessions, MAX_TRACKED_SESSIONS);
     }
 
     pub async fn update_sessions(&self) {
@@ -2267,22 +2320,16 @@ impl FlodbaddCapture {
                 continue; // Skip if not modified since last fetch
             }
 
-            // Clone and clean up domain name
+            // Filter on the borrowed session before cloning
+            if !Self::session_matches_filter(&filter, session_info) {
+                continue;
+            }
+
             let mut session_info_clone = session_info.clone();
             if session_info_clone.dst_domain == Some("Unknown".to_string()) {
                 session_info_clone.dst_domain = None;
             }
-
-            // Apply session filter (LocalOnly, GlobalOnly, All)
-            let should_include = match filter {
-                SessionFilter::All => true,
-                SessionFilter::LocalOnly => is_local_session!(session_info_clone),
-                SessionFilter::GlobalOnly => is_global_session!(session_info_clone),
-            };
-
-            if should_include {
-                sessions_vec.push(session_info_clone);
-            }
+            sessions_vec.push(session_info_clone);
         }
 
         // Always update timestamp after fetch to enable true incremental fetching
@@ -2314,22 +2361,16 @@ impl FlodbaddCapture {
                     continue; // Skip if not modified since last fetch
                 }
 
-                // Clone and clean up domain name
+                // Filter on the borrowed session before cloning
+                if !Self::session_matches_filter(&filter, session_info) {
+                    continue;
+                }
+
                 let mut session_info_clone = session_info.clone();
                 if session_info_clone.dst_domain == Some("Unknown".to_string()) {
                     session_info_clone.dst_domain = None;
                 }
-
-                // Apply session filter (LocalOnly, GlobalOnly, All)
-                let should_include = match filter {
-                    SessionFilter::All => true,
-                    SessionFilter::LocalOnly => is_local_session!(session_info_clone),
-                    SessionFilter::GlobalOnly => is_global_session!(session_info_clone),
-                };
-
-                if should_include {
-                    current_sessions_vec.push(session_info_clone);
-                }
+                current_sessions_vec.push(session_info_clone);
             }
         }
 
@@ -3227,6 +3268,184 @@ mod tests {
         assert!(
             capture.sessions.get(&blacklisted).is_none(),
             "blacklisted session must evict once past the violation retention cap"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_evict_sessions_to_cap_inactive_pass() {
+        // Pass 1: when over capacity with inactive sessions, evict oldest benign
+        // inactive first and retain verdict-bearing inactive sessions.
+        let sessions = CustomDashMap::new("test_evict_cap_inactive");
+        let now = Utc::now();
+        let make_session = |last_octet: u8| Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, last_octet)),
+            src_port: 1000 + last_octet as u16,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, last_octet)),
+            dst_port: 443,
+        };
+        let make_info =
+            |session: &Session, wl: WhitelistState, crit: &str, last_activity: DateTime<Utc>| {
+                let mut stats = SessionStats::new(last_activity);
+                stats.last_activity = last_activity;
+                SessionInfo {
+                    session: session.clone(),
+                    stats,
+                    status: SessionStatus::default(),
+                    is_local_src: false,
+                    is_local_dst: false,
+                    is_self_src: false,
+                    is_self_dst: false,
+                    src_domain: None,
+                    dst_domain: None,
+                    dst_service: None,
+                    l7: None,
+                    src_asn: None,
+                    dst_asn: None,
+                    is_whitelisted: wl,
+                    criticality: crit.to_string(),
+                    dismissed: false,
+                    whitelist_reason: None,
+                    src_domain_type: DomainResolutionType::None,
+                    dst_domain_type: DomainResolutionType::None,
+                    uid: Uuid::new_v4().to_string(),
+                    last_modified: last_activity,
+                }
+            };
+
+        let oldest_benign = make_session(1);
+        let newer_benign = make_session(2);
+        let verdict = make_session(3);
+        sessions.insert(
+            oldest_benign.clone(),
+            make_info(
+                &oldest_benign,
+                WhitelistState::Conforming,
+                "",
+                now - ChronoDuration::seconds(300),
+            ),
+        );
+        sessions.insert(
+            newer_benign.clone(),
+            make_info(
+                &newer_benign,
+                WhitelistState::Conforming,
+                "",
+                now - ChronoDuration::seconds(60),
+            ),
+        );
+        sessions.insert(
+            verdict.clone(),
+            make_info(
+                &verdict,
+                WhitelistState::NonConforming,
+                "",
+                now - ChronoDuration::seconds(600),
+            ),
+        );
+
+        let removed = FlodbaddCapture::evict_sessions_to_cap(&sessions, 2);
+        assert_eq!(removed, 1);
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions.get(&oldest_benign).is_none(),
+            "oldest benign inactive must be preferred for eviction"
+        );
+        assert!(sessions.get(&newer_benign).is_some());
+        assert!(
+            sessions.get(&verdict).is_some(),
+            "verdict-bearing inactive must survive pass 1 when enough benign exist"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_evict_sessions_to_cap_active_pass() {
+        // Pass 2: when every session is active and still over cap, force-evict
+        // oldest active (benign before verdict-bearing).
+        let sessions = CustomDashMap::new("test_evict_cap_active");
+        let now = Utc::now();
+        let make_session = |last_octet: u8| Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
+            src_port: 2000 + last_octet as u16,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, last_octet)),
+            dst_port: 80,
+        };
+        let make_active_info =
+            |session: &Session, wl: WhitelistState, crit: &str, last_activity: DateTime<Utc>| {
+                let mut stats = SessionStats::new(last_activity);
+                stats.last_activity = last_activity;
+                let mut status = SessionStatus::default();
+                status.active = true;
+                SessionInfo {
+                    session: session.clone(),
+                    stats,
+                    status,
+                    is_local_src: false,
+                    is_local_dst: false,
+                    is_self_src: false,
+                    is_self_dst: false,
+                    src_domain: None,
+                    dst_domain: None,
+                    dst_service: None,
+                    l7: None,
+                    src_asn: None,
+                    dst_asn: None,
+                    is_whitelisted: wl,
+                    criticality: crit.to_string(),
+                    dismissed: false,
+                    whitelist_reason: None,
+                    src_domain_type: DomainResolutionType::None,
+                    dst_domain_type: DomainResolutionType::None,
+                    uid: Uuid::new_v4().to_string(),
+                    last_modified: last_activity,
+                }
+            };
+
+        let oldest_active = make_session(1);
+        let newer_active = make_session(2);
+        let active_verdict = make_session(3);
+        sessions.insert(
+            oldest_active.clone(),
+            make_active_info(
+                &oldest_active,
+                WhitelistState::Conforming,
+                "",
+                now - ChronoDuration::seconds(120),
+            ),
+        );
+        sessions.insert(
+            newer_active.clone(),
+            make_active_info(
+                &newer_active,
+                WhitelistState::Conforming,
+                "",
+                now - ChronoDuration::seconds(10),
+            ),
+        );
+        sessions.insert(
+            active_verdict.clone(),
+            make_active_info(
+                &active_verdict,
+                WhitelistState::Unknown,
+                "blacklist:firehol_level1",
+                now - ChronoDuration::seconds(300),
+            ),
+        );
+
+        let removed = FlodbaddCapture::evict_sessions_to_cap(&sessions, 2);
+        assert_eq!(removed, 1);
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions.get(&oldest_active).is_none(),
+            "oldest benign active must be preferred when no inactive sessions remain"
+        );
+        assert!(sessions.get(&newer_active).is_some());
+        assert!(
+            sessions.get(&active_verdict).is_some(),
+            "verdict-bearing active must survive when enough benign active exist"
         );
     }
 
@@ -4387,7 +4606,7 @@ mod tests {
             last_updated: Some("2025-03-29".to_string()),
             source_url: None,
             ip_ranges: vec![
-                "100.64.0.0/10".to_string(), // Carrier-grade NAT range
+                "203.0.113.0/24".to_string(), // RFC 5737 TEST-NET-3 (deliberately not bogon-filtered)
             ],
         };
 
@@ -4404,13 +4623,15 @@ mod tests {
         initialize_test_blacklist(blacklists_data).await;
 
         // Simulate an outbound packet to a known blacklisted IP (in firehol_level1)
-        // Using 100.64.0.0/10 from the blacklist (Carrier-grade NAT range)
+        // Using 203.0.113.0/24 from the blacklist (RFC 5737 TEST-NET-3; CGNAT/bogon
+        // space is filtered from reputation verdicts since the non-globally-routable
+        // filtering change, so fixtures use the deliberately unfiltered doc range)
         let session_packet = SessionPacketData {
             session: Session {
                 protocol: Protocol::TCP,
                 src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
                 src_port: 12345,
-                dst_ip: IpAddr::V4(Ipv4Addr::new(100, 64, 1, 1)),
+                dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 45)),
                 dst_port: 80,
             },
             packet_length: 100,
@@ -5070,8 +5291,10 @@ mod tests {
         println!("Reset blacklists to default state");
 
         // --- Define test IPs ---
-        // CGNAT range IP that is in default blacklists
-        let blacklisted_ipv4 = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
+        // RFC 5737 TEST-NET-3 IP present in the default blacklists (bogon feeds
+        // carry it, and the documentation ranges are deliberately NOT filtered
+        // from reputation verdicts, unlike CGNAT space)
+        let blacklisted_ipv4 = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 45));
 
         // IPv6 address not in default blacklists
         // Use imported Ipv6Addr::from_str
@@ -5218,7 +5441,7 @@ mod tests {
                 "signature": "custom-sig",
                 "blacklists": [{
                     "name": "custom_bad_ips",
-                    "ip_ranges": ["100.64.0.0/10", "2001:db8::/64"]
+                    "ip_ranges": ["203.0.113.0/24", "2001:db8::/64"]
                 }]
             }"#;
 

@@ -39,6 +39,9 @@ examples = ["clap", "tracing-subscriber"]
 # process enumeration. `sysinfo?/` so this never force-enables the optional
 # sysinfo dep on its own.
 appstore = [ "sysinfo?/apple-app-store" ]
+# Opt-in undeadlock hold-time / contention instrumentation in release builds.
+# Forwarded from edamame_core's `lock-diagnostics`. Never in `default`.
+lock-diagnostics = [ "undeadlock/diagnostics" ]
 
 [dependencies]
 # Core dependencies

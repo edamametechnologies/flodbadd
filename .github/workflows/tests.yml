@@ -23,17 +23,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# CI-3 / SG-002: the envcrypt secrets previously declared here were consumed
+# nowhere in flodbadd (no envc!() in the crate, no dependency on
+# edamame_foundation) and are dropped entirely.
 env:
   CARGO_TERM_COLOR: always
-  EDAMAME_TARGET: ${{ secrets.EDAMAME_TARGET }}
-  EDAMAME_SERVER: ${{ secrets.EDAMAME_SERVER }}
-  EDAMAME_SERVER_PEM: ${{ secrets.EDAMAME_SERVER_PEM }}
-  EDAMAME_SERVER_KEY: ${{ secrets.EDAMAME_SERVER_KEY }}
-  EDAMAME_CA_PEM: ${{ secrets.EDAMAME_CA_PEM }}
-  EDAMAME_CLIENT_PEM: ${{ secrets.EDAMAME_CLIENT_PEM }}
-  EDAMAME_CLIENT_KEY: ${{ secrets.EDAMAME_CLIENT_KEY }}
-  EDAMAME_CLIENT_CA_PEM: ${{ secrets.EDAMAME_CLIENT_CA_PEM }}
-  LAMBDA_SIGNATURE: ${{ secrets.LAMBDA_SIGNATURE }}
   # Debug mode
   EDAMAME_LOG_LEVEL: debug
   # Pinned nightly. The 2026-07-23 nightly (89c61a754) has a codegen ICE
