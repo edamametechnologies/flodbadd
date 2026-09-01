@@ -445,6 +445,12 @@ impl Whitelists {
         whitelist_name: &str,
         visited: &mut HashSet<String>,
     ) -> Result<Vec<WhitelistEndpoint>> {
+        // The root is always part of the visited set: `is_session_in_whitelist`
+        // pre-seeds it, but the recursion must not depend on the caller doing
+        // so -- otherwise an `A extends B extends A` cycle re-enters A and
+        // duplicates its endpoints.
+        visited.insert(whitelist_name.to_string());
+
         // Get the whitelist info and handle the case where it's not found
         let info = self
             .whitelists
@@ -1722,6 +1728,685 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
+
+    //--------------------------------------------------------------------
+    // Enforcement core: domain_matches / endpoint_matches_with_reason /
+    // is_session_in_whitelist / get_all_endpoints
+    //--------------------------------------------------------------------
+
+    fn ep() -> WhitelistEndpoint {
+        WhitelistEndpoint {
+            domain: None,
+            domains: None,
+            ip: None,
+            ips: None,
+            port: None,
+            ports: None,
+            protocol: None,
+            as_number: None,
+            as_country: None,
+            as_owner: None,
+            process: None,
+            description: None,
+        }
+    }
+
+    fn wl(
+        name: &str,
+        extends: Option<Vec<&str>>,
+        endpoints: Vec<WhitelistEndpoint>,
+    ) -> WhitelistInfo {
+        WhitelistInfo {
+            name: name.to_string(),
+            extends: extends.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
+            endpoints,
+        }
+    }
+
+    fn model(infos: Vec<WhitelistInfo>) -> Whitelists {
+        let map = CustomDashMap::new("whitelists");
+        for info in infos {
+            map.insert(info.name.clone(), info);
+        }
+        Whitelists {
+            date: "June 18th 2025".into(),
+            signature: None,
+            whitelists: Arc::new(map),
+        }
+    }
+
+    #[test]
+    fn test_domain_matches_exact() {
+        let pat = Some("api.github.com".to_string());
+        assert!(domain_matches(Some("api.github.com"), &pat));
+        assert!(
+            domain_matches(Some("API.GitHub.COM"), &pat),
+            "case-insensitive"
+        );
+        assert!(!domain_matches(Some("github.com"), &pat));
+        assert!(!domain_matches(Some("xapi.github.com"), &pat));
+        assert!(
+            !domain_matches(None, &pat),
+            "no session domain never matches a pattern"
+        );
+    }
+
+    #[test]
+    fn test_domain_matches_no_pattern_is_unconstrained() {
+        // `domain: None` means "domain is not part of this endpoint's identity".
+        assert!(domain_matches(Some("anything.example"), &None));
+        assert!(domain_matches(None, &None));
+    }
+
+    #[test]
+    fn test_domain_matches_prefix_wildcard() {
+        let pat = Some("*.github.com".to_string());
+        assert!(domain_matches(Some("api.github.com"), &pat));
+        assert!(
+            domain_matches(Some("a.b.github.com"), &pat),
+            "wildcard spans labels"
+        );
+        assert!(domain_matches(Some("API.GITHUB.COM"), &pat));
+        // Security contract: a suffix match must sit on a label boundary and
+        // must not match the apex itself.
+        assert!(
+            !domain_matches(Some("evil-github.com"), &pat),
+            "*.github.com must NOT match evil-github.com"
+        );
+        assert!(
+            !domain_matches(Some("evilgithub.com"), &pat),
+            "*.github.com must NOT match evilgithub.com"
+        );
+        assert!(
+            !domain_matches(Some("github.com"), &pat),
+            "*.github.com must NOT match the bare apex"
+        );
+        assert!(!domain_matches(Some("github.com.evil"), &pat));
+        assert!(!domain_matches(None, &pat));
+    }
+
+    #[test]
+    fn test_domain_matches_suffix_and_middle_wildcards() {
+        let suffix = Some("example.*".to_string());
+        assert!(domain_matches(Some("example.com"), &suffix));
+        assert!(domain_matches(Some("example.co.uk"), &suffix));
+        assert!(domain_matches(Some("example"), &suffix));
+        assert!(
+            !domain_matches(Some("examplex.com"), &suffix),
+            "label boundary"
+        );
+        assert!(!domain_matches(Some("notexample.com"), &suffix));
+
+        let middle = Some("cdn*.example.com".to_string());
+        assert!(domain_matches(Some("cdn1.example.com"), &middle));
+        assert!(domain_matches(Some("cdn-eu.example.com"), &middle));
+        assert!(
+            !domain_matches(Some("cdn.example.com"), &middle),
+            "star must consume >= 1 char"
+        );
+        assert!(!domain_matches(Some("xcdn1.example.com"), &middle));
+    }
+
+    #[test]
+    fn test_domains_match_list_any() {
+        let many = Some(vec!["*.github.com".to_string(), "gitlab.com".to_string()]);
+        assert!(domains_match(Some("api.github.com"), &None, &many));
+        assert!(domains_match(Some("gitlab.com"), &None, &many));
+        assert!(!domains_match(Some("bitbucket.org"), &None, &many));
+        assert!(!domains_match(None, &None, &many));
+        // When `domains` is present it takes precedence over `domain`.
+        assert!(!domains_match(
+            Some("solo.example"),
+            &Some("solo.example".to_string()),
+            &many
+        ));
+    }
+
+    #[test]
+    fn test_endpoint_matches_domain_port_protocol() {
+        let e = WhitelistEndpoint {
+            domain: Some("*.github.com".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            ..ep()
+        };
+        let m = |d: Option<&str>, port: u16, proto: &str| {
+            endpoint_matches_with_reason(d, None, port, proto, None, None, None, None, &e)
+        };
+        assert_eq!(m(Some("api.github.com"), 443, "TCP"), (true, None));
+        assert_eq!(
+            m(Some("api.github.com"), 443, "tcp").0,
+            true,
+            "protocol is case-insensitive"
+        );
+
+        let (ok, why) = m(Some("api.github.com"), 80, "TCP");
+        assert!(!ok);
+        assert!(why.unwrap().contains("Port mismatch"));
+
+        let (ok, why) = m(Some("api.github.com"), 443, "UDP");
+        assert!(!ok);
+        assert!(why.unwrap().contains("Protocol mismatch"));
+
+        let (ok, why) = m(Some("evil-github.com"), 443, "TCP");
+        assert!(!ok);
+        assert!(why.unwrap().contains("Domain mismatch"));
+
+        let (ok, why) = m(None, 443, "TCP");
+        assert!(
+            !ok,
+            "domain-identified endpoint must not match a session without a domain"
+        );
+        assert!(why.unwrap().contains("Domain mismatch"));
+    }
+
+    #[test]
+    fn test_endpoint_matches_port_and_protocol_are_mandatory_gates() {
+        // Port/protocol mismatch short-circuits before any entity check, and
+        // the reason lists every failing gate.
+        let e = WhitelistEndpoint {
+            domain: Some("api.github.com".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            process: Some("git".into()),
+            ..ep()
+        };
+        let (ok, why) = endpoint_matches_with_reason(
+            Some("api.github.com"),
+            None,
+            80,
+            "UDP",
+            None,
+            None,
+            None,
+            None,
+            &e,
+        );
+        assert!(!ok);
+        let why = why.unwrap();
+        assert!(why.contains("Protocol mismatch"), "{}", why);
+        assert!(why.contains("Port mismatch"), "{}", why);
+        assert!(why.contains("Process mismatch"), "{}", why);
+    }
+
+    #[test]
+    fn test_endpoint_matches_process() {
+        let e = WhitelistEndpoint {
+            domain: Some("api.github.com".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            process: Some("git".into()),
+            ..ep()
+        };
+        let m = |proc_: Option<&str>| {
+            endpoint_matches_with_reason(
+                Some("api.github.com"),
+                None,
+                443,
+                "TCP",
+                None,
+                None,
+                None,
+                proc_,
+                &e,
+            )
+        };
+        assert_eq!(m(Some("git")), (true, None));
+        assert_eq!(m(Some("GIT")).0, true, "process is case-insensitive");
+        let (ok, why) = m(Some("curl"));
+        assert!(!ok);
+        assert!(why.unwrap().contains("Process mismatch"));
+        let (ok, why) = m(None);
+        assert!(
+            !ok,
+            "process-pinned endpoint must not match an unattributed session"
+        );
+        assert!(why.unwrap().contains("Process mismatch"));
+
+        // Endpoint without a process pin accepts any / no process.
+        let free = WhitelistEndpoint {
+            process: None,
+            ..e.clone()
+        };
+        assert!(
+            endpoint_matches_with_reason(
+                Some("api.github.com"),
+                None,
+                443,
+                "TCP",
+                None,
+                None,
+                None,
+                None,
+                &free
+            )
+            .0
+        );
+    }
+
+    #[test]
+    fn test_endpoint_matches_ip_and_domain_are_alternatives() {
+        // Either identity is sufficient when both are declared.
+        let e = WhitelistEndpoint {
+            domain: Some("dns.google".into()),
+            ip: Some("8.8.8.8".into()),
+            port: Some(53),
+            protocol: Some("UDP".into()),
+            ..ep()
+        };
+        let m = |d: Option<&str>, ip: Option<&str>| {
+            endpoint_matches_with_reason(d, ip, 53, "UDP", None, None, None, None, &e)
+        };
+        assert!(
+            m(Some("dns.google"), Some("1.1.1.1")).0,
+            "domain matches, ip does not"
+        );
+        assert!(
+            m(Some("other.example"), Some("8.8.8.8")).0,
+            "ip matches, domain does not"
+        );
+        assert!(m(None, Some("8.8.8.8")).0);
+        let (ok, why) = m(Some("other.example"), Some("1.1.1.1"));
+        assert!(!ok);
+        let why = why.unwrap();
+        assert!(
+            why.contains("Domain mismatch") && why.contains("IP mismatch"),
+            "{}",
+            why
+        );
+        let (ok, _) = m(None, None);
+        assert!(
+            !ok,
+            "no session identity at all cannot satisfy an identified endpoint"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_matches_ip_cidr() {
+        let e = WhitelistEndpoint {
+            ip: Some("10.0.0.0/8".into()),
+            port: Some(22),
+            protocol: Some("TCP".into()),
+            ..ep()
+        };
+        let m = |ip: Option<&str>| {
+            endpoint_matches_with_reason(None, ip, 22, "TCP", None, None, None, None, &e)
+        };
+        assert!(m(Some("10.1.2.3")).0);
+        assert!(!m(Some("11.1.2.3")).0);
+        assert!(!m(Some("not-an-ip")).0);
+        assert!(!m(None).0);
+    }
+
+    #[test]
+    fn test_endpoint_matches_as_only_endpoint() {
+        // No domain / ip: the AS fields are the identity.
+        let e = WhitelistEndpoint {
+            as_number: Some(15169),
+            as_owner: Some("GOOGLE".into()),
+            as_country: Some("US".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            ..ep()
+        };
+        let m = |asn: Option<u32>, country: Option<&str>, owner: Option<&str>| {
+            endpoint_matches_with_reason(
+                Some("x.example"),
+                Some("1.2.3.4"),
+                443,
+                "TCP",
+                asn,
+                country,
+                owner,
+                None,
+                &e,
+            )
+        };
+        assert_eq!(m(Some(15169), Some("us"), Some("google")), (true, None));
+        let (ok, why) = m(Some(13335), Some("US"), Some("GOOGLE"));
+        assert!(!ok);
+        assert!(why.unwrap().contains("AS number mismatch"));
+        let (ok, why) = m(Some(15169), Some("US"), Some("CLOUDFLARE"));
+        assert!(!ok);
+        assert!(why.unwrap().contains("Owner mismatch"));
+        let (ok, why) = m(Some(15169), Some("FR"), Some("GOOGLE"));
+        assert!(!ok);
+        assert!(why.unwrap().contains("Country mismatch"));
+        let (ok, why) = m(None, None, None);
+        assert!(
+            !ok,
+            "session without ASN data cannot satisfy an AS-identified endpoint"
+        );
+        assert!(why.unwrap().contains("AS number mismatch"));
+    }
+
+    #[test]
+    fn test_endpoint_matches_domain_match_short_circuits_as_checks() {
+        // Documented contract: "If domain is specified and matches, other
+        // checks are irrelevant" -- AS constraints are not re-checked.
+        let e = WhitelistEndpoint {
+            domain: Some("api.github.com".into()),
+            as_number: Some(36459),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            ..ep()
+        };
+        let (ok, _) = endpoint_matches_with_reason(
+            Some("api.github.com"),
+            None,
+            443,
+            "TCP",
+            Some(1),
+            None,
+            None,
+            None,
+            &e,
+        );
+        assert!(ok);
+    }
+
+    #[test]
+    fn test_endpoint_matches_unconstrained_endpoint_matches_everything() {
+        // An endpoint with no identity at all is a catch-all. This is the
+        // current contract (a whitelist author must opt into it by writing
+        // such an endpoint); pinned here so any tightening is deliberate.
+        let e = ep();
+        assert_eq!(
+            endpoint_matches_with_reason(None, None, 1, "TCP", None, None, None, None, &e),
+            (true, None)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_is_session_in_whitelist_empty_whitelist_fails_closed() {
+        overwrite_with_test_data(model(vec![wl("empty", None, vec![])])).await;
+        let (ok, why) = is_session_in_whitelist(
+            Some("api.github.com"),
+            Some("1.2.3.4"),
+            443,
+            "TCP",
+            "empty",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            !ok,
+            "a whitelist with no endpoints must reject every session"
+        );
+        assert!(why.unwrap().contains("contains no endpoints"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_is_session_in_whitelist_unknown_name_fails_closed() {
+        overwrite_with_test_data(model(vec![wl(
+            "known",
+            None,
+            vec![WhitelistEndpoint {
+                domain: Some("api.github.com".into()),
+                ..ep()
+            }],
+        )]))
+        .await;
+        let (ok, why) = is_session_in_whitelist(
+            Some("api.github.com"),
+            None,
+            443,
+            "TCP",
+            "does_not_exist",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!ok, "an unknown whitelist name must reject every session");
+        assert!(why.is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_is_session_in_whitelist_matching_and_non_matching() {
+        overwrite_with_test_data(model(vec![wl(
+            "gh",
+            None,
+            vec![WhitelistEndpoint {
+                domain: Some("*.github.com".into()),
+                port: Some(443),
+                protocol: Some("TCP".into()),
+                ..ep()
+            }],
+        )]))
+        .await;
+
+        let (ok, why) = is_session_in_whitelist(
+            Some("api.github.com"),
+            Some("140.82.112.5"),
+            443,
+            "TCP",
+            "gh",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!((ok, why), (true, None));
+
+        let (ok, why) = is_session_in_whitelist(
+            Some("evil-github.com"),
+            Some("1.2.3.4"),
+            443,
+            "TCP",
+            "gh",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!ok);
+        assert!(why
+            .unwrap()
+            .contains("No matching endpoint found in whitelist 'gh'"));
+
+        let (ok, _) = is_session_in_whitelist(
+            Some("api.github.com"),
+            None,
+            22,
+            "TCP",
+            "gh",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!ok, "port must still gate a domain match");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_is_session_in_whitelist_follows_extends() {
+        // `child` declares nothing itself but inherits `base`'s endpoint.
+        overwrite_with_test_data(model(vec![
+            wl(
+                "base",
+                None,
+                vec![WhitelistEndpoint {
+                    ip: Some("8.8.8.8".into()),
+                    port: Some(53),
+                    protocol: Some("UDP".into()),
+                    ..ep()
+                }],
+            ),
+            wl("child", Some(vec!["base"]), vec![]),
+        ]))
+        .await;
+        let (ok, _) = is_session_in_whitelist(
+            None,
+            Some("8.8.8.8"),
+            53,
+            "UDP",
+            "child",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(ok, "inherited endpoints must be enforced");
+        let (ok, _) = is_session_in_whitelist(
+            None,
+            Some("8.8.4.4"),
+            53,
+            "UDP",
+            "child",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_get_all_endpoints_flattens_extends_chain() {
+        let m = model(vec![
+            wl(
+                "a",
+                None,
+                vec![WhitelistEndpoint {
+                    domain: Some("a.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl(
+                "b",
+                Some(vec!["a"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("b.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl(
+                "c",
+                Some(vec!["b"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("c.example".into()),
+                    ..ep()
+                }],
+            ),
+        ]);
+        let mut visited = HashSet::new();
+        visited.insert("c".to_string());
+        let eps = m.get_all_endpoints("c", &mut visited).unwrap();
+        let mut domains: Vec<String> = eps.iter().map(|e| e.domain.clone().unwrap()).collect();
+        domains.sort();
+        assert_eq!(domains, vec!["a.example", "b.example", "c.example"]);
+        assert!(visited.contains("a") && visited.contains("b") && visited.contains("c"));
+    }
+
+    #[test]
+    fn test_get_all_endpoints_multiple_parents_and_diamond() {
+        // d extends b and c, both of which extend a: a must be included once.
+        let m = model(vec![
+            wl(
+                "a",
+                None,
+                vec![WhitelistEndpoint {
+                    domain: Some("a.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl(
+                "b",
+                Some(vec!["a"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("b.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl(
+                "c",
+                Some(vec!["a"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("c.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl("d", Some(vec!["b", "c"]), vec![]),
+        ]);
+        let mut visited = HashSet::new();
+        visited.insert("d".to_string());
+        let eps = m.get_all_endpoints("d", &mut visited).unwrap();
+        let mut domains: Vec<String> = eps.iter().map(|e| e.domain.clone().unwrap()).collect();
+        domains.sort();
+        assert_eq!(domains, vec!["a.example", "b.example", "c.example"]);
+    }
+
+    #[test]
+    fn test_get_all_endpoints_cycle_terminates_without_duplicates() {
+        let m = model(vec![
+            wl(
+                "a",
+                Some(vec!["b"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("a.example".into()),
+                    ..ep()
+                }],
+            ),
+            wl(
+                "b",
+                Some(vec!["a"]),
+                vec![WhitelistEndpoint {
+                    domain: Some("b.example".into()),
+                    ..ep()
+                }],
+            ),
+        ]);
+        // Caller convention (is_session_in_whitelist): root pre-seeded.
+        let mut visited = HashSet::new();
+        visited.insert("a".to_string());
+        let eps = m.get_all_endpoints("a", &mut visited).unwrap();
+        let mut domains: Vec<String> = eps.iter().map(|e| e.domain.clone().unwrap()).collect();
+        domains.sort();
+        assert_eq!(domains, vec!["a.example", "b.example"]);
+
+        // Same result when the caller forgets to seed the root.
+        let mut visited = HashSet::new();
+        let eps = m.get_all_endpoints("a", &mut visited).unwrap();
+        let mut domains: Vec<String> = eps.iter().map(|e| e.domain.clone().unwrap()).collect();
+        domains.sort();
+        assert_eq!(domains, vec!["a.example", "b.example"]);
+
+        // Self-cycle.
+        let m = model(vec![wl(
+            "s",
+            Some(vec!["s"]),
+            vec![WhitelistEndpoint {
+                domain: Some("s.example".into()),
+                ..ep()
+            }],
+        )]);
+        let mut visited = HashSet::new();
+        let eps = m.get_all_endpoints("s", &mut visited).unwrap();
+        assert_eq!(eps.len(), 1);
+    }
+
+    #[test]
+    fn test_get_all_endpoints_missing_whitelist_errors() {
+        let m = model(vec![wl("orphan", Some(vec!["ghost"]), vec![])]);
+        let mut visited = HashSet::new();
+        assert!(m.get_all_endpoints("nope", &mut visited).is_err());
+        let err = m.get_all_endpoints("orphan", &mut visited).unwrap_err();
+        assert!(err.to_string().contains("ghost"), "{}", err);
+    }
 
     /// Regression guard (helper/app/posture startup): the embedded whitelists
     /// snapshot MUST decode and parse. If a bad regen of `whitelists_db.bin`
