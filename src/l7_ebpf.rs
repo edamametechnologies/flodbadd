@@ -252,6 +252,24 @@ mod linux {
             );
             let aligned_object: Vec<u8> = EBPF_OBJECT.to_vec();
 
+            // On kernels < 5.11 (and in many containers) BPF map memory is
+            // charged against RLIMIT_MEMLOCK, and the default limit makes
+            // `bpf(BPF_MAP_CREATE)` fail with EPERM -- the single most
+            // common shape of the "failed to create map `socket_to_process`
+            // with code -1" load failure Sentry has recorded across
+            // 1.4.1..1.8.3 production hosts. Lift the limit for this process
+            // before loading, the way aya's own examples do; failing to lift
+            // it is not fatal (the load below reports the real outcome).
+            {
+                use nix::sys::resource::{setrlimit, Resource, RLIM_INFINITY};
+                if let Err(e) = setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY) {
+                    warn!(
+                        "eBPF: could not raise RLIMIT_MEMLOCK ({}); map creation may fail on kernels < 5.11",
+                        e
+                    );
+                }
+            }
+
             let mut bpf = match Ebpf::load(&aligned_object) {
                 Ok(bpf) => bpf,
                 Err(e) => {
@@ -259,7 +277,13 @@ mod linux {
                         "Disabled: failed to load eBPF program: {} (kernel {})",
                         e, kernel_version
                     );
-                    error!("Failed to load eBPF program: {}", e);
+                    // Environment limitation (unprivileged process, locked-down
+                    // container, old kernel), not a developer-actionable bug:
+                    // capture degrades to the non-eBPF L7 path and the status
+                    // string above is surfaced to the operator. error! here
+                    // produced a Sentry issue with 23k events, once per process
+                    // start on every affected host. Keep it at warn!.
+                    warn!("Failed to load eBPF program: {}", e);
                     return (None, msg);
                 }
             };
@@ -274,7 +298,7 @@ mod linux {
                             "Disabled: failed to cast eBPF program to KProbe: {} (kernel {})",
                             e, kernel_version
                         );
-                        error!("Failed to cast program into KProbe: {}", e);
+                        warn!("Failed to cast program into KProbe: {}", e);
                         return (None, msg);
                     }
                 };
@@ -283,7 +307,7 @@ mod linux {
                         "Disabled: kernel rejected eBPF program load: {} (kernel {})",
                         e, kernel_version
                     );
-                    error!("Failed to load kprobe program: {}", e);
+                    warn!("Failed to load kprobe program: {}", e);
                     return (None, msg);
                 }
                 if let Err(e) = kp.attach("tcp_set_state", 0) {

@@ -136,7 +136,7 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 [target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 aya = { version = "0.13.1", features = ["async_tokio"], optional = true }
 bytemuck = { version = "1.23", features = ["derive"], optional = true }
-nix = { version = "0.30.1", optional = true, features = [ "user" ] }
+nix = { version = "0.30.1", optional = true, features = [ "user", "resource" ] }
 
 # Not WASI/WASIX/WASM
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
