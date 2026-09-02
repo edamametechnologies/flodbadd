@@ -971,7 +971,22 @@ impl IsolationForestModel {
                             diag_time.elapsed()
                         );
                     }
-                    diagnostic
+                    // Export the continuous score and both thresholds inside
+                    // the diagnostic segment so downstream consumers (the
+                    // attack-pattern detector, the LLM adjudicator) can grade
+                    // anomaly strength instead of collapsing it to one
+                    // boolean. Format: `score=<s>;susp=<t>;abn=<u> <feats>`.
+                    // Only non-normal levels carry a diagnostic, so normal
+                    // sessions stay byte-identical.
+                    let score_part = format!(
+                        "score={:.4};susp={:.4};abn={:.4}",
+                        score, self.suspicious_threshold, self.abnormal_threshold
+                    );
+                    if diagnostic.is_empty() {
+                        score_part
+                    } else {
+                        format!("{} {}", score_part, diagnostic)
+                    }
                 } else {
                     "".to_string()
                 };
