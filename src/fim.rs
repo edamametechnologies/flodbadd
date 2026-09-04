@@ -286,6 +286,13 @@ impl FimWatcher {
 
         let mut actual_paths = Vec::new();
         for path in &paths {
+            if config.recursive && is_forbidden_recursive_root(path) {
+                error!(
+                    "FIM: refusing to watch {} recursively (filesystem root or system tree)",
+                    path.display()
+                );
+                continue;
+            }
             if path.exists() {
                 if let Err(e) = watcher.watch(path, mode) {
                     warn!("FIM: failed to watch {}: {}", path.display(), e);
@@ -1308,13 +1315,131 @@ pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
     crate::sensitive_paths::default_sensitive_watch_paths_for_home(home)
 }
 
+/// Directories that must never become a recursive FIM watch root. Watching
+/// one of these means walking (and `inotify_add_watch`-ing) the whole
+/// filesystem tree beneath it: on Linux that walk goes through `/proc` and
+/// `/sys`, never finishes, and its bookkeeping grows the daemon by hundreds
+/// of kilobytes per second (seen 2026-09-03 on the Azure runners: the
+/// runner-protection daemon reached 17-24 GB RSS in 6-8 h and OOM-killed
+/// the GitHub runner service).
+#[cfg(not(target_os = "windows"))]
+const FORBIDDEN_WORKSPACE_ROOTS: &[&str] = &[
+    "/",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/lib64",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/srv",
+    "/sys",
+    "/usr",
+    "/var",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/Users",
+    "/Volumes",
+    "/private",
+];
+#[cfg(target_os = "windows")]
+const FORBIDDEN_WORKSPACE_ROOTS: &[&str] = &[
+    "C:\\",
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\Users",
+];
+
+fn is_forbidden_root_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    // `/` (or `//`) trims to nothing: the filesystem root itself.
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    FORBIDDEN_WORKSPACE_ROOTS.iter().any(|root| {
+        let r = root
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        // The `/` entry trims to an empty string and is covered above; it
+        // must not match every path.
+        !r.is_empty() && lower == r
+    })
+}
+
+/// True for paths that [`FimWatcher::start`] must never watch recursively,
+/// whatever caller asked for them: a filesystem root or a top-level system
+/// tree (see [`FORBIDDEN_WORKSPACE_ROOTS`]). `/tmp` and `/var/tmp` are not
+/// in that list and stay watchable.
+fn is_forbidden_recursive_root(path: &Path) -> bool {
+    is_forbidden_root_path(path)
+}
+
+/// A CI workspace root is acceptable only when it is an existing directory
+/// that is neither a filesystem root nor one of the top-level system trees
+/// in [`FORBIDDEN_WORKSPACE_ROOTS`], and sits at least two components below
+/// the root. The systemd-started runner-protection daemon has no
+/// `GITHUB_WORKSPACE` and a cwd of `/`, which is exactly the case this must
+/// reject.
+pub fn is_acceptable_workspace_root(path: &Path) -> bool {
+    if !path.is_dir() || is_forbidden_recursive_root(path) {
+        return false;
+    }
+    let depth = path
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    depth >= 2
+}
+
+/// The CI workspace to watch: an explicit CI environment variable when it
+/// names an acceptable directory, else the current directory when *it* is
+/// acceptable, else nothing. Never falls back to a filesystem root.
+fn ci_workspace_root() -> Option<PathBuf> {
+    for key in [
+        "GITHUB_WORKSPACE",
+        "CI_PROJECT_DIR",
+        "BUILD_SOURCESDIRECTORY",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            let p = PathBuf::from(value);
+            if is_acceptable_workspace_root(&p) {
+                return Some(p);
+            }
+            warn!(
+                "FIM: ignoring {}={} as a watch root (not an acceptable workspace directory)",
+                key,
+                p.display()
+            );
+        }
+    }
+    match std::env::current_dir() {
+        Ok(cwd) if is_acceptable_workspace_root(&cwd) => Some(cwd),
+        Ok(cwd) => {
+            info!(
+                "FIM: not watching the current directory {} (filesystem root or system tree)",
+                cwd.display()
+            );
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 fn ci_watch_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Ok(workspace) = std::env::var("GITHUB_WORKSPACE") {
-        paths.push(PathBuf::from(workspace));
-    } else if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd);
+    if let Some(workspace) = ci_workspace_root() {
+        paths.push(workspace);
     }
 
     #[cfg(target_os = "macos")]
@@ -1386,6 +1511,65 @@ mod tests {
     fn test_default_ci_paths_not_empty() {
         let paths = default_watch_paths(FimMode::CI);
         assert!(!paths.is_empty(), "CI watch paths should not be empty");
+    }
+
+    #[test]
+    fn test_ci_paths_never_include_a_filesystem_root() {
+        // The systemd-started daemon has cwd `/` and no GITHUB_WORKSPACE;
+        // whatever the environment, no CI watch path may be a root or a
+        // top-level system tree.
+        for p in default_watch_paths(FimMode::CI) {
+            assert!(
+                !is_forbidden_recursive_root(&p),
+                "CI watch paths must never contain a filesystem root: {:?}",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn test_acceptable_workspace_root_rejects_roots_and_system_trees() {
+        #[cfg(not(target_os = "windows"))]
+        {
+            for bad in ["/", "//", "/usr", "/usr/", "/proc", "/home", "/var", "/etc"] {
+                assert!(
+                    !is_acceptable_workspace_root(Path::new(bad)),
+                    "{bad} must not be an acceptable workspace root"
+                );
+            }
+            // A single component below the root is a system tree, not a
+            // workspace, even when it exists.
+            assert!(!is_acceptable_workspace_root(Path::new("/tmp")));
+            let temp = std::env::temp_dir().join(format!("fim_ws_{}", std::process::id()));
+            fs::create_dir_all(temp.join("repo")).unwrap();
+            assert!(is_acceptable_workspace_root(&temp.join("repo")));
+            assert!(!is_acceptable_workspace_root(&temp.join("missing")));
+            let _ = fs::remove_dir_all(&temp);
+            assert!(is_forbidden_recursive_root(Path::new("/")));
+            assert!(is_forbidden_recursive_root(Path::new("/usr")));
+            assert!(!is_forbidden_recursive_root(Path::new("/tmp")));
+            assert!(!is_forbidden_recursive_root(Path::new("/var/tmp")));
+        }
+    }
+
+    #[test]
+    fn test_start_refuses_recursive_root_watch() {
+        let config = FimConfig {
+            recursive: true,
+            ..FimConfig::default()
+        };
+        let root = if cfg!(target_os = "windows") {
+            "C:\\"
+        } else {
+            "/"
+        };
+        let watcher = FimWatcher::start(vec![PathBuf::from(root)], config).expect("start");
+        assert!(
+            watcher.watch_paths().is_empty(),
+            "a recursive watch on the filesystem root must be refused, got {:?}",
+            watcher.watch_paths()
+        );
+        watcher.stop();
     }
 
     #[test]
