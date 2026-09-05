@@ -45,6 +45,8 @@ mod win {
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
+    use crate::process_events as proc_events;
+
     const KERNEL_LOGGER_NAME: &str = "NT Kernel Logger";
 
     // Well-known GUIDs for kernel providers
@@ -122,6 +124,9 @@ mod win {
         process_table: Arc<DashMap<u32, EtwProcessInfo>>,
         connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
         file_attribution_table: Arc<DashMap<String, FimEtwAttribution>>,
+        // Diagnostics counter; the read path lives on the trace-thread
+        // clone, so the struct's own handle is retention-only.
+        #[allow(dead_code)]
         file_insert_counter: Arc<AtomicU64>,
         file_event_counters: Arc<FileEventCounters>,
         available: Arc<AtomicBool>,
@@ -744,8 +749,35 @@ mod win {
                     return;
                 }
 
+                // FLODBADD2 §1b.2: kernel-delivered exec stream. The
+                // command line is digested (I5) -- raw argv never leaves
+                // this handler.
+                let command_line = extract_command_line(remaining_slice);
+                let argv_sha256 = command_line.and_then(|cmd| proc_events::argv_digest(&[cmd]));
+
                 THREAD_PROCESS_TABLE.with(|t| {
                     if let Some(table) = t.borrow().as_ref() {
+                        let parent_process_path = table
+                            .get(&ppid)
+                            .map(|parent| parent.process_path.clone())
+                            .filter(|path| !path.is_empty());
+                        proc_events::push(proc_events::ProcessEvent {
+                            timestamp_ms: proc_events::now_ms(),
+                            kind: proc_events::ProcessEventKind::Exec,
+                            pid,
+                            ppid: Some(ppid),
+                            uid: None,
+                            process_name: process_name.clone(),
+                            process_path: image_path.clone(),
+                            parent_process_path,
+                            argv_sha256: argv_sha256.clone(),
+                            argv_len: None,
+                            signing_id: None,
+                            team_id: None,
+                            is_platform_binary: None,
+                            target_pid: None,
+                            target_process_path: None,
+                        });
                         table.insert(
                             pid,
                             EtwProcessInfo {
@@ -771,7 +803,25 @@ mod win {
 
                 THREAD_PROCESS_TABLE.with(|t| {
                     if let Some(table) = t.borrow().as_ref() {
-                        table.remove(&pid);
+                        if let Some((_, info)) = table.remove(&pid) {
+                            proc_events::push(proc_events::ProcessEvent {
+                                timestamp_ms: proc_events::now_ms(),
+                                kind: proc_events::ProcessEventKind::Exit,
+                                pid,
+                                ppid: Some(info.ppid),
+                                uid: None,
+                                process_name: info.process_name,
+                                process_path: info.process_path,
+                                parent_process_path: None,
+                                argv_sha256: None,
+                                argv_len: None,
+                                signing_id: None,
+                                team_id: None,
+                                is_platform_binary: None,
+                                target_pid: None,
+                                target_process_path: None,
+                            });
+                        }
                     }
                 });
 
@@ -867,6 +917,61 @@ mod win {
             .map(|&b| b as char)
             .collect();
         s
+    }
+
+    /// Best-effort CommandLine extraction from a `Process/Start`
+    /// payload (FLODBADD2 §1b.2, monitoring role). The V3+ classic
+    /// layout places a UTF-16LE null-terminated CommandLine after the
+    /// ANSI ImageFileName; older layouts do not carry one, and the SID
+    /// padding makes the wide string's alignment unreliable -- so both
+    /// byte offsets are tried and the result is discarded unless it
+    /// decodes as plausible text. `None` = unmeasured, never fabricated.
+    fn extract_command_line(data: &[u8]) -> Option<String> {
+        let null_pos = data.iter().position(|&b| b == 0)?;
+        let mut rest = &data[null_pos + 1..];
+        while rest.first() == Some(&0) {
+            rest = &rest[1..];
+        }
+        if rest.len() < 4 {
+            return None;
+        }
+        for offset in 0..=1usize {
+            if rest.len() <= offset {
+                break;
+            }
+            if let Some(cmd) = decode_wide_cstring(&rest[offset..]) {
+                return Some(cmd);
+            }
+        }
+        None
+    }
+
+    fn decode_wide_cstring(bytes: &[u8]) -> Option<String> {
+        let mut wide: Vec<u16> = Vec::with_capacity(bytes.len() / 2);
+        for chunk in bytes.chunks_exact(2) {
+            let ch = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if ch == 0 {
+                break;
+            }
+            wide.push(ch);
+        }
+        if wide.len() < 2 {
+            return None;
+        }
+        let text = String::from_utf16_lossy(&wide);
+        let total = text.chars().count();
+        let printable = text
+            .chars()
+            .filter(|c| !c.is_control() && *c != '\u{FFFD}')
+            .count();
+        // >= 90% printable and no replacement chars in the first token:
+        // the plausibility bar that separates a real command line from
+        // mis-aligned binary tail bytes.
+        if total == 0 || printable * 10 < total * 9 {
+            return None;
+        }
+        let trimmed = text.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
     }
 
     unsafe impl Send for FlodbaddL7Etw {}

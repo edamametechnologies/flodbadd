@@ -100,6 +100,105 @@ struct {
 } socket_to_process SEC(".maps");
 
 /*
+ * FLODBADD2 §1b.2 process-event monitoring stream (monitoring role
+ * only). A ringbuf of exec/fork/exit events plus a child->parent map so
+ * exec/exit events carry ppid without userspace /proc races. Requires
+ * kernel 5.8+ for BPF_MAP_TYPE_RINGBUF; on older kernels the loader's
+ * tracepoint attach fails and the stream degrades to absent (fail-open).
+ */
+#ifndef BPF_MAP_TYPE_RINGBUF
+#define BPF_MAP_TYPE_RINGBUF 27
+#endif
+
+#define PROC_EVENT_EXEC 1
+#define PROC_EVENT_FORK 2
+#define PROC_EVENT_EXIT 3
+
+struct proc_event {
+    __u32 kind;
+    __u32 pid;
+    __u32 ppid;
+    __u32 uid;
+    char filename[256]; /* exec: binary path; fork/exit: comm */
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 262144);
+} proc_events SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_ENTRIES);
+    __type(key, __u32);   /* child pid */
+    __type(value, __u32); /* parent pid */
+} proc_parent SEC(".maps");
+
+/*
+ * sched_process_exec context layout (from
+ * /sys/kernel/tracing/events/sched/sched_process_exec/format): the 8-byte
+ * common header is type(2)+flags(1)+preempt(1)+pid(4), then
+ * __data_loc filename @8, pid @12, old_pid @16. Unchanged across every
+ * kernel we run on, so it can be a fixed struct.
+ */
+struct tp_sched_process_exec {
+    __u64 _common;
+    __u32 __data_loc_filename;
+    __u32 pid;
+    __u32 old_pid;
+};
+
+/*
+ * sched_process_fork / sched_process_exit are NOT layout-stable: 6.17
+ * stores the comm fields of sched_process_fork as __data_loc (record is
+ * 24 bytes) while 5.x/6.8 keep inline char[16] (record is 48 bytes).
+ * Direct ctx loads at the wrong offset are rejected at ATTACH time
+ * (perf_event_set_bpf_prog: max_ctx_offset > record size -> EACCES),
+ * which is exactly the "bpf_link_create failed" seen on the 6.17
+ * dogfood host. So the loader reads the live `format` files and hands
+ * the offsets in through `proc_tp_cfg`; the programs then read every
+ * field with bpf_probe_read_kernel (no direct ctx access, so nothing
+ * for max_ctx_offset to trip on) and stay silent (fail-open) until the
+ * config is valid.
+ */
+struct proc_tp_cfg {
+    __u32 valid;
+    __u32 fork_parent_pid_off;
+    __u32 fork_child_pid_off;
+    __u32 fork_child_comm_off;
+    __u32 fork_child_comm_data_loc; /* 1: __data_loc u32 at off; 0: inline char[16] */
+    __u32 exit_pid_off;
+    __u32 exit_comm_off;
+    __u32 exit_comm_data_loc;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct proc_tp_cfg);
+} proc_tp_cfg SEC(".maps");
+
+static __always_inline __u32 tp_read_u32(void *ctx, __u32 off)
+{
+    __u32 v = 0;
+    bpf_probe_read_kernel(&v, sizeof(v), (void *)ctx + off);
+    return v;
+}
+
+/* Copy a 16-byte comm that is either inline at `off` or behind a
+ * __data_loc descriptor stored at `off`. */
+static __always_inline void tp_read_comm(void *ctx, __u32 off, __u32 data_loc,
+                                         char *dst, __u32 dst_len)
+{
+    if (data_loc) {
+        __u32 loc = tp_read_u32(ctx, off);
+        off = loc & 0xFFFF;
+    }
+    bpf_probe_read_kernel_str(dst, dst_len, (void *)ctx + off);
+}
+
+/*
  * Helper to extract IPv4 address from sock_common
  * Uses stable offsets for skc_rcv_saddr (src) and skc_daddr (dst)
  */
@@ -366,6 +465,88 @@ int socket_cleanup(struct pt_regs *ctx) {
     /* Note: We keep l7_connections entries for userspace to query
      * They will be cleaned up by TTL in userspace */
     
+    return 0;
+}
+
+SEC("tracepoint/sched/sched_process_fork")
+int trace_sched_fork(void *ctx)
+{
+    __u32 zero = 0;
+    struct proc_tp_cfg *cfg = bpf_map_lookup_elem(&proc_tp_cfg, &zero);
+    if (!cfg || !cfg->valid)
+        return 0;
+
+    __u32 child = tp_read_u32(ctx, cfg->fork_child_pid_off);
+    __u32 parent = tp_read_u32(ctx, cfg->fork_parent_pid_off);
+    bpf_map_update_elem(&proc_parent, &child, &parent, BPF_ANY);
+
+    struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+    ev->kind = PROC_EVENT_FORK;
+    ev->pid = child;
+    ev->ppid = parent;
+    ev->uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffff);
+    __builtin_memset(ev->filename, 0, sizeof(ev->filename));
+    tp_read_comm(ctx, cfg->fork_child_comm_off, cfg->fork_child_comm_data_loc,
+                 ev->filename, 16);
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
+}
+
+SEC("tracepoint/sched/sched_process_exec")
+int trace_sched_exec(struct tp_sched_process_exec *ctx)
+{
+    struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+    __u32 pid = ctx->pid;
+    ev->kind = PROC_EVENT_EXEC;
+    ev->pid = pid;
+    __u32 *pp = bpf_map_lookup_elem(&proc_parent, &pid);
+    ev->ppid = pp ? *pp : 0;
+    ev->uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffff);
+    __builtin_memset(ev->filename, 0, sizeof(ev->filename));
+    /* __data_loc encoding: low 16 bits = offset of the string from the
+     * start of the tracepoint record. */
+    unsigned int off = ctx->__data_loc_filename & 0xFFFF;
+    bpf_probe_read_kernel_str(ev->filename, sizeof(ev->filename),
+                              (void *)ctx + off);
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
+}
+
+SEC("tracepoint/sched/sched_process_exit")
+int trace_sched_exit(void *ctx)
+{
+    /* Thread exits share this tracepoint; only report group leaders so
+     * the stream mirrors process lifetimes. */
+    __u64 id = bpf_get_current_pid_tgid();
+    if ((__u32)id != (__u32)(id >> 32))
+        return 0;
+
+    __u32 zero = 0;
+    struct proc_tp_cfg *cfg = bpf_map_lookup_elem(&proc_tp_cfg, &zero);
+    if (!cfg || !cfg->valid)
+        return 0;
+
+    __u32 pid = tp_read_u32(ctx, cfg->exit_pid_off);
+    /* The parent survives the child; report it so exit events join the
+     * same lineage as their exec, then drop the row. */
+    __u32 *pp = bpf_map_lookup_elem(&proc_parent, &pid);
+    __u32 ppid = pp ? *pp : 0;
+    bpf_map_delete_elem(&proc_parent, &pid);
+
+    struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+    ev->kind = PROC_EVENT_EXIT;
+    ev->pid = pid;
+    ev->ppid = ppid;
+    ev->uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffff);
+    __builtin_memset(ev->filename, 0, sizeof(ev->filename));
+    tp_read_comm(ctx, cfg->exit_comm_off, cfg->exit_comm_data_loc, ev->filename, 16);
+    bpf_ringbuf_submit(ev, 0);
     return 0;
 }
 

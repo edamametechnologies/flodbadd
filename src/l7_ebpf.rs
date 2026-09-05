@@ -130,6 +130,205 @@ mod linux {
         key
     }
 
+    /// Live layout of the `sched_process_fork` / `sched_process_exit`
+    /// records, parsed from tracefs at load time. The kernel is not
+    /// layout-stable here (6.17 turned the fork comm fields into
+    /// `__data_loc`, shrinking the record from 48 to 24 bytes), and a
+    /// program that loads a field past the real record size is rejected at
+    /// ATTACH time (`perf_event_set_bpf_prog`: max_ctx_offset > record size
+    /// -> EACCES), so the offsets are handed to the programs through the
+    /// `proc_tp_cfg` map instead of being compiled in. Mirrors
+    /// `struct proc_tp_cfg` in `l7_ebpf.c`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ProcTpCfg {
+        valid: u32,
+        fork_parent_pid_off: u32,
+        fork_child_pid_off: u32,
+        fork_child_comm_off: u32,
+        fork_child_comm_data_loc: u32,
+        exit_pid_off: u32,
+        exit_comm_off: u32,
+        exit_comm_data_loc: u32,
+    }
+    unsafe impl AyaPod for ProcTpCfg {}
+
+    fn read_tracepoint_format(name: &str) -> Option<String> {
+        ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
+            .iter()
+            .find_map(|root| {
+                std::fs::read_to_string(format!("{root}/events/sched/{name}/format")).ok()
+            })
+    }
+
+    /// `(offset, is_data_loc)` of one field in a tracefs `format` file.
+    /// Lines look like `field:__data_loc char[] child_comm;\toffset:16;...`
+    /// or `field:char comm[16];\toffset:8;...`.
+    fn tracepoint_field(format: &str, name: &str) -> Option<(u32, bool)> {
+        for line in format.lines() {
+            let Some(rest) = line.trim().strip_prefix("field:") else {
+                continue;
+            };
+            let mut parts = rest.split(';');
+            let decl = parts.next()?.trim();
+            let last = decl.split_whitespace().last()?;
+            let field_name = last.split('[').next().unwrap_or(last);
+            if field_name != name {
+                continue;
+            }
+            let offset = parts
+                .find_map(|p| p.trim().strip_prefix("offset:"))
+                .and_then(|v| v.trim().parse::<u32>().ok())?;
+            return Some((offset, decl.starts_with("__data_loc")));
+        }
+        None
+    }
+
+    fn proc_tp_cfg_from_tracefs() -> Option<ProcTpCfg> {
+        let fork = read_tracepoint_format("sched_process_fork")?;
+        let exit = read_tracepoint_format("sched_process_exit")?;
+        let (fork_parent_pid_off, _) = tracepoint_field(&fork, "parent_pid")?;
+        let (fork_child_pid_off, _) = tracepoint_field(&fork, "child_pid")?;
+        let (fork_child_comm_off, fork_child_comm_data_loc) =
+            tracepoint_field(&fork, "child_comm")?;
+        let (exit_pid_off, _) = tracepoint_field(&exit, "pid")?;
+        let (exit_comm_off, exit_comm_data_loc) = tracepoint_field(&exit, "comm")?;
+        Some(ProcTpCfg {
+            valid: 1,
+            fork_parent_pid_off,
+            fork_child_pid_off,
+            fork_child_comm_off,
+            fork_child_comm_data_loc: u32::from(fork_child_comm_data_loc),
+            exit_pid_off,
+            exit_comm_off,
+            exit_comm_data_loc: u32::from(exit_comm_data_loc),
+        })
+    }
+
+    /// Parent pid from `/proc/<pid>/stat` (field after the `)`-terminated
+    /// comm, then state, then ppid) for processes whose fork predates the
+    /// tracepoint attach; short-lived processes may already be gone.
+    fn proc_ppid(pid: u32) -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.rsplit_once(')')?.1;
+        rest.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    fn proc_exe(pid: u32) -> Option<String> {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// FLODBADD2 §1b.2: consumer thread for the `proc_events` ringbuf.
+    /// Monitoring role only (fail-open: absence of the map or a spawn
+    /// failure degrades to "no stream"). Exec argv is read from /proc at
+    /// delivery time and immediately digested (I5) -- raw argv is never
+    /// stored.
+    fn spawn_proc_event_thread(mut ring: aya::maps::RingBuf<aya::maps::MapData>) {
+        if let Err(e) = std::thread::Builder::new()
+            .name("proc-events-ebpf".into())
+            .spawn(move || loop {
+                let mut drained = false;
+                while let Some(item) = ring.next() {
+                    drained = true;
+                    handle_proc_event_bytes(&item);
+                }
+                if !drained {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            })
+        {
+            warn!("proc-events consumer thread spawn failed: {}", e);
+        }
+    }
+
+    fn handle_proc_event_bytes(bytes: &[u8]) {
+        use crate::process_events as pe;
+        if bytes.len() < 16 {
+            return;
+        }
+        let word = |i: usize| u32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap());
+        let raw_kind = word(0);
+        let pid = word(4);
+        let ppid = word(8);
+        let uid = word(12);
+        let text_bytes = &bytes[16..bytes.len().min(16 + 256)];
+        let end = text_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(text_bytes.len());
+        let text = String::from_utf8_lossy(&text_bytes[..end]).to_string();
+
+        let basename = |path: &str| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string())
+        };
+
+        let event = match raw_kind {
+            1 => {
+                // Exec: `text` is the binary path from the tracepoint;
+                // argv comes from /proc at delivery time (short-lived
+                // processes may already be gone -> unmeasured None).
+                let argv: Option<Vec<String>> = std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .map(|raw| {
+                        raw.split(|b| *b == 0)
+                            .filter(|part| !part.is_empty())
+                            .map(|part| String::from_utf8_lossy(part).to_string())
+                            .collect()
+                    })
+                    .filter(|argv: &Vec<String>| !argv.is_empty());
+                // Kernel-vouched ppid when the fork was seen after attach;
+                // otherwise /proc (near-kernel-time, may already be gone).
+                let ppid = (ppid > 0).then_some(ppid).or_else(|| proc_ppid(pid));
+                pe::ProcessEvent {
+                    timestamp_ms: pe::now_ms(),
+                    kind: pe::ProcessEventKind::Exec,
+                    pid,
+                    ppid,
+                    uid: Some(uid),
+                    process_name: basename(&text),
+                    process_path: text,
+                    parent_process_path: ppid.and_then(proc_exe),
+                    argv_sha256: argv.as_deref().and_then(pe::argv_digest),
+                    argv_len: argv.as_ref().map(|a| a.len() as u32),
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary: None,
+                    target_pid: None,
+                    target_process_path: None,
+                }
+            }
+            2 | 3 => pe::ProcessEvent {
+                timestamp_ms: pe::now_ms(),
+                kind: if raw_kind == 2 {
+                    pe::ProcessEventKind::Fork
+                } else {
+                    pe::ProcessEventKind::Exit
+                },
+                pid,
+                ppid: (ppid > 0).then_some(ppid),
+                uid: Some(uid),
+                // Fork/exit carry the 16-byte comm, not a path.
+                process_name: text,
+                process_path: String::new(),
+                parent_process_path: None,
+                argv_sha256: None,
+                argv_len: None,
+                signing_id: None,
+                team_id: None,
+                is_platform_binary: None,
+                target_pid: None,
+                target_process_path: None,
+            },
+            _ => return,
+        };
+        pe::push(event);
+    }
+
     // Internal singleton that owns the BPF instance and user-space map copy
     pub struct Inner {
         _bpf: Ebpf,
@@ -380,6 +579,56 @@ mod linux {
                                 "Attached track_connect_v6 to tcp_v6_connect for IPv6 process info"
                             );
                         }
+                    }
+                }
+            }
+
+            // FLODBADD2 §1b.2: hand the live fork/exit record layout to the
+            // programs before they attach. Fail-open: unreadable tracefs
+            // leaves `valid = 0` and the two programs stay silent.
+            match proc_tp_cfg_from_tracefs() {
+                Some(cfg) => match bpf.map_mut("proc_tp_cfg") {
+                    Some(map) => match aya::maps::Array::<_, ProcTpCfg>::try_from(map) {
+                        Ok(mut array) => match array.set(0, cfg, 0) {
+                            Ok(()) => debug!("proc_tp_cfg installed: {:?}", cfg),
+                            Err(e) => debug!("proc_tp_cfg set failed: {} (non-critical)", e),
+                        },
+                        Err(e) => debug!("proc_tp_cfg map open failed: {} (non-critical)", e),
+                    },
+                    None => debug!("proc_tp_cfg map missing from object (non-critical)"),
+                },
+                None => debug!(
+                    "proc_tp_cfg: tracefs format unreadable; fork/exit stream disabled (non-critical)"
+                ),
+            }
+
+            // Process-event tracepoints (monitoring role; fail-open -- a
+            // failed attach only means no stream).
+            for (prog_name, category, tp_name) in [
+                ("trace_sched_fork", "sched", "sched_process_fork"),
+                ("trace_sched_exec", "sched", "sched_process_exec"),
+                ("trace_sched_exit", "sched", "sched_process_exit"),
+            ] {
+                if let Some(prog_any) = bpf.program_mut(prog_name) {
+                    use aya::programs::TracePoint;
+                    if let Ok(tp) = TryInto::<&mut TracePoint>::try_into(prog_any) {
+                        if tp.load().is_ok() {
+                            if let Err(e) = tp.attach(category, tp_name) {
+                                debug!("Could not attach {}: {} (non-critical)", prog_name, e);
+                            } else {
+                                debug!("Attached {} to {}/{}", prog_name, category, tp_name);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ring-buffer consumer for the process-event stream.
+            if let Some(map) = bpf.take_map("proc_events") {
+                match aya::maps::RingBuf::try_from(map) {
+                    Ok(ring) => spawn_proc_event_thread(ring),
+                    Err(e) => {
+                        debug!("proc_events ringbuf unavailable: {} (non-critical)", e)
                     }
                 }
             }

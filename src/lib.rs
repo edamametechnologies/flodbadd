@@ -47,6 +47,7 @@ pub mod l7_trait;
 pub mod mdns;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub mod neighbors;
+pub mod process_events;
 #[cfg(target_os = "windows")]
 pub mod windows_npcap;
 #[cfg(target_os = "windows")]

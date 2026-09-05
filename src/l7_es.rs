@@ -39,6 +39,49 @@ mod macos {
     use std::time::Instant;
     use tracing::{debug, error, warn};
 
+    use crate::process_events as proc_events;
+
+    fn optional_identity(value: std::borrow::Cow<'_, str>) -> Option<String> {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    /// BS-9 observe (FLODBADD2 §1b.2): `responsible` asked for `target`'s
+    /// task port. Shared by the control-port (`GET_TASK`) and read-port
+    /// (`GET_TASK_READ`) notifications: both hand out cross-process memory
+    /// access, and `task_read_for_pid` is the primitive a modern reader
+    /// uses, so watching only the control port misses it.
+    fn push_task_access(
+        responsible: &endpoint_sec::Process<'_>,
+        responsible_pid: u32,
+        target: &endpoint_sec::Process<'_>,
+    ) {
+        let requestor_path = responsible
+            .executable()
+            .path()
+            .to_string_lossy()
+            .to_string();
+        let target_pid = target.audit_token().pid() as u32;
+        let target_path = target.executable().path().to_string_lossy().to_string();
+        proc_events::push(proc_events::ProcessEvent {
+            timestamp_ms: proc_events::now_ms(),
+            kind: proc_events::ProcessEventKind::TaskAccess,
+            pid: responsible_pid,
+            ppid: None,
+            uid: Some(responsible.audit_token().euid()),
+            process_name: extract_process_name(&requestor_path),
+            process_path: requestor_path,
+            parent_process_path: None,
+            argv_sha256: None,
+            argv_len: None,
+            signing_id: optional_identity(responsible.signing_id().to_string_lossy()),
+            team_id: optional_identity(responsible.team_id().to_string_lossy()),
+            is_platform_binary: Some(responsible.is_platform_binary()),
+            target_pid: Some(target_pid),
+            target_process_path: Some(target_path),
+        });
+    }
+
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
     const FILE_ATTR_TTL_SECS: u64 = 30;
     const FILE_ATTR_PRUNE_INTERVAL: u64 = 1_000;
@@ -64,6 +107,12 @@ mod macos {
         pub start_time: u64,
         pub code_signing_flags: u32,
         pub is_platform_binary: bool,
+        /// Kernel-vouched signing identity from the exec message
+        /// (FLODBADD2 §1b.2: makes publisher attestation unforgeable
+        /// and free on macOS). Empty when ES did not deliver one
+        /// (fork-created entries before their exec).
+        pub signing_id: String,
+        pub team_id: String,
         pub parent_process_name: String,
         pub parent_process_path: String,
         pub parent_args: Vec<String>,
@@ -287,8 +336,10 @@ mod macos {
                         let child = fork.child();
                         let child_pid = child.audit_token().pid() as u32;
 
-                        let parent_info = table_for_handler.get(&responsible_pid);
-                        let (gp_pid, gp_name, gp_path, gp_args) =
+                        // Drop the read guard before the insert below -- same
+                        // DashMap same-shard deadlock as the exec arm.
+                        let (gp_pid, gp_name, gp_path, gp_args) = {
+                            let parent_info = table_for_handler.get(&responsible_pid);
                             if let Some(parent) = parent_info.as_ref() {
                                 (
                                     Some(parent.pid),
@@ -298,7 +349,8 @@ mod macos {
                                 )
                             } else {
                                 (None, String::new(), String::new(), Vec::new())
-                            };
+                            }
+                        };
 
                         let parent_path = responsible
                             .executable()
@@ -307,6 +359,12 @@ mod macos {
                             .to_string();
                         let parent_name = extract_process_name(&parent_path);
                         let child_path = child.executable().path().to_string_lossy().to_string();
+                        // Fork-created entries carry the (pre-exec) child
+                        // image's identity; the exec arm overwrites the row
+                        // with the real target identity moments later.
+                        let child_signing_id =
+                            child.signing_id().to_string_lossy().trim().to_string();
+                        let child_team_id = child.team_id().to_string_lossy().trim().to_string();
 
                         let info = EsProcessInfo {
                             pid: child_pid,
@@ -318,17 +376,39 @@ mod macos {
                             args: Vec::new(),
                             username: String::new(),
                             start_time: 0,
-                            code_signing_flags: 0,
-                            is_platform_binary: false,
+                            code_signing_flags: child.codesigning_flags(),
+                            is_platform_binary: child.is_platform_binary(),
+                            signing_id: child_signing_id,
+                            team_id: child_team_id,
                             parent_process_name: parent_name,
-                            parent_process_path: parent_path,
+                            parent_process_path: parent_path.clone(),
                             parent_args: Vec::new(),
                             grandparent_pid: gp_pid,
                             grandparent_process_name: gp_name,
                             grandparent_process_path: gp_path,
                             grandparent_args: gp_args,
                         };
+                        let child_path_for_event = info.process_path.clone();
+                        let child_name_for_event = info.process_name.clone();
+                        let child_uid = info.uid;
                         table_for_handler.insert(child_pid, info);
+                        crate::process_events::push(crate::process_events::ProcessEvent {
+                            timestamp_ms: crate::process_events::now_ms(),
+                            kind: crate::process_events::ProcessEventKind::Fork,
+                            pid: child_pid,
+                            ppid: Some(responsible_pid),
+                            uid: Some(child_uid),
+                            process_name: child_name_for_event,
+                            process_path: child_path_for_event,
+                            parent_process_path: Some(parent_path),
+                            argv_sha256: None,
+                            argv_len: None,
+                            signing_id: None,
+                            team_id: None,
+                            is_platform_binary: None,
+                            target_pid: None,
+                            target_process_path: None,
+                        });
                     }
                     Some(Event::NotifyExec(exec)) => {
                         let target = exec.target();
@@ -346,10 +426,24 @@ mod macos {
 
                         let cs_flags = target.codesigning_flags();
                         let is_platform = target.is_platform_binary();
+                        let signing_id = target.signing_id().to_string_lossy().to_string();
+                        let team_id = target.team_id().to_string_lossy().to_string();
 
-                        let parent_info = table_for_handler.get(&responsible_pid);
-                        let (parent_name, parent_path, parent_args) =
-                            if let Some(p) = parent_info.as_ref() {
+                        // Extract everything needed from the parent row, then
+                        // DROP the DashMap read guard BEFORE the insert below.
+                        // Holding a `get()` Ref across `insert()` deadlocks
+                        // DashMap whenever the target PID hashes to the parent's
+                        // shard (same thread takes the shard read lock, then
+                        // waits on its write lock). Inside the ES handler that
+                        // freezes the serial dispatch queue and silently kills
+                        // the whole event stream after the first colliding exec
+                        // -- the FLODBADD2 §1b.2 bring-up freeze.
+                        let (
+                            (parent_name, parent_path, parent_args),
+                            (gp_pid, gp_name, gp_path, gp_args),
+                        ) = {
+                            let parent_info = table_for_handler.get(&responsible_pid);
+                            let parents = if let Some(p) = parent_info.as_ref() {
                                 (
                                     p.process_name.clone(),
                                     p.process_path.clone(),
@@ -363,9 +457,7 @@ mod macos {
                                     .to_string();
                                 (extract_process_name(&rpath), rpath, Vec::new())
                             };
-
-                        let (gp_pid, gp_name, gp_path, gp_args) =
-                            if let Some(p) = parent_info.as_ref() {
+                            let grand = if let Some(p) = parent_info.as_ref() {
                                 (
                                     Some(p.ppid),
                                     p.parent_process_name.clone(),
@@ -375,6 +467,8 @@ mod macos {
                             } else {
                                 (None, String::new(), String::new(), Vec::new())
                             };
+                            (parents, grand)
+                        };
 
                         let username = resolve_username(target.audit_token().euid());
 
@@ -390,6 +484,8 @@ mod macos {
                             start_time: 0,
                             code_signing_flags: cs_flags,
                             is_platform_binary: is_platform,
+                            signing_id: signing_id.trim().to_string(),
+                            team_id: team_id.trim().to_string(),
                             parent_process_name: parent_name,
                             parent_process_path: parent_path,
                             parent_args,
@@ -398,10 +494,94 @@ mod macos {
                             grandparent_process_path: gp_path,
                             grandparent_args: gp_args,
                         };
+                        // FLODBADD2 §1b.2 monitoring stream: exec with
+                        // argv digested (I5) and the kernel-vouched
+                        // signing identity from the message itself.
+                        let event_path = info.process_path.clone();
+                        let event_name = info.process_name.clone();
+                        let event_uid = info.uid;
+                        let event_parent_path = info.parent_process_path.clone();
+                        let event_argc = info.args.len() as u32;
+                        let argv_sha256 = proc_events::argv_digest(&info.args);
                         table_for_handler.insert(target_pid, info);
+                        proc_events::push(proc_events::ProcessEvent {
+                            timestamp_ms: proc_events::now_ms(),
+                            kind: proc_events::ProcessEventKind::Exec,
+                            pid: target_pid,
+                            ppid: Some(responsible_pid),
+                            uid: Some(event_uid),
+                            process_name: event_name,
+                            process_path: event_path,
+                            parent_process_path: Some(event_parent_path),
+                            argv_sha256,
+                            argv_len: (event_argc > 0).then_some(event_argc),
+                            signing_id: optional_identity(target.signing_id().to_string_lossy()),
+                            team_id: optional_identity(target.team_id().to_string_lossy()),
+                            is_platform_binary: Some(is_platform),
+                            target_pid: None,
+                            target_process_path: None,
+                        });
                     }
                     Some(Event::NotifyExit(_)) => {
-                        table_for_handler.remove(&responsible_pid);
+                        let removed = table_for_handler.remove(&responsible_pid);
+                        let (
+                            exit_name,
+                            exit_path,
+                            exit_ppid,
+                            exit_signing,
+                            exit_team,
+                            exit_platform,
+                        ) = match removed {
+                            Some((_, info)) => (
+                                info.process_name,
+                                info.process_path,
+                                Some(info.ppid),
+                                (!info.signing_id.is_empty()).then_some(info.signing_id),
+                                (!info.team_id.is_empty()).then_some(info.team_id),
+                                Some(info.is_platform_binary),
+                            ),
+                            None => {
+                                // Untracked (predates the client): still
+                                // record the exit with what the message
+                                // itself vouches for.
+                                let path = responsible
+                                    .executable()
+                                    .path()
+                                    .to_string_lossy()
+                                    .to_string();
+                                (
+                                    extract_process_name(&path),
+                                    path,
+                                    None,
+                                    optional_identity(responsible.signing_id().to_string_lossy()),
+                                    optional_identity(responsible.team_id().to_string_lossy()),
+                                    Some(responsible.is_platform_binary()),
+                                )
+                            }
+                        };
+                        proc_events::push(proc_events::ProcessEvent {
+                            timestamp_ms: proc_events::now_ms(),
+                            kind: proc_events::ProcessEventKind::Exit,
+                            pid: responsible_pid,
+                            ppid: exit_ppid,
+                            uid: Some(responsible.audit_token().euid()),
+                            process_name: exit_name,
+                            process_path: exit_path,
+                            parent_process_path: None,
+                            argv_sha256: None,
+                            argv_len: None,
+                            signing_id: exit_signing,
+                            team_id: exit_team,
+                            is_platform_binary: exit_platform,
+                            target_pid: None,
+                            target_process_path: None,
+                        });
+                    }
+                    Some(Event::NotifyGetTask(get_task)) => {
+                        push_task_access(&responsible, responsible_pid, &get_task.target());
+                    }
+                    Some(Event::NotifyGetTaskRead(get_task_read)) => {
+                        push_task_access(&responsible, responsible_pid, &get_task_read.target());
                     }
                     Some(Event::NotifyCreate(ev)) => {
                         counters.create_received.fetch_add(1, Ordering::Relaxed);
@@ -517,6 +697,10 @@ mod macos {
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_FORK,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXEC,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXIT,
+                // FLODBADD2 §1b.2 (BS-9 observe): task-port access is the
+                // macOS primitive for reading another process's memory.
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_GET_TASK,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_CREATE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_CLOSE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_RENAME,
