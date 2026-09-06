@@ -2029,6 +2029,20 @@ impl FlodbaddCapture {
                 if session_info.l7.is_none() {
                     l7.add_connection_to_resolver_ex(&session_info.session, false)
                         .await;
+                    // Re-arm an exhausted resolution only for flows worth a
+                    // resolver round: external destination, still active,
+                    // and carrying traffic. Local/system chatter that never
+                    // attributes stays parked (see L7_REQUEUE_* in l7.rs).
+                    let carried = session_info
+                        .stats
+                        .outbound_bytes
+                        .saturating_add(session_info.stats.inbound_bytes);
+                    if session_info.status.active
+                        && !session_info.is_local_dst
+                        && carried >= crate::l7::L7_REQUEUE_MIN_SESSION_BYTES
+                    {
+                        l7.rearm_failed_resolution(&session_info.session);
+                    }
                 }
 
                 let l7_resolution = l7.get_resolved_l7(&session_info.session).await;

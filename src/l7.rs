@@ -100,20 +100,36 @@ static MAX_L7_RETRIES_DYNAMIC: Lazy<usize> = Lazy::new(|| {
 // would otherwise stay unattributed for its entire lifetime. `populate_l7`
 // re-offers every unattributed session on each update pass; this is how often
 // such an offer is accepted, and how many times in total.
+//
+// Cost control: every re-arm costs one resolver round (process-table +
+// socket-table refresh shared by all sessions re-armed in that cycle).
+// Re-arming every unattributed session every 5 s measurably raised CPU on
+// the posture perf gate (ubuntu capture/lanscan +20-45%, `all` +25%) because
+// CI hosts carry hundreds of local/system flows that never attribute. The
+// caller (`populate_l7`) therefore only offers sessions that are worth it --
+// external destination, still active, and carrying traffic -- and the
+// cadence is 15 s for up to 8 rounds (~2 min), which covers the observed
+// 40-130 s attribution latency without the per-5 s churn.
 static L7_REQUEUE_INTERVAL_SECS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
     std::env::var("L7_REQUEUE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v >= 1)
-        .unwrap_or(5)
+        .unwrap_or(15)
 });
 
 static MAX_L7_REQUEUE_ROUNDS_DYNAMIC: Lazy<usize> = Lazy::new(|| {
     std::env::var("MAX_L7_REQUEUE_ROUNDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(6)
+        .unwrap_or(8)
 });
+
+/// Minimum bytes (either direction) a session must have carried before an
+/// exhausted resolution is re-armed. Idle or one-packet flows are not worth
+/// a resolver round; a flow that keeps moving data is exactly the one whose
+/// attribution matters.
+pub const L7_REQUEUE_MIN_SESSION_BYTES: u64 = 1024;
 
 // Dynamic retry delay for likely-ephemeral connections (defaults to 10 ms)
 static EPHEMERAL_RETRY_MS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
@@ -1472,12 +1488,13 @@ impl FlodbaddL7 {
     /// (batch backfill from `populate_l7`), the heavyweight probes are skipped
     /// so the caller does not stall the session pipeline for minutes.
     /// Give a `FailedMaxRetries` session another bounded round of socket-table
-    /// resolution. Called for every session that is re-offered to the resolver
-    /// while still unattributed (`populate_l7` does so on each update pass);
-    /// only re-arms when the previous attempt is at least
-    /// `L7_REQUEUE_INTERVAL_SECS` old and fewer than `MAX_L7_REQUEUE_ROUNDS`
-    /// rounds have been spent. Returns true when the session was re-queued.
-    fn rearm_failed_resolution(&self, connection: &Session) -> bool {
+    /// resolution. The caller decides which sessions are worth it
+    /// (`populate_l7` offers external, active flows above
+    /// `L7_REQUEUE_MIN_SESSION_BYTES`); this only re-arms when the previous
+    /// attempt is at least `L7_REQUEUE_INTERVAL_SECS` old and fewer than
+    /// `MAX_L7_REQUEUE_ROUNDS` rounds have been spent. Returns true when the
+    /// session was re-queued. Never touches resolved entries.
+    pub fn rearm_failed_resolution(&self, connection: &Session) -> bool {
         let Some(mut entry) = self.l7_map.get_mut(connection) else {
             return false;
         };
@@ -1511,7 +1528,6 @@ impl FlodbaddL7 {
 
     pub async fn add_connection_to_resolver_ex(&self, connection: &Session, eager: bool) {
         if self.l7_map.contains_key(connection) {
-            self.rearm_failed_resolution(connection);
             return;
         }
 
@@ -2719,9 +2735,7 @@ mod tests {
 
         // The backfill path (populate_l7) re-offers unattributed sessions
         // non-eagerly; a stale FailedMaxRetries entry must be re-queued.
-        flodbadd_l7
-            .add_connection_to_resolver_ex(&connection, false)
-            .await;
+        flodbadd_l7.rearm_failed_resolution(&connection);
 
         assert!(flodbadd_l7.resolver_queue.contains_key(&connection));
         let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
@@ -2740,9 +2754,7 @@ mod tests {
             failed_resolution(Some(Instant::now()), 0),
         );
 
-        flodbadd_l7
-            .add_connection_to_resolver_ex(&connection, false)
-            .await;
+        flodbadd_l7.rearm_failed_resolution(&connection);
 
         assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
         let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
@@ -2760,6 +2772,25 @@ mod tests {
             failed_resolution(Some(stale), *MAX_L7_REQUEUE_ROUNDS_DYNAMIC),
         );
 
+        flodbadd_l7.rearm_failed_resolution(&connection);
+
+        assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
+        let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
+        assert_eq!(entry.source, L7ResolutionSource::FailedMaxRetries);
+        assert_eq!(entry.requeue_rounds, *MAX_L7_REQUEUE_ROUNDS_DYNAMIC);
+    }
+
+    #[tokio::test]
+    async fn test_plain_offer_does_not_rearm_exhausted_entry() {
+        // The unconditional backfill offer must stay cheap: re-arming is the
+        // caller's explicit, gated decision.
+        let flodbadd_l7 = FlodbaddL7::new();
+        let connection = udp_dns_session();
+        let stale = Instant::now() - Duration::from_secs(*L7_REQUEUE_INTERVAL_SECS_DYNAMIC + 1);
+        flodbadd_l7
+            .l7_map
+            .insert(connection.clone(), failed_resolution(Some(stale), 0));
+
         flodbadd_l7
             .add_connection_to_resolver_ex(&connection, false)
             .await;
@@ -2767,7 +2798,7 @@ mod tests {
         assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
         let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
         assert_eq!(entry.source, L7ResolutionSource::FailedMaxRetries);
-        assert_eq!(entry.requeue_rounds, *MAX_L7_REQUEUE_ROUNDS_DYNAMIC);
+        assert_eq!(entry.requeue_rounds, 0);
     }
 
     #[tokio::test]
@@ -2782,9 +2813,7 @@ mod tests {
         resolved.source = L7ResolutionSource::ExactMatch;
         flodbadd_l7.l7_map.insert(connection.clone(), resolved);
 
-        flodbadd_l7
-            .add_connection_to_resolver_ex(&connection, false)
-            .await;
+        flodbadd_l7.rearm_failed_resolution(&connection);
 
         assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
         let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
