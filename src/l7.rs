@@ -92,6 +92,29 @@ static MAX_L7_RETRIES_DYNAMIC: Lazy<usize> = Lazy::new(|| {
         .unwrap_or(5)
 });
 
+// Re-arm cadence for sessions that exhausted `MAX_L7_RETRIES` but are still
+// alive. The initial retry window is ~3 s of exponential backoff; a long-lived
+// flow whose socket was not yet visible in the socket table during that window
+// (connected UDP on a loaded host is the canonical case -- ES on macOS and ETW
+// on Windows carry no UDP attribution, so the socket table is the only source)
+// would otherwise stay unattributed for its entire lifetime. `populate_l7`
+// re-offers every unattributed session on each update pass; this is how often
+// such an offer is accepted, and how many times in total.
+static L7_REQUEUE_INTERVAL_SECS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
+    std::env::var("L7_REQUEUE_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(5)
+});
+
+static MAX_L7_REQUEUE_ROUNDS_DYNAMIC: Lazy<usize> = Lazy::new(|| {
+    std::env::var("MAX_L7_REQUEUE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(6)
+});
+
 // Dynamic retry delay for likely-ephemeral connections (defaults to 10 ms)
 static EPHEMERAL_RETRY_MS_DYNAMIC: Lazy<u64> = Lazy::new(|| {
     std::env::var("EPHEMERAL_RETRY_MS")
@@ -132,6 +155,11 @@ pub struct L7Resolution {
     pub retry_count: usize,
     pub last_retry: Option<Instant>,
     pub source: L7ResolutionSource,
+    /// Number of times a `FailedMaxRetries` entry has been re-armed for a
+    /// session that outlived its initial retry window (see
+    /// `add_connection_to_resolver_ex`). Bounded by
+    /// `MAX_L7_REQUEUE_ROUNDS_DYNAMIC`.
+    pub requeue_rounds: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +390,7 @@ impl FlodbaddL7 {
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
+                                    requeue_rounds: 0,
                                     source: L7ResolutionSource::Ebpf,
                                 },
                             );
@@ -380,6 +409,7 @@ impl FlodbaddL7 {
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
+                                    requeue_rounds: 0,
                                     source: L7ResolutionSource::Etw,
                                 },
                             );
@@ -434,6 +464,7 @@ impl FlodbaddL7 {
                                             date: Utc::now(),
                                             retry_count: 0,
                                             last_retry: None,
+                                            requeue_rounds: 0,
                                             source,
                                         },
                                     );
@@ -474,6 +505,7 @@ impl FlodbaddL7 {
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
+                                    requeue_rounds: 0,
                                     source: L7ResolutionSource::ExactMatch,
                                 },
                             );
@@ -536,6 +568,7 @@ impl FlodbaddL7 {
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
+                                    requeue_rounds: 0,
                                     source,
                                 },
                             );
@@ -602,6 +635,7 @@ impl FlodbaddL7 {
                                     date: Utc::now(),
                                     retry_count: 0,
                                     last_retry: None,
+                                    requeue_rounds: 0,
                                     source: cache_source.unwrap_or(L7ResolutionSource::ExactMatch),
                                 },
                             );
@@ -662,6 +696,7 @@ impl FlodbaddL7 {
                                                     date: Utc::now(),
                                                     retry_count: 1,
                                                     last_retry: Some(Instant::now()),
+                                                    requeue_rounds: 0,
                                                     source: L7ResolutionSource::Unknown,
                                                 },
                                             );
@@ -727,6 +762,7 @@ impl FlodbaddL7 {
                                                 date: Utc::now(),
                                                 retry_count: 0,
                                                 last_retry: None,
+                                                requeue_rounds: 0,
                                                 source: L7ResolutionSource::ExactMatch,
                                             },
                                         );
@@ -766,6 +802,7 @@ impl FlodbaddL7 {
                                                 date: Utc::now(),
                                                 retry_count: 0,
                                                 last_retry: None,
+                                                requeue_rounds: 0,
                                                 source,
                                             },
                                         );
@@ -821,6 +858,7 @@ impl FlodbaddL7 {
                                         retry_count: 0, // Start retries from 0
                                         last_retry: Some(Instant::now()), // Mark a retry attempt
                                         source: L7ResolutionSource::Unknown,
+                                        requeue_rounds: 0,
                                     },
                                 );
                                 resolver_queue.insert(connection.clone(), ());
@@ -840,6 +878,7 @@ impl FlodbaddL7 {
                                     retry_count: 0, // Start retries from 0
                                     last_retry: Some(Instant::now()), // Mark a retry attempt
                                     source: L7ResolutionSource::Unknown,
+                                    requeue_rounds: 0,
                                 },
                             );
                             resolver_queue.insert(connection.clone(), ());
@@ -1432,8 +1471,47 @@ impl FlodbaddL7 {
     /// inline to catch short-lived processes before they exit.  When false
     /// (batch backfill from `populate_l7`), the heavyweight probes are skipped
     /// so the caller does not stall the session pipeline for minutes.
+    /// Give a `FailedMaxRetries` session another bounded round of socket-table
+    /// resolution. Called for every session that is re-offered to the resolver
+    /// while still unattributed (`populate_l7` does so on each update pass);
+    /// only re-arms when the previous attempt is at least
+    /// `L7_REQUEUE_INTERVAL_SECS` old and fewer than `MAX_L7_REQUEUE_ROUNDS`
+    /// rounds have been spent. Returns true when the session was re-queued.
+    fn rearm_failed_resolution(&self, connection: &Session) -> bool {
+        let Some(mut entry) = self.l7_map.get_mut(connection) else {
+            return false;
+        };
+        let resolution = entry.value_mut();
+        if resolution.l7.is_some() || resolution.source != L7ResolutionSource::FailedMaxRetries {
+            return false;
+        }
+        if resolution.requeue_rounds >= *MAX_L7_REQUEUE_ROUNDS_DYNAMIC {
+            return false;
+        }
+        let interval = Duration::from_secs(*L7_REQUEUE_INTERVAL_SECS_DYNAMIC);
+        if resolution
+            .last_retry
+            .is_some_and(|last| last.elapsed() < interval)
+        {
+            return false;
+        }
+        resolution.requeue_rounds += 1;
+        resolution.retry_count = 0;
+        resolution.last_retry = Some(Instant::now());
+        resolution.source = L7ResolutionSource::Unknown;
+        let rounds = resolution.requeue_rounds;
+        drop(entry);
+        self.resolver_queue.insert(connection.clone(), ());
+        debug!(
+            "Re-armed L7 resolution for long-lived unattributed session {:?} (round {}/{})",
+            connection, rounds, *MAX_L7_REQUEUE_ROUNDS_DYNAMIC
+        );
+        true
+    }
+
     pub async fn add_connection_to_resolver_ex(&self, connection: &Session, eager: bool) {
         if self.l7_map.contains_key(connection) {
+            self.rearm_failed_resolution(connection);
             return;
         }
 
@@ -1449,6 +1527,7 @@ impl FlodbaddL7 {
                         date: Utc::now(),
                         retry_count: 0,
                         last_retry: None,
+                        requeue_rounds: 0,
                         source: L7ResolutionSource::Ebpf,
                     },
                 );
@@ -1465,6 +1544,7 @@ impl FlodbaddL7 {
                         date: Utc::now(),
                         retry_count: 0,
                         last_retry: None,
+                        requeue_rounds: 0,
                         source: L7ResolutionSource::Etw,
                     },
                 );
@@ -1480,6 +1560,7 @@ impl FlodbaddL7 {
                         date: Utc::now(),
                         retry_count: 0,
                         last_retry: None,
+                        requeue_rounds: 0,
                         source: L7ResolutionSource::EndpointSecurity,
                     },
                 );
@@ -1511,6 +1592,7 @@ impl FlodbaddL7 {
                             date: Utc::now(),
                             retry_count: 0,
                             last_retry: None,
+                            requeue_rounds: 0,
                             source,
                         },
                     );
@@ -1527,6 +1609,7 @@ impl FlodbaddL7 {
                 date: Utc::now(),
                 retry_count: 0,
                 last_retry: None,
+                requeue_rounds: 0,
                 source: L7ResolutionSource::Unknown,
             },
         );
@@ -1551,6 +1634,7 @@ impl FlodbaddL7 {
                 date: Utc::now(),
                 retry_count: 0,
                 last_retry: None,
+                requeue_rounds: 0,
                 source: L7ResolutionSource::Ebpf,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
@@ -1563,6 +1647,7 @@ impl FlodbaddL7 {
                 date: Utc::now(),
                 retry_count: 0,
                 last_retry: None,
+                requeue_rounds: 0,
                 source: L7ResolutionSource::Etw,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
@@ -1574,6 +1659,7 @@ impl FlodbaddL7 {
                 date: Utc::now(),
                 retry_count: 0,
                 last_retry: None,
+                requeue_rounds: 0,
                 source: L7ResolutionSource::EndpointSecurity,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
@@ -1653,6 +1739,7 @@ impl FlodbaddL7 {
                     date: Utc::now(),
                     retry_count: 1,
                     last_retry: Some(std::time::Instant::now()),
+                    requeue_rounds: 0,
                     source: L7ResolutionSource::Unknown,
                 },
             );
@@ -2598,6 +2685,111 @@ mod tests {
         } else {
             panic!("Connection not found in l7_map");
         };
+    }
+
+    fn failed_resolution(last_retry: Option<Instant>, requeue_rounds: usize) -> L7Resolution {
+        L7Resolution {
+            l7: None,
+            date: Utc::now(),
+            retry_count: *MAX_L7_RETRIES_DYNAMIC + 1,
+            last_retry,
+            source: L7ResolutionSource::FailedMaxRetries,
+            requeue_rounds,
+        }
+    }
+
+    fn udp_dns_session() -> Session {
+        Session {
+            protocol: Protocol::UDP,
+            src_ip: IpAddr::from_str("192.168.1.100").unwrap(),
+            src_port: 51515,
+            dst_ip: IpAddr::from_str("1.1.1.1").unwrap(),
+            dst_port: 53,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_failed_max_retries_is_rearmed_after_interval() {
+        let flodbadd_l7 = FlodbaddL7::new();
+        let connection = udp_dns_session();
+        let stale = Instant::now() - Duration::from_secs(*L7_REQUEUE_INTERVAL_SECS_DYNAMIC + 1);
+        flodbadd_l7
+            .l7_map
+            .insert(connection.clone(), failed_resolution(Some(stale), 0));
+
+        // The backfill path (populate_l7) re-offers unattributed sessions
+        // non-eagerly; a stale FailedMaxRetries entry must be re-queued.
+        flodbadd_l7
+            .add_connection_to_resolver_ex(&connection, false)
+            .await;
+
+        assert!(flodbadd_l7.resolver_queue.contains_key(&connection));
+        let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
+        assert_eq!(entry.source, L7ResolutionSource::Unknown);
+        assert_eq!(entry.retry_count, 0);
+        assert_eq!(entry.requeue_rounds, 1);
+        assert!(entry.l7.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_failed_max_retries_is_not_rearmed_within_interval() {
+        let flodbadd_l7 = FlodbaddL7::new();
+        let connection = udp_dns_session();
+        flodbadd_l7.l7_map.insert(
+            connection.clone(),
+            failed_resolution(Some(Instant::now()), 0),
+        );
+
+        flodbadd_l7
+            .add_connection_to_resolver_ex(&connection, false)
+            .await;
+
+        assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
+        let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
+        assert_eq!(entry.source, L7ResolutionSource::FailedMaxRetries);
+        assert_eq!(entry.requeue_rounds, 0);
+    }
+
+    #[tokio::test]
+    async fn test_failed_max_retries_rearm_is_bounded() {
+        let flodbadd_l7 = FlodbaddL7::new();
+        let connection = udp_dns_session();
+        let stale = Instant::now() - Duration::from_secs(*L7_REQUEUE_INTERVAL_SECS_DYNAMIC + 1);
+        flodbadd_l7.l7_map.insert(
+            connection.clone(),
+            failed_resolution(Some(stale), *MAX_L7_REQUEUE_ROUNDS_DYNAMIC),
+        );
+
+        flodbadd_l7
+            .add_connection_to_resolver_ex(&connection, false)
+            .await;
+
+        assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
+        let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
+        assert_eq!(entry.source, L7ResolutionSource::FailedMaxRetries);
+        assert_eq!(entry.requeue_rounds, *MAX_L7_REQUEUE_ROUNDS_DYNAMIC);
+    }
+
+    #[tokio::test]
+    async fn test_resolved_entry_is_never_rearmed() {
+        let flodbadd_l7 = FlodbaddL7::new();
+        let connection = udp_dns_session();
+        let mut resolved = failed_resolution(None, 0);
+        resolved.l7 = Some(SessionL7 {
+            pid: 4242,
+            ..Default::default()
+        });
+        resolved.source = L7ResolutionSource::ExactMatch;
+        flodbadd_l7.l7_map.insert(connection.clone(), resolved);
+
+        flodbadd_l7
+            .add_connection_to_resolver_ex(&connection, false)
+            .await;
+
+        assert!(!flodbadd_l7.resolver_queue.contains_key(&connection));
+        let entry = flodbadd_l7.l7_map.get(&connection).expect("entry kept");
+        assert_eq!(entry.source, L7ResolutionSource::ExactMatch);
+        assert_eq!(entry.requeue_rounds, 0);
     }
 
     #[tokio::test]
