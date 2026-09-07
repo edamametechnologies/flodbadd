@@ -748,6 +748,11 @@ fn should_attempt_process_attribution(
     path_str.contains("/tmp/")
         || path_str.contains("/var/tmp/")
         || path_str.contains("/private/tmp/")
+        // macOS per-user temp root (`$TMPDIR`): the detector grades writes
+        // there as temp staging, so the writer must be looked up too --
+        // before 2026-09-08 these events carried a null writer by
+        // construction and the grading never saw the interpreter.
+        || path_str.contains("/var/folders/")
         || path_str.contains("\\Temp\\")
         || path_str.contains("\\AppData\\Local\\Temp\\")
 }

@@ -61,8 +61,27 @@ mod win {
     const EVENT_TRACE_TYPE_START: u8 = 1; // Process/Start
     const EVENT_TRACE_TYPE_END: u8 = 2; // Process/End
 
-    // FileIo event opcode
+    // FileIo event opcodes (all delivered by EVENT_TRACE_FLAG_FILE_IO_INIT,
+    // i.e. initiation events in the caller's process context)
     const FILEIO_CREATE: u8 = 64; // FileIo/Create -- file open or create with full path
+    const FILEIO_CLEANUP: u8 = 65; // FileIo/Cleanup -- last handle closed
+    const FILEIO_CLOSE: u8 = 66; // FileIo/Close -- file object released
+    const FILEIO_WRITE: u8 = 68; // FileIo/Write -- write initiation on an open file object
+
+    // FileIo/Create `CreateOptions` carries the NT create disposition in its
+    // top byte; these dispositions create or truncate the file, so the open
+    // itself is a write even when no FileIo/Write follows.
+    const FILE_SUPERSEDE: u32 = 0;
+    const FILE_CREATE: u32 = 2;
+    const FILE_OVERWRITE: u32 = 4;
+    const FILE_OVERWRITE_IF: u32 = 5;
+
+    // Open file objects seen at FileIo/Create by a foreign process, keyed by
+    // the kernel `FileObject` pointer, so a later FileIo/Write on that
+    // object can be attributed to the writer's path. Bounded; entries die
+    // at Cleanup/Close or after `FILE_OBJECT_TTL_SECS`.
+    const FILE_OBJECT_MAX_ENTRIES: usize = 16_384;
+    const FILE_OBJECT_TTL_SECS: u64 = 120;
 
     // Provider GUIDs
     const TCP_IP_GUID: GUID = GUID::from_u128(0x9a280ac0_c8e0_11d1_84e2_00c04fb998a2);
@@ -99,6 +118,15 @@ mod win {
     //   FileAttributes(4) + ShareAccess(4) = 32 bytes
     // OpenPath (variable-length UTF-16) follows immediately.
     const FILEIO_CREATE_FIXED_PREFIX: usize = 32;
+    const FILEIO_CREATE_FILE_OBJECT_OFFSET: usize = 8;
+    const FILEIO_CREATE_OPTIONS_OFFSET: usize = 20;
+    // FileIo_ReadWrite (64-bit): Offset(8) + IrpPtr(8) + FileObject(8) +
+    // FileKey(8) + TTID(4) + IoSize(4) + IoFlags(4)
+    const FILEIO_READWRITE_FILE_OBJECT_OFFSET: usize = 16;
+    const FILEIO_READWRITE_MIN_LEN: usize = 24;
+    // FileIo_SimpleOp (64-bit): IrpPtr(8) + FileObject(8) + FileKey(8) + TTID(4)
+    const FILEIO_SIMPLEOP_FILE_OBJECT_OFFSET: usize = 8;
+    const FILEIO_SIMPLEOP_MIN_LEN: usize = 16;
 
     #[derive(Clone, Debug)]
     pub struct FimEtwAttribution {
@@ -479,9 +507,10 @@ mod win {
                 props.Wnode.ClientContext = 1; // QPC for timestamps
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
                 // EVENT_TRACE_FLAG_FILE_IO_INIT alone is sufficient: it delivers
-                // the FileIo TypeGroup2 events (Create=64, Cleanup, Close, ...) and
-                // FILEIO_CREATE is the only opcode `handle_fileio_event` actually
-                // processes; every other opcode is dropped at the opcode check.
+                // the FileIo initiation events (Create=64, Cleanup=65, Close=66,
+                // Write=68, ...) in the caller's context; `handle_fileio_event`
+                // consumes Create/Write/Cleanup/Close and drops the rest at the
+                // opcode check.
                 //
                 // EVENT_TRACE_FLAG_FILE_IO (TypeGroup1: Read/Write completion / OpEnd)
                 // was previously also enabled, which made the NT Kernel Logger emit
@@ -762,6 +791,9 @@ mod win {
             const { std::cell::RefCell::new(None) };
         static THREAD_FILE_COUNTER: std::cell::RefCell<Option<Arc<AtomicU64>>> =
             const { std::cell::RefCell::new(None) };
+        // Only the ProcessTrace thread touches it: no lock needed.
+        static THREAD_FILE_OBJECTS: std::cell::RefCell<std::collections::HashMap<u64, (String, Instant)>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
     }
 
     /// `Microsoft-Windows-Kernel-Audit-API-Calls` callback (audit session
@@ -1220,15 +1252,73 @@ mod win {
         }
     }
 
+    fn read_u64_at(data: &[u8], off: usize) -> Option<u64> {
+        data.get(off..off + 8)
+            .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+    }
+
+    fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
+        data.get(off..off + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Whether a FileIo/Create with this `CreateOptions` value creates or
+    /// truncates the target (a write in itself).
+    pub(crate) fn create_disposition_is_write(create_options: u32) -> bool {
+        matches!(
+            create_options >> 24,
+            FILE_SUPERSEDE | FILE_CREATE | FILE_OVERWRITE | FILE_OVERWRITE_IF
+        )
+    }
+
+    fn remember_file_object(file_object: u64, path: String) {
+        THREAD_FILE_OBJECTS.with(|objects| {
+            let mut objects = objects.borrow_mut();
+            if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
+                let cutoff = Instant::now();
+                objects.retain(|_, (_, seen)| {
+                    cutoff.duration_since(*seen).as_secs() < FILE_OBJECT_TTL_SECS
+                });
+                if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
+                    return;
+                }
+            }
+            objects.insert(file_object, (path, Instant::now()));
+        });
+    }
+
+    fn take_file_object(file_object: u64) -> Option<String> {
+        THREAD_FILE_OBJECTS
+            .with(|objects| objects.borrow_mut().remove(&file_object).map(|(p, _)| p))
+    }
+
+    fn file_object_path(file_object: u64) -> Option<String> {
+        THREAD_FILE_OBJECTS.with(|objects| {
+            objects
+                .borrow()
+                .get(&file_object)
+                .map(|(path, _)| path.clone())
+        })
+    }
+
+    /// FileIo initiation events run in the calling process's context, so the
+    /// header pid is the actor. Before 2026-09-08 every FileIo/Create -- a
+    /// read-only open included -- overwrote the attribution table, so the
+    /// last *reader* of a file became its writer (the FIM hash worker or any
+    /// scanner replacing the real dropper). Now: a creating / truncating
+    /// open records at once; a plain open is remembered by `FileObject` and
+    /// recorded only when a FileIo/Write follows on that object.
     unsafe fn handle_fileio_event(event: &EVENT_RECORD, opcode: u8) {
-        if opcode != FILEIO_CREATE {
+        if !matches!(
+            opcode,
+            FILEIO_CREATE | FILEIO_WRITE | FILEIO_CLEANUP | FILEIO_CLOSE
+        ) {
             return;
         }
 
         let data_ptr = event.UserData;
         let data_len = event.UserDataLength as usize;
-
-        if data_ptr.is_null() || data_len <= FILEIO_CREATE_FIXED_PREFIX {
+        if data_ptr.is_null() || data_len == 0 {
             return;
         }
 
@@ -1243,15 +1333,55 @@ mod win {
             return;
         }
 
-        // OpenPath starts after the fixed prefix as a null-terminated UTF-16 string
-        let path_ptr = (data_ptr as *const u8).add(FILEIO_CREATE_FIXED_PREFIX) as *const u16;
-        let path_max_u16 = (data_len - FILEIO_CREATE_FIXED_PREFIX) / 2;
-        let path_slice = std::slice::from_raw_parts(path_ptr, path_max_u16);
+        let data = std::slice::from_raw_parts(data_ptr as *const u8, data_len);
 
-        let path = extract_utf16_path(path_slice);
-        if path.is_empty() {
-            return;
-        }
+        let path = match opcode {
+            FILEIO_CREATE => {
+                if data_len <= FILEIO_CREATE_FIXED_PREFIX {
+                    return;
+                }
+                // OpenPath starts after the fixed prefix as a null-terminated UTF-16 string
+                let path_ptr =
+                    (data_ptr as *const u8).add(FILEIO_CREATE_FIXED_PREFIX) as *const u16;
+                let path_max_u16 = (data_len - FILEIO_CREATE_FIXED_PREFIX) / 2;
+                let path_slice = std::slice::from_raw_parts(path_ptr, path_max_u16);
+                let path = extract_utf16_path(path_slice);
+                if path.is_empty() {
+                    return;
+                }
+                let file_object = read_u64_at(data, FILEIO_CREATE_FILE_OBJECT_OFFSET);
+                let create_options = read_u32_at(data, FILEIO_CREATE_OPTIONS_OFFSET);
+                if let Some(file_object) = file_object {
+                    remember_file_object(file_object, path.clone());
+                }
+                if !create_options.is_some_and(create_disposition_is_write) {
+                    return;
+                }
+                path
+            }
+            FILEIO_WRITE => {
+                if data_len < FILEIO_READWRITE_MIN_LEN {
+                    return;
+                }
+                let Some(file_object) = read_u64_at(data, FILEIO_READWRITE_FILE_OBJECT_OFFSET)
+                else {
+                    return;
+                };
+                let Some(path) = file_object_path(file_object) else {
+                    return;
+                };
+                path
+            }
+            _ => {
+                if data_len >= FILEIO_SIMPLEOP_MIN_LEN {
+                    if let Some(file_object) = read_u64_at(data, FILEIO_SIMPLEOP_FILE_OBJECT_OFFSET)
+                    {
+                        let _ = take_file_object(file_object);
+                    }
+                }
+                return;
+            }
+        };
 
         THREAD_FILE_TABLE.with(|ft| {
             THREAD_FILE_COUNTER.with(|fc| {

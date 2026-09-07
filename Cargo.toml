@@ -224,6 +224,10 @@ required-features = ["examples"]
 name = "session_analyzer"
 required-features = ["examples"]
 
+[[example]]
+name = "etw_file_writers"
+required-features = ["examples"]
+
 [lib]
 name = "flodbadd"
 path = "src/lib.rs" 

@@ -154,6 +154,7 @@ mod macos {
         pub create_received: AtomicU64,
         pub create_dest_some: AtomicU64,
         pub create_dest_none: AtomicU64,
+        pub write_received: AtomicU64,
         pub close_received: AtomicU64,
         pub close_modified: AtomicU64,
         pub rename_received: AtomicU64,
@@ -167,6 +168,7 @@ mod macos {
                 create_received: AtomicU64::new(0),
                 create_dest_some: AtomicU64::new(0),
                 create_dest_none: AtomicU64::new(0),
+                write_received: AtomicU64::new(0),
                 close_received: AtomicU64::new(0),
                 close_modified: AtomicU64::new(0),
                 rename_received: AtomicU64::new(0),
@@ -627,13 +629,8 @@ mod macos {
                             counters.create_dest_none.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Some(Event::NotifyClose(ev)) => {
-                        counters.close_received.fetch_add(1, Ordering::Relaxed);
-                        if ev.modified() {
-                            counters.close_modified.fetch_add(1, Ordering::Relaxed);
-                        }
-                        // Record all close events, not just modified ones:
-                        // newly created files may have modified=false on APFS.
+                    Some(Event::NotifyWrite(ev)) => {
+                        counters.write_received.fetch_add(1, Ordering::Relaxed);
                         let path = ev.target().path().to_string_lossy().to_string();
                         let exe = responsible
                             .executable()
@@ -648,6 +645,33 @@ mod macos {
                             responsible_pid,
                             &exe,
                         );
+                    }
+                    Some(Event::NotifyClose(ev)) => {
+                        counters.close_received.fetch_add(1, Ordering::Relaxed);
+                        // Only a modified close is a write. Recording every
+                        // close made the last *reader* the writer: the FIM
+                        // hash worker's own read of a freshly dropped
+                        // `~/.env*` replaced the Python writer with
+                        // `edamame_posture` (security gate `file_events`,
+                        // macOS, 2026-09-08). New files are covered by
+                        // CREATE and their first write by WRITE.
+                        if ev.modified() {
+                            counters.close_modified.fetch_add(1, Ordering::Relaxed);
+                            let path = ev.target().path().to_string_lossy().to_string();
+                            let exe = responsible
+                                .executable()
+                                .path()
+                                .to_string_lossy()
+                                .to_string();
+                            FlodbaddL7Es::record_file_attribution(
+                                &file_table_for_handler,
+                                &file_counter_for_handler,
+                                &table_for_handler,
+                                path,
+                                responsible_pid,
+                                &exe,
+                            );
+                        }
                     }
                     Some(Event::NotifyRename(ev)) => {
                         counters.rename_received.fetch_add(1, Ordering::Relaxed);
@@ -710,6 +734,12 @@ mod macos {
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_GET_TASK,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_CREATE,
+                // WRITE fires at the first write to an open file, i.e.
+                // before the writer closes it. The FIM watcher (FSEvents)
+                // wakes on the write, so a CLOSE-only table was empty when
+                // the watcher looked -- every macOS temp-staging finding
+                // carried a null writer (security gate, 2026-09-08).
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_WRITE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_CLOSE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_RENAME,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_UNLINK,
@@ -720,7 +750,7 @@ mod macos {
             }
 
             available.store(true, Ordering::Release);
-            info!("ES client subscribed to FORK/EXEC/EXIT + CREATE/CLOSE/RENAME/UNLINK");
+            info!("ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK");
 
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
@@ -794,12 +824,13 @@ mod macos {
             self.file_attribution_table.len()
         }
 
-        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64) {
             let c = &self.file_event_counters;
             (
                 c.create_received.load(Ordering::Relaxed),
                 c.create_dest_some.load(Ordering::Relaxed),
                 c.create_dest_none.load(Ordering::Relaxed),
+                c.write_received.load(Ordering::Relaxed),
                 c.close_received.load(Ordering::Relaxed),
                 c.close_modified.load(Ordering::Relaxed),
                 c.rename_received.load(Ordering::Relaxed),
@@ -974,8 +1005,8 @@ mod macos {
             0
         }
 
-        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
-            (0, 0, 0, 0, 0, 0, 0, 0)
+        pub fn file_event_stats(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64) {
+            (0, 0, 0, 0, 0, 0, 0, 0, 0)
         }
 
         pub fn dump_file_attribution_paths(&self, _max: usize) -> Vec<(String, u32, String)> {
@@ -1080,7 +1111,8 @@ pub fn file_attribution_count() -> usize {
     macos::global().file_attribution_count()
 }
 
-pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+/// `(create, create_dest_some, create_dest_none, write, close, close_modified, rename, unlink, other)`.
+pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64, u64) {
     macos::global().file_event_stats()
 }
 
