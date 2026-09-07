@@ -69,6 +69,26 @@ mod win {
     const PROCESS_GUID: GUID = GUID::from_u128(0x3d6fa8d0_fe05_11d0_9dda_00c04fd7ba7c);
     const FILEIO_GUID: GUID = GUID::from_u128(0x90cbdc39_4a3e_11d1_84f4_0000f80464e3);
 
+    // BS-9 task access (FLODBADD2 §1b.2 Windows row): the kernel's
+    // Microsoft-Windows-Kernel-Audit-API-Calls manifest provider reports
+    // every PsOpenProcess with the target pid and the desired-access mask.
+    // A manifest provider cannot ride the NT Kernel Logger, so it gets its
+    // own private real-time session. No driver, admin session only.
+    const KERNEL_AUDIT_API_CALLS_GUID: GUID =
+        GUID::from_u128(0xe02a841c_75a3_4fa7_afc8_ae09cf9b7f23);
+    const AUDIT_SESSION_NAME: &str = "EDAMAME-KernelAuditApiCalls";
+    /// Event id of `PsOpenProcess` in that provider; payload
+    /// `TargetProcessId: u32, DesiredAccess: u32, ReturnCode: u32`.
+    const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
+    // PROCESS_* access rights (winnt.h) that let the opener read or write
+    // the target's memory -- the ATTACH-grade subset. Query-only opens
+    // (Task Manager, psutil, every process monitor) are READ-grade and not
+    // forwarded: the same ATTACH-only policy the Linux kprobe applies.
+    const PROCESS_VM_OPERATION: u32 = 0x0008;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_VM_WRITE: u32 = 0x0020;
+    const PROCESS_ALL_ACCESS_MASK: u32 = 0x001F_FFFF;
+
     // File attribution table limits -- same as ES on macOS (l7_es.rs)
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
     const FILE_ATTR_TTL_SECS: u64 = 30;
@@ -193,6 +213,18 @@ mod win {
                 error!("Failed to spawn ETW client thread: {}", e);
             }
 
+            // Task-access watch on its own session and thread; failure only
+            // means "no task-access stream" (monitoring role, fail-open).
+            let audit_pt = Arc::clone(&process_table);
+            if let Err(e) = std::thread::Builder::new()
+                .name("etw-audit-api-calls".into())
+                .spawn(move || {
+                    Self::run_audit_session(audit_pt);
+                })
+            {
+                warn!("Failed to spawn ETW audit-api-calls thread: {}", e);
+            }
+
             std::thread::sleep(std::time::Duration::from_millis(500));
 
             let is_available = available.load(Ordering::Acquire);
@@ -285,6 +317,112 @@ mod win {
                 primed,
                 started.elapsed()
             );
+        }
+
+        /// Private real-time session for `Microsoft-Windows-Kernel-Audit-API-Calls`
+        /// (PsOpenProcess). Runs on its own thread; `ProcessTrace` blocks.
+        fn run_audit_session(process_table: Arc<DashMap<u32, EtwProcessInfo>>) {
+            THREAD_PROCESS_TABLE.with(|t| {
+                *t.borrow_mut() = Some(Arc::clone(&process_table));
+            });
+            unsafe {
+                let name_wide: Vec<u16> = AUDIT_SESSION_NAME
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let buf_size =
+                    std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + (name_wide.len() * 2) + 1024;
+
+                // Stop a stale session from a previous daemon instance.
+                let mut stop_buf = vec![0u8; buf_size];
+                let stop_props = &mut *(stop_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                stop_props.Wnode.BufferSize = buf_size as u32;
+                stop_props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+                let _ = ControlTraceW(
+                    CONTROLTRACE_HANDLE::default(),
+                    PCWSTR(name_wide.as_ptr()),
+                    stop_props,
+                    EVENT_TRACE_CONTROL_STOP,
+                );
+
+                let mut trace_buf = vec![0u8; buf_size];
+                let props = &mut *(trace_buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                props.Wnode.BufferSize = buf_size as u32;
+                props.Wnode.ClientContext = 1; // QPC
+                props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+                props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+                props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+                std::ptr::copy_nonoverlapping(
+                    name_wide.as_ptr() as *const u8,
+                    trace_buf.as_mut_ptr().add(props.LoggerNameOffset as usize),
+                    name_wide.len() * 2,
+                );
+
+                let mut session_handle = CONTROLTRACE_HANDLE::default();
+                let start = StartTraceW(&mut session_handle, PCWSTR(name_wide.as_ptr()), props);
+                if start.is_err() {
+                    debug!(
+                        "ETW audit-api-calls session not started: {:?} (task-access stream disabled)",
+                        start
+                    );
+                    return;
+                }
+
+                let mut params = ENABLE_TRACE_PARAMETERS::default();
+                params.Version = 2;
+                const ENABLE_PROVIDER: u32 = 1;
+                let enabled = EnableTraceEx2(
+                    session_handle,
+                    &KERNEL_AUDIT_API_CALLS_GUID,
+                    ENABLE_PROVIDER,
+                    TRACE_LEVEL_INFORMATION as u8,
+                    0xFFFFFFFF_FFFFFFFF,
+                    0,
+                    0,
+                    Some(&params),
+                );
+                if enabled.is_err() {
+                    debug!(
+                        "ETW audit-api-calls provider not enabled: {:?} (task-access stream disabled)",
+                        enabled
+                    );
+                    let _ = ControlTraceW(
+                        session_handle,
+                        PCWSTR::null(),
+                        props,
+                        EVENT_TRACE_CONTROL_STOP,
+                    );
+                    return;
+                }
+
+                let mut logfile = EVENT_TRACE_LOGFILEW::default();
+                logfile.LoggerName = windows::core::PWSTR(name_wide.as_ptr() as *mut u16);
+                logfile.Anonymous1.ProcessTraceMode =
+                    PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+                logfile.Anonymous2.EventRecordCallback = Some(audit_record_callback);
+                let trace_handle = OpenTraceW(&mut logfile);
+                if trace_handle.Value == u64::MAX {
+                    debug!("ETW audit-api-calls OpenTrace failed (task-access stream disabled)");
+                    let _ = ControlTraceW(
+                        session_handle,
+                        PCWSTR::null(),
+                        props,
+                        EVENT_TRACE_CONTROL_STOP,
+                    );
+                    return;
+                }
+                info!("ETW audit-api-calls session open (PsOpenProcess task-access stream)");
+                let handles = [trace_handle];
+                let _ = ProcessTrace(&handles, None, None);
+                let _ = CloseTrace(trace_handle);
+                let _ = ControlTraceW(
+                    session_handle,
+                    PCWSTR::null(),
+                    props,
+                    EVENT_TRACE_CONTROL_STOP,
+                );
+                debug!("ETW audit-api-calls session ended");
+            }
         }
 
         fn run_etw_session(
@@ -624,6 +762,152 @@ mod win {
             const { std::cell::RefCell::new(None) };
         static THREAD_FILE_COUNTER: std::cell::RefCell<Option<Arc<AtomicU64>>> =
             const { std::cell::RefCell::new(None) };
+    }
+
+    /// `Microsoft-Windows-Kernel-Audit-API-Calls` callback (audit session
+    /// thread). Only `PsOpenProcess` with an ATTACH-grade access mask is
+    /// forwarded, as a `TaskAccess` ring event carrying the requester (the
+    /// event header's process) and the target from the payload; both images
+    /// come from the ETW process table primed at start.
+    unsafe extern "system" fn audit_record_callback(record: *mut EVENT_RECORD) {
+        if record.is_null() {
+            return;
+        }
+        let event = &*record;
+        let header = &event.EventHeader;
+        if header.ProviderId != KERNEL_AUDIT_API_CALLS_GUID
+            || header.EventDescriptor.Id != AUDIT_EVENT_PS_OPEN_PROCESS
+        {
+            return;
+        }
+        let data_ptr = event.UserData as *const u8;
+        let data_len = event.UserDataLength as usize;
+        if data_ptr.is_null() || data_len < 12 {
+            return;
+        }
+        let read_u32 = |off: usize| {
+            u32::from_le_bytes([
+                *data_ptr.add(off),
+                *data_ptr.add(off + 1),
+                *data_ptr.add(off + 2),
+                *data_ptr.add(off + 3),
+            ])
+        };
+        let target_pid = read_u32(0);
+        let desired_access = read_u32(4);
+        let requester_pid = header.ProcessId;
+        let own_pid = GetCurrentProcessId();
+        if target_pid == 0 || requester_pid == 0 || requester_pid == target_pid {
+            return;
+        }
+        if requester_pid == own_pid || target_pid == own_pid {
+            return;
+        }
+        let attach_grade =
+            desired_access & (PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION) != 0
+                || desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
+        if !attach_grade {
+            return;
+        }
+        THREAD_PROCESS_TABLE.with(|t| {
+            if let Some(table) = t.borrow().as_ref() {
+                let (requester_name, requester_path, requester_ppid, parent_path) = table
+                    .get(&requester_pid)
+                    .map(|p| {
+                        let parent = table
+                            .get(&p.ppid)
+                            .map(|pp| pp.process_path.clone())
+                            .filter(|s| !s.is_empty());
+                        (
+                            p.process_name.clone(),
+                            p.process_path.clone(),
+                            Some(p.ppid),
+                            parent,
+                        )
+                    })
+                    .unwrap_or_default();
+                let target_path = table
+                    .get(&target_pid)
+                    .map(|p| p.process_path.clone())
+                    .filter(|s| !s.is_empty());
+                // Interim OS-shipped marking until in-proc WinVerifyTrust
+                // lands (FLODBADD2 §1b.5): csrss, lsass, svchost and
+                // Defender's MsMpEng open every process with VM_READ, and
+                // Windows has no in-message signing fact like ES. A
+                // path-under-%SystemRoot% / Defender-root check is what
+                // keeps the idle baseline clean; the detector still
+                // requires a canonical OS path before it drops the edge.
+                let is_platform_binary = Some(is_os_shipped_windows_image(&requester_path));
+                proc_events::push(proc_events::ProcessEvent {
+                    timestamp_ms: proc_events::now_ms(),
+                    kind: proc_events::ProcessEventKind::TaskAccess,
+                    pid: requester_pid,
+                    ppid: requester_ppid,
+                    uid: None,
+                    process_name: requester_name,
+                    process_path: requester_path,
+                    parent_process_path: parent_path,
+                    argv_sha256: None,
+                    argv_len: None,
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary,
+                    target_pid: Some(target_pid),
+                    target_process_path: target_path,
+                    task_access_mode: Some(2),
+                });
+            }
+        });
+    }
+
+    /// Windows has no kernel-vouched platform-binary fact; until the
+    /// in-proc Authenticode check lands, an image under the Windows
+    /// directory or the Defender platform roots counts as OS-shipped for
+    /// the task-access stream. Interim and path-shaped by design -- the
+    /// detector additionally requires `is_canonical_os_path`.
+    pub(crate) fn is_os_shipped_windows_image(path: &str) -> bool {
+        let p = path.trim().to_ascii_lowercase().replace('\\', "/");
+        if p.is_empty() {
+            return false;
+        }
+        let roots = [
+            "c:/windows/",
+            "c:/program files/windows defender/",
+            "c:/programdata/microsoft/windows defender/",
+        ];
+        // Any drive letter for the Windows directory (`d:/windows/...`).
+        let other_drive = p.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && p.get(1..)
+                .is_some_and(|rest| rest.starts_with(":/windows/"));
+        roots.iter().any(|r| p.starts_with(r)) || other_drive
+    }
+
+    #[cfg(test)]
+    mod os_shipped_tests {
+        use super::is_os_shipped_windows_image;
+
+        #[test]
+        fn windows_and_defender_roots_are_os_shipped() {
+            assert!(is_os_shipped_windows_image(
+                r"C:\Windows\System32\csrss.exe"
+            ));
+            assert!(is_os_shipped_windows_image(
+                r"D:\WINDOWS\System32\lsass.exe"
+            ));
+            assert!(is_os_shipped_windows_image(
+                r"C:\ProgramData\Microsoft\Windows Defender\Platform\4.18\MsMpEng.exe"
+            ));
+            assert!(is_os_shipped_windows_image(
+                r"C:\Program Files\Windows Defender\MsMpEng.exe"
+            ));
+            assert!(!is_os_shipped_windows_image(
+                r"C:\Users\me\AppData\Local\Temp\stealer.exe"
+            ));
+            assert!(!is_os_shipped_windows_image(
+                r"C:\Program Files\Python312\python.exe"
+            ));
+            assert!(!is_os_shipped_windows_image(""));
+        }
     }
 
     unsafe extern "system" fn event_record_callback(record: *mut EVENT_RECORD) {
