@@ -244,6 +244,20 @@ impl FimWatcher {
         let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| match result {
                 Ok(event) => {
+                    // Keep the fanotify writer table covering directories
+                    // created after start (its marks are per directory).
+                    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(notify::event::CreateKind::Folder)
+                            | EventKind::Create(notify::event::CreateKind::Any)
+                    ) {
+                        for p in &event.paths {
+                            if p.is_dir() {
+                                crate::fim_fanotify::remark_directory(p);
+                            }
+                        }
+                    }
                     if let Some(fim_events) =
                         translate_notify_event(&event, hash_threshold, explicit_clone.as_ref())
                     {
@@ -308,6 +322,10 @@ impl FimWatcher {
         if actual_paths.is_empty() {
             warn!("FIM: no valid watch paths, watcher started but inactive");
         }
+
+        // Linux: kernel-time writer attribution for the same roots.
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        crate::fim_fanotify::init(&actual_paths);
 
         Ok(Self {
             _watcher: watcher,
@@ -761,6 +779,13 @@ fn best_effort_process_attribution(
 
     // Tier 1: ES file attribution table (macOS only, zero-cost on other platforms)
     if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&path_str) {
+        return (Some(name), Some(proc_path));
+    }
+
+    // Tier 1 (Linux): kernel-time writer from the fanotify table -- no race
+    // with the writer closing the file, unlike the lsof poll of tier 3.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    if let Some((_pid, name, proc_path)) = crate::fim_fanotify::get_file_attribution(&path_str) {
         return (Some(name), Some(proc_path));
     }
 

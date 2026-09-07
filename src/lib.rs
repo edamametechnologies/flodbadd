@@ -31,6 +31,10 @@ pub mod fim;
     feature = "fim"
 ))]
 pub mod fim_events;
+/// Kernel-time FIM writer attribution (fanotify). Linux only; rides the
+/// `ebpf` feature set for the `nix` dependency and `fim` for the watcher.
+#[cfg(all(target_os = "linux", feature = "fim", feature = "ebpf"))]
+pub mod fim_fanotify;
 pub mod interface;
 pub mod ip;
 #[cfg(all(
