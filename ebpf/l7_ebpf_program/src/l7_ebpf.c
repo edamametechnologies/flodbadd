@@ -113,6 +113,10 @@ struct {
 #define PROC_EVENT_EXEC 1
 #define PROC_EVENT_FORK 2
 #define PROC_EVENT_EXIT 3
+/* Cross-process memory / task access attempt (ptrace_may_access): pid =
+ * requester tgid, ppid slot = target tgid, uid slot = ptrace mode bits,
+ * filename = target comm. Self-access is filtered in-kernel. */
+#define PROC_EVENT_TASK_ACCESS 4
 
 struct proc_event {
     __u32 kind;
@@ -546,6 +550,84 @@ int trace_sched_exit(void *ctx)
     ev->uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffff);
     __builtin_memset(ev->filename, 0, sizeof(ev->filename));
     tp_read_comm(ctx, cfg->exit_comm_off, cfg->exit_comm_data_loc, ev->filename, 16);
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
+}
+
+/*
+ * BS-9 monitoring hook (fail-open, notify-only): every cross-process memory
+ * or task access goes through ptrace_may_access(task, mode) -- ptrace
+ * attach, process_vm_readv/writev, and every open of /proc/<pid>/mem,
+ * maps, environ, auxv, stack (PTRACE_MODE_READ / _ATTACH, with the
+ * _FSCREDS / _REALCREDS flavours). A kprobe on that function sees the
+ * attempt even when the kernel then denies it, which is the interesting
+ * half for an observer. Only the requester and target tgids plus the mode
+ * bits leave the kernel; the Rust side resolves the image paths.
+ */
+/* The trimmed vmlinux.h carries no task_struct; declare only the fields we
+ * read as a CO-RE flavour (the `___local` suffix is stripped by libbpf /
+ * aya when relocating against the running kernel's BTF), so the offsets
+ * of `tgid` and `comm` are resolved per kernel rather than assumed. */
+struct task_struct___local {
+    int tgid;
+    char comm[16];
+} __attribute__((preserve_access_index));
+
+/* Installed by the loader: the sensor's own tgid (its /proc/<pid>/exe and
+ * /proc/<pid>/status lookups go through ptrace_may_access too -- without
+ * this filter the consumer's own resolution re-triggers the probe in a
+ * feedback loop, measured at 26k events/s) and the PTRACE_MODE bits that
+ * count. Default when absent: ATTACH only (0x02: /proc/<pid>/mem,
+ * process_vm_readv/writev, ptrace attach); READ (0x01: exe, maps, environ,
+ * cmdline readers such as ps / lsof / IDEs) is far too noisy for a
+ * kernel-route signal and is covered by the procfs open-file route. */
+struct task_access_cfg {
+    __u32 self_tgid;
+    __u32 mode_mask;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct task_access_cfg);
+} task_access_cfg SEC(".maps");
+
+#define PTRACE_MODE_ATTACH_BIT 0x02
+
+SEC("kprobe/ptrace_may_access")
+int trace_ptrace_may_access(struct pt_regs *ctx)
+{
+    struct task_struct___local *target =
+        (struct task_struct___local *)PT_REGS_PARM1(ctx);
+    __u32 mode = (__u32)PT_REGS_PARM2(ctx);
+    if (!target)
+        return 0;
+    __u64 id = bpf_get_current_pid_tgid();
+    __u32 requester = (__u32)(id >> 32);
+    __u32 zero = 0;
+    struct task_access_cfg *cfg = bpf_map_lookup_elem(&task_access_cfg, &zero);
+    __u32 mode_mask = cfg && cfg->mode_mask ? cfg->mode_mask : PTRACE_MODE_ATTACH_BIT;
+    if ((mode & mode_mask) == 0)
+        return 0;
+    if (cfg && cfg->self_tgid && cfg->self_tgid == requester)
+        return 0;
+    __u32 target_tgid = 0;
+    if (bpf_core_read(&target_tgid, sizeof(target_tgid), &target->tgid))
+        return 0;
+    /* Reading one's own /proc/self/* is not cross-process access. */
+    if (target_tgid == 0 || target_tgid == requester)
+        return 0;
+
+    struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+    ev->kind = PROC_EVENT_TASK_ACCESS;
+    ev->pid = requester;
+    ev->ppid = target_tgid;
+    ev->uid = mode;
+    __builtin_memset(ev->filename, 0, sizeof(ev->filename));
+    bpf_core_read_str(ev->filename, sizeof(ev->filename), &target->comm);
     bpf_ringbuf_submit(ev, 0);
     return 0;
 }

@@ -153,6 +153,20 @@ mod linux {
     }
     unsafe impl AyaPod for ProcTpCfg {}
 
+    /// `struct task_access_cfg` in `l7_ebpf.c`: the sensor's own tgid (its
+    /// `/proc/<pid>/exe` lookups would otherwise re-trigger the probe) and
+    /// the PTRACE_MODE bits that count (ATTACH only by default).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    struct TaskAccessCfg {
+        self_tgid: u32,
+        mode_mask: u32,
+    }
+    unsafe impl AyaPod for TaskAccessCfg {}
+
+    /// `PTRACE_MODE_ATTACH` (kernel `include/linux/ptrace.h`).
+    const PTRACE_MODE_ATTACH_BIT: u32 = 0x02;
+
     fn read_tracepoint_format(name: &str) -> Option<String> {
         ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
             .iter()
@@ -324,9 +338,50 @@ mod linux {
                 target_pid: None,
                 target_process_path: None,
             },
+            4 => {
+                // ptrace_may_access(target, mode): ppid slot = target tgid,
+                // uid slot = PTRACE_MODE bits, text = target comm. Resolve
+                // both images from /proc at delivery (best effort; a
+                // short-lived target may already be gone, in which case the
+                // kernel comm stands in for its path).
+                let target_pid = (ppid > 0).then_some(ppid);
+                let requester_path = proc_exe(pid).unwrap_or_default();
+                let target_path = target_pid
+                    .and_then(proc_exe)
+                    .or_else(|| (!text.is_empty()).then(|| text.clone()));
+                pe::ProcessEvent {
+                    timestamp_ms: pe::now_ms(),
+                    kind: pe::ProcessEventKind::TaskAccess,
+                    pid,
+                    ppid: proc_ppid(pid),
+                    // The mode word rides in `uid` on the wire only; the
+                    // event's uid is the requester's real uid.
+                    uid: proc_uid(pid),
+                    process_name: basename(&requester_path),
+                    process_path: requester_path,
+                    parent_process_path: None,
+                    argv_sha256: None,
+                    argv_len: Some(uid),
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary: None,
+                    target_pid,
+                    target_process_path: target_path,
+                }
+            }
             _ => return,
         };
         pe::push(event);
+    }
+
+    /// Real uid of a live process from `/proc/<pid>/status`.
+    fn proc_uid(pid: u32) -> Option<u32> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|uid| uid.parse().ok())
     }
 
     // Internal singleton that owns the BPF instance and user-space map copy
@@ -624,6 +679,49 @@ mod linux {
             }
 
             // Ring-buffer consumer for the process-event stream.
+            // BS-9 cross-process memory / task access watch (monitoring role,
+            // fail-open): a kprobe on `ptrace_may_access`, which every ptrace
+            // attach, process_vm_readv and /proc/<pid>/mem open goes
+            // through (ATTACH mode). Symbol availability varies by kernel
+            // build; absence only means "no task-access stream". The config
+            // map excludes this process's own procfs lookups.
+            match bpf.map_mut("task_access_cfg") {
+                Some(map) => match aya::maps::Array::<_, TaskAccessCfg>::try_from(map) {
+                    Ok(mut array) => {
+                        let cfg = TaskAccessCfg {
+                            self_tgid: std::process::id(),
+                            mode_mask: PTRACE_MODE_ATTACH_BIT,
+                        };
+                        match array.set(0, cfg, 0) {
+                            Ok(()) => debug!("task_access_cfg installed: {:?}", cfg),
+                            Err(e) => debug!("task_access_cfg set failed: {} (non-critical)", e),
+                        }
+                    }
+                    Err(e) => debug!("task_access_cfg map open failed: {} (non-critical)", e),
+                },
+                None => debug!("task_access_cfg map missing from object (non-critical)"),
+            }
+            if let Some(prog_any) = bpf.program_mut("trace_ptrace_may_access") {
+                use aya::programs::KProbe;
+                if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
+                    match kp.load() {
+                        Ok(()) => match kp.attach("ptrace_may_access", 0) {
+                            Ok(_) => {
+                                debug!("Attached trace_ptrace_may_access to ptrace_may_access")
+                            }
+                            Err(e) => debug!(
+                                "Could not attach trace_ptrace_may_access: {} (non-critical)",
+                                e
+                            ),
+                        },
+                        Err(e) => debug!(
+                            "Could not load trace_ptrace_may_access: {} (non-critical)",
+                            e
+                        ),
+                    }
+                }
+            }
+
             if let Some(map) = bpf.take_map("proc_events") {
                 match aya::maps::RingBuf::try_from(map) {
                     Ok(ring) => spawn_proc_event_thread(ring),
