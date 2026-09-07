@@ -775,13 +775,41 @@ mod win {
         }
         let event = &*record;
         let header = &event.EventHeader;
-        if header.ProviderId != KERNEL_AUDIT_API_CALLS_GUID
-            || header.EventDescriptor.Id != AUDIT_EVENT_PS_OPEN_PROCESS
-        {
+        if header.ProviderId != KERNEL_AUDIT_API_CALLS_GUID {
             return;
         }
         let data_ptr = event.UserData as *const u8;
         let data_len = event.UserDataLength as usize;
+        // Bounded diagnostic of the provider's raw shape (event id, version,
+        // payload) so a daemon log answers "what does this kernel deliver"
+        // without a debugger -- the PsOpenProcess layout below is decoded
+        // from documentation, not from an SDK header.
+        static AUDIT_DIAG_LINES: AtomicU64 = AtomicU64::new(0);
+        if AUDIT_DIAG_LINES.fetch_add(1, Ordering::Relaxed) < 12 {
+            let preview_len = data_len.min(32);
+            let preview: Vec<String> = if data_ptr.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(data_ptr, preview_len)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            };
+            info!(
+                "ETW audit-api-calls event id={} version={} opcode={} level={} keyword={:#x} pid={} len={} payload={}",
+                header.EventDescriptor.Id,
+                header.EventDescriptor.Version,
+                header.EventDescriptor.Opcode,
+                header.EventDescriptor.Level,
+                header.EventDescriptor.Keyword,
+                header.ProcessId,
+                data_len,
+                preview.join("")
+            );
+        }
+        if header.EventDescriptor.Id != AUDIT_EVENT_PS_OPEN_PROCESS {
+            return;
+        }
         if data_ptr.is_null() || data_len < 12 {
             return;
         }
