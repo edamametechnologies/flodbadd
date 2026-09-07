@@ -37,11 +37,11 @@ mod win {
     use windows::core::{GUID, PCWSTR};
     use windows::Win32::System::Diagnostics::Etw::{
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
-        CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
-        EVENT_TRACE_FLAG_FILE_IO_INIT, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
-        EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
-        PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION,
-        WNODE_FLAG_TRACED_GUID,
+        CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_HEADER_FLAG_32_BIT_HEADER,
+        EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FLAG_FILE_IO_INIT,
+        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW,
+        EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+        PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -839,7 +839,7 @@ mod win {
         }
         THREAD_PROCESS_TABLE.with(|t| {
             if let Some(table) = t.borrow().as_ref() {
-                let (requester_name, requester_path, requester_ppid, parent_path) = table
+                let (mut requester_name, mut requester_path, requester_ppid, parent_path) = table
                     .get(&requester_pid)
                     .map(|p| {
                         let parent = table
@@ -854,10 +854,21 @@ mod win {
                         )
                     })
                     .unwrap_or_default();
+                if requester_path.is_empty() {
+                    // The opener is alive right now: ask the kernel.
+                    if let Some(path) = query_image_path(requester_pid) {
+                        requester_name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        requester_path = path;
+                    }
+                }
                 let target_path = table
                     .get(&target_pid)
                     .map(|p| p.process_path.clone())
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| query_image_path(target_pid));
                 // Interim OS-shipped marking until in-proc WinVerifyTrust
                 // lands (FLODBADD2 §1b.5): csrss, lsass, svchost and
                 // Defender's MsMpEng open every process with VM_READ, and
@@ -886,6 +897,36 @@ mod win {
                 });
             }
         });
+    }
+
+    /// Full image path of a live process from the kernel
+    /// (`QueryFullProcessImageNameW`), for processes whose start event we
+    /// could not decode or that the audit stream names before the process
+    /// table does. Query-limited access only (never an ATTACH-grade open,
+    /// and our own opens are filtered by pid in the audit callback).
+    fn query_image_path(pid: u32) -> Option<String> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+            .is_ok();
+            let _ = CloseHandle(handle);
+            if !ok || len == 0 {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&buf[..len as usize]))
+        }
     }
 
     /// Windows has no kernel-vouched platform-binary fact; until the
@@ -1034,26 +1075,24 @@ mod win {
                 if data_len < std::mem::size_of::<ProcessStartEvent>() {
                     return;
                 }
+                // Layout-aware decode (MOF Process_V3/V4, pointer size from
+                // the header); the printable-run heuristics stay as a
+                // fallback for kernels whose layout we have not seen.
+                let full = std::slice::from_raw_parts(data_ptr as *const u8, data_len);
+                let ptr_size =
+                    if (event.EventHeader.Flags as u32) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
+                        4
+                    } else {
+                        8
+                    };
+                let version = event.EventHeader.EventDescriptor.Version;
+                let parsed =
+                    crate::etw_process_payload::parse_process_start(full, version, ptr_size);
                 let ev = &*(data_ptr as *const ProcessStartEvent);
-                let pid = ev.pid;
-                let ppid = ev.ppid;
-                let session_id = ev.session_id;
-
-                // Extract image file name from the variable-length data after the fixed struct.
-                // The layout after the fixed fields is: SID (variable) then ImageFileName (wide string).
-                // We skip the SID by scanning for the image path.
-                let fixed_size = std::mem::size_of::<ProcessStartEvent>();
-                let remaining = data_len.saturating_sub(fixed_size);
-                let remaining_ptr = (data_ptr as *const u8).add(fixed_size);
-                let remaining_slice = std::slice::from_raw_parts(remaining_ptr, remaining);
-
-                // The image path is a null-terminated ANSI string at the end of the payload
-                // in older format, or a wide string. Try to extract it.
-                let image_path = extract_image_path(remaining_slice);
-                let process_name = std::path::Path::new(&image_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                let (pid, ppid, session_id) = match parsed.as_ref() {
+                    Some(p) => (p.pid, p.ppid, p.session_id),
+                    None => (ev.pid, ev.ppid, ev.session_id),
+                };
 
                 // Skip our own process
                 let own_pid = GetCurrentProcessId();
@@ -1061,10 +1100,41 @@ mod win {
                     return;
                 }
 
-                // FLODBADD2 §1b.2: kernel-delivered exec stream. The
-                // command line is digested (I5) -- raw argv never leaves
-                // this handler.
-                let command_line = extract_command_line(remaining_slice);
+                let fixed_size = std::mem::size_of::<ProcessStartEvent>();
+                let remaining_slice = &full[fixed_size.min(full.len())..];
+                let (image_file_name, command_line) = match parsed.as_ref() {
+                    Some(p) if !p.image_file_name.is_empty() => (
+                        p.image_file_name.clone(),
+                        (!p.command_line.is_empty()).then(|| p.command_line.clone()),
+                    ),
+                    _ => (
+                        extract_image_path(remaining_slice),
+                        extract_command_line(remaining_slice),
+                    ),
+                };
+                // ImageFileName is usually a bare `image.exe`; the full path
+                // comes from the command line's executable token or, while
+                // the process is alive, from the kernel.
+                let image_path = if image_file_name.contains('\\') || image_file_name.contains('/')
+                {
+                    image_file_name.clone()
+                } else {
+                    command_line
+                        .as_deref()
+                        .and_then(|cmd| {
+                            crate::etw_process_payload::image_path_from_command_line(
+                                &image_file_name,
+                                cmd,
+                            )
+                        })
+                        .or_else(|| query_image_path(pid))
+                        .unwrap_or_else(|| image_file_name.clone())
+                };
+                let process_name = std::path::Path::new(&image_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or(image_file_name);
                 let argv_sha256 = command_line.and_then(|cmd| proc_events::argv_digest(&[cmd]));
 
                 THREAD_PROCESS_TABLE.with(|t| {
