@@ -173,11 +173,9 @@ pub fn push(event: ProcessEvent) {
         );
     }
     let stored = RING.try_with(|ring| {
-        if ring.len() >= PROCESS_EVENT_RING_MAX {
-            ring.pop_front();
+        if ring_push(ring, event) {
             COUNTERS.evicted.fetch_add(1, Ordering::Relaxed);
         }
-        ring.push_back(event);
     });
     if stored.is_none() {
         COUNTERS.dropped_locked.fetch_add(1, Ordering::Relaxed);
@@ -187,11 +185,30 @@ pub fn push(event: ProcessEvent) {
 /// Newest-last copy of up to `limit` most recent events. Non-blocking:
 /// returns empty if the ring lock is momentarily contended.
 pub fn recent(limit: usize) -> Vec<ProcessEvent> {
-    RING.try_with(|ring| {
-        let skip = ring.len().saturating_sub(limit);
-        ring.iter().skip(skip).cloned().collect()
-    })
-    .unwrap_or_default()
+    RING.try_with(|ring| ring_recent(ring, limit))
+        .unwrap_or_default()
+}
+
+/// Bounded append: evicts the oldest entry when the ring is full. Returns
+/// `true` when an eviction happened. Pure over the ring so the policy can be
+/// tested without the global lock (whose `try_with` legitimately fails
+/// under contention -- including undeadlock's debug-build diagnostics --
+/// which made exact-count tests on the global flaky).
+fn ring_push(ring: &mut VecDeque<ProcessEvent>, event: ProcessEvent) -> bool {
+    let evicted = if ring.len() >= PROCESS_EVENT_RING_MAX {
+        ring.pop_front();
+        true
+    } else {
+        false
+    };
+    ring.push_back(event);
+    evicted
+}
+
+/// Newest `limit` entries, oldest first.
+fn ring_recent(ring: &VecDeque<ProcessEvent>, limit: usize) -> Vec<ProcessEvent> {
+    let skip = ring.len().saturating_sub(limit);
+    ring.iter().skip(skip).cloned().collect()
 }
 
 pub fn counters() -> ProcessEventCountersSnapshot {
@@ -249,23 +266,51 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn ring_is_bounded_ordered_and_counts_evictions() {
-        clear_ring_for_tests();
-        let evicted_before = counters().evicted;
+        // Exercised on a local ring: the global goes through a try-lock that
+        // can legitimately miss under contention, so exact counts belong to
+        // the pure policy, not to the shared static.
+        let mut ring: VecDeque<ProcessEvent> = VecDeque::new();
+        let mut evicted = 0usize;
         for pid in 0..(PROCESS_EVENT_RING_MAX as u32 + 10) {
-            push(ev(ProcessEventKind::Exec, pid));
+            if ring_push(&mut ring, ev(ProcessEventKind::Exec, pid)) {
+                evicted += 1;
+            }
         }
-        let all = recent(usize::MAX);
+        let all = ring_recent(&ring, usize::MAX);
         assert_eq!(all.len(), PROCESS_EVENT_RING_MAX);
         // Oldest were evicted; newest-last ordering.
         assert_eq!(all.first().unwrap().pid, 10);
         assert_eq!(all.last().unwrap().pid, PROCESS_EVENT_RING_MAX as u32 + 9);
-        assert_eq!(counters().evicted - evicted_before, 10);
+        assert_eq!(evicted, 10);
         // Bounded fetch takes the newest tail.
-        let tail = recent(3);
+        let tail = ring_recent(&ring, 3);
         assert_eq!(tail.len(), 3);
         assert_eq!(tail.last().unwrap().pid, PROCESS_EVENT_RING_MAX as u32 + 9);
+    }
+
+    #[test]
+    #[serial]
+    fn global_ring_accepts_pushes_and_counts() {
+        // Tolerant smoke test of the shared static: pushes that lose the
+        // try-lock are counted in `dropped_locked`, never lost silently, and
+        // the ring never exceeds its bound.
+        clear_ring_for_tests();
+        let before = counters();
+        for pid in 0..50u32 {
+            push(ev(ProcessEventKind::Fork, pid));
+        }
+        let after = counters();
+        assert_eq!(after.fork - before.fork, 50);
+        let stored = recent(usize::MAX);
+        assert!(stored.len() <= PROCESS_EVENT_RING_MAX);
+        assert!(
+            stored.len() as u64 + (after.dropped_locked - before.dropped_locked) >= 50
+                || stored.is_empty(),
+            "every push is stored or counted as dropped: stored={} dropped={}",
+            stored.len(),
+            after.dropped_locked - before.dropped_locked
+        );
         clear_ring_for_tests();
     }
 
