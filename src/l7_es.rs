@@ -51,10 +51,14 @@ mod macos {
     /// (`GET_TASK_READ`) notifications: both hand out cross-process memory
     /// access, and `task_read_for_pid` is the primitive a modern reader
     /// uses, so watching only the control port misses it.
+    /// `mode`: 2 for the control port (`GET_TASK`), 1 for the read-only
+    /// port (`GET_TASK_READ`) -- the PTRACE_MODE vocabulary shared with the
+    /// Linux kprobe (`ProcessEvent::task_access_mode`).
     fn push_task_access(
         responsible: &endpoint_sec::Process<'_>,
         responsible_pid: u32,
         target: &endpoint_sec::Process<'_>,
+        mode: u32,
     ) {
         let requestor_path = responsible
             .executable()
@@ -79,6 +83,7 @@ mod macos {
             is_platform_binary: Some(responsible.is_platform_binary()),
             target_pid: Some(target_pid),
             target_process_path: Some(target_path),
+            task_access_mode: Some(mode),
         });
     }
 
@@ -408,6 +413,7 @@ mod macos {
                             is_platform_binary: None,
                             target_pid: None,
                             target_process_path: None,
+                            task_access_mode: None,
                         });
                     }
                     Some(Event::NotifyExec(exec)) => {
@@ -520,6 +526,7 @@ mod macos {
                             is_platform_binary: Some(is_platform),
                             target_pid: None,
                             target_process_path: None,
+                            task_access_mode: None,
                         });
                     }
                     Some(Event::NotifyExit(_)) => {
@@ -575,13 +582,14 @@ mod macos {
                             is_platform_binary: exit_platform,
                             target_pid: None,
                             target_process_path: None,
+                            task_access_mode: None,
                         });
                     }
                     Some(Event::NotifyGetTask(get_task)) => {
-                        push_task_access(&responsible, responsible_pid, &get_task.target());
+                        push_task_access(&responsible, responsible_pid, &get_task.target(), 2);
                     }
                     Some(Event::NotifyGetTaskRead(get_task_read)) => {
-                        push_task_access(&responsible, responsible_pid, &get_task_read.target());
+                        push_task_access(&responsible, responsible_pid, &get_task_read.target(), 1);
                     }
                     Some(Event::NotifyCreate(ev)) => {
                         counters.create_received.fetch_add(1, Ordering::Relaxed);

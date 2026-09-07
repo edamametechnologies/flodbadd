@@ -77,6 +77,15 @@ pub struct ProcessEvent {
     pub target_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_process_path: Option<String>,
+    /// `TaskAccess` only: how much the requester obtained, in PTRACE_MODE
+    /// terms so every backend speaks the same vocabulary -- `1` (READ: a
+    /// macOS read-only task port from `GET_TASK_READ`, Linux
+    /// `PTRACE_MODE_READ`) or `2` (ATTACH: the macOS control port from
+    /// `GET_TASK`, Linux `PTRACE_MODE_ATTACH` -- `/proc/<pid>/mem`,
+    /// `process_vm_readv`, ptrace attach). `None` when the backend cannot
+    /// tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_access_mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +259,7 @@ mod tests {
             is_platform_binary: None,
             target_pid: None,
             target_process_path: None,
+            task_access_mode: None,
         }
     }
 

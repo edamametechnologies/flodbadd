@@ -777,6 +777,7 @@ mod win {
                             is_platform_binary: None,
                             target_pid: None,
                             target_process_path: None,
+                            task_access_mode: None,
                         });
                         table.insert(
                             pid,
@@ -820,6 +821,7 @@ mod win {
                                 is_platform_binary: None,
                                 target_pid: None,
                                 target_process_path: None,
+                                task_access_mode: None,
                             });
                         }
                     }

@@ -314,6 +314,7 @@ mod linux {
                     is_platform_binary: None,
                     target_pid: None,
                     target_process_path: None,
+                    task_access_mode: None,
                 }
             }
             2 | 3 => pe::ProcessEvent {
@@ -337,6 +338,7 @@ mod linux {
                 is_platform_binary: None,
                 target_pid: None,
                 target_process_path: None,
+                task_access_mode: None,
             },
             4 => {
                 // ptrace_may_access(target, mode): ppid slot = target tgid,
@@ -354,19 +356,22 @@ mod linux {
                     kind: pe::ProcessEventKind::TaskAccess,
                     pid,
                     ppid: proc_ppid(pid),
-                    // The mode word rides in `uid` on the wire only; the
-                    // event's uid is the requester's real uid.
+                    // The PTRACE_MODE word rides in the `uid` slot on the
+                    // wire only; the event's uid is the requester's real uid.
                     uid: proc_uid(pid),
                     process_name: basename(&requester_path),
                     process_path: requester_path,
                     parent_process_path: None,
                     argv_sha256: None,
-                    argv_len: Some(uid),
+                    argv_len: None,
                     signing_id: None,
                     team_id: None,
                     is_platform_binary: None,
                     target_pid,
                     target_process_path: target_path,
+                    // READ (0x01) / ATTACH (0x02) bits only; the _FSCREDS /
+                    // _REALCREDS / _NOAUDIT flags are irrelevant here.
+                    task_access_mode: Some(uid & 0x3),
                 }
             }
             _ => return,
