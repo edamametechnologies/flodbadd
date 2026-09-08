@@ -19,14 +19,42 @@ fn main() {
     println!("ETW: {}", flodbadd::l7_etw::etw_support());
     std::thread::sleep(Duration::from_secs(3));
 
-    let temp = std::env::temp_dir().join(format!("edamame_etw_writers_{}.txt", std::process::id()));
+    // A long-named directory so an 8.3 alias actually exists for it.
+    let probe_dir = std::env::temp_dir().join("edamame_etw_shortname_probe_directory");
+    let _ = std::fs::create_dir_all(&probe_dir);
+    let temp = probe_dir.join(format!("edamame_etw_writers_{}.txt", std::process::id()));
     let path = temp.to_string_lossy().to_string();
+    // The writer uses the 8.3 short spelling of the directory (what %TEMP%
+    // is on the CI runners); the lookups below use the long form, as the
+    // FIM watcher does. Both must meet in the attribution table.
+    let parent = temp.parent().unwrap();
+    let short_dir = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(New-Object -ComObject Scripting.FileSystemObject).GetFolder('{}').ShortPath",
+                parent.display()
+            ),
+        ])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| parent.to_string_lossy().to_string());
+    let short_path = format!(
+        "{}\\{}",
+        short_dir.trim_end_matches('\\'),
+        temp.file_name().unwrap().to_string_lossy()
+    );
+    println!("write path  : {}", short_path);
+    println!("lookup path : {}", path);
 
     let writer = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            &format!("Set-Content -Path '{}' -Value 'hello'", path),
+            &format!("Set-Content -Path '{}' -Value 'hello'", short_path),
         ])
         .status();
     println!("writer child: {:?}", writer);
@@ -48,6 +76,7 @@ fn main() {
     println!("after read  : {:?}", after_read);
 
     let _ = std::fs::remove_file(&temp);
+    let _ = std::fs::remove_dir(&probe_dir);
     let ok = match (&after_write, &after_read) {
         (Some((wpid, wname, _)), Some((rpid, _, _))) => {
             wname.eq_ignore_ascii_case("powershell.exe") && wpid == rpid

@@ -70,7 +70,41 @@ const NT_DOS_PREFIX: &str = r"\??\";
 pub fn normalize_win_path(path: &str) -> String {
     let stripped = strip_long_or_nt_prefix(path);
     let with_drive = nt_device_to_drive(stripped);
-    canonicalize_separators_and_case(&with_drive)
+    let long_form = fold_short_names(&with_drive);
+    canonicalize_separators_and_case(&long_form)
+}
+
+/// Replace 8.3 short-name components (`C:\Users\RUNNER~1\...`) with the
+/// long form while the file exists. ETW records the spelling the writer
+/// used (`%TEMP%` on the CI runners is the short form) and the FIM
+/// watcher reports the watched root's spelling, so the two sides of the
+/// attribution table did not collide and a staged file lost its writer
+/// (2026-09-08). Only paths containing `~` pay the filesystem call.
+#[cfg(target_os = "windows")]
+fn fold_short_names(path: &str) -> String {
+    if !path.contains('~') {
+        return path.to_string();
+    }
+    let is_drive_path = path.as_bytes().get(1).is_some_and(|b| *b == b':')
+        && path
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic());
+    if !is_drive_path {
+        return path.to_string();
+    }
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => {
+            let text = canonical.to_string_lossy();
+            strip_long_or_nt_prefix(&text).to_string()
+        }
+        Err(_) => path.to_string(),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn fold_short_names(path: &str) -> String {
+    path.to_string()
 }
 
 /// Strip `\\?\` (long-path) and `\??\` (NT-DOS device) prefixes if
