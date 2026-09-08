@@ -220,8 +220,8 @@ fn fim_attribution_benchmark() {
     let (lsof_cache_size, es_available) = attribution_cache_stats();
     let es_file_table_size = l7_es::file_attribution_count();
     let es_process_count = l7_es::process_count();
-    let (cr, cds, cdn, clr, clm, rn, ul, oth) = l7_es::file_event_stats();
-    let es_system_events = cr + clr + rn + ul;
+    let (cr, cds, cdn, wr, clr, clm, rn, ul, oth) = l7_es::file_event_stats();
+    let es_system_events = cr + wr + clr + rn + ul;
 
     println!(
         "  Post-backfill: {}/{} attributed (backfill updated {})",
@@ -233,8 +233,8 @@ fn fim_attribution_benchmark() {
     println!("  lsof cache: {} entries", lsof_cache_size);
     println!("  Backfill took {}ms", backfill_elapsed.as_millis());
     println!(
-        "  ES counters: create={}(dest_some={},dest_none={}) close={}(modified={}) rename={} unlink={} other={}",
-        cr, cds, cdn, clr, clm, rn, ul, oth
+        "  ES counters: create={}(dest_some={},dest_none={}) write={} close={}(modified={}) rename={} unlink={} other={}",
+        cr, cds, cdn, wr, clr, clm, rn, ul, oth
     );
 
     let table_dump = l7_es::dump_file_attribution_paths(15);
