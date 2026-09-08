@@ -99,10 +99,17 @@ mod win {
     /// Event id of `PsOpenProcess` in that provider; payload
     /// `TargetProcessId: u32, DesiredAccess: u32, ReturnCode: u32`.
     const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
-    // PROCESS_* access rights (winnt.h) that let the opener read or write
-    // the target's memory -- the ATTACH-grade subset. Query-only opens
-    // (Task Manager, psutil, every process monitor) are READ-grade and not
-    // forwarded: the same ATTACH-only policy the Linux kprobe applies.
+    // PROCESS_* access rights (winnt.h). The PTRACE_MODE vocabulary the
+    // detector shares across backends maps onto the mask like this:
+    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / ALL_ACCESS --
+    //               the debugger-grade opens (task_for_pid / ptrace attach)
+    //   READ   (1): VM_READ without any of the above -- the read-only task
+    //               port shape (macOS GET_TASK_READ), which updaters, crash
+    //               handlers and process monitors take on every process
+    //   neither   : query-only opens, never forwarded
+    // Before 2026-09-08 VM_READ alone was ATTACH-grade, so Google Updater
+    // reading svchost graded like a scraper on the idle baseline.
+    const PROCESS_CREATE_THREAD: u32 = 0x0002;
     const PROCESS_VM_OPERATION: u32 = 0x0008;
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_VM_WRITE: u32 = 0x0020;
@@ -863,12 +870,17 @@ mod win {
         if requester_pid == own_pid || target_pid == own_pid {
             return;
         }
+        // The return code is deliberately not consulted: like the Linux
+        // `ptrace_may_access` kprobe this records the attempt, and a denied
+        // open of a sensitive target is evidence in its own right.
         let attach_grade =
-            desired_access & (PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION) != 0
+            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0
                 || desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
-        if !attach_grade {
+        let read_grade = !attach_grade && desired_access & PROCESS_VM_READ != 0;
+        if !attach_grade && !read_grade {
             return;
         }
+        let task_access_mode = if attach_grade { 2 } else { 1 };
         THREAD_PROCESS_TABLE.with(|t| {
             if let Some(table) = t.borrow().as_ref() {
                 let (mut requester_name, mut requester_path, requester_ppid, parent_path) = table
@@ -909,6 +921,12 @@ mod win {
                 // keeps the idle baseline clean; the detector still
                 // requires a canonical OS path before it drops the edge.
                 let is_platform_binary = Some(is_os_shipped_windows_image(&requester_path));
+                // Read-grade opens by OS-shipped requesters (csrss, lsass,
+                // svchost, MsMpEng, ...) are the constant background the
+                // detector drops anyway; keep them out of the ring.
+                if !attach_grade && is_platform_binary == Some(true) {
+                    return;
+                }
                 proc_events::push(proc_events::ProcessEvent {
                     timestamp_ms: proc_events::now_ms(),
                     kind: proc_events::ProcessEventKind::TaskAccess,
@@ -925,7 +943,7 @@ mod win {
                     is_platform_binary,
                     target_pid: Some(target_pid),
                     target_process_path: target_path,
-                    task_access_mode: Some(2),
+                    task_access_mode: Some(task_access_mode),
                 });
             }
         });

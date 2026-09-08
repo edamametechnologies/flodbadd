@@ -159,11 +159,15 @@ fn main() {
     for event in all
         .iter()
         .filter(|e| e.kind == ProcessEventKind::TaskAccess)
-        .take(4)
+        .take(32)
     {
         println!(
-            "  task_access by pid={} {} -> target pid={:?} {:?}",
-            event.pid, event.process_name, event.target_pid, event.target_process_path
+            "  task_access by pid={} {} -> target pid={:?} {:?} mode={:?}",
+            event.pid,
+            event.process_name,
+            event.target_pid,
+            event.target_process_path,
+            event.task_access_mode
         );
     }
 
