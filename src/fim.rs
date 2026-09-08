@@ -770,6 +770,71 @@ fn should_backfill_process_attribution(event: &FimEvent) -> bool {
     event.is_sensitive
 }
 
+/// Writer of `path` from the kernel-time attribution table of this platform
+/// (ES on macOS, fanotify on Linux, ETW FileIo on Windows): `(name, path)`.
+/// Cheap map lookups only -- no `lsof`, no Restart Manager.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn kernel_table_attribution(path: &str) -> Option<(String, String)> {
+    #[cfg(target_os = "macos")]
+    if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(path) {
+        return Some((name, proc_path));
+    }
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    if let Some((_pid, name, proc_path)) = crate::fim_fanotify::get_file_attribution(path) {
+        return Some((name, proc_path));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(path) {
+        return Some((name, proc_path));
+    }
+    #[cfg(all(target_os = "linux", not(feature = "ebpf")))]
+    let _ = path;
+    None
+}
+
+/// Kernel-table-only backfill for temp-staging events still missing a
+/// writer. The notify event for a fresh drop can be handled before the
+/// kernel table has the entry (FSEvents fired on the write; the ES WRITE
+/// message is still in flight), and a single-write drop never gets a second
+/// event to retry on -- so the security gate's macOS `temp_modify` finding
+/// carried a null writer while `file_events` in the same directory was
+/// attributed (2026-09-08). Sensitive events keep the full tiered backfill;
+/// temp events get the map lookups only (never `lsof`), so `/tmp` churn
+/// cannot starve the credential-store candidates.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: usize) -> usize {
+    let candidates: Vec<FimEvent> = store
+        .get_recent_events_missing_process_attribution(max_events.saturating_mul(4))
+        .into_iter()
+        .filter(|event| {
+            !event.is_sensitive
+                && should_attempt_process_attribution(
+                    Path::new(&event.path),
+                    false,
+                    event.event_type,
+                )
+        })
+        .take(max_events)
+        .collect();
+    if candidates.is_empty() {
+        return 0;
+    }
+    let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
+    let mut updated = 0;
+    for path in path_order {
+        let Some(uids) = uids_by_path.remove(&path) else {
+            continue;
+        };
+        if let Some((name, proc_path)) = kernel_table_attribution(&path) {
+            for uid in &uids {
+                store.update_process_attribution(uid, Some(name.clone()), Some(proc_path.clone()));
+                updated += 1;
+            }
+        }
+    }
+    updated
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn best_effort_process_attribution(
     path: &Path,
@@ -1063,6 +1128,7 @@ fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
+    let updated_temp = backfill_temp_events_from_kernel_tables(store, max_events);
     // Store selector already prefers sensitive/non-delete events so `/tmp`
     // churn cannot starve the window; re-apply `should_backfill_*` here as the
     // single policy gate shared with unit tests.
@@ -1072,7 +1138,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
         .filter(should_backfill_process_attribution)
         .collect();
     if candidates.is_empty() {
-        return 0;
+        return updated_temp;
     }
 
     let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
@@ -1084,8 +1150,8 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             continue;
         };
 
-        // Tier 1: ES file attribution table
-        if let Some((_pid, name, proc_path)) = crate::l7_es::get_file_attribution(&path) {
+        // Tier 1: kernel-time table (ES on macOS, fanotify on Linux)
+        if let Some((name, proc_path)) = kernel_table_attribution(&path) {
             let name = Some(name);
             let proc_path = Some(proc_path);
             cache_attribution(&path, &name, &proc_path);
@@ -1140,13 +1206,14 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
 
 #[cfg(target_os = "windows")]
 pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: usize) -> usize {
+    let updated_temp = backfill_temp_events_from_kernel_tables(store, max_events);
     let candidates: Vec<FimEvent> = store
         .get_recent_sensitive_events_missing_process_attribution(max_events)
         .into_iter()
         .filter(should_backfill_process_attribution)
         .collect();
     if candidates.is_empty() {
-        return 0;
+        return updated_temp;
     }
 
     let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
@@ -1159,7 +1226,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
         };
 
         // Tier 1: ETW file attribution table (canonicalizes path internally).
-        if let Some((_pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&path) {
+        if let Some((name, proc_path)) = kernel_table_attribution(&path) {
             let name = Some(name);
             let proc_path = Some(proc_path);
             cache_attribution(&path, &name, &proc_path);

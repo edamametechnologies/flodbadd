@@ -681,14 +681,37 @@ mod macos {
                             .path()
                             .to_string_lossy()
                             .to_string();
-                        FlodbaddL7Es::record_file_attribution(
-                            &file_table_for_handler,
-                            &file_counter_for_handler,
-                            &table_for_handler,
-                            source,
-                            responsible_pid,
-                            &exe,
-                        );
+                        // The destination is the path FIM reports for an
+                        // atomic replace (`write tmp; rename tmp -> file`);
+                        // recording only the source left such writers
+                        // unattributed.
+                        let destination = ev.destination().map(|dest| {
+                            use endpoint_sec::EventRenameDestinationFile;
+                            match dest {
+                                EventRenameDestinationFile::ExistingFile(f) => {
+                                    f.path().to_string_lossy().to_string()
+                                }
+                                EventRenameDestinationFile::NewPath {
+                                    directory,
+                                    filename,
+                                    ..
+                                } => {
+                                    let dir = directory.path().to_string_lossy();
+                                    let name = filename.to_string_lossy();
+                                    format!("{}/{}", dir.trim_end_matches('/'), name)
+                                }
+                            }
+                        });
+                        for path in std::iter::once(source).chain(destination) {
+                            FlodbaddL7Es::record_file_attribution(
+                                &file_table_for_handler,
+                                &file_counter_for_handler,
+                                &table_for_handler,
+                                path,
+                                responsible_pid,
+                                &exe,
+                            );
+                        }
                     }
                     Some(Event::NotifyUnlink(ev)) => {
                         counters.unlink_received.fetch_add(1, Ordering::Relaxed);
