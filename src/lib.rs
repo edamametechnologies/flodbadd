@@ -28,6 +28,10 @@ pub mod etw_process_payload;
     feature = "fim"
 ))]
 pub mod fim;
+/// Endpoint Security as the FIM event source (macOS): the ES handler hands
+/// file events under the FIM roots, writer attached, to the watcher.
+#[cfg(all(target_os = "macos", feature = "fim"))]
+pub mod fim_es;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),
     feature = "fim"

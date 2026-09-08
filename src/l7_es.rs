@@ -322,6 +322,29 @@ mod macos {
             }
         }
 
+        /// Hand a file event under a FIM root to the watcher (FLODBADD2
+        /// §1b.2 "ES as the FIM event source"). Name / path come from the
+        /// process table when the pid is known, else from the message.
+        #[cfg(feature = "fim")]
+        fn fim_source_push(
+            kind: crate::fim_es::FimSourceKind,
+            path: &str,
+            pid: u32,
+            exe: &str,
+            table: &DashMap<u32, EsProcessInfo>,
+        ) {
+            if !crate::fim_es::is_active() {
+                return;
+            }
+            let (name, process_path) = match table.get(&pid) {
+                Some(info) if !info.process_path.is_empty() => {
+                    (info.process_name.clone(), info.process_path.clone())
+                }
+                _ => (extract_process_name(exe), exe.to_string()),
+            };
+            crate::fim_es::push(kind, path, pid, &name, &process_path);
+        }
+
         fn run_es_client(
             table: Arc<DashMap<u32, EsProcessInfo>>,
             file_table: Arc<DashMap<String, FimEsAttribution>>,
@@ -621,9 +644,17 @@ mod macos {
                                 &file_table_for_handler,
                                 &file_counter_for_handler,
                                 &table_for_handler,
-                                path,
+                                path.clone(),
                                 responsible_pid,
                                 &exe,
+                            );
+                            #[cfg(feature = "fim")]
+                            FlodbaddL7Es::fim_source_push(
+                                crate::fim_es::FimSourceKind::Create,
+                                &path,
+                                responsible_pid,
+                                &exe,
+                                &table_for_handler,
                             );
                         } else {
                             counters.create_dest_none.fetch_add(1, Ordering::Relaxed);
@@ -641,9 +672,17 @@ mod macos {
                             &file_table_for_handler,
                             &file_counter_for_handler,
                             &table_for_handler,
-                            path,
+                            path.clone(),
                             responsible_pid,
                             &exe,
+                        );
+                        #[cfg(feature = "fim")]
+                        FlodbaddL7Es::fim_source_push(
+                            crate::fim_es::FimSourceKind::Modify,
+                            &path,
+                            responsible_pid,
+                            &exe,
+                            &table_for_handler,
                         );
                     }
                     Some(Event::NotifyClose(ev)) => {
@@ -667,9 +706,17 @@ mod macos {
                                 &file_table_for_handler,
                                 &file_counter_for_handler,
                                 &table_for_handler,
-                                path,
+                                path.clone(),
                                 responsible_pid,
                                 &exe,
+                            );
+                            #[cfg(feature = "fim")]
+                            FlodbaddL7Es::fim_source_push(
+                                crate::fim_es::FimSourceKind::Modify,
+                                &path,
+                                responsible_pid,
+                                &exe,
+                                &table_for_handler,
                             );
                         }
                     }
@@ -702,6 +749,24 @@ mod macos {
                                 }
                             }
                         });
+                        #[cfg(feature = "fim")]
+                        FlodbaddL7Es::fim_source_push(
+                            crate::fim_es::FimSourceKind::Delete,
+                            &source,
+                            responsible_pid,
+                            &exe,
+                            &table_for_handler,
+                        );
+                        #[cfg(feature = "fim")]
+                        if let Some(dest) = destination.as_deref() {
+                            FlodbaddL7Es::fim_source_push(
+                                crate::fim_es::FimSourceKind::Rename,
+                                dest,
+                                responsible_pid,
+                                &exe,
+                                &table_for_handler,
+                            );
+                        }
                         for path in std::iter::once(source).chain(destination) {
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
@@ -725,9 +790,17 @@ mod macos {
                             &file_table_for_handler,
                             &file_counter_for_handler,
                             &table_for_handler,
-                            path,
+                            path.clone(),
                             responsible_pid,
                             &exe,
+                        );
+                        #[cfg(feature = "fim")]
+                        FlodbaddL7Es::fim_source_push(
+                            crate::fim_es::FimSourceKind::Delete,
+                            &path,
+                            responsible_pid,
+                            &exe,
+                            &table_for_handler,
                         );
                     }
                     _ => {

@@ -298,6 +298,20 @@ impl FimWatcher {
             RecursiveMode::NonRecursive
         };
 
+        // macOS: Endpoint Security is the event source when its client is
+        // up (kernel-time events with the writer attached). The ES client
+        // subscribes on its own thread; give it a moment before deciding.
+        #[cfg(target_os = "macos")]
+        let es_source = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !crate::l7_es::is_available() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            crate::l7_es::is_available()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let es_source = false;
+
         let mut actual_paths = Vec::new();
         for path in &paths {
             if config.recursive && is_forbidden_recursive_root(path) {
@@ -307,20 +321,57 @@ impl FimWatcher {
                 );
                 continue;
             }
-            if path.exists() {
-                if let Err(e) = watcher.watch(path, mode) {
-                    warn!("FIM: failed to watch {}: {}", path.display(), e);
-                } else {
-                    info!("FIM: watching {}", path.display());
-                    actual_paths.push(path.clone());
-                }
-            } else {
+            if !path.exists() {
                 debug!("FIM: skipping non-existent path {}", path.display());
+                continue;
+            }
+            if es_source {
+                actual_paths.push(path.clone());
+                continue;
+            }
+            if let Err(e) = watcher.watch(path, mode) {
+                warn!("FIM: failed to watch {}: {}", path.display(), e);
+            } else {
+                info!("FIM: watching {}", path.display());
+                actual_paths.push(path.clone());
             }
         }
 
         if actual_paths.is_empty() {
             warn!("FIM: no valid watch paths, watcher started but inactive");
+        }
+
+        #[cfg(target_os = "macos")]
+        if es_source && !actual_paths.is_empty() {
+            match crate::fim_es::install(&actual_paths, config.recursive) {
+                Some(rx) => {
+                    info!(
+                        "FIM: Endpoint Security is the event source for {} root(s) ({} spellings); FSEvents watcher idle",
+                        actual_paths.len(),
+                        crate::fim_es::root_count()
+                    );
+                    spawn_fim_es_consumer(
+                        rx,
+                        store.clone(),
+                        running.clone(),
+                        hash_threshold,
+                        explicit_watch_roots.clone(),
+                    );
+                }
+                None => {
+                    // A previous watcher installed the sink (restart): fall
+                    // back to FSEvents for this instance rather than lose
+                    // the roots.
+                    warn!(
+                        "FIM: ES sink already installed; falling back to FSEvents for this watcher"
+                    );
+                    for path in &actual_paths {
+                        if let Err(e) = watcher.watch(path, mode) {
+                            warn!("FIM: failed to watch {}: {}", path.display(), e);
+                        }
+                    }
+                }
+            }
         }
 
         // Linux: kernel-time writer attribution for the same roots.
@@ -405,6 +456,57 @@ impl FimWatcher {
     }
 }
 
+/// Consumer for the Endpoint Security FIM source: shapes each kernel event
+/// as the `notify` event the translation already understands, with the
+/// writer attached, coalesces write bursts, and inserts into the store.
+#[cfg(target_os = "macos")]
+fn spawn_fim_es_consumer(
+    rx: std::sync::mpsc::Receiver<crate::fim_es::FimSourceEvent>,
+    store: Arc<FimEventStore>,
+    running: Arc<AtomicBool>,
+    hash_threshold: u64,
+    explicit_watch_roots: Arc<Vec<String>>,
+) {
+    use crate::fim_es::{Coalescer, FimSourceKind};
+    use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
+    let spawned = std::thread::Builder::new()
+        .name("fim-es".into())
+        .spawn(move || {
+            let mut coalescer = Coalescer::new(std::time::Duration::from_millis(500));
+            while running.load(Ordering::SeqCst) {
+                let source = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                    Ok(ev) => ev,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                };
+                if !coalescer.admit(&source, std::time::Instant::now()) {
+                    continue;
+                }
+                let kind = match source.kind {
+                    FimSourceKind::Create => EventKind::Create(CreateKind::Any),
+                    FimSourceKind::Modify => EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                    FimSourceKind::Rename => EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+                    FimSourceKind::Delete => EventKind::Remove(RemoveKind::Any),
+                };
+                let event = Event::new(kind).add_path(PathBuf::from(&source.path));
+                let Some(fim_events) = translate_notify_event_with_attribution(
+                    &event,
+                    hash_threshold,
+                    explicit_watch_roots.as_ref(),
+                    Some((&source.process_name, &source.process_path)),
+                ) else {
+                    continue;
+                };
+                for fim_event in fim_events {
+                    store.insert(fim_event);
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        error!("FIM: could not spawn the ES consumer thread: {}", e);
+    }
+}
+
 /// Decide whether a raw notify event for `path_str` is worth promoting to a
 /// `FimEvent`. The detector pipeline only consumes sensitive findings and
 /// suspicious temp staging, so churn from build trees, browser caches, and
@@ -464,6 +566,17 @@ fn translate_notify_event(
     event: &Event,
     hash_threshold: u64,
     explicit_watch_roots: &[String],
+) -> Option<Vec<FimEvent>> {
+    translate_notify_event_with_attribution(event, hash_threshold, explicit_watch_roots, None)
+}
+
+/// `attribution` = the writer already known at event time (kernel source:
+/// ES on macOS); `None` runs the tiered lookup.
+fn translate_notify_event_with_attribution(
+    event: &Event,
+    hash_threshold: u64,
+    explicit_watch_roots: &[String],
+    attribution: Option<(&str, &str)>,
 ) -> Option<Vec<FimEvent>> {
     #[cfg(target_os = "windows")]
     let _ = hash_threshold;
@@ -542,8 +655,13 @@ fn translate_notify_event(
         let labels = classify_sensitive_path_labels_sync(&[path_str.clone()]);
         // Attribution is expensive and platform-dependent, so only attempt it for
         // sensitive or temp-ish paths that are likely to matter for vuln correlation.
-        let (process_name, process_path) =
-            best_effort_process_attribution(path, sensitive, event_type);
+        let (process_name, process_path) = match attribution {
+            Some((name, proc_path)) if !name.is_empty() || !proc_path.is_empty() => (
+                Some(name.to_string()).filter(|n| !n.is_empty()),
+                Some(proc_path.to_string()).filter(|p| !p.is_empty()),
+            ),
+            _ => best_effort_process_attribution(path, sensitive, event_type),
+        };
 
         let ts = Utc::now();
         let uid = FimEvent::compute_uid(&path_str, &event_type, &ts);
