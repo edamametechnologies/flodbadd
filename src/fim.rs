@@ -480,6 +480,29 @@ fn translate_notify_event(
 
     let mut fim_events = Vec::new();
     for path in &event.paths {
+        // Windows: `notify` hands back the spelling the writer used, so the
+        // same file shows up as `C:\Users\RUNNER~1\...` (8.3 short name,
+        // `%TEMP%` on the CI runners) and `C:\Users\runneradmin\...`
+        // under different events. Downstream identity (finding keys, the
+        // attribution table, dedup) is by path string, so the security
+        // gate served two temp_modify findings for one staged file, one of
+        // them with a null writer (2026-09-08). Fold to the long form
+        // while the file exists; a deleted path keeps its raw spelling.
+        #[cfg(target_os = "windows")]
+        let path: std::borrow::Cow<'_, Path> = match std::fs::canonicalize(path) {
+            Ok(canonical) => {
+                let text = canonical.to_string_lossy();
+                let stripped = text
+                    .strip_prefix("\\\\?\\UNC\\")
+                    .map(|rest| format!("\\\\{rest}"))
+                    .or_else(|| text.strip_prefix("\\\\?\\").map(str::to_string))
+                    .unwrap_or_else(|| text.to_string());
+                std::borrow::Cow::Owned(PathBuf::from(stripped))
+            }
+            Err(_) => std::borrow::Cow::Borrowed(path.as_path()),
+        };
+        #[cfg(target_os = "windows")]
+        let path: &Path = path.as_ref();
         let path_str = path.to_string_lossy().to_string();
 
         // Early-drop: skip hashing, attribution, and store insertion for
