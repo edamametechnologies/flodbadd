@@ -913,13 +913,15 @@ mod win {
                     .map(|p| p.process_path.clone())
                     .filter(|s| !s.is_empty())
                     .or_else(|| query_image_path(target_pid));
-                // Interim OS-shipped marking until in-proc WinVerifyTrust
-                // lands (FLODBADD2 §1b.5): csrss, lsass, svchost and
-                // Defender's MsMpEng open every process with VM_READ, and
-                // Windows has no in-message signing fact like ES. A
-                // path-under-%SystemRoot% / Defender-root check is what
-                // keeps the idle baseline clean; the detector still
-                // requires a canonical OS path before it drops the edge.
+                // Ring-level pre-filter (FLODBADD2 §1b.5): csrss, lsass,
+                // svchost and Defender's MsMpEng open every process with
+                // VM_READ, and Windows has no in-message signing fact like
+                // ES. A path-under-%SystemRoot% / Defender-root check keeps
+                // that background out of the ring; the grader in core does
+                // not trust it -- it attaches the requester's measured
+                // publisher verdict (in-process WinVerifyTrust + catalog,
+                // edamame_foundation::publisher_attestation) and drops an
+                // edge only for a Microsoft-signed binary at a canonical path.
                 let is_platform_binary = Some(is_os_shipped_windows_image(&requester_path));
                 // Read-grade opens by OS-shipped requesters (csrss, lsass,
                 // svchost, MsMpEng, ...) are the constant background the
