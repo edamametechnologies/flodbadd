@@ -1,8 +1,8 @@
 //! Windows-only check of the ETW FIM writer-attribution table: starts the
 //! kernel trace, has a child PowerShell create + write a temp file, then a
 //! second child only *read* it, and prints who the table names as the
-//! writer. Correct output names `powershell.exe` from the first child (a
-//! writer), never the reader.
+//! writer. Correct output names the first child (the writer) both times:
+//! same pid before and after the read.
 //!
 //! ```text
 //! cargo build --example etw_file_writers --features etw,examples
@@ -34,8 +34,13 @@ fn main() {
     let after_write = flodbadd::l7_etw::get_file_attribution(&path);
     println!("after write : {:?}", after_write);
 
-    let reader = Command::new("cmd")
-        .args(["/c", &format!("type \"{}\" > NUL", path)])
+    // Another PowerShell so only the pid tells the two apart.
+    let reader = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("Get-Content -Path '{}' | Out-Null", path),
+        ])
         .status();
     println!("reader child: {:?}", reader);
     std::thread::sleep(Duration::from_secs(2));
@@ -43,12 +48,12 @@ fn main() {
     println!("after read  : {:?}", after_read);
 
     let _ = std::fs::remove_file(&temp);
-    let ok = after_write
-        .as_ref()
-        .is_some_and(|(_, name, _)| name.eq_ignore_ascii_case("powershell.exe"))
-        && after_read
-            .as_ref()
-            .is_some_and(|(_, name, _)| name.eq_ignore_ascii_case("powershell.exe"));
+    let ok = match (&after_write, &after_read) {
+        (Some((wpid, wname, _)), Some((rpid, _, _))) => {
+            wname.eq_ignore_ascii_case("powershell.exe") && wpid == rpid
+        }
+        _ => false,
+    };
     println!("RESULT: {}", if ok { "PASS" } else { "FAIL" });
     std::process::exit(if ok { 0 } else { 1 });
 }
