@@ -315,6 +315,7 @@ mod linux {
                     target_pid: None,
                     target_process_path: None,
                     task_access_mode: None,
+                    net_dst: None,
                 }
             }
             2 | 3 => pe::ProcessEvent {
@@ -339,6 +340,7 @@ mod linux {
                 target_pid: None,
                 target_process_path: None,
                 task_access_mode: None,
+                net_dst: None,
             },
             4 => {
                 // ptrace_may_access(target, mode): ppid slot = target tgid,
@@ -372,6 +374,56 @@ mod linux {
                     // READ (0x01) / ATTACH (0x02) bits only; the _FSCREDS /
                     // _REALCREDS / _NOAUDIT flags are irrelevant here.
                     task_access_mode: Some(uid & 0x3),
+                    net_dst: None,
+                }
+            }
+            5 => {
+                // cgroup connect / sendmsg: packed destination in the text
+                // slot (family, proto, port in network order, 16-byte
+                // address, comm), pid = tgid, uid slot = uid.
+                let raw = &bytes[16..bytes.len().min(16 + 36)];
+                if raw.len() < 36 {
+                    return;
+                }
+                let family = raw[0];
+                let proto = raw[1];
+                let port = u16::from_be_bytes([raw[2], raw[3]]);
+                let ip = if family == 2 {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(raw[4], raw[5], raw[6], raw[7]))
+                } else {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&raw[4..20]);
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))
+                };
+                let comm_end = raw[20..36].iter().position(|&b| b == 0).unwrap_or(16);
+                let comm = String::from_utf8_lossy(&raw[20..20 + comm_end]).to_string();
+                let path = proc_exe(pid).unwrap_or_default();
+                pe::ProcessEvent {
+                    timestamp_ms: pe::now_ms(),
+                    kind: pe::ProcessEventKind::NetConnect,
+                    pid,
+                    ppid: None,
+                    uid: Some(uid),
+                    process_name: if path.is_empty() {
+                        comm
+                    } else {
+                        basename(&path)
+                    },
+                    process_path: path,
+                    parent_process_path: None,
+                    argv_sha256: None,
+                    argv_len: None,
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary: None,
+                    target_pid: None,
+                    target_process_path: None,
+                    task_access_mode: None,
+                    net_dst: Some(pe::NetDestination {
+                        ip: ip.to_string(),
+                        port,
+                        proto,
+                    }),
                 }
             }
             _ => return,
@@ -706,25 +758,96 @@ mod linux {
                 },
                 None => debug!("task_access_cfg map missing from object (non-critical)"),
             }
+            // FLODBADD2 §4b.3: the kprobe on `ptrace_may_access` is the
+            // primary source and the BPF-LSM `ptrace_access_check` hook the
+            // fallback (symbol missing / kprobe refused), never both. The
+            // order matters: LSM hooks run in the boot-line order and stop
+            // at the first refusal, and `bpf` is last -- an access Yama or
+            // AppArmor denies never reaches the hook, while the kprobe sees
+            // the attempt (which is the half an observer wants: the CI
+            // trigger under Yama, a scraper without CAP_SYS_PTRACE).
+            let mut task_access_source = "";
             if let Some(prog_any) = bpf.program_mut("trace_ptrace_may_access") {
                 use aya::programs::KProbe;
                 if let Ok(kp) = TryInto::<&mut KProbe>::try_into(prog_any) {
                     match kp.load() {
                         Ok(()) => match kp.attach("ptrace_may_access", 0) {
                             Ok(_) => {
-                                debug!("Attached trace_ptrace_may_access to ptrace_may_access")
+                                debug!("Attached trace_ptrace_may_access to ptrace_may_access");
+                                task_access_source = "kprobe";
                             }
                             Err(e) => debug!(
-                                "Could not attach trace_ptrace_may_access: {} (non-critical)",
+                                "Could not attach trace_ptrace_may_access: {} (trying the BPF LSM hook)",
                                 e
                             ),
                         },
                         Err(e) => debug!(
-                            "Could not load trace_ptrace_may_access: {} (non-critical)",
+                            "Could not load trace_ptrace_may_access: {} (trying the BPF LSM hook)",
                             e
                         ),
                     }
                 }
+            }
+            if task_access_source.is_empty() {
+                let btf = aya::Btf::from_sys_fs().ok();
+                if let (Some(btf), Some(prog_any)) =
+                    (btf.as_ref(), bpf.program_mut("lsm_ptrace_access_check"))
+                {
+                    use aya::programs::Lsm;
+                    if let Ok(lsm) = TryInto::<&mut Lsm>::try_into(prog_any) {
+                        match lsm.load("ptrace_access_check", btf) {
+                            Ok(()) => match lsm.attach() {
+                                Ok(_) => {
+                                    debug!("Attached lsm_ptrace_access_check (BPF LSM)");
+                                    task_access_source = "lsm";
+                                }
+                                Err(e) => debug!(
+                                    "Could not attach lsm_ptrace_access_check: {} (no task-access stream)",
+                                    e
+                                ),
+                            },
+                            Err(e) => debug!(
+                                "Could not load lsm_ptrace_access_check: {} (no task-access stream)",
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+
+            // FLODBADD2 §4b.1: cgroup-BPF observe on the cgroup v2 root --
+            // kernel-time egress intent per process (connect / unconnected
+            // UDP send). Attached as a BPF link (kernel 5.7+), which coexists with
+            // other links and with systemd's own cgroup programs; the link
+            // API rejects the allow-multi flag, so the plain mode is the
+            // right one. Fail-open: no cgroup2 mount or no attach means no
+            // net-intent stream.
+            let mut net_intent_attached = 0usize;
+            if let Ok(cgroup_root) = std::fs::File::open("/sys/fs/cgroup") {
+                use aya::programs::{CgroupAttachMode, CgroupSockAddr};
+                for prog_name in ["cg_connect4", "cg_connect6", "cg_sendmsg4", "cg_sendmsg6"] {
+                    let Some(prog_any) = bpf.program_mut(prog_name) else {
+                        continue;
+                    };
+                    let Ok(prog) = TryInto::<&mut CgroupSockAddr>::try_into(prog_any) else {
+                        continue;
+                    };
+                    match prog.load() {
+                        Ok(()) => match prog.attach(&cgroup_root, CgroupAttachMode::Single) {
+                            Ok(_) => net_intent_attached += 1,
+                            Err(e) => {
+                                debug!("Could not attach {}: {} (non-critical)", prog_name, e)
+                            }
+                        },
+                        Err(e) => debug!("Could not load {}: {} (non-critical)", prog_name, e),
+                    }
+                }
+            }
+            if net_intent_attached > 0 {
+                debug!(
+                    "cgroup net-intent observe attached ({} program(s) on /sys/fs/cgroup)",
+                    net_intent_attached
+                );
             }
 
             if let Some(map) = bpf.take_map("proc_events") {
@@ -770,8 +893,19 @@ mod linux {
             let env_info = if in_container { " (container)" } else { "" };
 
             let msg = format!(
-                "Enabled: kernel {} with tcp_set_state kprobe attached{}",
-                kernel_version, env_info
+                "Enabled: kernel {} with tcp_set_state kprobe attached{}{}{}",
+                kernel_version,
+                env_info,
+                match task_access_source {
+                    "lsm" => "; task access via BPF LSM",
+                    "kprobe" => "; task access via kprobe",
+                    _ => "",
+                },
+                if net_intent_attached > 0 {
+                    "; cgroup net-intent observe"
+                } else {
+                    ""
+                }
             );
 
             info!("eBPF L7 helper initialised successfully: {}", msg);

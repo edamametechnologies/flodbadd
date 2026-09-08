@@ -595,12 +595,8 @@ struct {
 
 #define PTRACE_MODE_ATTACH_BIT 0x02
 
-SEC("kprobe/ptrace_may_access")
-int trace_ptrace_may_access(struct pt_regs *ctx)
+static __always_inline int report_task_access(struct task_struct___local *target, __u32 mode)
 {
-    struct task_struct___local *target =
-        (struct task_struct___local *)PT_REGS_PARM1(ctx);
-    __u32 mode = (__u32)PT_REGS_PARM2(ctx);
     if (!target)
         return 0;
     __u64 id = bpf_get_current_pid_tgid();
@@ -631,5 +627,139 @@ int trace_ptrace_may_access(struct pt_regs *ctx)
     bpf_ringbuf_submit(ev, 0);
     return 0;
 }
+
+SEC("kprobe/ptrace_may_access")
+int trace_ptrace_may_access(struct pt_regs *ctx)
+{
+    struct task_struct___local *target =
+        (struct task_struct___local *)PT_REGS_PARM1(ctx);
+    __u32 mode = (__u32)PT_REGS_PARM2(ctx);
+    return report_task_access(target, mode);
+}
+
+/*
+ * FLODBADD2 §4b.3 BPF-LSM observe hook: the same check, at the security
+ * layer. `ptrace_access_check(child, mode)` is the LSM hook every
+ * ptrace_may_access() call goes through; a stable attach point (no symbol
+ * dependence) and the place a future enforce mode would return -EPERM
+ * from. Observe only: always returns 0 (allow). The loader uses it as the
+ * FALLBACK when the kprobe cannot attach, never alongside it: LSM hooks run
+ * in boot-line order and stop at the first refusal, and `bpf` is last, so
+ * an access Yama or AppArmor denies never reaches this hook while the
+ * kprobe still sees the attempt (verified on the Lima VM, 2026-09-08).
+ * LSM programs receive their arguments as a u64 array.
+ */
+SEC("lsm/ptrace_access_check")
+int lsm_ptrace_access_check(unsigned long long *ctx)
+{
+    struct task_struct___local *target = (struct task_struct___local *)ctx[0];
+    __u32 mode = (__u32)ctx[1];
+    report_task_access(target, mode);
+    return 0;
+}
+
+/*
+ * FLODBADD2 §4b.1 cgroup-BPF observe: kernel-time egress intent per
+ * process. `cgroup/connect{4,6}` fires at connect(2) (TCP and connected
+ * UDP), `cgroup/sendmsg{4,6}` at every unconnected UDP send (DNS queries
+ * included) -- the "who asked for which name" half of BS-5, and the attach
+ * point a future cgroup deny (§4b.2) would return 0 from. Observe only:
+ * every program returns 1 (allow). The programs run for the whole cgroup
+ * tree they are attached to (the root, mode allow-multi so systemd /
+ * container managers keep theirs).
+ *
+ * Volume guard: an LRU keyed by (tgid, family, proto, port, addr) drops
+ * repeats within NET_INTENT_WINDOW_NS, so a chatty UDP flow costs one
+ * event per second, and the sensor's own traffic (task_access_cfg
+ * self_tgid) is never reported.
+ */
+struct bpf_sock_addr___local {
+    __u32 user_family;
+    __u32 user_ip4;
+    __u32 user_ip6[4];
+    __u32 user_port;
+    __u32 family;
+    __u32 type;
+    __u32 protocol;
+};
+
+#define PROC_EVENT_NET_CONNECT 5
+#define NET_INTENT_WINDOW_NS 1000000000ULL
+
+struct net_intent_key {
+    __u32 tgid;
+    __u32 dst[4];
+    __u16 port;
+    __u8 family;
+    __u8 proto;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct net_intent_key);
+    __type(value, __u64);
+} net_intent_seen SEC(".maps");
+
+/* `is_v6` is a compile-time constant per program: the verifier allows a
+ * connect4/sendmsg4 program to touch only user_ip4 and a v6 program only
+ * user_ip6, so the branch must fold away, not be taken at run time. */
+static __always_inline int report_net_intent(struct bpf_sock_addr___local *ctx, const int is_v6)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(id >> 32);
+    if (tgid == 0)
+        return 1;
+    __u32 zero = 0;
+    struct task_access_cfg *cfg = bpf_map_lookup_elem(&task_access_cfg, &zero);
+    if (cfg && cfg->self_tgid && cfg->self_tgid == tgid)
+        return 1;
+
+    struct net_intent_key key = {};
+    key.tgid = tgid;
+    key.family = is_v6 ? 10 : 2;
+    key.proto = (__u8)ctx->protocol;
+    key.port = (__u16)ctx->user_port; /* network byte order, as delivered */
+    if (is_v6) {
+        key.dst[0] = ctx->user_ip6[0];
+        key.dst[1] = ctx->user_ip6[1];
+        key.dst[2] = ctx->user_ip6[2];
+        key.dst[3] = ctx->user_ip6[3];
+    } else {
+        key.dst[0] = ctx->user_ip4;
+    }
+    __u64 now = bpf_ktime_get_ns();
+    __u64 *seen = bpf_map_lookup_elem(&net_intent_seen, &key);
+    if (seen && now - *seen < NET_INTENT_WINDOW_NS)
+        return 1;
+    bpf_map_update_elem(&net_intent_seen, &key, &now, BPF_ANY);
+
+    struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
+    if (!ev)
+        return 1;
+    ev->kind = PROC_EVENT_NET_CONNECT;
+    ev->pid = tgid;
+    ev->ppid = 0;
+    ev->uid = (__u32)(bpf_get_current_uid_gid() & 0xffffffff);
+    __builtin_memset(ev->filename, 0, sizeof(ev->filename));
+    /* Packed destination in the text slot: family, proto, port (network
+     * order, 2 bytes), addr (16 bytes), then the comm. */
+    ev->filename[0] = (char)key.family;
+    ev->filename[1] = (char)key.proto;
+    __builtin_memcpy(&ev->filename[2], &key.port, 2);
+    __builtin_memcpy(&ev->filename[4], key.dst, 16);
+    bpf_get_current_comm(&ev->filename[20], 16);
+    bpf_ringbuf_submit(ev, 0);
+    return 1;
+}
+
+SEC("cgroup/connect4")
+int cg_connect4(struct bpf_sock_addr___local *ctx) { return report_net_intent(ctx, 0); }
+SEC("cgroup/connect6")
+int cg_connect6(struct bpf_sock_addr___local *ctx) { return report_net_intent(ctx, 1); }
+SEC("cgroup/sendmsg4")
+int cg_sendmsg4(struct bpf_sock_addr___local *ctx) { return report_net_intent(ctx, 0); }
+SEC("cgroup/sendmsg6")
+int cg_sendmsg6(struct bpf_sock_addr___local *ctx) { return report_net_intent(ctx, 1); }
 
 char LICENSE[] SEC("license") = "GPL";

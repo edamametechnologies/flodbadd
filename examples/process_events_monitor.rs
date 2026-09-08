@@ -111,12 +111,13 @@ fn main() {
         }
         let c = flodbadd::process_events::counters();
         println!(
-            "t={:>3}s exec={} fork={} exit={} task_access={} evicted={}",
+            "t={:>3}s exec={} fork={} exit={} task_access={} net_connect={} evicted={}",
             tick + 1,
             c.exec - c0.exec,
             c.fork - c0.fork,
             c.exit - c0.exit,
             c.task_access - c0.task_access,
+            c.net_connect - c0.net_connect,
             c.evicted - c0.evicted,
         );
     }
@@ -175,7 +176,7 @@ fn main() {
     println!("last {} events:", recent.len());
     for event in recent {
         println!(
-            "  {:>13} {:?} pid={} ppid={:?} name={} path={} argv_len={:?} digest={} signing={:?} platform={:?}",
+            "  {:>13} {:?} pid={} ppid={:?} name={} path={} argv_len={:?} digest={} signing={:?} platform={:?} net_dst={:?}",
             event.timestamp_ms,
             event.kind,
             event.pid,
@@ -189,7 +190,8 @@ fn main() {
                 .map(|d| &d[..12])
                 .unwrap_or("-"),
             event.signing_id,
-            event.is_platform_binary
+            event.is_platform_binary,
+            event.net_dst
         );
     }
 }

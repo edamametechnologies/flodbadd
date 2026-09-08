@@ -84,6 +84,7 @@ mod macos {
             target_pid: Some(target_pid),
             target_process_path: Some(target_path),
             task_access_mode: Some(mode),
+            net_dst: None,
         });
     }
 
@@ -439,6 +440,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            net_dst: None,
                         });
                     }
                     Some(Event::NotifyExec(exec)) => {
@@ -552,6 +554,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            net_dst: None,
                         });
                     }
                     Some(Event::NotifyExit(_)) => {
@@ -608,6 +611,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            net_dst: None,
                         });
                     }
                     Some(Event::NotifyGetTask(get_task)) => {

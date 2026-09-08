@@ -946,6 +946,7 @@ mod win {
                     target_pid: Some(target_pid),
                     target_process_path: target_path,
                     task_access_mode: Some(task_access_mode),
+                    net_dst: None,
                 });
             }
         });
@@ -1212,6 +1213,7 @@ mod win {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            net_dst: None,
                         });
                         table.insert(
                             pid,
@@ -1256,6 +1258,7 @@ mod win {
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,
+                                net_dst: None,
                             });
                         }
                     }
