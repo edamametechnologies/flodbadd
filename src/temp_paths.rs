@@ -52,7 +52,9 @@ mod tests {
         assert!(is_temp_directory_path("/private/tmp/x"));
         assert!(is_temp_directory_path("/var/folders/ab/cdef/T/x"));
         assert!(is_temp_directory_path("/private/var/folders/ab/cdef/T/x"));
-        assert!(is_temp_directory_path("C:\\Users\\u\\AppData\\Local\\Temp\\x.exe"));
+        assert!(is_temp_directory_path(
+            "C:\\Users\\u\\AppData\\Local\\Temp\\x.exe"
+        ));
         assert!(!is_temp_directory_path("/Users/u/Documents/x"));
         assert!(!is_temp_directory_path("/var/folders/ab/cdef/C/x"));
     }

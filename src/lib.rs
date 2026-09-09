@@ -63,8 +63,6 @@ pub mod windows_npcap;
 #[cfg(target_os = "windows")]
 pub use windows_npcap as npcap_utils; // backward-compatible re-export
 pub mod dns_patterns;
-/// Temp-directory predicate shared with the core detector (always compiled).
-pub mod temp_paths;
 pub mod open_files;
 pub mod oui;
 pub mod oui_db;
@@ -93,6 +91,8 @@ pub mod sessions;
 ))]
 pub mod sni;
 pub mod task;
+/// Temp-directory predicate shared with the core detector (always compiled).
+pub mod temp_paths;
 pub mod vendor_vulns;
 pub mod vendor_vulns_db;
 pub mod vulnerability_info;

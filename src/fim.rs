@@ -974,7 +974,12 @@ fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: us
         };
         if let Some((pid, name, proc_path)) = kernel_table_attribution(&path) {
             for uid in &uids {
-                store.update_process_attribution(uid, Some(name.clone()), Some(proc_path.clone()), Some(pid));
+                store.update_process_attribution(
+                    uid,
+                    Some(name.clone()),
+                    Some(proc_path.clone()),
+                    Some(pid),
+                );
                 updated += 1;
             }
         }
