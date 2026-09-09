@@ -922,11 +922,13 @@ mod win {
                 // publisher verdict (in-process WinVerifyTrust + catalog,
                 // edamame_foundation::publisher_attestation) and drops an
                 // edge only for a Microsoft-signed binary at a canonical path.
-                let is_platform_binary = Some(is_os_shipped_windows_image(&requester_path));
+                let path_marked = is_os_shipped_windows_image(&requester_path);
                 // Read-grade opens by OS-shipped requesters (csrss, lsass,
                 // svchost, MsMpEng, ...) are the constant background the
-                // detector drops anyway; keep them out of the ring.
-                if !attach_grade && is_platform_binary == Some(true) {
+                // detector drops anyway; keep them out of the ring. The mark
+                // rides the event as `platform_path_marked`, never as
+                // `is_platform_binary`: a path is not a kernel fact.
+                if !attach_grade && path_marked {
                     return;
                 }
                 proc_events::push(proc_events::ProcessEvent {
@@ -942,7 +944,8 @@ mod win {
                     argv_len: None,
                     signing_id: None,
                     team_id: None,
-                    is_platform_binary,
+                    is_platform_binary: None,
+                    platform_path_marked: path_marked,
                     target_pid: Some(target_pid),
                     target_process_path: target_path,
                     task_access_mode: Some(task_access_mode),
@@ -1210,6 +1213,7 @@ mod win {
                             signing_id: None,
                             team_id: None,
                             is_platform_binary: None,
+                            platform_path_marked: false,
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
@@ -1255,6 +1259,7 @@ mod win {
                                 signing_id: None,
                                 team_id: None,
                                 is_platform_binary: None,
+                                platform_path_marked: false,
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,

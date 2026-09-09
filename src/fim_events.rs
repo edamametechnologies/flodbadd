@@ -36,6 +36,16 @@ pub struct FimEvent {
     pub hash: Option<String>,
     pub process_name: Option<String>,
     pub process_path: Option<String>,
+    /// Writer pid when the attribution source knew the instance (kernel-time
+    /// ES / fanotify / ETW FileIo tables, live lsof). `None` = unmeasured
+    /// (cache hits, Restart Manager parent-directory probes). Lets the
+    /// detector join the writer to its kernel exec record by pid instead of
+    /// by image path (DETECTIONGAPSPLAN-2026-09 Inc 6.4 / N-03).
+    /// `#[serde(default)]`: the helper ships events to an app that may be one
+    /// release behind during an upgrade (same precedent as `last_modified`);
+    /// a missing pid reads as unmeasured, never as a fabricated value.
+    #[serde(default)]
+    pub process_pid: Option<u32>,
     /// Parent process name when attribution is available (ES, lsof).
     pub parent_process_name: Option<String>,
     /// Parent process path when attribution is available (ES, lsof).
@@ -199,13 +209,18 @@ impl FimEventStore {
         uid: &str,
         process_name: Option<String>,
         process_path: Option<String>,
+        process_pid: Option<u32>,
     ) {
-        if process_name.is_none() && process_path.is_none() {
+        if process_name.is_none() && process_path.is_none() && process_pid.is_none() {
             return;
         }
 
         if let Some(mut event) = self.events.get_mut(uid) {
             let mut changed = false;
+            if event.process_pid.is_none() && process_pid.is_some() {
+                event.process_pid = process_pid;
+                changed = true;
+            }
             if event
                 .process_name
                 .as_deref()
@@ -247,6 +262,15 @@ impl FimEventStore {
                 event.last_modified = Utc::now();
             }
         }
+    }
+
+    /// [`Self::has_suspicious_events`] with the CloudModel temp patterns the
+    /// attack-pattern detector uses, so both surfaces flag the same events.
+    pub fn has_suspicious_events_with(&self, extra_temp_patterns: &[String]) -> bool {
+        self.events.iter().any(|e| {
+            let ev = e.value();
+            ev.is_sensitive || is_temp_directory_path_with(&ev.path, extra_temp_patterns)
+        })
     }
 
     pub fn has_suspicious_events(&self) -> bool {
@@ -301,14 +325,7 @@ impl Default for FimEventStore {
     }
 }
 
-pub fn is_temp_directory_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized.starts_with("/tmp/")
-        || normalized.starts_with("/private/tmp/")
-        || normalized.starts_with("/var/tmp/")
-        || normalized.contains("/Temp/")
-        || normalized.contains("/AppData/Local/Temp/")
-}
+pub use crate::temp_paths::{is_temp_directory_path, is_temp_directory_path_with};
 
 #[cfg(test)]
 mod tests {
@@ -342,6 +359,7 @@ mod tests {
             hash: Some("abc123".to_string()),
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -369,6 +387,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -385,6 +404,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -418,6 +438,7 @@ mod tests {
             hash: None,
             process_name: Some("cursor".to_string()),
             process_path: Some("/Applications/Cursor.app".to_string()),
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -433,6 +454,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -450,6 +472,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -478,6 +501,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -495,6 +519,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -516,6 +541,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -545,6 +571,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -557,6 +584,7 @@ mod tests {
             &uid,
             Some("cursor".to_string()),
             Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
+            None,
         );
 
         let events = store.get_all_events();
@@ -581,6 +609,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -609,6 +638,7 @@ mod tests {
             hash: Some("original".to_string()),
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -636,6 +666,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -663,6 +694,7 @@ mod tests {
                 hash: None,
                 process_name: None,
                 process_path: None,
+                process_pid: None,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
@@ -699,6 +731,7 @@ mod tests {
                         hash: None,
                         process_name: None,
                         process_path: None,
+                        process_pid: None,
                         parent_process_name: None,
                         parent_process_path: None,
                         is_sensitive: false,
@@ -727,6 +760,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -767,6 +801,7 @@ mod tests {
             hash: Some("abc123".to_string()),
             process_name: Some("node".to_string()),
             process_path: Some("/usr/bin/node".to_string()),
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -796,6 +831,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -811,6 +847,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -843,6 +880,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -858,6 +896,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -890,6 +929,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -908,6 +948,7 @@ mod tests {
             &uid,
             Some("cursor".to_string()),
             Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
+            None,
         );
 
         let delta = store.get_events_modified_since(cursor);
@@ -939,6 +980,7 @@ mod tests {
             hash: None,
             process_name: None,
             process_path: None,
+            process_pid: None,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -982,6 +1024,7 @@ mod tests {
                 hash: None,
                 process_name: None,
                 process_path: None,
+                process_pid: None,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,

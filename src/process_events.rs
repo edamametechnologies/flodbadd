@@ -84,6 +84,13 @@ pub struct ProcessEvent {
     pub team_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_platform_binary: Option<bool>,
+    /// Interim, PATH-shaped platform mark: the image sits under a root the
+    /// OS owns (Windows ETW: `%SystemRoot%` / Defender roots). This is NOT
+    /// a kernel fact -- `is_platform_binary` stays `None` on such events so
+    /// no benign credit can derive from a path. Consumers may use it only
+    /// as a ring pre-filter hint and only when no measured publisher
+    /// verdict exists (DETECTIONGAPSPLAN-2026-09 Inc 6.1 / N-01).
+    pub platform_path_marked: bool,
     /// `TaskAccess` only: the victim process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_pid: Option<u32>,
@@ -278,6 +285,7 @@ mod tests {
             signing_id: None,
             team_id: None,
             is_platform_binary: None,
+            platform_path_marked: false,
             target_pid: None,
             target_process_path: None,
             task_access_mode: None,
