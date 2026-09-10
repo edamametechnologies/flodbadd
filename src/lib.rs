@@ -28,6 +28,10 @@ pub mod etw_process_payload;
     feature = "fim"
 ))]
 pub mod fim;
+/// FIM watch roots, published for the kernel-time attribution sensors.
+/// Always compiled: the sensors that consult it are gated on independent
+/// features, and a predicate that vanishes under a `#[cfg]` stops confining.
+pub mod fim_attribution;
 /// Endpoint Security as the FIM event source (macOS): the ES handler hands
 /// file events under the FIM roots, writer attached, to the watcher.
 #[cfg(all(target_os = "macos", feature = "fim"))]

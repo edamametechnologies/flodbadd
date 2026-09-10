@@ -1411,6 +1411,14 @@ mod win {
             }
         };
 
+        // Same confinement as the macOS Endpoint Security path: the FileIo
+        // session sees every file event on the machine, and the only reader of
+        // this table is `fim::kernel_table_attribution`, which is only ever
+        // asked about paths under a FIM watch root.
+        if !crate::fim_attribution::is_attributable(&path) {
+            return;
+        }
+
         THREAD_FILE_TABLE.with(|ft| {
             THREAD_FILE_COUNTER.with(|fc| {
                 THREAD_PROCESS_TABLE.with(|pt| {

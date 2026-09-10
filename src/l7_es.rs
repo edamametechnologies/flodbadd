@@ -275,6 +275,15 @@ mod macos {
             responsible_pid: u32,
             responsible_exe_path: &str,
         ) {
+            // The only reader of this table is `fim::kernel_table_attribution`,
+            // and it is only ever asked about paths under a FIM watch root.
+            // Recording anything else fills the table with entries that expire
+            // unread. The hot WRITE / CLOSE arms answer this before they
+            // allocate; this guard covers CREATE, RENAME and UNLINK too, so
+            // the table is confined wherever the entry came from.
+            if !crate::fim_attribution::is_attributable(&path) {
+                return;
+            }
             let (process_name, process_path) =
                 if let Some(info) = process_table.get(&responsible_pid) {
                     (info.process_name.clone(), info.process_path.clone())
@@ -670,7 +679,16 @@ mod macos {
                     }
                     Some(Event::NotifyWrite(ev)) => {
                         counters.write_received.fetch_add(1, Ordering::Relaxed);
-                        let path = ev.target().path().to_string_lossy().to_string();
+                        // NOTIFY_WRITE is the highest-volume event ES emits:
+                        // every write syscall by every process on the machine.
+                        // Nothing downstream is ever asked about a path outside
+                        // a FIM watch root, so answer that on the borrowed path
+                        // before allocating anything.
+                        let target = ev.target().path().to_string_lossy();
+                        if !crate::fim_attribution::is_attributable(&target) {
+                            return;
+                        }
+                        let path = target.into_owned();
                         let exe = responsible
                             .executable()
                             .path()
@@ -704,7 +722,11 @@ mod macos {
                         // CREATE and their first write by WRITE.
                         if ev.modified() {
                             counters.close_modified.fetch_add(1, Ordering::Relaxed);
-                            let path = ev.target().path().to_string_lossy().to_string();
+                            let target = ev.target().path().to_string_lossy();
+                            if !crate::fim_attribution::is_attributable(&target) {
+                                return;
+                            }
+                            let path = target.into_owned();
                             let exe = responsible
                                 .executable()
                                 .path()

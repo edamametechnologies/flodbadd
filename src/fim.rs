@@ -341,6 +341,13 @@ impl FimWatcher {
             warn!("FIM: no valid watch paths, watcher started but inactive");
         }
 
+        // Publish the roots for the kernel-time attribution sensors BEFORE the
+        // event-source decision below, so the Endpoint Security source and the
+        // FSEvents fallback are both covered. Without this the FSEvents
+        // configuration -- which still reads the ES attribution table for the
+        // writer pid -- would find it empty.
+        crate::fim_attribution::set_roots(&actual_paths, config.recursive);
+
         #[cfg(target_os = "macos")]
         if es_source && !actual_paths.is_empty() {
             match crate::fim_es::install(&actual_paths, config.recursive) {
@@ -391,6 +398,9 @@ impl FimWatcher {
 
     pub fn stop(self) {
         self.running.store(false, Ordering::SeqCst);
+        // Nothing reads the kernel-time attribution table while no watcher is
+        // running, so stop paying for it. A restart re-publishes the roots.
+        crate::fim_attribution::clear_roots();
         info!("FIM: watcher stopped");
     }
 

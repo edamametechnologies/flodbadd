@@ -52,31 +52,9 @@ struct Sink {
 
 static SINK: OnceCell<Sink> = OnceCell::new();
 
-/// Lower-cased, forward-slash form used for prefix matching.
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
-}
-
-/// Whether `path` (normalized) falls under `root` (normalized) for the
-/// given recursion mode.
-pub fn path_under_root(path: &str, root: &str, recursive: bool) -> bool {
-    let root = root.trim_end_matches('/');
-    if root.is_empty() {
-        return false;
-    }
-    let Some(rest) = path.strip_prefix(root) else {
-        return false;
-    };
-    let Some(rest) = rest.strip_prefix('/') else {
-        // Exact match is the root itself (a directory), never a file event
-        // we want; a longer name sharing the prefix is a sibling.
-        return false;
-    };
-    if rest.is_empty() {
-        return false;
-    }
-    recursive || !rest.contains('/')
-}
+// Root matching lives in `fim_attribution` so the sink filter here and the
+// attribution confinement in the sensors cannot drift apart.
+pub use crate::fim_attribution::{normalize, path_under_root};
 
 /// Install the sink for the given roots (raw and canonical spellings are
 /// both kept: ES reports `/private/var/...` while callers often pass
