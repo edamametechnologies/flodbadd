@@ -29,8 +29,30 @@ use std::sync::RwLock;
 use once_cell::sync::Lazy;
 
 /// Lower-cased, forward-slash form used for prefix matching.
+///
+/// On Windows this MUST go through `win_path_normalize` first. The same file
+/// arrives here in several shapes: the FIM watcher supplies the Win32 form it
+/// registered (`C:\Users\...`), while the ETW FileIo session reports the NT
+/// object path the kernel saw (`\Device\HarddiskVolume3\Users\...`), and the
+/// CI runners' `%TEMP%` is an 8.3 short name. A plain lowercase-and-flip
+/// leaves those as different strings, so a device-form path matches no root,
+/// nothing is recorded, and every file event loses its writer.
+///
+/// That is not hypothetical twice over: the same class of mismatch cost a
+/// staged file its writer on 2026-09-08, and skipping the canonicaliser here
+/// regressed `package_install_lifecycle` on windows-x64 in gate run
+/// 34520133863.
 pub fn normalize(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
+    #[cfg(target_os = "windows")]
+    {
+        // Canonical Windows form is backslash-separated; the matcher below
+        // works in forward slashes, so convert after canonicalising.
+        crate::win_path_normalize::normalize_win_path(path).replace('\\', "/")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.replace('\\', "/").to_lowercase()
+    }
 }
 
 /// Whether `path` (normalized) falls under `root` (normalized) for the given
