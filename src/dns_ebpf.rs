@@ -118,6 +118,24 @@ mod linux {
             // Copy to Vec for alignment (same fix as l7_ebpf)
             let aligned_object: Vec<u8> = DNS_EBPF_OBJECT.to_vec();
 
+            // Same lift as the L7 loader (flodbadd ab753b8): on kernels < 5.11
+            // and in many containers BPF map memory is charged against
+            // RLIMIT_MEMLOCK, and the default limit makes `bpf(BPF_MAP_CREATE)`
+            // fail with EPERM. The L7 map failures stopped on 1.8.5 once that
+            // loader raised the limit; this loader still reported "failed to
+            // create map `dns_sockets` with code -1" on 1.8.5 and 1.9.0 hosts
+            // because it never did. Raising is per process and idempotent, so
+            // doing it here too costs nothing when L7 already ran.
+            {
+                use nix::sys::resource::{setrlimit, Resource, RLIM_INFINITY};
+                if let Err(e) = setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY) {
+                    warn!(
+                        "DNS eBPF: could not raise RLIMIT_MEMLOCK ({}); map creation may fail on kernels < 5.11",
+                        e
+                    );
+                }
+            }
+
             let mut bpf = match Ebpf::load(&aligned_object) {
                 Ok(bpf) => bpf,
                 Err(e) => {
@@ -125,7 +143,12 @@ mod linux {
                         "Disabled: failed to load DNS eBPF program: {} (kernel {})",
                         e, kernel_version
                     );
-                    error!("Failed to load DNS eBPF program: {}", e);
+                    // Environmental (old kernel, container, missing
+                    // capability): the daemon carries on without DNS
+                    // attribution and the status string above is surfaced to
+                    // the operator. error! here fanned out to Sentry on every
+                    // affected host at every start; keep it at warn!.
+                    warn!("Failed to load DNS eBPF program: {}", e);
                     return (None, msg);
                 }
             };
@@ -139,7 +162,7 @@ mod linux {
                     Ok(kp) => kp,
                     Err(e) => {
                         let msg = format!("Disabled: {} is not a kprobe: {}", prog_name, e);
-                        error!("{}", msg);
+                        warn!("{}", msg);
                         return (None, msg);
                     }
                 },
@@ -152,13 +175,13 @@ mod linux {
 
             if let Err(e) = prog.load() {
                 let msg = format!("Disabled: failed to load {}: {}", prog_name, e);
-                error!("{}", msg);
+                warn!("{}", msg);
                 return (None, msg);
             }
 
             if let Err(e) = prog.attach("udp_sendmsg", 0) {
                 let msg = format!("Disabled: failed to attach {}: {}", prog_name, e);
-                error!("{}", msg);
+                warn!("{}", msg);
                 return (None, msg);
             }
 
