@@ -665,8 +665,9 @@ int lsm_ptrace_access_check(unsigned long long *ctx)
  * included) -- the "who asked for which name" half of BS-5, and the attach
  * point a future cgroup deny (§4b.2) would return 0 from. Observe only:
  * every program returns 1 (allow). The programs run for the whole cgroup
- * tree they are attached to (the root, mode allow-multi so systemd /
- * container managers keep theirs).
+ * tree they are attached to (the root). The loader attaches them as plain
+ * BPF links in Single mode: the link API rejects the allow-multi flag, and
+ * links coexist with systemd's and container managers' own programs anyway.
  *
  * Volume guard: an LRU keyed by (tgid, family, proto, port, addr) drops
  * repeats within NET_INTENT_WINDOW_NS, so a chatty UDP flow costs one

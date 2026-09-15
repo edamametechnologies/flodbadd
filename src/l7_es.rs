@@ -241,7 +241,7 @@ mod macos {
 
             let init_status = if is_available {
                 format!(
-                    "Enabled: macOS {} with ES process + file tracking (FORK/EXEC/EXIT + CREATE/CLOSE/RENAME/UNLINK)",
+                    "Enabled: macOS {} with ES process + file + task-port tracking (FORK/EXEC/EXIT + GET_TASK/GET_TASK_READ + CREATE/WRITE/CLOSE/RENAME/UNLINK)",
                     version_str
                 )
             } else {

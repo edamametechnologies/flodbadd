@@ -804,10 +804,14 @@ mod win {
     }
 
     /// `Microsoft-Windows-Kernel-Audit-API-Calls` callback (audit session
-    /// thread). Only `PsOpenProcess` with an ATTACH-grade access mask is
-    /// forwarded, as a `TaskAccess` ring event carrying the requester (the
+    /// thread). `PsOpenProcess` is graded by requested access mask and
+    /// forwarded as a `TaskAccess` ring event carrying the requester (the
     /// event header's process) and the target from the payload; both images
-    /// come from the ETW process table primed at start.
+    /// come from the ETW process table primed at start. Query-only masks are
+    /// never forwarded; READ-grade opens are, except from OS-shipped
+    /// requesters, which are dropped as ring pre-filtering (the constant
+    /// csrss / lsass / svchost / MsMpEng background). ATTACH-grade opens are
+    /// forwarded regardless of the requester's path.
     unsafe extern "system" fn audit_record_callback(record: *mut EVENT_RECORD) {
         if record.is_null() {
             return;

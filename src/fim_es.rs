@@ -175,7 +175,7 @@ impl Coalescer {
     }
 }
 
-/// Convenience for the watcher: the roots as `Path`s for logging.
+/// Convenience for the watcher: how many root spellings are installed.
 pub fn root_count() -> usize {
     SINK.get().map(|s| s.roots.len()).unwrap_or(0)
 }
