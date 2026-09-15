@@ -44,14 +44,14 @@ Each resolution is tagged with its source: `Ebpf`, `MacosLibproc`, `ExactMatch`,
 | Full process scan each cycle | Medium | `scan_all_process_sockets()` calls `proc_listallpids()` then `proc_pidinfo(PROC_PIDLISTFDS)` + `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` for every process. On systems with many processes, this is expensive (100+ ms). |
 | Race with process exit | Low | A process may exit between `proc_listallpids()` and `proc_pidfdinfo()`. Handled gracefully (returns empty), but the connection may be missed. |
 | UDP fuzzy matching only | Low | For UDP, falls back to port-based matching against `all_entries` since UDP sockets are often unconnected. May attribute to the wrong process if multiple processes bind the same port. |
-| No eBPF equivalent | Medium | macOS has no kernel-level session-to-process tracing. The libproc approach is inherently poll-based and can miss very short-lived connections between scan cycles. |
+| No kernel-level connection tracing | Medium | Endpoint Security delivers process events but never socket events, so macOS has no kernel-side 4-tuple to PID join. ES narrows libproc to kernel-known PIDs, which lifts the 50 ms bucket from 33% to 100%, but the floor stays at 50 ms because libproc probing is still the bottleneck. Apple's Network Extension framework could provide per-flow PID mapping and would need further entitlements. |
 | Requires root or elevated entitlements | Low | `proc_pidfdinfo` for other processes requires root or appropriate entitlements. Without them, only the current process's sockets are visible. |
 
 #### Windows
 
 | Gap | Severity | Details |
 |-----|----------|---------|
-| Netstat-only (no native acceleration) | Medium | Windows relies entirely on `netstat2::get_sockets_info()`. No eBPF, no equivalent of macOS libproc. Short-lived connections are more likely to be missed. |
+| No kernel-time socket-to-PID join | Low | Windows relies on `netstat2::get_sockets_info()` for the join. ETW is enabled and supplies a connection table, but its events arrive after `GetExtendedTcpTable` already sees the connection, so ETW never wins the race. Measured resolution is 100% at every hold duration including 0 ms, so this costs nothing in practice; it is listed because the mechanism differs from Linux. |
 | Sensitive file scan is expensive | Medium | `start_sensitive_scan_task` interval is 120s on Windows because `NtQuerySystemInformation` enumerates ALL handles system-wide. |
 | Username resolution via NetUserGetInfo | Low | Uses `NetApiBufferFree`/`NetUserGetInfo` Win32 API for UID-to-username mapping. May fail for domain accounts without network connectivity to the domain controller. |
 | No QUIC/UDP acceleration | Low | Same as Linux without eBPF -- UDP attribution relies on netstat exact match and port cache. |
@@ -158,6 +158,51 @@ Forward DNS (from packet capture) takes priority over reverse DNS when both are 
 
 ---
 
+## Kernel Sensors
+
+The three privileged sensors (Linux eBPF plus fanotify, macOS Endpoint
+Security, Windows ETW) are documented in `EBPF.md`, `ENDPOINTSECURITY.md` and
+`ETW.md`. This section tracks only their gaps.
+
+### Closed
+
+Each row names the commit and, where one exists, the run or host that
+confirmed it.
+
+| Gap | Platforms | Closed by | Confirmed on |
+|---|---|---|---|
+| File attribution recorded the last reader, not the writer | macOS, Windows | `7b23842` | Security gate, 2026-09-08 |
+| Writer lost to the `lsof` race when the writer closed first | Linux | `18b7b56` (fanotify) | ubuntu-arm64 gate, 2026-09-07 |
+| Atomic replace left the final path unattributed | macOS | `ea48a38` (rename destination) | |
+| No task-access telemetry at all | Windows | `e566ffd` | Azure Windows runner |
+| Any `PROCESS_VM_READ` open graded as attach | Windows | `157cd5e` | Azure runner: 0x0410 no event, 0x0438 mode 2 |
+| Processes started after the sensor had no image path | Windows | `59be337` | Azure runner: `exec_with_path` 0 of 5 to 8 of 8 |
+| Short-name and device-path spellings split one file's identity | Windows | `8e5b85c`, `7a644b0` | Gate run 34520133863 |
+| `EVENT_TRACE_FLAG_FILE_IO` flooded 6-7 MB/s of discarded events | Windows | `ee6f5f4` | Dogfood host shiawase |
+| BPF map create failed under `RLIMIT_MEMLOCK` | Linux | `ab753b8` | 23,000 Sentry events on 1.4.1 to 1.8.3 |
+| Fork and exit tracepoints never attached on kernel 6.17 | Linux | `c5e2a44` | 6.17 dogfood host |
+| Sensor's own procfs reads re-triggered its ptrace probe | Linux | `6caca3c` | Lima VM 6.8, measured 26,000 ev/s before the filter |
+| CI watch-root fallback watched the filesystem root | all | `657ee49` | Azure runners, 17-24 GB RSS in 6-8 h |
+| Attribution tables recorded every file event on the machine | macOS, Windows | `0f42307` | |
+
+### Open
+
+| Gap | Severity | Details |
+|---|---|---|
+| No per-sensor unmeasured marker | Medium | Where a sensor is absent it attaches nothing, so the evidence fields it would have set stay false. A consumer reading those fields cannot distinguish an absent sensor from a measured negative. This affects severity grading between a sandboxed host and a fully instrumented one. |
+| No overhead measurement for the eBPF programs | Medium | There is a measured cost for the Windows FileIo flood and for the L7 re-arm cadence, but no CPU or latency number for the eBPF programs themselves. `EBPF.md` carries only a qualitative claim. |
+| ETW availability decided after a fixed 500 ms sleep | Low | `FlodbaddL7Etw::init` sleeps 500 ms and then reads the flag, so a slow-starting trace session is reported unavailable for the life of the process. |
+| fanotify mark cap below the kernel default | Low | Marks are capped at 4096 against a kernel default `max_user_marks` of 8192 per user. A watch set exceeding the cap silently stops marking further subdirectories. |
+| Net-intent LRU may coalesce distinct events | Low | The cgroup egress-intent hook drops repeats of `(tgid, family, proto, port, addr)` inside a 1 s window, so a burst of genuinely distinct connections to the same destination inside that window is reported once. |
+| Linux kernel-time file attribution is coupled to the `ebpf` feature | Low | `fim_fanotify` is gated on `fim` AND `ebpf`, the latter only because it supplies the `nix` dependency with its `fanotify` feature. A Linux build with `fim` but without `ebpf`, which is what 32-bit Linux gets, silently loses kernel-time writer attribution and falls back to the `lsof` race the fanotify work was written to close. |
+| ES file attribution untestable in-process | Low | Endpoint Security suppresses events from its client's own process tree including children, so a single test binary is its own client and never sees its own writes. `tests/fim_attribution_benchmark_test.rs` can only validate init, the tier cascade and the `lsof` fallback. |
+| ETW TCP/IP decode may never key an IPv4 session | Medium | `handle_tcp_event` selects the IPv4 or IPv6 payload by event version alone, never by opcode. Modern kernels emit version 2 for IPv4 Connect/Accept/Reconnect and use separate opcodes for the IPv6 variants, so IPv4 tuples may decode through the V6 arm and never key a session. This would explain the benchmark result that ETW never wins the Windows L7 race mechanically rather than as a latency race. Unverified; no Windows host was available when it was found. |
+| Two ETW consumers on one host contend for the kernel session | Low | `init` unconditionally stops any pre-existing NT Kernel Logger session, and both the helper and the posture daemon now build the `etw` feature. On a host running both, the second to start takes the kernel session from the first. |
+| No garbage collection of the eBPF connection map | Medium | `l7_connections` is written by the kernel programs and only ever read from user space. `__sk_free` deletes the socket row but not the connection row, and the in-code comment claiming a userspace TTL describes a sweep that does not exist. Rows persist until the 65,536 cap is reached. Already listed under the Linux eBPF table above; repeated here because the comment is misleading. |
+| Linux task-access probe is ATTACH-only | Low | The `ptrace_may_access` kprobe filters to `PTRACE_MODE_ATTACH`. Read-mode access is deliberately not reported because it is far too noisy, and is covered instead by the procfs open-file route. macOS reports both modes, so the platforms are not symmetric here. |
+
+---
+
 ## Performance Optimizations
 
 ### Potential Improvements (Low Priority)
@@ -222,7 +267,7 @@ let to_resolve: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
 3. **Cache eviction tests** - Verify LRU/TTL eviction works correctly under load
 4. **eBPF map saturation** - Test behavior when `l7_connections` BPF map reaches 65,536 entries
 5. **DNS-over-HTTPS detection** - Verify sessions to known DoH providers are at least flagged as DNS-related even without domain extraction
-6. **Cross-platform L7 accuracy** - Comparative tests measuring resolution success rate across Linux (eBPF), macOS (libproc), and Windows (netstat-only)
+6. **Cross-platform L7 accuracy** - Covered by `tests/l7_benchmark_test.rs` and `.github/workflows/l7_benchmark.yml`, which run six variants across the three platforms with and without the kernel feature. Results are in `L7.md`.
 7. **Short-lived connection coverage** - Measure what percentage of sub-100ms connections are successfully attributed to processes on each platform
 
 ---
@@ -231,6 +276,7 @@ let to_resolve: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
 
 | Date | Change |
 |------|--------|
+| 2026-09-15 | Added the Kernel Sensors section with the closed and open registers; corrected the Windows and macOS L7 rows, which described a state that predates the ETW and Endpoint Security work |
 | 2026-03-18 | Rewrote GAPS.md with comprehensive L7 and DNS strategy analysis; added platform-specific gap tables for eBPF, macOS libproc, Windows, mobile; added DNS resolution gaps (DoH/DoT, eBPF map pruning, TTL handling); added cross-platform L7 gaps |
 | 2026-01-22 | Added `MAX_HISTORY_LENGTH` fix for TCP history string |
 | 2026-01-22 | Created GAPS.md to track remaining items |
