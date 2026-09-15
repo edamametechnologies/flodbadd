@@ -233,12 +233,21 @@ See [GAPS.md](GAPS.md) for known limitations and planned improvements.
 
 See [ANALYZER.md](ANALYZER.md) for complete details.
 
-## eBPF Support (Linux)
+## Kernel sensors
 
-Kernel-level process attribution via Aya framework:
+Each platform has one privileged sensor that observes the kernel directly.
+They started as L7 accelerators and now carry three kinds of evidence:
+session-to-process attribution, kernel-time file-writer attribution, and a
+cross-platform process-event stream.
+
+| Platform | Sensor | Feature | Doc |
+|---|---|---|---|
+| Linux | eBPF via Aya, plus fanotify for file events | `ebpf` | [EBPF.md](EBPF.md) |
+| macOS | Endpoint Security | `endpointsecurity` | [ENDPOINTSECURITY.md](ENDPOINTSECURITY.md) |
+| Windows | Event Tracing for Windows, two sessions | `etw` | [ETW.md](ETW.md) |
 
 ```
-User Space                    Kernel Space (eBPF)
+User Space                    Kernel Space (eBPF, Linux)
 +-----------------+          +------------------------+
 | Query session   |--peek--->| kprobe: tcp_v4_connect |
 |                 |          | kprobe: tcp_set_state  |
@@ -249,7 +258,26 @@ User Space                    Kernel Space (eBPF)
 **Requirements**: Linux kernel 5.3+, CAP_SYS_ADMIN or root
 **Fallback**: netstat2 crate when eBPF unavailable
 
-See [EBPF.md](EBPF.md) for complete documentation.
+Every sensor is fail-open. When one cannot start it attaches nothing, the
+subsystems that read it fall back to their polling paths, and the failure
+reaches the operator as a status string rather than as an error.
+
+### The process-event stream
+
+`src/process_events.rs` is the convergence point. All three sensors push
+`Exec`, `Fork`, `Exit`, `TaskAccess` and `NetConnect` events into one bounded
+ring of 8,192 entries with atomic counters. Two properties are load-bearing:
+
+- **One vocabulary.** Task access is graded in PTRACE_MODE terms on every
+  platform, where 1 is a read-only view and 2 is attach-grade control. A
+  macOS read task port, a Windows `PROCESS_VM_READ` open and a Linux
+  `PTRACE_MODE_READ` therefore grade identically.
+- **Argv never enters the ring raw.** Only a SHA-256 digest and an argument
+  count, because argv routinely carries secrets.
+
+Pushes come from kernel-callback threads, so the ring is taken through a
+non-blocking try-lock and a contended push is dropped and counted rather than
+blocking a sensor thread.
 
 ## L7 Process Attribution
 
@@ -257,14 +285,17 @@ Process attribution resolves which local process owns a network session. The
 primary mechanism varies by platform:
 
 - **Linux**: eBPF kprobes (`l7_ebpf.rs`) when the `ebpf` feature is enabled.
-  Falls back to netstat polling via the `netstat2` crate.
-- **macOS**: `lsof`-based resolution via `l7.rs`.
-- **Windows**: Netstat polling via `netstat2`. The `etw` feature flag exists for
-  future Event Tracing for Windows (ETW) integration but is currently an empty
-  stub. Enabling `etw` compiles the Windows ETW crate dependencies (see
-  `Win32_System_Diagnostics_Etw` in `Cargo.toml`) but does not activate any
-  runtime behavior. A real ETW consumer would require native ETW provider
-  registration and session management that has not been implemented.
+  The 4-tuple to PID join happens in the kernel, so instant-close sessions
+  resolve. Falls back to netstat polling via the `netstat2` crate.
+- **macOS**: Endpoint Security supplies the PID set and `libproc`
+  (`l7_macos.rs`) probes those PIDs' sockets. Falls back to a full `libproc`
+  scan plus `sysinfo`.
+- **Windows**: netstat polling via `netstat2`, which calls
+  `GetExtendedTcpTable` and is already fast enough to resolve instant-close
+  sessions. ETW is tried first but is never observed to win the race, so the
+  recorded source is always the netstat exact match.
+
+See [L7.md](L7.md) for the measured comparison.
 
 ## Feature Flags
 
@@ -273,24 +304,27 @@ primary mechanism varies by platform:
 | `packetcapture` | Live packet capture (requires root/CAP_NET_RAW) |
 | `asyncpacketcapture` | Async capture API over pcap; enables async channel-based packet delivery. Depends on `packetcapture` being enabled in the consuming crate. |
 | `ebpf` | Linux eBPF acceleration (x86_64/aarch64) |
-| `etw` | Windows ETW stub (empty; requires native ETW dependencies to build) |
-| `endpointsecurity` | macOS Endpoint Security framework (optional, requires entitlements) |
+| `etw` | Windows ETW kernel trace: process lineage, file-writer attribution, task access |
+| `endpointsecurity` | macOS Endpoint Security framework (requires entitlement and root) |
 | `fim` | File integrity monitoring via notify + BLAKE3 hashing |
 
 ## Platform Support
 
-| Platform | Capture | eBPF | Privileges |
-|----------|---------|------|------------|
-| Linux | ✅ | ✅ | CAP_NET_RAW or root |
-| macOS | ✅ | ❌ | Root or BPF entitlements |
-| Windows | ✅ (Npcap) | ❌ | Administrator |
-| iOS/Android | Limited | ❌ | App entitlements |
+| Platform | Capture | Kernel sensor | Privileges |
+|----------|---------|---------------|------------|
+| Linux | ✅ | eBPF + fanotify | CAP_NET_RAW or root; CAP_SYS_ADMIN for fanotify |
+| macOS | ✅ | Endpoint Security | Root plus the ES entitlement and a provisioning profile |
+| Windows | ✅ (Npcap) | ETW, two sessions | Administrator or LocalSystem |
+| iOS/Android | Limited | none | App entitlements |
 
 ## Related Documentation
 
 - [README.md](README.md) - Overview and usage examples
 - [ANALYZER.md](ANALYZER.md) - ML anomaly detection deep dive
-- [EBPF.md](EBPF.md) - eBPF architecture and troubleshooting
+- [L7.md](L7.md) - Session-to-process attribution and its benchmarks
+- [EBPF.md](EBPF.md) - eBPF and fanotify architecture and troubleshooting
+- [ENDPOINTSECURITY.md](ENDPOINTSECURITY.md) - macOS Endpoint Security sensor
+- [ETW.md](ETW.md) - Windows ETW sessions
 - [WHITELISTS.md](WHITELISTS.md) - Whitelist system design
 - [PROFILES.md](PROFILES.md) - Device profiling system
 - [CDN.md](CDN.md) - Threat intelligence CDN
