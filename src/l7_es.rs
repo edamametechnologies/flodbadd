@@ -137,7 +137,7 @@ mod macos {
     }
 
     fn resolve_username(uid: u32) -> String {
-        users::get_user_by_uid(uid)
+        uzers::get_user_by_uid(uid)
             .map(|u| u.name().to_string_lossy().to_string())
             .unwrap_or_else(|| format!("uid-{}", uid))
     }
@@ -1272,7 +1272,7 @@ mod tests {
     #[test]
     #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
     fn test_es_entitlement_active() {
-        let running_as_root = users::get_effective_uid() == 0;
+        let running_as_root = uzers::get_effective_uid() == 0;
         if !running_as_root {
             eprintln!("SKIP: test_es_entitlement_active requires root (run via `make macos_test`)");
             return;

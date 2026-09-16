@@ -1905,7 +1905,7 @@ impl FlodbaddL7 {
                             #[cfg(unix)]
                             {
                                 let user_id_u32 = **user_id;
-                                if let Some(user) = users::get_user_by_uid(user_id_u32) {
+                                if let Some(user) = uzers::get_user_by_uid(user_id_u32) {
                                     user.name().to_string_lossy().to_string()
                                 } else {
                                     warn!("No username found for user_id {:?}", user_id);
@@ -2063,7 +2063,7 @@ impl FlodbaddL7 {
             match uid_to_username.get(&user_id).map(|s| s.to_string()) {
                 Some(username) => username,
                 None => {
-                    if let Some(user) = users::get_user_by_uid(**user_id) {
+                    if let Some(user) = uzers::get_user_by_uid(**user_id) {
                         user.name().to_string_lossy().to_string()
                     } else {
                         String::new()
