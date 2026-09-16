@@ -24,7 +24,9 @@ struct OuiTable {
 }
 
 fn mac_to_u48(octets: &[u8; 6]) -> u64 {
-    octets.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
+    octets
+        .iter()
+        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
 }
 
 fn mask_for(bits: u8) -> u64 {
