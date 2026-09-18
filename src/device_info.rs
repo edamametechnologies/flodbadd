@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Upper bound on open ports for a standard-breadth scan (the ~5099-port DB).
 /// Real phones, IoT, and routers sit well below this; a standard scan that
@@ -1709,6 +1709,58 @@ impl DeviceInfo {
     /// crosses the boundary.
     pub fn strip_anomalous_open_ports(&mut self) -> bool {
         self.strip_anomalous_open_ports_with_limit(MAX_REASONABLE_OPEN_PORTS_DEEP)
+    }
+
+    /// Drop port evidence that no definite verdict has refreshed within `max_age`.
+    ///
+    /// `open_ports` is a union: [`Self::merge`] only adds, and
+    /// [`Self::reconcile_open_ports_after_scan`] only retracts a port the target
+    /// *actively refused*. A host that silently drops every probe -- iOS is the
+    /// reference case -- never refuses anything, so whatever its record holds
+    /// stays there for good: ports inherited from a previous tenant of the same
+    /// address, from the device's own hotspot gateway, or from an mDNS
+    /// misattribution keep feeding classification and criticality indefinitely.
+    ///
+    /// The expiry is keyed on the device, not the port. [`Self::last_port_scan`]
+    /// is refreshed by *any* definite verdict for the device, so an active host
+    /// that is throttled to a partial sweep, or that refuses on a delay, still
+    /// re-stamps every cycle and never expires. Only a record that produced no
+    /// verdict at all for `max_age` is cleared -- which means the device was
+    /// either absent or silent for that long, and in both cases a list nobody
+    /// has corroborated in that time is not evidence. A switched-off host
+    /// therefore reads `Unknown` rather than a stale `Low`/`High` while it is
+    /// away, and is re-scanned within one cycle of coming back.
+    ///
+    /// A record with ports but no stamp (a cache or peer record predating the
+    /// stamp) is aged by `last_seen`: its ports cannot be newer than the
+    /// device's last observation. Clearing also resets the stamp, so
+    /// criticality falls back to `Unknown` -- stale evidence is no evidence --
+    /// and `non_std_ports`, which is derived from the list. Per-port `dismissed`
+    /// goes with the ports: a dismissal of a port nobody has seen for `max_age`
+    /// has nothing left to dismiss. A stamp in the future (clock skew) yields a
+    /// negative age and is kept.
+    ///
+    /// Returns true when anything was cleared.
+    pub fn expire_stale_port_evidence(&mut self, max_age: chrono::Duration) -> bool {
+        if self.open_ports.is_empty() && self.last_port_scan.is_none() {
+            return false;
+        }
+        let reference = self.last_port_scan.unwrap_or(self.last_seen);
+        if Utc::now().signed_duration_since(reference) <= max_age {
+            return false;
+        }
+        if !self.open_ports.is_empty() {
+            info!(
+                "Expiring {} open port(s) on {:?}: no port verdict since {}",
+                self.open_ports.len(),
+                self.get_ip_address(),
+                reference
+            );
+        }
+        self.open_ports.clear();
+        self.non_std_ports = false;
+        self.last_port_scan = None;
+        true
     }
 
     pub fn clear(&mut self) {
@@ -5608,6 +5660,98 @@ mod tests {
         peer.last_port_scan = None;
         DeviceInfo::merge(&mut unscanned, &peer);
         assert_eq!(unscanned.last_port_scan, Some(older));
+    }
+
+    #[test]
+    fn test_expire_stale_port_evidence_clears_uncorroborated_record() {
+        // Reference case: an iPhone record that inherited FTP/DNS from a previous
+        // tenant of its address. iOS drops every probe, so reconcile can never
+        // retract them; only age can.
+        let max_age = chrono::Duration::days(7);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 112))));
+        device.open_ports = vec![make_port(21, false), make_port(53, true)];
+        device.non_std_ports = true;
+        device.last_port_scan = Some(Utc::now() - max_age - chrono::Duration::hours(1));
+        device.last_seen = Utc::now();
+
+        assert!(device.expire_stale_port_evidence(max_age));
+        assert!(device.open_ports.is_empty());
+        assert!(!device.non_std_ports, "derived from the list, so it goes with it");
+        assert!(
+            device.last_port_scan.is_none(),
+            "stale evidence is no evidence: criticality must fall back to Unknown"
+        );
+
+        // Idempotent: a cleared record reports nothing to clear.
+        assert!(!device.expire_stale_port_evidence(max_age));
+    }
+
+    #[test]
+    fn test_expire_stale_port_evidence_keeps_recently_verified_record() {
+        // Any definite verdict re-stamps the device, so a host that is scanned
+        // every cycle -- even throttled to a partial sweep -- never expires,
+        // however old its individual ports are. Ports and dismissals survive.
+        let max_age = chrono::Duration::days(7);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))));
+        device.open_ports = vec![make_port(22, true), make_port(80, false)];
+        device.non_std_ports = true;
+        device.last_port_scan = Some(Utc::now() - chrono::Duration::hours(1));
+        // Absence alone is not what expires a record: the stamp is what counts.
+        device.last_seen = Utc::now() - chrono::Duration::days(30);
+
+        assert!(!device.expire_stale_port_evidence(max_age));
+        assert_eq!(device.open_ports.len(), 2);
+        assert!(device.open_ports[0].dismissed);
+        assert!(device.non_std_ports);
+        assert!(device.last_port_scan.is_some());
+    }
+
+    #[test]
+    fn test_expire_stale_port_evidence_expires_stale_stamp_without_ports() {
+        // An empty list with an old stamp reads `Low` ("minimal attack surface")
+        // on evidence nobody has refreshed. Same rule: the stamp expires too.
+        let max_age = chrono::Duration::days(7);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 21))));
+        device.last_port_scan = Some(Utc::now() - max_age - chrono::Duration::days(1));
+
+        assert!(device.expire_stale_port_evidence(max_age));
+        assert!(device.last_port_scan.is_none());
+
+        // And a record with neither is a no-op.
+        let mut blank = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 22))));
+        assert!(!blank.expire_stale_port_evidence(max_age));
+    }
+
+    #[test]
+    fn test_expire_stale_port_evidence_unstamped_record_ages_by_last_seen() {
+        // Caches and peer records that predate `last_port_scan` carry ports with
+        // no stamp. Their ports cannot be newer than the device's last
+        // observation, so that is the age used.
+        let max_age = chrono::Duration::days(7);
+        let mut seen_recently = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 30))));
+        seen_recently.open_ports = vec![make_port(443, false)];
+        seen_recently.last_port_scan = None;
+        seen_recently.last_seen = Utc::now() - chrono::Duration::days(1);
+        assert!(!seen_recently.expire_stale_port_evidence(max_age));
+        assert_eq!(seen_recently.open_ports.len(), 1);
+
+        let mut long_gone = seen_recently.clone();
+        long_gone.last_seen = Utc::now() - max_age - chrono::Duration::days(1);
+        assert!(long_gone.expire_stale_port_evidence(max_age));
+        assert!(long_gone.open_ports.is_empty());
+    }
+
+    #[test]
+    fn test_expire_stale_port_evidence_keeps_future_stamp() {
+        // Clock skew yields a negative age. Keep it: expiring on drift would make
+        // criticality depend on NTP.
+        let max_age = chrono::Duration::days(7);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40))));
+        device.open_ports = vec![make_port(8080, false)];
+        device.last_port_scan = Some(Utc::now() + chrono::Duration::days(30));
+
+        assert!(!device.expire_stale_port_evidence(max_age));
+        assert_eq!(device.open_ports.len(), 1);
     }
 
     #[test]
