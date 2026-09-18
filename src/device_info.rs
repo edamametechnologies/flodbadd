@@ -5676,7 +5676,10 @@ mod tests {
 
         assert!(device.expire_stale_port_evidence(max_age));
         assert!(device.open_ports.is_empty());
-        assert!(!device.non_std_ports, "derived from the list, so it goes with it");
+        assert!(
+            !device.non_std_ports,
+            "derived from the list, so it goes with it"
+        );
         assert!(
             device.last_port_scan.is_none(),
             "stale evidence is no evidence: criticality must fall back to Unknown"
