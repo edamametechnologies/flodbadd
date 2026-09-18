@@ -115,6 +115,33 @@ mod win {
     const PROCESS_VM_WRITE: u32 = 0x0020;
     const PROCESS_ALL_ACCESS_MASK: u32 = 0x001F_FFFF;
 
+    /// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE
+    /// vocabulary. `None` is a query-only open, never forwarded.
+    ///
+    /// `PROCESS_ALL_ACCESS` is deliberately NOT debugger-grade. It is what
+    /// managed frameworks ask for on any operation -- .NET's
+    /// `System.Diagnostics.Process` requests it to read a process name --
+    /// so grading the blanket ask as an attach made every .NET tool that
+    /// enumerates processes a CRITICAL generator (Chocolatey opening the CI
+    /// runner worker, `edamame_cli` Windows gate 2026-09-18). It still
+    /// carries VM_READ, so it grades READ: a named sensitive victim is
+    /// CRITICAL exactly as before, and only the detector's enumeration
+    /// breadth rule (>= 3 distinct read targets) relieves it. The SPECIFIC
+    /// rights a scrape or an injection needs -- VM_WRITE, VM_OPERATION,
+    /// CREATE_THREAD asked for on their own -- stay ATTACH.
+    pub(crate) fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
+        let specific_attach =
+            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0;
+        let all_access = desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
+        if specific_attach && !all_access {
+            return Some(2);
+        }
+        if all_access || desired_access & PROCESS_VM_READ != 0 {
+            return Some(1);
+        }
+        None
+    }
+
     // File attribution table limits -- same as ES on macOS (l7_es.rs)
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
     const FILE_ATTR_TTL_SECS: u64 = 30;
@@ -877,14 +904,9 @@ mod win {
         // The return code is deliberately not consulted: like the Linux
         // `ptrace_may_access` kprobe this records the attempt, and a denied
         // open of a sensitive target is evidence in its own right.
-        let attach_grade =
-            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0
-                || desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
-        let read_grade = !attach_grade && desired_access & PROCESS_VM_READ != 0;
-        if !attach_grade && !read_grade {
+        let Some(task_access_mode) = task_access_mode_for_desired_access(desired_access) else {
             return;
-        }
-        let task_access_mode = if attach_grade { 2 } else { 1 };
+        };
         THREAD_PROCESS_TABLE.with(|t| {
             if let Some(table) = t.borrow().as_ref() {
                 let (mut requester_name, mut requester_path, requester_ppid, parent_path) = table
@@ -931,8 +953,13 @@ mod win {
                 // svchost, MsMpEng, ...) are the constant background the
                 // detector drops anyway; keep them out of the ring. The mark
                 // rides the event as `platform_path_marked`, never as
-                // `is_platform_binary`: a path is not a kernel fact.
-                if !attach_grade && path_marked {
+                // `is_platform_binary`: a path is not a kernel fact. Since
+                // `PROCESS_ALL_ACCESS` grades READ, an OS-shipped binary
+                // making the blanket ask now also stays out of the ring --
+                // the same background, and the detector drops a
+                // kernel-vouched platform requester at a canonical path
+                // regardless of grade.
+                if task_access_mode == 1 && path_marked {
                     return;
                 }
                 proc_events::push(proc_events::ProcessEvent {
@@ -1199,10 +1226,26 @@ mod win {
 
                 THREAD_PROCESS_TABLE.with(|t| {
                     if let Some(table) = t.borrow().as_ref() {
-                        let parent_process_path = table
-                            .get(&ppid)
-                            .map(|parent| parent.process_path.clone())
-                            .filter(|path| !path.is_empty());
+                        // The table is a pid -> image cache, and Windows
+                        // recycles pids fast enough that a just-exited
+                        // process can still hold the entry when its
+                        // successor's child execs: an Azure
+                        // `provjobd.exe<n>` under `\AppData\Local\Temp\`
+                        // was attributed as the parent of cargo build
+                        // scripts whose real parent is `cargo.exe`, and that
+                        // Temp path then read as suspicious lineage on 48
+                        // findings (`edamame_cli` Windows gate, 2026-09-18).
+                        // Ask the kernel what currently owns the pid first;
+                        // the cache is the fallback for a parent that has
+                        // already exited.
+                        let parent_process_path = query_image_path(ppid)
+                            .filter(|path| !path.is_empty())
+                            .or_else(|| {
+                                table
+                                    .get(&ppid)
+                                    .map(|parent| parent.process_path.clone())
+                                    .filter(|path| !path.is_empty())
+                            });
                         proc_events::push(proc_events::ProcessEvent {
                             timestamp_ms: proc_events::now_ms(),
                             kind: proc_events::ProcessEventKind::Exec,
@@ -1682,6 +1725,35 @@ mod tests {
     use crate::sessions::Protocol;
     use std::net::IpAddr;
     use std::str::FromStr;
+
+    /// The PTRACE_MODE mapping is the measurement the memory-scrape check
+    /// grades on, so the blanket managed-framework ask must not read as a
+    /// debugger attach while the specific rights still do.
+    #[cfg(all(target_os = "windows", feature = "etw"))]
+    #[test]
+    fn desired_access_maps_onto_the_ptrace_mode_vocabulary() {
+        use super::win::task_access_mode_for_desired_access as grade;
+        const CREATE_THREAD: u32 = 0x0002;
+        const VM_OPERATION: u32 = 0x0008;
+        const VM_READ: u32 = 0x0010;
+        const VM_WRITE: u32 = 0x0020;
+        const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const ALL_ACCESS: u32 = 0x001F_FFFF;
+
+        // Specific debugger-grade rights stay ATTACH.
+        assert_eq!(grade(VM_WRITE), Some(2));
+        assert_eq!(grade(VM_OPERATION), Some(2));
+        assert_eq!(grade(CREATE_THREAD), Some(2));
+        assert_eq!(grade(VM_READ | VM_WRITE), Some(2));
+        // Read-only stays READ.
+        assert_eq!(grade(VM_READ), Some(1));
+        assert_eq!(grade(VM_READ | QUERY_LIMITED_INFORMATION), Some(1));
+        // The blanket ask every .NET tool makes is READ, not ATTACH.
+        assert_eq!(grade(ALL_ACCESS), Some(1));
+        // Query-only opens are never forwarded.
+        assert_eq!(grade(QUERY_LIMITED_INFORMATION), None);
+        assert_eq!(grade(0), None);
+    }
 
     #[test]
     fn test_etw_returns_none_without_session() {
