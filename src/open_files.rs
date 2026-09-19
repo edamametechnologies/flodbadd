@@ -328,9 +328,14 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
     )
 }
 
-/// Drop the cached entry for `pid` (a process exit, for instance).
+/// Drop the cached entry for `pid` (a process exit, for instance) so the
+/// next lookup asks the OS. On Windows this also drops the shared handle
+/// snapshot: an explicit invalidation means "now", not "within the
+/// snapshot window".
 pub fn invalidate_open_files_cache(pid: u32) {
     OPEN_FILES_CACHE.remove(&pid);
+    #[cfg(target_os = "windows")]
+    win_handles::invalidate_snapshot();
 }
 
 /// Number of pids currently cached (diagnostics).
@@ -680,6 +685,11 @@ mod win_handles {
         })
     }
 
+    /// Forget the current snapshot so the next lookup queries the kernel.
+    pub(super) fn invalidate_snapshot() {
+        SNAPSHOT.store(None);
+    }
+
     /// The current snapshot, refreshed when older than `SNAPSHOT_TTL`.
     /// Two callers racing past an expired snapshot may both query; the
     /// second store simply wins. A failed query keeps serving the stale
@@ -950,6 +960,19 @@ mod tests {
             .collect();
         for pid in &pids {
             invalidate_open_files_cache(*pid);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Cost of one system-wide handle snapshot on its own: before the
+            // shared snapshot every pid paid this once.
+            let ts = Instant::now();
+            let snap = win_handles::current_snapshot().expect("handle snapshot");
+            eprintln!(
+                "open_files timing probe: one SystemHandleInformation snapshot = {:?} ({} pids, {} handles)",
+                ts.elapsed(),
+                snap.by_pid.len(),
+                snap.by_pid.values().map(|v| v.len()).sum::<usize>()
+            );
         }
         let t0 = Instant::now();
         let first: usize = pids.iter().map(|p| get_open_file_paths(*p).len()).sum();
