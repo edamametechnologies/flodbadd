@@ -44,6 +44,19 @@
 //
 // This system aims to handle the ephemeral nature of network connections and process lifecycles
 // by combining direct matching with caching, PID reuse protection, and retry mechanisms.
+//
+// Cost model (2026-09, after profiling the released daemons on all three platforms):
+// - The expensive part of resolution is asking the OS, not matching. A resolver round
+//   refreshes the process table and dumps the socket table; per-pid open-file enumeration
+//   is a /proc fd walk (Linux), a libproc fd walk (macOS) or a share of a system-wide
+//   handle-table snapshot (Windows). Those are shared and cached, never repeated per socket:
+//   `open_files::get_open_file_paths` serves a per-pid cache, Windows takes one handle
+//   snapshot per window, macOS one libproc socket snapshot (`l7_macos::socket_snapshot`).
+// - Rounds are spaced at least `MIN_ROUND_INTERVAL` apart so a burst of ephemeral sessions
+//   cannot chain several full refreshes back to back.
+// - Eager (packet-path) resolution only consults kernel tables and the shared snapshot;
+//   parked `FailedMaxRetries` entries are re-armed by `rearm_failed_resolution`, never
+//   re-probed on every populate pass.
 
 use crate::l7_ebpf;
 use crate::l7_es;
@@ -1954,7 +1967,11 @@ impl FlodbaddL7 {
                         }
                     }
                 } else {
-                    warn!("No user_id found for PID {:?}", socket_pid);
+                    // Kernel/system pseudo-processes (Windows PID 4, launchd
+                    // helpers) legitimately have no user id; this fires once
+                    // per socket per round, so keep it out of the WARN stream
+                    // (1.9.0 logged it ~3/s on an idle Windows host).
+                    debug!("No user_id found for PID {:?}", socket_pid);
                     String::new()
                 };
                 let process_name = process.name().to_string_lossy().to_string();

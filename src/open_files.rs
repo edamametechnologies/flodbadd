@@ -932,6 +932,40 @@ mod tests {
         assert!(cache.get(&999_999).is_some());
     }
 
+    /// Manual timing probe, run with `--ignored --nocapture`: enumerates the
+    /// open files of up to 50 live pids twice in a row. Before the per-pid
+    /// cache (and, on Windows, the shared handle snapshot) the second pass
+    /// cost the same as the first; now it is served from memory.
+    #[test]
+    #[ignore]
+    #[cfg(any(feature = "packetcapture", feature = "etw", feature = "fim"))]
+    fn timing_probe_open_files_50_pids_twice() {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let pids: Vec<u32> = sys
+            .processes()
+            .keys()
+            .map(|p| p.as_u32())
+            .take(50)
+            .collect();
+        for pid in &pids {
+            invalidate_open_files_cache(*pid);
+        }
+        let t0 = Instant::now();
+        let first: usize = pids.iter().map(|p| get_open_file_paths(*p).len()).sum();
+        let t1 = Instant::now();
+        let second: usize = pids.iter().map(|p| get_open_file_paths(*p).len()).sum();
+        let t2 = Instant::now();
+        eprintln!(
+            "open_files timing probe: {} pids, {} paths; first pass {:?}, second pass {:?}",
+            pids.len(),
+            first,
+            t1 - t0,
+            t2 - t1
+        );
+        assert_eq!(first, second);
+    }
+
     #[test]
     fn public_wrapper_hits_cache_for_own_pid() {
         let me = std::process::id();
