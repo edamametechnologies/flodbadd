@@ -1,8 +1,11 @@
 use crate::sensitive_paths::SENSITIVE_PATHS;
 use arc_swap::ArcSwap;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use undeadlock::CustomDashMap;
 
 pub const MAX_OPEN_FILES: usize = 100;
 
@@ -235,8 +238,108 @@ pub fn get_sensitive_open_file_paths(pid: u32) -> Vec<String> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+/// How long a per-pid open-file enumeration is reused before the OS is
+/// asked again.
+///
+/// Every caller of [`get_open_file_paths`] tolerates staleness of this
+/// order already: the resolver populates `open_files` once per resolution
+/// and the sensitive scan re-reads them every 30 s (120 s on Windows), the
+/// attack pattern detector reads them once per 60 s tick. What they do NOT
+/// tolerate is the cost of the raw enumeration -- a `/proc/<pid>/fd`
+/// readlink walk on Linux, a libproc fd walk on macOS and, on Windows, a
+/// share of a system-wide handle-table snapshot -- repeated for the same
+/// pid by every socket that pid owns in the same resolver round. Live
+/// profiles on the Linux and Windows dogfood hosts (2026-09-19) put that
+/// repetition at the top of the daemon's CPU.
+pub const OPEN_FILES_CACHE_TTL: Duration = Duration::from_secs(15);
+
+/// Upper bound on cached pids; beyond it expired entries are dropped and,
+/// if still over, the oldest are evicted so pid churn cannot grow the map.
+const OPEN_FILES_CACHE_MAX_ENTRIES: usize = 4096;
+
+struct CachedOpenFiles {
+    paths: Arc<Vec<String>>,
+    refreshed_at: Instant,
+}
+
+/// Per-pid result cache. A `CustomDashMap` (undeadlock) so debug builds
+/// get the usual hold-time diagnostics; it is only ever used from sync
+/// blocking-pool code.
+static OPEN_FILES_CACHE: Lazy<CustomDashMap<u32, CachedOpenFiles>> =
+    Lazy::new(|| CustomDashMap::new("open_files_cache"));
+
+/// Cache-or-compute with an injectable clock and enumerator so the policy
+/// is unit-testable without touching the OS.
+fn cached_open_files_with(
+    cache: &CustomDashMap<u32, CachedOpenFiles>,
+    pid: u32,
+    now: Instant,
+    ttl: Duration,
+    enumerate: impl FnOnce() -> Vec<String>,
+) -> Vec<String> {
+    if let Some(hit) = cache.get(&pid) {
+        if now.saturating_duration_since(hit.refreshed_at) < ttl {
+            return hit.paths.as_ref().clone();
+        }
+    }
+
+    let paths = enumerate();
+
+    if cache.len() >= OPEN_FILES_CACHE_MAX_ENTRIES {
+        cache.retain(|_, v| now.saturating_duration_since(v.refreshed_at) < ttl);
+        if cache.len() >= OPEN_FILES_CACHE_MAX_ENTRIES {
+            // Still full of live entries: drop the oldest half rather than
+            // let the map grow without bound.
+            let mut ages: Vec<(u32, Instant)> = cache
+                .iter()
+                .map(|e| (*e.key(), e.value().refreshed_at))
+                .collect();
+            ages.sort_by_key(|(_, at)| *at);
+            for (old_pid, _) in ages.into_iter().take(OPEN_FILES_CACHE_MAX_ENTRIES / 2) {
+                cache.remove(&old_pid);
+            }
+        }
+    }
+
+    cache.insert(
+        pid,
+        CachedOpenFiles {
+            paths: Arc::new(paths.clone()),
+            refreshed_at: now,
+        },
+    );
+    paths
+}
+
+/// Open disk-backed file paths of `pid`, served from a per-pid cache for
+/// [`OPEN_FILES_CACHE_TTL`] and enumerated from the OS on a miss.
+///
+/// A pid recycled within the TTL can briefly be served the previous
+/// owner's list; the L7 layer keys its own process cache by
+/// `(pid, start_time)` and the sensitive scan already tolerated 30 s of
+/// staleness, so that window is acceptable.
 pub fn get_open_file_paths(pid: u32) -> Vec<String> {
+    cached_open_files_with(
+        &OPEN_FILES_CACHE,
+        pid,
+        Instant::now(),
+        OPEN_FILES_CACHE_TTL,
+        || enumerate_open_file_paths(pid),
+    )
+}
+
+/// Drop the cached entry for `pid` (a process exit, for instance).
+pub fn invalidate_open_files_cache(pid: u32) {
+    OPEN_FILES_CACHE.remove(&pid);
+}
+
+/// Number of pids currently cached (diagnostics).
+pub fn open_files_cache_len() -> usize {
+    OPEN_FILES_CACHE.len()
+}
+
+#[cfg(target_os = "linux")]
+fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
     let fd_dir = format!("/proc/{}/fd", pid);
     let entries = match std::fs::read_dir(&fd_dir) {
         Ok(e) => e,
@@ -260,7 +363,7 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn get_open_file_paths(pid: u32) -> Vec<String> {
+fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
     use std::mem;
 
     #[allow(non_camel_case_types)]
@@ -412,31 +515,63 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_open_file_paths(pid: u32) -> Vec<String> {
+mod win_handles {
+    //! System-wide handle-table snapshot shared by every per-pid open-files
+    //! lookup.
+    //!
+    //! `NtQuerySystemInformation(SystemHandleInformation)` copies the handle
+    //! table of EVERY process (tens of thousands of entries, a multi-MB
+    //! buffer the kernel zeroes and fills under the handle-table locks).
+    //! Before this module each `get_open_file_paths(pid)` call performed that
+    //! snapshot on its own, so a resolver round with N resolved sockets or a
+    //! sensitive-scan cycle with 50 pids cost N / 50 full snapshots. A
+    //! symbolized xperf profile of the released 1.9.0 posture daemon on the
+    //! Windows dogfood host (2026-09-19) attributed ~75% of the daemon's CPU
+    //! to `ObpCaptureHandleInformation` / `ExpSnapShotHandleTables` /
+    //! `ExLockHandleTableEntry` / `KeZeroPages` -- i.e. to this one call.
+    //!
+    //! The snapshot is now taken at most once per `SNAPSHOT_TTL`, bucketed by
+    //! owning pid, and every caller within the window reads its pid's bucket
+    //! from the shared copy. Per-handle work (DuplicateHandle, GetFileType,
+    //! GetFinalPathNameByHandleW) is unchanged and still done per pid.
+
+    use arc_swap::ArcSwapOption;
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::ptr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    type HANDLE = *mut c_void;
+    pub(super) type HANDLE = *mut c_void;
     type NTSTATUS = i32;
 
     const STATUS_INFO_LENGTH_MISMATCH: NTSTATUS = 0xC0000004_u32 as i32;
     const STATUS_SUCCESS: NTSTATUS = 0;
     const SYSTEM_HANDLE_INFORMATION_CLASS: u32 = 16;
-    const PROCESS_DUP_HANDLE: u32 = 0x0040;
-    const DUPLICATE_SAME_ACCESS: u32 = 0x0002;
-    const FILE_TYPE_DISK: u32 = 0x0001;
+    pub(super) const PROCESS_DUP_HANDLE: u32 = 0x0040;
+    pub(super) const DUPLICATE_SAME_ACCESS: u32 = 0x0002;
+    pub(super) const FILE_TYPE_DISK: u32 = 0x0001;
+
+    /// How long one system-wide handle snapshot is reused. Long enough to
+    /// cover a whole resolver round / sensitive-scan cycle (they iterate
+    /// their pids back to back), short enough that a handle opened by a
+    /// process is visible within a few seconds.
+    pub(super) const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
+    const INITIAL_BUF_SIZE: u32 = 1 << 20;
+    const MAX_BUF_SIZE: u32 = 512 << 20;
 
     // Stable NT ABI -- layout verified against ntifs.h SYSTEM_HANDLE_TABLE_ENTRY_INFO.
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct HandleEntry {
-        unique_process_id: u16,
-        creator_back_trace_index: u16,
-        object_type_index: u8,
-        handle_attributes: u8,
-        handle_value: u16,
-        object: usize,
-        granted_access: u32,
+    pub(super) struct HandleEntry {
+        pub unique_process_id: u16,
+        pub creator_back_trace_index: u16,
+        pub object_type_index: u8,
+        pub handle_attributes: u8,
+        pub handle_value: u16,
+        pub object: usize,
+        pub granted_access: u32,
     }
 
     #[link(name = "ntdll")]
@@ -450,8 +585,8 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
     }
 
     extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
-        fn DuplicateHandle(
+        pub(super) fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
+        pub(super) fn DuplicateHandle(
             src_proc: HANDLE,
             src: HANDLE,
             dst_proc: HANDLE,
@@ -460,114 +595,226 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
             inherit: i32,
             options: u32,
         ) -> i32;
-        fn GetCurrentProcess() -> HANDLE;
-        fn CloseHandle(h: HANDLE) -> i32;
-        fn GetFileType(h: HANDLE) -> u32;
-        fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, buf_len: u32, flags: u32) -> u32;
+        pub(super) fn GetCurrentProcess() -> HANDLE;
+        pub(super) fn CloseHandle(h: HANDLE) -> i32;
+        pub(super) fn GetFileType(h: HANDLE) -> u32;
+        pub(super) fn GetFinalPathNameByHandleW(
+            h: HANDLE,
+            buf: *mut u16,
+            buf_len: u32,
+            flags: u32,
+        ) -> u32;
     }
 
-    let proc_handle = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
-    if proc_handle.is_null() {
-        return Vec::new();
+    /// One system-wide snapshot, bucketed by owning pid.
+    pub(super) struct HandleSnapshot {
+        pub taken_at: Instant,
+        pub by_pid: HashMap<u32, Vec<u16>>,
     }
 
-    let mut buf_size: u32 = 1 << 20;
-    let mut buffer: Vec<u8>;
-    let mut ret_len: u32 = 0;
+    static SNAPSHOT: ArcSwapOption<HandleSnapshot> = ArcSwapOption::const_empty();
+    /// Size that satisfied the last query; the next query starts from it
+    /// instead of re-growing from 1 MiB through several
+    /// STATUS_INFO_LENGTH_MISMATCH round trips.
+    static LAST_BUF_SIZE: AtomicU32 = AtomicU32::new(INITIAL_BUF_SIZE);
 
-    loop {
-        buffer = vec![0u8; buf_size as usize];
-        let status = unsafe {
-            NtQuerySystemInformation(
-                SYSTEM_HANDLE_INFORMATION_CLASS,
-                buffer.as_mut_ptr() as *mut c_void,
-                buf_size,
-                &mut ret_len,
+    /// Bucket raw handle-table entries by owning pid (pure; unit-tested).
+    pub(super) fn bucket_by_pid(entries: &[HandleEntry]) -> HashMap<u32, Vec<u16>> {
+        let mut by_pid: HashMap<u32, Vec<u16>> = HashMap::new();
+        for entry in entries {
+            by_pid
+                .entry(entry.unique_process_id as u32)
+                .or_default()
+                .push(entry.handle_value);
+        }
+        by_pid
+    }
+
+    fn query_handle_table() -> Option<HandleSnapshot> {
+        let mut buf_size: u32 = LAST_BUF_SIZE.load(Ordering::Relaxed).max(INITIAL_BUF_SIZE);
+        let mut buffer: Vec<u8>;
+        let mut ret_len: u32 = 0;
+
+        loop {
+            buffer = vec![0u8; buf_size as usize];
+            let status = unsafe {
+                NtQuerySystemInformation(
+                    SYSTEM_HANDLE_INFORMATION_CLASS,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    buf_size,
+                    &mut ret_len,
+                )
+            };
+            if status == STATUS_INFO_LENGTH_MISMATCH {
+                buf_size = ret_len.max(buf_size).saturating_mul(2);
+                if buf_size > MAX_BUF_SIZE {
+                    return None;
+                }
+                continue;
+            }
+            if status != STATUS_SUCCESS {
+                return None;
+            }
+            break;
+        }
+        LAST_BUF_SIZE.store(buf_size, Ordering::Relaxed);
+
+        let num_handles = unsafe { *(buffer.as_ptr() as *const u32) };
+        let entry_align = std::mem::align_of::<HandleEntry>();
+        let entries_offset = (std::mem::size_of::<u32>() + entry_align - 1) & !(entry_align - 1);
+        let needed = entries_offset + num_handles as usize * std::mem::size_of::<HandleEntry>();
+        if needed > buffer.len() {
+            return None;
+        }
+
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr().add(entries_offset) as *const HandleEntry,
+                num_handles as usize,
             )
         };
-        if status == STATUS_INFO_LENGTH_MISMATCH {
-            buf_size = ret_len.max(buf_size).saturating_mul(2);
-            if buf_size > 512 << 20 {
-                unsafe { CloseHandle(proc_handle) };
-                return Vec::new();
+
+        Some(HandleSnapshot {
+            taken_at: Instant::now(),
+            by_pid: bucket_by_pid(entries),
+        })
+    }
+
+    /// The current snapshot, refreshed when older than `SNAPSHOT_TTL`.
+    /// Two callers racing past an expired snapshot may both query; the
+    /// second store simply wins. A failed query keeps serving the stale
+    /// snapshot (if any) rather than returning nothing.
+    pub(super) fn current_snapshot() -> Option<Arc<HandleSnapshot>> {
+        if let Some(snap) = SNAPSHOT.load_full() {
+            if snap.taken_at.elapsed() < SNAPSHOT_TTL {
+                return Some(snap);
             }
-            continue;
         }
-        if status != STATUS_SUCCESS {
-            unsafe { CloseHandle(proc_handle) };
+        match query_handle_table() {
+            Some(fresh) => {
+                let fresh = Arc::new(fresh);
+                SNAPSHOT.store(Some(fresh.clone()));
+                Some(fresh)
+            }
+            None => SNAPSHOT.load_full(),
+        }
+    }
+
+    /// Resolve the disk-backed file paths behind `handles` owned by `pid`.
+    pub(super) fn resolve_paths(pid: u32, handles: &[u16]) -> Vec<String> {
+        let proc_handle = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
+        if proc_handle.is_null() {
             return Vec::new();
         }
-        break;
-    }
+        let current = unsafe { GetCurrentProcess() };
+        let mut paths = Vec::new();
 
-    let num_handles = unsafe { *(buffer.as_ptr() as *const u32) };
-    let entry_align = std::mem::align_of::<HandleEntry>();
-    let entries_offset = (std::mem::size_of::<u32>() + entry_align - 1) & !(entry_align - 1);
-    let needed = entries_offset + num_handles as usize * std::mem::size_of::<HandleEntry>();
-    if needed > buffer.len() {
-        unsafe { CloseHandle(proc_handle) };
-        return Vec::new();
-    }
+        for &handle_value in handles {
+            let mut dup: HANDLE = ptr::null_mut();
+            let ok = unsafe {
+                DuplicateHandle(
+                    proc_handle,
+                    handle_value as usize as HANDLE,
+                    current,
+                    &mut dup,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if ok == 0 || dup.is_null() {
+                continue;
+            }
 
-    let entries = unsafe {
-        std::slice::from_raw_parts(
-            buffer.as_ptr().add(entries_offset) as *const HandleEntry,
-            num_handles as usize,
-        )
-    };
+            // Only query disk-backed files; pipes/devices/mailslots can deadlock
+            // GetFinalPathNameByHandleW on synchronous I/O handles.
+            if unsafe { GetFileType(dup) } != FILE_TYPE_DISK {
+                unsafe { CloseHandle(dup) };
+                continue;
+            }
 
-    let current = unsafe { GetCurrentProcess() };
-    let mut paths = Vec::new();
-
-    for entry in entries {
-        if entry.unique_process_id as u32 != pid {
-            continue;
-        }
-
-        let mut dup: HANDLE = ptr::null_mut();
-        let ok = unsafe {
-            DuplicateHandle(
-                proc_handle,
-                entry.handle_value as usize as HANDLE,
-                current,
-                &mut dup,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        };
-        if ok == 0 || dup.is_null() {
-            continue;
-        }
-
-        // Only query disk-backed files; pipes/devices/mailslots can deadlock
-        // GetFinalPathNameByHandleW on synchronous I/O handles.
-        if unsafe { GetFileType(dup) } != FILE_TYPE_DISK {
+            let mut name_buf = [0u16; 1024];
+            let len = unsafe { GetFinalPathNameByHandleW(dup, name_buf.as_mut_ptr(), 1024, 0) };
             unsafe { CloseHandle(dup) };
-            continue;
+
+            if len == 0 || len as usize >= name_buf.len() {
+                continue;
+            }
+
+            let raw = String::from_utf16_lossy(&name_buf[..len as usize]);
+            let s = raw.strip_prefix("\\\\?\\").unwrap_or(&raw);
+            if !s.starts_with('\\') {
+                paths.push(s.to_string());
+            }
         }
 
-        let mut name_buf = [0u16; 1024];
-        let len = unsafe { GetFinalPathNameByHandleW(dup, name_buf.as_mut_ptr(), 1024, 0) };
-        unsafe { CloseHandle(dup) };
-
-        if len == 0 || len as usize >= name_buf.len() {
-            continue;
-        }
-
-        let raw = String::from_utf16_lossy(&name_buf[..len as usize]);
-        let s = raw.strip_prefix("\\\\?\\").unwrap_or(&raw);
-        if !s.starts_with('\\') {
-            paths.push(s.to_string());
-        }
+        unsafe { CloseHandle(proc_handle) };
+        paths
     }
 
-    unsafe { CloseHandle(proc_handle) };
-    paths
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn entry(pid: u16, handle: u16) -> HandleEntry {
+            HandleEntry {
+                unique_process_id: pid,
+                creator_back_trace_index: 0,
+                object_type_index: 0,
+                handle_attributes: 0,
+                handle_value: handle,
+                object: 0,
+                granted_access: 0,
+            }
+        }
+
+        #[test]
+        fn bucket_by_pid_groups_handles_per_owner() {
+            let entries = [
+                entry(4, 0x10),
+                entry(1652, 0x20),
+                entry(4, 0x30),
+                entry(7, 0x40),
+            ];
+            let by_pid = bucket_by_pid(&entries);
+            assert_eq!(by_pid.len(), 3);
+            assert_eq!(by_pid[&4], vec![0x10, 0x30]);
+            assert_eq!(by_pid[&1652], vec![0x20]);
+            assert_eq!(by_pid[&7], vec![0x40]);
+        }
+
+        #[test]
+        fn bucket_by_pid_empty_table() {
+            assert!(bucket_by_pid(&[]).is_empty());
+        }
+
+        #[test]
+        fn snapshot_is_shared_within_ttl() {
+            // Two consecutive lookups must observe the same snapshot instance
+            // (the whole point: one NtQuerySystemInformation per TTL window).
+            let a = current_snapshot().expect("handle snapshot");
+            let b = current_snapshot().expect("handle snapshot");
+            assert!(Arc::ptr_eq(&a, &b));
+            // Our own process is in the table.
+            assert!(a.by_pid.contains_key(&std::process::id()));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
+    let snapshot = match win_handles::current_snapshot() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    match snapshot.by_pid.get(&pid) {
+        Some(handles) => win_handles::resolve_paths(pid, handles),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn get_open_file_paths(_pid: u32) -> Vec<String> {
+fn enumerate_open_file_paths(_pid: u32) -> Vec<String> {
     Vec::new()
 }
 
@@ -576,6 +823,125 @@ mod tests {
     use super::*;
 
     // --- aggregate_open_files tests ---
+
+    // --- open_files cache tests ---
+
+    use std::cell::Cell;
+
+    fn fresh_cache() -> CustomDashMap<u32, CachedOpenFiles> {
+        CustomDashMap::new("open_files_cache_test")
+    }
+
+    #[test]
+    fn cache_serves_second_lookup_within_ttl_without_enumerating() {
+        let cache = fresh_cache();
+        let calls = Cell::new(0);
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        let enumerate = || {
+            calls.set(calls.get() + 1);
+            vec!["/etc/hosts".to_string()]
+        };
+        let a = cached_open_files_with(&cache, 42, t0, ttl, enumerate);
+        let b = cached_open_files_with(&cache, 42, t0 + Duration::from_secs(14), ttl, enumerate);
+        assert_eq!(a, b);
+        assert_eq!(
+            calls.get(),
+            1,
+            "second lookup inside the TTL must hit the cache"
+        );
+    }
+
+    #[test]
+    fn cache_re_enumerates_after_ttl() {
+        let cache = fresh_cache();
+        let calls = Cell::new(0);
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        let enumerate = || {
+            calls.set(calls.get() + 1);
+            vec![format!("/tmp/gen{}", calls.get())]
+        };
+        let a = cached_open_files_with(&cache, 7, t0, ttl, enumerate);
+        let b = cached_open_files_with(&cache, 7, t0 + ttl, ttl, enumerate);
+        assert_eq!(calls.get(), 2);
+        assert_ne!(a, b, "an expired entry must be refreshed from the OS");
+    }
+
+    #[test]
+    fn cache_caches_negative_results_too() {
+        // A process with no disk files open still costs a full enumeration;
+        // the empty answer must be cached like any other.
+        let cache = fresh_cache();
+        let calls = Cell::new(0);
+        let t0 = Instant::now();
+        let enumerate = || {
+            calls.set(calls.get() + 1);
+            Vec::new()
+        };
+        let _ = cached_open_files_with(&cache, 9, t0, Duration::from_secs(15), enumerate);
+        let _ = cached_open_files_with(
+            &cache,
+            9,
+            t0 + Duration::from_secs(1),
+            Duration::from_secs(15),
+            enumerate,
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn cache_is_per_pid() {
+        let cache = fresh_cache();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        let a = cached_open_files_with(&cache, 1, t0, ttl, || vec!["/a".to_string()]);
+        let b = cached_open_files_with(&cache, 2, t0, ttl, || vec!["/b".to_string()]);
+        assert_eq!(a, vec!["/a".to_string()]);
+        assert_eq!(b, vec!["/b".to_string()]);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn cache_is_bounded_under_pid_churn() {
+        let cache = fresh_cache();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        for pid in 0..(OPEN_FILES_CACHE_MAX_ENTRIES as u32 * 2) {
+            let _ = cached_open_files_with(&cache, pid, t0, ttl, Vec::new);
+        }
+        assert!(
+            cache.len() <= OPEN_FILES_CACHE_MAX_ENTRIES,
+            "cache grew to {} entries",
+            cache.len()
+        );
+    }
+
+    #[test]
+    fn cache_evicts_expired_entries_before_live_ones() {
+        let cache = fresh_cache();
+        let ttl = Duration::from_secs(15);
+        let t0 = Instant::now();
+        // Fill to the cap with entries that will be expired by t1.
+        for pid in 0..(OPEN_FILES_CACHE_MAX_ENTRIES as u32) {
+            let _ = cached_open_files_with(&cache, pid, t0, ttl, Vec::new);
+        }
+        let t1 = t0 + ttl + Duration::from_secs(1);
+        let _ = cached_open_files_with(&cache, 999_999, t1, ttl, || vec!["/live".to_string()]);
+        assert_eq!(cache.len(), 1, "expired entries must be dropped first");
+        assert!(cache.get(&999_999).is_some());
+    }
+
+    #[test]
+    fn public_wrapper_hits_cache_for_own_pid() {
+        let me = std::process::id();
+        invalidate_open_files_cache(me);
+        let first = get_open_file_paths(me);
+        let second = get_open_file_paths(me);
+        assert_eq!(first, second);
+        assert!(open_files_cache_len() >= 1);
+        invalidate_open_files_cache(me);
+    }
 
     #[test]
     fn test_aggregate_under_cap() {
