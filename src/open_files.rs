@@ -1068,8 +1068,12 @@ mod tests {
         let mut f = File::create(&file_path).expect("create sentinel");
         f.write_all(b"test").expect("write sentinel");
 
-        // Keep the file handle open while we query
+        // Keep the file handle open while we query. Another test in this
+        // process may have cached our pid's list before the sentinel was
+        // opened; the cache is the subject of its own tests, this one wants
+        // the live enumeration.
         let pid = std::process::id();
+        invalidate_open_files_cache(pid);
         let paths = get_open_file_paths(pid);
         eprintln!("paths with sentinel open (pid {}): {:?}", pid, paths);
 

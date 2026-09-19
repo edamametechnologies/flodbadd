@@ -265,6 +265,13 @@ impl FlodbaddL7 {
             let refresh_kind = RefreshKind::nothing()
                 .with_processes(ProcessRefreshKind::everything().without_cpu());
 
+            // Minimum spacing between two resolver rounds. A round refreshes
+            // the whole process table and dumps the whole socket table; the
+            // 10 ms ephemeral backoff used to let a burst of UDP/DNS sessions
+            // trigger five such rounds within ~60 ms.
+            const MIN_ROUND_INTERVAL: Duration = Duration::from_millis(250);
+            let mut last_round_started: Option<Instant> = None;
+
             while !*stop_rx.borrow() {
                 let mut to_process_this_cycle: Vec<Session> = Vec::new();
                 let mut requeue_due_to_backoff: Vec<Session> = Vec::new();
@@ -308,6 +315,13 @@ impl FlodbaddL7 {
 
                 let to_process_len = to_process_this_cycle.len();
                 if to_process_len > 0 {
+                    if let Some(last) = last_round_started {
+                        let since = last.elapsed();
+                        if since < MIN_ROUND_INTERVAL {
+                            sleep(MIN_ROUND_INTERVAL - since).await;
+                        }
+                    }
+                    last_round_started = Some(Instant::now());
                     {
                         let mut sys = system.write().await;
                         sys.refresh_specifics(refresh_kind);
@@ -321,7 +335,11 @@ impl FlodbaddL7 {
                     #[cfg(target_os = "macos")]
                     let (macos_session_map, macos_all_entries) =
                         match tokio::task::spawn_blocking(|| {
-                            l7_macos::scan_all_process_sockets(None)
+                            // Sweep now and publish the result so the eager
+                            // packet-path lookups reuse it instead of
+                            // sweeping on their own.
+                            let snap = l7_macos::socket_snapshot(Duration::ZERO);
+                            (snap.session_map.clone(), snap.entries.clone())
                         })
                         .await
                         {
@@ -1690,6 +1708,13 @@ impl FlodbaddL7 {
             if l7.l7.is_some() {
                 return Some(l7);
             }
+            // Parked after max retries: `rearm_failed_resolution` decides
+            // when it gets another chance. Re-probing the kernel tables for
+            // every parked local/UDP flow on every populate pass was a
+            // full socket sweep per entry on macOS.
+            if l7.source == L7ResolutionSource::FailedMaxRetries {
+                return Some(l7);
+            }
             // Cached entry exists but L7 is still unresolved -- try kernel
             // sources before returning None-like data.
             if let Some(resolution) = self.try_kernel_resolve(connection) {
@@ -2182,9 +2207,31 @@ impl FlodbaddL7 {
     /// that were not present in the resolver's cached sysinfo map yet.
     #[cfg(target_os = "macos")]
     async fn extract_l7_from_pid_fresh(pid: u32) -> Option<(SessionL7, u64)> {
-        let refresh_kind =
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_cpu());
-        let fresh_system = System::new_with_specifics(refresh_kind);
+        // Refresh only the process and its two ancestors. This used to build
+        // a full `System` snapshot (every process, args and environment) per
+        // session, on the packet task, for each eager macOS resolution.
+        let kind = || ProcessRefreshKind::everything().without_cpu();
+        let mut fresh_system = System::new();
+        let target = Pid::from_u32(pid);
+        fresh_system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[target]),
+            false,
+            kind(),
+        );
+        if let Some(ppid) = fresh_system.process(target).and_then(|p| p.parent()) {
+            fresh_system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[ppid]),
+                false,
+                kind(),
+            );
+            if let Some(gppid) = fresh_system.process(ppid).and_then(|p| p.parent()) {
+                fresh_system.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[gppid]),
+                    false,
+                    kind(),
+                );
+            }
+        }
         let mut fresh_users = Users::new();
         fresh_users.refresh();
 

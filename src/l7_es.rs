@@ -988,58 +988,42 @@ mod macos {
                 return None;
             }
 
-            let reverse = crate::sessions::Session {
-                protocol: session.protocol.clone(),
-                src_ip: session.dst_ip,
-                src_port: session.dst_port,
-                dst_ip: session.src_ip,
-                dst_port: session.src_port,
+            // One shared libproc socket snapshot answers the lookup instead
+            // of a sweep of every ES-known pid's socket fds per call. That
+            // sweep ran on the packet task for each new session and again
+            // for every parked entry on each populate pass; it was the
+            // dominant helper cost on macOS (fmba-3, 2026-09-19).
+            let pid = l7_macos::quick_lookup_session_pid(session)?;
+            let entry = self.process_table.get(&pid)?;
+            let es_info = entry.value();
+            let mut l7 = SessionL7 {
+                pid,
+                process_name: es_info.process_name.clone(),
+                process_path: es_info.process_path.clone(),
+                username: es_info.username.clone(),
+                cmd: es_info.args.clone(),
+                cwd: es_info.cwd.clone(),
+                start_time: es_info.start_time,
+                parent_pid: Some(es_info.ppid),
+                parent_process_name: es_info.parent_process_name.clone(),
+                parent_process_path: es_info.parent_process_path.clone(),
+                parent_cmd: es_info.parent_args.clone(),
+                grandparent_pid: es_info.grandparent_pid,
+                grandparent_process_name: es_info.grandparent_process_name.clone(),
+                grandparent_process_path: es_info.grandparent_process_path.clone(),
+                grandparent_cmd: es_info.grandparent_args.clone(),
+                ..Default::default()
             };
-
-            for entry in self.process_table.iter() {
-                let pid = *entry.key();
-                let es_info = entry.value();
-                for sock in l7_macos::scan_process_sockets(pid) {
-                    let sock_session = crate::sessions::Session {
-                        protocol: sock.protocol.clone(),
-                        src_ip: sock.local_ip,
-                        src_port: sock.local_port,
-                        dst_ip: sock.remote_ip,
-                        dst_port: sock.remote_port,
-                    };
-                    if sock_session == *session || sock_session == reverse {
-                        let mut l7 = SessionL7 {
-                            pid,
-                            process_name: es_info.process_name.clone(),
-                            process_path: es_info.process_path.clone(),
-                            username: es_info.username.clone(),
-                            cmd: es_info.args.clone(),
-                            cwd: es_info.cwd.clone(),
-                            start_time: es_info.start_time,
-                            parent_pid: Some(es_info.ppid),
-                            parent_process_name: es_info.parent_process_name.clone(),
-                            parent_process_path: es_info.parent_process_path.clone(),
-                            parent_cmd: es_info.parent_args.clone(),
-                            grandparent_pid: es_info.grandparent_pid,
-                            grandparent_process_name: es_info.grandparent_process_name.clone(),
-                            grandparent_process_path: es_info.grandparent_process_path.clone(),
-                            grandparent_cmd: es_info.grandparent_args.clone(),
-                            ..Default::default()
-                        };
-                        fn path_is_tmp(p: &str) -> bool {
-                            let lp = p.to_lowercase();
-                            lp.starts_with("/tmp/")
-                                || lp.starts_with("/var/tmp/")
-                                || lp.starts_with("/dev/shm/")
-                        }
-                        l7.spawned_from_tmp = path_is_tmp(&l7.process_path)
-                            || path_is_tmp(&l7.parent_process_path)
-                            || path_is_tmp(&l7.grandparent_process_path);
-                        return Some(l7);
-                    }
-                }
+            fn path_is_tmp(p: &str) -> bool {
+                let lp = p.to_lowercase();
+                lp.starts_with("/tmp/")
+                    || lp.starts_with("/var/tmp/")
+                    || lp.starts_with("/dev/shm/")
             }
-            None
+            l7.spawned_from_tmp = path_is_tmp(&l7.process_path)
+                || path_is_tmp(&l7.parent_process_path)
+                || path_is_tmp(&l7.grandparent_process_path);
+            Some(l7)
         }
 
         pub fn enrich_session_l7(&self, pid: u32, base_l7: &mut SessionL7) {

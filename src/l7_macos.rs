@@ -11,11 +11,14 @@
 #![cfg(target_os = "macos")]
 
 use crate::sessions::{Protocol, Session};
+use arc_swap::ArcSwapOption;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::raw::c_char;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::trace;
 
 // --- Constants from <sys/proc_info.h> ---
@@ -469,11 +472,45 @@ pub fn lookup_session_pid(
     None
 }
 
-/// Fast single-session PID lookup: scans all PIDs but short-circuits when
-/// the matching socket is found. Cheaper than building a full session map
-/// when only one session needs attribution.
-pub fn quick_lookup_session_pid(session: &Session) -> Option<u32> {
-    let pids = list_all_pids();
+/// One libproc sweep of every process's socket fds, shared by every caller
+/// that needs a session -> pid answer.
+pub struct SocketSnapshot {
+    pub taken_at: Instant,
+    pub session_map: HashMap<Session, u32>,
+    pub entries: Vec<MacosSocketEntry>,
+}
+
+static SOCKET_SNAPSHOT: ArcSwapOption<SocketSnapshot> = ArcSwapOption::const_empty();
+
+/// A snapshot younger than this answers lookups without a new sweep.
+pub const SOCKET_SNAPSHOT_TTL: Duration = Duration::from_millis(1000);
+/// On a miss (the socket may be newer than the snapshot) a new sweep is
+/// taken only if the snapshot is at least this old, which bounds the sweep
+/// rate under a burst of new sessions to ~10/s instead of one per session.
+pub const SOCKET_SNAPSHOT_MISS_REFRESH: Duration = Duration::from_millis(100);
+
+/// Current socket snapshot, re-swept when older than `max_age`
+/// (`Duration::ZERO` forces a sweep and publishes it for other callers).
+pub fn socket_snapshot(max_age: Duration) -> Arc<SocketSnapshot> {
+    if let Some(snap) = SOCKET_SNAPSHOT.load_full() {
+        if snap.taken_at.elapsed() < max_age {
+            return snap;
+        }
+    }
+    let (session_map, entries) = scan_all_process_sockets(None);
+    let fresh = Arc::new(SocketSnapshot {
+        taken_at: Instant::now(),
+        session_map,
+        entries,
+    });
+    SOCKET_SNAPSHOT.store(Some(fresh.clone()));
+    fresh
+}
+
+fn lookup_exact_or_reverse(session: &Session, session_map: &HashMap<Session, u32>) -> Option<u32> {
+    if let Some(&pid) = session_map.get(session) {
+        return Some(pid);
+    }
     let reverse = Session {
         protocol: session.protocol.clone(),
         src_ip: session.dst_ip,
@@ -481,20 +518,26 @@ pub fn quick_lookup_session_pid(session: &Session) -> Option<u32> {
         dst_ip: session.src_ip,
         dst_port: session.src_port,
     };
-    for pid in pids {
-        let entries = scan_process_sockets(pid);
-        for entry in entries {
-            let entry_session = Session {
-                protocol: entry.protocol.clone(),
-                src_ip: entry.local_ip,
-                src_port: entry.local_port,
-                dst_ip: entry.remote_ip,
-                dst_port: entry.remote_port,
-            };
-            if entry_session == *session || entry_session == reverse {
-                return Some(pid);
-            }
-        }
+    session_map.get(&reverse).copied()
+}
+
+/// Single-session PID lookup (exact or reversed 4-tuple) served from the
+/// shared [`socket_snapshot`].
+///
+/// This used to walk `proc_listallpids` and every pid's socket fds for each
+/// call; the packet path called it for every new session and the populate
+/// pass for every parked one, which made it the dominant helper cost on
+/// macOS. A miss on a fresh-enough snapshot re-sweeps once (see
+/// `SOCKET_SNAPSHOT_MISS_REFRESH`) so a socket created after the snapshot
+/// is still found within ~100 ms.
+pub fn quick_lookup_session_pid(session: &Session) -> Option<u32> {
+    let snap = socket_snapshot(SOCKET_SNAPSHOT_TTL);
+    if let Some(pid) = lookup_exact_or_reverse(session, &snap.session_map) {
+        return Some(pid);
+    }
+    if snap.taken_at.elapsed() >= SOCKET_SNAPSHOT_MISS_REFRESH {
+        let snap = socket_snapshot(Duration::ZERO);
+        return lookup_exact_or_reverse(session, &snap.session_map);
     }
     None
 }
