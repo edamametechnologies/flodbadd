@@ -430,6 +430,59 @@ pub fn open_files_cache_len() -> usize {
     OPEN_FILES_CACHE.len()
 }
 
+/// Start a "fresh" scan pass (the attack pattern detector's live open-file
+/// scan). On Windows this takes one system-wide handle snapshot now so the
+/// following [`get_open_file_paths_fresh`] calls of the pass share it; on
+/// the other platforms enumeration reads the live table and this is a
+/// no-op.
+pub fn begin_fresh_open_files_scan() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = win_handles::current_snapshot_max_age(Duration::ZERO);
+    }
+}
+
+/// Open disk-backed file paths of `pid`, read from the OS now, bypassing
+/// and refreshing the per-pid cache.
+///
+/// For callers that need the current state rather than a cheap answer:
+/// the detector's live scan hydrates `open_files` for recent sessions once
+/// per tick and must see a secret opened moments ago. The cached lookup is
+/// keyed by a descriptor-table fingerprint, but fd numbers are recycled
+/// (close one file, open another at the same number) so a fingerprint hit
+/// can still be stale; the L7 resolver tolerates that, the detector does
+/// not. On Windows a snapshot younger than
+/// [`win_handles::FRESH_SCAN_SNAPSHOT_MAX_AGE`] is accepted so a pass that
+/// called [`begin_fresh_open_files_scan`] costs one snapshot in total.
+pub fn get_open_file_paths_fresh(pid: u32) -> Vec<String> {
+    let fingerprint = live_fd_fingerprint(pid);
+    #[cfg(target_os = "windows")]
+    let paths = enumerate_open_file_paths_with_max_age(
+        pid,
+        fingerprint,
+        win_handles::FRESH_SCAN_SNAPSHOT_MAX_AGE,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let paths = enumerate_open_file_paths(pid, fingerprint);
+    OPEN_FILES_CACHE.insert(
+        pid,
+        CachedOpenFiles {
+            paths: Arc::new(paths.clone()),
+            refreshed_at: Instant::now(),
+            fingerprint,
+        },
+    );
+    paths
+}
+
+/// Sensitive subset of [`get_open_file_paths_fresh`].
+pub fn get_sensitive_open_file_paths_fresh(pid: u32) -> Vec<String> {
+    get_open_file_paths_fresh(pid)
+        .into_iter()
+        .filter(|p| is_sensitive_path(p))
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 fn enumerate_open_file_paths(pid: u32, _fingerprint: Option<u64>) -> Vec<String> {
     let fd_dir = format!("/proc/{}/fd", pid);
@@ -650,6 +703,9 @@ mod win_handles {
     /// their pids back to back), short enough that a handle opened by a
     /// process is visible within a few seconds.
     pub(super) const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
+    /// Snapshot age accepted by the fresh-scan entry points: long enough to
+    /// span one detector pass after `begin_fresh_open_files_scan`.
+    pub(super) const FRESH_SCAN_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5);
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const INITIAL_BUF_SIZE: u32 = 1 << 20;
     const MAX_BUF_SIZE: u32 = 512 << 20;
@@ -919,13 +975,22 @@ mod win_handles {
 
 #[cfg(target_os = "windows")]
 fn enumerate_open_file_paths(pid: u32, live_handle_count: Option<u64>) -> Vec<String> {
+    enumerate_open_file_paths_with_max_age(pid, live_handle_count, win_handles::SNAPSHOT_TTL)
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_open_file_paths_with_max_age(
+    pid: u32,
+    live_handle_count: Option<u64>,
+    max_age: Duration,
+) -> Vec<String> {
     // The shared snapshot may predate a handle this process just opened.
     // The live handle count says exactly whether it does: if the pid's
     // bucket in the snapshot has a different size, re-snapshot. A fresh
     // snapshot then compares equal for every other pid, so a burst of
     // callers costs one query rather than one per caller, and a process
     // whose table did not move never forces one.
-    let mut snapshot = match win_handles::current_snapshot_max_age(win_handles::SNAPSHOT_TTL) {
+    let mut snapshot = match win_handles::current_snapshot_max_age(max_age) {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -1085,18 +1150,21 @@ mod tests {
     }
 
     #[test]
-    fn public_wrapper_sees_a_handle_opened_after_the_cached_enumeration() {
-        // End-to-end on the real OS: enumerate self, then open a new file
-        // and look again without any explicit invalidation.
+    fn fresh_lookup_sees_a_handle_opened_after_the_cached_enumeration() {
+        // End-to-end on the real OS: populate the cache for self, open a new
+        // file, then ask for a fresh read. Unlike the cached lookup this is
+        // deterministic even with other tests opening and closing files in
+        // the same process (fd numbers are recycled, so a fingerprint can
+        // collide); the detector's live scan relies on it.
         let me = std::process::id();
         invalidate_open_files_cache(me);
         let before = get_open_file_paths(me);
-        let dir = std::env::temp_dir().join(format!("edamame_openfiles_fp_{}", me));
+        let dir = std::env::temp_dir().join(format!("edamame_openfiles_fresh_{}", me));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("late_sentinel.txt");
         let handle = std::fs::File::create(&path).expect("create late sentinel");
-        let after = get_open_file_paths(me);
-        // Resolve the comparison strings while the file still exists.
+        begin_fresh_open_files_scan();
+        let after = get_open_file_paths_fresh(me);
         let canon = path
             .canonicalize()
             .map(|p| p.to_string_lossy().to_string())
@@ -1112,10 +1180,12 @@ mod tests {
             after.iter().any(|p| {
                 p == &plain || p == &canon || p == canon.trim_start_matches("\\\\?\\")
             }),
-            "late sentinel {} not seen after the cached enumeration: {:?}",
+            "late sentinel {} not seen by the fresh lookup: {:?}",
             plain,
             after
         );
+        // The fresh read refreshed the cache: a cached lookup now agrees.
+        assert!(OPEN_FILES_CACHE.get(&me).is_some());
         invalidate_open_files_cache(me);
     }
 
