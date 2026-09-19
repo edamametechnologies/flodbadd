@@ -260,6 +260,89 @@ const OPEN_FILES_CACHE_MAX_ENTRIES: usize = 4096;
 struct CachedOpenFiles {
     paths: Arc<Vec<String>>,
     refreshed_at: Instant,
+    /// `live_fd_fingerprint(pid)` at enumeration time. A lookup re-probes it
+    /// and treats a change as a miss, so a handle the process opened after
+    /// the cached enumeration is visible on the very next lookup (the attack
+    /// pattern detector's live open-file scan depends on that), while a
+    /// process whose fd table did not move keeps the cached answer.
+    fingerprint: Option<u64>,
+}
+
+/// Cheap fingerprint of the process's descriptor table: one or two
+/// syscalls and no per-descriptor path lookups (the expensive part of the
+/// enumeration). `None` when the process cannot be inspected.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Linux: hash of the `/proc/<pid>/fd` entry names (one getdents walk; a
+/// new descriptor takes the lowest free number and changes the set).
+#[cfg(target_os = "linux")]
+fn live_fd_fingerprint(pid: u32) -> Option<u64> {
+    let entries = std::fs::read_dir(format!("/proc/{}/fd", pid)).ok()?;
+    let mut names: Vec<Vec<u8>> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned().into_bytes())
+        .collect();
+    names.sort();
+    Some(fnv1a64(
+        names
+            .into_iter()
+            .flat_map(|n| n.into_iter().chain(std::iter::once(0))),
+    ))
+}
+
+/// macOS: hash of the raw `PROC_PIDLISTFDS` list (fd number + type per
+/// entry). The size-only probe is NOT usable here: with a null buffer
+/// libproc reports the fd table's capacity, which grows in chunks and does
+/// not move when one more file is opened.
+#[cfg(target_os = "macos")]
+fn live_fd_fingerprint(pid: u32) -> Option<u64> {
+    const PROC_PIDLISTFDS: i32 = 1;
+    extern "C" {
+        fn proc_pidinfo(
+            pid: i32,
+            flavor: i32,
+            arg: u64,
+            buffer: *mut std::ffi::c_void,
+            buffersize: i32,
+        ) -> i32;
+    }
+    let size = unsafe { proc_pidinfo(pid as i32, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let got = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDLISTFDS,
+            0,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            size,
+        )
+    };
+    if got <= 0 {
+        return None;
+    }
+    buf.truncate(got as usize);
+    Some(fnv1a64(buf))
+}
+
+#[cfg(target_os = "windows")]
+fn live_fd_fingerprint(pid: u32) -> Option<u64> {
+    win_handles::handle_count(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn live_fd_fingerprint(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// Per-pid result cache. A `CustomDashMap` (undeadlock) so debug builds
@@ -275,15 +358,17 @@ fn cached_open_files_with(
     pid: u32,
     now: Instant,
     ttl: Duration,
-    enumerate: impl FnOnce() -> Vec<String>,
+    fingerprint: Option<u64>,
+    enumerate: impl FnOnce(Option<u64>) -> Vec<String>,
 ) -> Vec<String> {
     if let Some(hit) = cache.get(&pid) {
-        if now.saturating_duration_since(hit.refreshed_at) < ttl {
+        let fresh_enough = now.saturating_duration_since(hit.refreshed_at) < ttl;
+        if fresh_enough && hit.fingerprint == fingerprint {
             return hit.paths.as_ref().clone();
         }
     }
 
-    let paths = enumerate();
+    let paths = enumerate(fingerprint);
 
     if cache.len() >= OPEN_FILES_CACHE_MAX_ENTRIES {
         cache.retain(|_, v| now.saturating_duration_since(v.refreshed_at) < ttl);
@@ -306,6 +391,7 @@ fn cached_open_files_with(
         CachedOpenFiles {
             paths: Arc::new(paths.clone()),
             refreshed_at: now,
+            fingerprint,
         },
     );
     paths
@@ -324,7 +410,8 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
         pid,
         Instant::now(),
         OPEN_FILES_CACHE_TTL,
-        || enumerate_open_file_paths(pid),
+        live_fd_fingerprint(pid),
+        |fingerprint| enumerate_open_file_paths(pid, fingerprint),
     )
 }
 
@@ -344,7 +431,7 @@ pub fn open_files_cache_len() -> usize {
 }
 
 #[cfg(target_os = "linux")]
-fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
+fn enumerate_open_file_paths(pid: u32, _fingerprint: Option<u64>) -> Vec<String> {
     let fd_dir = format!("/proc/{}/fd", pid);
     let entries = match std::fs::read_dir(&fd_dir) {
         Ok(e) => e,
@@ -368,7 +455,7 @@ fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
+fn enumerate_open_file_paths(pid: u32, _fingerprint: Option<u64>) -> Vec<String> {
     use std::mem;
 
     #[allow(non_camel_case_types)]
@@ -563,6 +650,7 @@ mod win_handles {
     /// their pids back to back), short enough that a handle opened by a
     /// process is visible within a few seconds.
     pub(super) const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const INITIAL_BUF_SIZE: u32 = 1 << 20;
     const MAX_BUF_SIZE: u32 = 512 << 20;
 
@@ -609,6 +697,23 @@ mod win_handles {
             buf_len: u32,
             flags: u32,
         ) -> u32;
+        fn GetProcessHandleCount(h: HANDLE, count: *mut u32) -> i32;
+    }
+
+    /// Live handle count of `pid` (one OpenProcess + GetProcessHandleCount).
+    pub(super) fn handle_count(pid: u32) -> Option<u64> {
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h.is_null() {
+            return None;
+        }
+        let mut count: u32 = 0;
+        let ok = unsafe { GetProcessHandleCount(h, &mut count) };
+        unsafe { CloseHandle(h) };
+        if ok == 0 {
+            None
+        } else {
+            Some(count as u64)
+        }
     }
 
     /// One system-wide snapshot, bucketed by owning pid.
@@ -690,13 +795,14 @@ mod win_handles {
         SNAPSHOT.store(None);
     }
 
-    /// The current snapshot, refreshed when older than `SNAPSHOT_TTL`.
     /// Two callers racing past an expired snapshot may both query; the
     /// second store simply wins. A failed query keeps serving the stale
     /// snapshot (if any) rather than returning nothing.
-    pub(super) fn current_snapshot() -> Option<Arc<HandleSnapshot>> {
+    /// The current snapshot, refreshed when older than `max_age`
+    /// (callers pass `SNAPSHOT_TTL`, or `Duration::ZERO` to force a query).
+    pub(super) fn current_snapshot_max_age(max_age: Duration) -> Option<Arc<HandleSnapshot>> {
         if let Some(snap) = SNAPSHOT.load_full() {
-            if snap.taken_at.elapsed() < SNAPSHOT_TTL {
+            if snap.taken_at.elapsed() < max_age {
                 return Some(snap);
             }
         }
@@ -802,8 +908,8 @@ mod win_handles {
         fn snapshot_is_shared_within_ttl() {
             // Two consecutive lookups must observe the same snapshot instance
             // (the whole point: one NtQuerySystemInformation per TTL window).
-            let a = current_snapshot().expect("handle snapshot");
-            let b = current_snapshot().expect("handle snapshot");
+            let a = current_snapshot_max_age(SNAPSHOT_TTL).expect("handle snapshot");
+            let b = current_snapshot_max_age(SNAPSHOT_TTL).expect("handle snapshot");
             assert!(Arc::ptr_eq(&a, &b));
             // Our own process is in the table.
             assert!(a.by_pid.contains_key(&std::process::id()));
@@ -812,11 +918,29 @@ mod win_handles {
 }
 
 #[cfg(target_os = "windows")]
-fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
-    let snapshot = match win_handles::current_snapshot() {
+fn enumerate_open_file_paths(pid: u32, live_handle_count: Option<u64>) -> Vec<String> {
+    // The shared snapshot may predate a handle this process just opened.
+    // The live handle count says exactly whether it does: if the pid's
+    // bucket in the snapshot has a different size, re-snapshot. A fresh
+    // snapshot then compares equal for every other pid, so a burst of
+    // callers costs one query rather than one per caller, and a process
+    // whose table did not move never forces one.
+    let mut snapshot = match win_handles::current_snapshot_max_age(win_handles::SNAPSHOT_TTL) {
         Some(s) => s,
         None => return Vec::new(),
     };
+    if let Some(live) = live_handle_count {
+        let in_snapshot = snapshot
+            .by_pid
+            .get(&pid)
+            .map(|h| h.len() as u64)
+            .unwrap_or(0);
+        if in_snapshot != live {
+            if let Some(fresh) = win_handles::current_snapshot_max_age(Duration::ZERO) {
+                snapshot = fresh;
+            }
+        }
+    }
     match snapshot.by_pid.get(&pid) {
         Some(handles) => win_handles::resolve_paths(pid, handles),
         None => Vec::new(),
@@ -824,7 +948,7 @@ fn enumerate_open_file_paths(pid: u32) -> Vec<String> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn enumerate_open_file_paths(_pid: u32) -> Vec<String> {
+fn enumerate_open_file_paths(_pid: u32, _fingerprint: Option<u64>) -> Vec<String> {
     Vec::new()
 }
 
@@ -848,12 +972,19 @@ mod tests {
         let calls = Cell::new(0);
         let t0 = Instant::now();
         let ttl = Duration::from_secs(15);
-        let enumerate = || {
+        let enumerate = |_: Option<u64>| {
             calls.set(calls.get() + 1);
             vec!["/etc/hosts".to_string()]
         };
-        let a = cached_open_files_with(&cache, 42, t0, ttl, enumerate);
-        let b = cached_open_files_with(&cache, 42, t0 + Duration::from_secs(14), ttl, enumerate);
+        let a = cached_open_files_with(&cache, 42, t0, ttl, None, enumerate);
+        let b = cached_open_files_with(
+            &cache,
+            42,
+            t0 + Duration::from_secs(14),
+            ttl,
+            None,
+            enumerate,
+        );
         assert_eq!(a, b);
         assert_eq!(
             calls.get(),
@@ -868,12 +999,12 @@ mod tests {
         let calls = Cell::new(0);
         let t0 = Instant::now();
         let ttl = Duration::from_secs(15);
-        let enumerate = || {
+        let enumerate = |_: Option<u64>| {
             calls.set(calls.get() + 1);
             vec![format!("/tmp/gen{}", calls.get())]
         };
-        let a = cached_open_files_with(&cache, 7, t0, ttl, enumerate);
-        let b = cached_open_files_with(&cache, 7, t0 + ttl, ttl, enumerate);
+        let a = cached_open_files_with(&cache, 7, t0, ttl, None, enumerate);
+        let b = cached_open_files_with(&cache, 7, t0 + ttl, ttl, None, enumerate);
         assert_eq!(calls.get(), 2);
         assert_ne!(a, b, "an expired entry must be refreshed from the OS");
     }
@@ -885,19 +1016,107 @@ mod tests {
         let cache = fresh_cache();
         let calls = Cell::new(0);
         let t0 = Instant::now();
-        let enumerate = || {
+        let enumerate = |_: Option<u64>| {
             calls.set(calls.get() + 1);
             Vec::new()
         };
-        let _ = cached_open_files_with(&cache, 9, t0, Duration::from_secs(15), enumerate);
+        let _ = cached_open_files_with(&cache, 9, t0, Duration::from_secs(15), None, enumerate);
         let _ = cached_open_files_with(
             &cache,
             9,
             t0 + Duration::from_secs(1),
             Duration::from_secs(15),
+            None,
             enumerate,
         );
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn cache_misses_when_fd_fingerprint_changes() {
+        // The detector's live open-file scan must see a handle opened after
+        // the cached enumeration: a changed fd count is a miss even inside
+        // the TTL, and the enumerator receives the live fingerprint.
+        let cache = fresh_cache();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        let moved_flags = std::cell::RefCell::new(Vec::new());
+        let enumerate = |fp: Option<u64>| {
+            moved_flags.borrow_mut().push(fp);
+            vec![format!("/f{}", moved_flags.borrow().len())]
+        };
+        let a = cached_open_files_with(&cache, 5, t0, ttl, Some(10), enumerate);
+        let b = cached_open_files_with(
+            &cache,
+            5,
+            t0 + Duration::from_secs(1),
+            ttl,
+            Some(11),
+            enumerate,
+        );
+        assert_ne!(a, b, "a new descriptor must force a fresh enumeration");
+        assert_eq!(*moved_flags.borrow(), vec![Some(10), Some(11)]);
+        // Same fingerprint again: served from the cache.
+        let c = cached_open_files_with(
+            &cache,
+            5,
+            t0 + Duration::from_secs(2),
+            ttl,
+            Some(11),
+            enumerate,
+        );
+        assert_eq!(b, c);
+        assert_eq!(moved_flags.borrow().len(), 2);
+    }
+
+    #[test]
+    fn cache_ttl_expiry_re_enumerates_with_the_same_fingerprint() {
+        let cache = fresh_cache();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(15);
+        let moved_flags = std::cell::RefCell::new(Vec::new());
+        let enumerate = |fp: Option<u64>| {
+            moved_flags.borrow_mut().push(fp);
+            Vec::new()
+        };
+        let _ = cached_open_files_with(&cache, 6, t0, ttl, Some(3), enumerate);
+        let _ = cached_open_files_with(&cache, 6, t0 + ttl, ttl, Some(3), enumerate);
+        assert_eq!(*moved_flags.borrow(), vec![Some(3), Some(3)]);
+    }
+
+    #[test]
+    fn public_wrapper_sees_a_handle_opened_after_the_cached_enumeration() {
+        // End-to-end on the real OS: enumerate self, then open a new file
+        // and look again without any explicit invalidation.
+        let me = std::process::id();
+        invalidate_open_files_cache(me);
+        let before = get_open_file_paths(me);
+        let dir = std::env::temp_dir().join(format!("edamame_openfiles_fp_{}", me));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("late_sentinel.txt");
+        let handle = std::fs::File::create(&path).expect("create late sentinel");
+        let after = get_open_file_paths(me);
+        // Resolve the comparison strings while the file still exists.
+        let canon = path
+            .canonicalize()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let plain = path.to_string_lossy().to_string();
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&dir);
+        if before.is_empty() && after.is_empty() {
+            // No /proc permissions (some CI containers): nothing to assert.
+            return;
+        }
+        assert!(
+            after.iter().any(|p| {
+                p == &plain || p == &canon || p == canon.trim_start_matches("\\\\?\\")
+            }),
+            "late sentinel {} not seen after the cached enumeration: {:?}",
+            plain,
+            after
+        );
+        invalidate_open_files_cache(me);
     }
 
     #[test]
@@ -905,8 +1124,8 @@ mod tests {
         let cache = fresh_cache();
         let t0 = Instant::now();
         let ttl = Duration::from_secs(15);
-        let a = cached_open_files_with(&cache, 1, t0, ttl, || vec!["/a".to_string()]);
-        let b = cached_open_files_with(&cache, 2, t0, ttl, || vec!["/b".to_string()]);
+        let a = cached_open_files_with(&cache, 1, t0, ttl, None, |_| vec!["/a".to_string()]);
+        let b = cached_open_files_with(&cache, 2, t0, ttl, None, |_| vec!["/b".to_string()]);
         assert_eq!(a, vec!["/a".to_string()]);
         assert_eq!(b, vec!["/b".to_string()]);
         assert_eq!(cache.len(), 2);
@@ -918,7 +1137,7 @@ mod tests {
         let t0 = Instant::now();
         let ttl = Duration::from_secs(15);
         for pid in 0..(OPEN_FILES_CACHE_MAX_ENTRIES as u32 * 2) {
-            let _ = cached_open_files_with(&cache, pid, t0, ttl, Vec::new);
+            let _ = cached_open_files_with(&cache, pid, t0, ttl, None, |_| Vec::new());
         }
         assert!(
             cache.len() <= OPEN_FILES_CACHE_MAX_ENTRIES,
@@ -934,10 +1153,18 @@ mod tests {
         let t0 = Instant::now();
         // Fill to the cap with entries that will be expired by t1.
         for pid in 0..(OPEN_FILES_CACHE_MAX_ENTRIES as u32) {
-            let _ = cached_open_files_with(&cache, pid, t0, ttl, Vec::new);
+            let _ = cached_open_files_with(&cache, pid, t0, ttl, None, |_| Vec::new());
         }
         let t1 = t0 + ttl + Duration::from_secs(1);
-        let _ = cached_open_files_with(&cache, 999_999, t1, ttl, || vec!["/live".to_string()]);
+        let _ =
+            cached_open_files_with(
+                &cache,
+                999_999,
+                t1,
+                ttl,
+                None,
+                |_| vec!["/live".to_string()],
+            );
         assert_eq!(cache.len(), 1, "expired entries must be dropped first");
         assert!(cache.get(&999_999).is_some());
     }
@@ -966,7 +1193,8 @@ mod tests {
             // Cost of one system-wide handle snapshot on its own: before the
             // shared snapshot every pid paid this once.
             let ts = Instant::now();
-            let snap = win_handles::current_snapshot().expect("handle snapshot");
+            let snap = win_handles::current_snapshot_max_age(win_handles::SNAPSHOT_TTL)
+                .expect("handle snapshot");
             eprintln!(
                 "open_files timing probe: one SystemHandleInformation snapshot = {:?} ({} pids, {} handles)",
                 ts.elapsed(),
@@ -986,16 +1214,19 @@ mod tests {
             t1 - t0,
             t2 - t1
         );
-        assert_eq!(first, second);
+        let _ = (first, second);
     }
 
     #[test]
-    fn public_wrapper_hits_cache_for_own_pid() {
+    fn public_wrapper_populates_cache_for_own_pid() {
+        // Other tests in this binary open and close files concurrently, so
+        // two consecutive own-pid lookups may legitimately differ (the fd
+        // fingerprint moved); only the cache population is asserted here.
+        // Hit/miss semantics are covered by the injected-enumerator tests.
         let me = std::process::id();
         invalidate_open_files_cache(me);
-        let first = get_open_file_paths(me);
-        let second = get_open_file_paths(me);
-        assert_eq!(first, second);
+        let _ = get_open_file_paths(me);
+        assert!(OPEN_FILES_CACHE.get(&me).is_some());
         assert!(open_files_cache_len() >= 1);
         invalidate_open_files_cache(me);
     }
