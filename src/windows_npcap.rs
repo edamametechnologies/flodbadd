@@ -361,13 +361,41 @@ pub fn configure_npcap_runtime() -> Result<(), String> {
 /// like the staging directories Windows installers create for themselves.
 #[cfg(target_os = "windows")]
 fn installer_stage_dir() -> Result<PathBuf, String> {
-    let guid = uuid::Uuid::new_v4()
-        .braced()
-        .to_string()
-        .to_ascii_uppercase();
-    let dir = std::env::temp_dir().join(guid);
+    let dir = std::env::temp_dir().join(format!("{{{}}}", random_guid_upper()));
     fs::create_dir_all(&dir).map_err(|e| format!("stage dir create failed: {e}"))?;
     Ok(canonical_without_verbatim_prefix(&dir))
+}
+
+/// 32 random hex digits in the `8-4-4-4-12` layout, uppercase. std only:
+/// this file is also compiled into flodbadd's build script, which has no
+/// `uuid` crate (foundation run 35489497849 failed its Windows build on
+/// that), and a staging directory name needs uniqueness, not cryptographic
+/// quality. Each `RandomState` is seeded from the OS per process; the
+/// clock, the pid and the word index are mixed in.
+#[cfg(target_os = "windows")]
+fn random_guid_upper() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut words = [0u64; 2];
+    for (index, word) in words.iter_mut().enumerate() {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(nanos);
+        hasher.write_u32(std::process::id());
+        hasher.write_usize(index);
+        *word = hasher.finish();
+    }
+    let hex = format!("{:016X}{:016X}", words[0], words[1]);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 /// `std::fs::canonicalize` on Windows yields a `\\?\C:\...` verbatim path,
@@ -838,5 +866,30 @@ mod tests {
             NPCAP_INSTALLER_SHA256, NPCAP_SDK_SHA256,
             "installer and SDK pins must not be copy-paste duplicates"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod stage_dir_tests {
+    use super::random_guid_upper;
+
+    #[test]
+    fn random_guid_has_the_brace_wrapped_guid_layout_and_varies() {
+        let a = random_guid_upper();
+        let b = random_guid_upper();
+        for guid in [&a, &b] {
+            let groups: Vec<&str> = guid.split('-').collect();
+            assert_eq!(groups.len(), 5, "{guid}");
+            for (group, width) in groups.iter().zip([8usize, 4, 4, 4, 12]) {
+                assert_eq!(group.len(), width, "{guid}");
+                assert!(
+                    group
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
+                    "{guid}"
+                );
+            }
+        }
+        assert_ne!(a, b);
     }
 }
