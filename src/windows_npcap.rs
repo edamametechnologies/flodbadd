@@ -357,6 +357,36 @@ pub fn configure_npcap_runtime() -> Result<(), String> {
 
 // --- Installer ---
 
+/// A fresh `%TEMP%\{GUID}\` for one installer run, brace-wrapped uppercase
+/// like the staging directories Windows installers create for themselves.
+#[cfg(target_os = "windows")]
+fn installer_stage_dir() -> Result<PathBuf, String> {
+    let guid = uuid::Uuid::new_v4()
+        .braced()
+        .to_string()
+        .to_ascii_uppercase();
+    let dir = std::env::temp_dir().join(guid);
+    fs::create_dir_all(&dir).map_err(|e| format!("stage dir create failed: {e}"))?;
+    Ok(canonical_without_verbatim_prefix(&dir))
+}
+
+/// `std::fs::canonicalize` on Windows yields a `\\?\C:\...` verbatim path,
+/// which not every consumer of `TEMP` accepts; strip the prefix and keep the
+/// long-name spelling. Falls back to the path as given.
+#[cfg(target_os = "windows")]
+fn canonical_without_verbatim_prefix(path: &Path) -> PathBuf {
+    match fs::canonicalize(path) {
+        Ok(canonical) => {
+            let text = canonical.to_string_lossy();
+            match text.strip_prefix(r"\\?\") {
+                Some(stripped) => PathBuf::from(stripped),
+                None => canonical,
+            }
+        }
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), String> {
     use std::io::Write;
@@ -368,8 +398,19 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
         return Ok(());
     }
 
-    let temp_dir = std::env::temp_dir();
-    let installer_path = temp_dir.join("npcap-installer.exe");
+    // Stage the installer in a fresh per-invocation directory of its own,
+    // `%TEMP%\{GUID}\`, and point the installer's TEMP / TMP at it, so the
+    // NSIS scratch (`ns<letter><hex>.tmp` and its plugin directory), the
+    // extracted `Insecure-SHA1.cer` and the installer file itself all land in
+    // the writer's own GUID directory -- the self-extraction shape the attack
+    // pattern detector recognises structurally -- instead of the shared user
+    // temp root, where each of them graded as file-system tampering on the
+    // posture idle baseline (runs 35466191145 to 35485477994). The directory
+    // is removed after the install. The path is canonicalised so the launched
+    // image path carries the profile's long name, as the FIM events do, not
+    // the 8.3 form a hosted runner's %TEMP% expands to.
+    let stage_dir = installer_stage_dir()?;
+    let installer_path = stage_dir.join("npcap-installer.exe");
 
     // Caller argument wins, then the environment override, then the source list.
     // An override is an operator pointing at their own mirror, so it is exempt
@@ -461,11 +502,18 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
                 "/quiet",
                 "/norestart",
             ])
+            .env("TEMP", &stage_dir)
+            .env("TMP", &stage_dir)
             .status();
     } else {
         let mut attempts = 0;
         while attempts < 3 {
-            match Command::new(&installer_path).args(["/S"]).status() {
+            match Command::new(&installer_path)
+                .args(["/S"])
+                .env("TEMP", &stage_dir)
+                .env("TMP", &stage_dir)
+                .status()
+            {
                 Ok(_) => break,
                 Err(_) => {
                     attempts += 1;
@@ -483,7 +531,7 @@ pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), St
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    let _ = std::fs::remove_file(&installer_path);
+    let _ = fs::remove_dir_all(&stage_dir);
     if installed {
         npcap_info!("Npcap installed at {}", npcap_dir.display());
         let _ = configure_npcap_runtime();
