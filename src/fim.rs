@@ -381,7 +381,9 @@ impl FimWatcher {
             }
         }
 
-        // Linux: kernel-time writer attribution for the same roots.
+        // Linux: kernel-time writer attribution for the same roots. On a
+        // restart (paths changed) this extends the running table's marks
+        // to the roots it does not cover yet.
         #[cfg(all(target_os = "linux", feature = "ebpf"))]
         crate::fim_fanotify::init(&actual_paths);
 

@@ -268,6 +268,17 @@ Marks are per directory, so a directory created after startup would be
 invisible. The notify watcher closes that gap: on a `Create(Folder)` event it
 calls `fim_fanotify::remark_directory()` for the new path.
 
+The table lives for the process, and `init()` is re-entrant: a FIM restart
+with other paths (the daemon starts the watcher with the default roots at
+startup since 2.0.0; the operator or the security gate restarts it with
+custom roots afterwards) marks the roots the table does not cover yet and
+logs `FIM fanotify writer attribution extended`. Until 2026-09-20 the second
+call returned at once, so every root added by a restart resolved its writers
+by `lsof` only: the posture gate's `package_install_lifecycle` scenario, a
+one-second open/write/close loop under `~/.cursor/rules`, produced no
+attributed event on either ubuntu leg from the moment the startup pass
+began marking the default roots first.
+
 The reader thread resolves the event path by reading
 `/proc/self/fd/<event fd>` and skips events whose pid is its own. Writer
 image resolution is three steps, in order:

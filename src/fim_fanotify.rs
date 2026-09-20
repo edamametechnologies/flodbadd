@@ -21,7 +21,9 @@
 //! Needs CAP_SYS_ADMIN (the posture daemon / helper run as root). Marks
 //! are per directory (`FAN_EVENT_ON_CHILD`), so a directory created after
 //! start is attributed only once `remark_directory` is called for it; the
-//! notify watcher does that from its create events.
+//! notify watcher does that from its create events. The table itself lives
+//! for the process: a FIM restart with other paths calls `init` again,
+//! which marks the roots not covered yet instead of returning.
 
 use dashmap::DashMap;
 use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MarkFlags, MaskFlags};
@@ -57,55 +59,62 @@ struct FanotifyTable {
 
 static TABLE: OnceCell<Arc<FanotifyTable>> = OnceCell::new();
 
-/// Start the fanotify writer-attribution table for the given FIM roots.
-/// Idempotent; logs and returns on any failure (fail-open).
+/// Start the fanotify writer-attribution table for the given FIM roots,
+/// or, once it runs, extend its marks to the roots it does not cover yet.
+/// Re-entrant on purpose: the FIM watcher is restarted whenever its paths
+/// change (since 2.0.0 the daemon starts it with the default roots at
+/// startup; the operator or the security gate restarts it with custom
+/// roots later), and an `init` that merely returned on the second call
+/// left every later root without kernel writer attribution -- the posture
+/// gate's `package_install_lifecycle` scenario wrote under
+/// `~/.cursor/rules`, a root the startup pass had never marked, and
+/// resolved a null writer on both ubuntu legs (2026-09-19, runs
+/// 35466191145 to 35480406093). Logs and returns on any failure
+/// (fail-open).
 pub fn init(roots: &[PathBuf]) {
-    if TABLE.get().is_some() {
-        return;
-    }
-    let fan = match Fanotify::init(
-        InitFlags::FAN_CLASS_NOTIF | InitFlags::FAN_CLOEXEC,
-        EventFFlags::O_RDONLY | EventFFlags::O_CLOEXEC | EventFFlags::O_LARGEFILE,
-    ) {
-        Ok(fan) => fan,
-        Err(e) => {
+    // One table per process. `get_or_try_init` serialises concurrent first
+    // calls (two watchers starting at once): the second waits for the
+    // first to finish instead of building a table of its own whose fd
+    // nobody reads. A failure to open fanotify (no CAP_SYS_ADMIN) leaves
+    // the cell empty so a later start can try again.
+    let mut created = false;
+    let table = TABLE.get_or_try_init(|| -> Result<Arc<FanotifyTable>, ()> {
+        let fan = Fanotify::init(
+            InitFlags::FAN_CLASS_NOTIF | InitFlags::FAN_CLOEXEC,
+            EventFFlags::O_RDONLY | EventFFlags::O_CLOEXEC | EventFFlags::O_LARGEFILE,
+        )
+        .map_err(|e| {
             info!(
                 "FIM fanotify writer attribution unavailable: {} (falling back to lsof)",
                 e
             );
-            return;
-        }
-    };
-    let table = Arc::new(FanotifyTable {
-        entries: DashMap::new(),
-        fan,
-        marked: DashMap::new(),
-        events_total: std::sync::atomic::AtomicU64::new(0),
+        })?;
+        let table = Arc::new(FanotifyTable {
+            entries: DashMap::new(),
+            fan,
+            marked: DashMap::new(),
+            events_total: std::sync::atomic::AtomicU64::new(0),
+        });
+        let reader = Arc::clone(&table);
+        std::thread::Builder::new()
+            .name("fim-fanotify".into())
+            .spawn(move || reader_loop(reader))
+            .map_err(|e| {
+                warn!("FIM fanotify reader thread spawn failed: {}", e);
+            })?;
+        created = true;
+        Ok(table)
     });
-    let mut marked = 0usize;
-    for root in roots {
-        marked += mark_tree(&table, root, MAX_DIRECTORY_MARKS.saturating_sub(marked));
-        if marked >= MAX_DIRECTORY_MARKS {
-            warn!(
-                "FIM fanotify: directory mark cap ({}) reached; deeper directories are attributed by lsof only",
-                MAX_DIRECTORY_MARKS
-            );
-            break;
-        }
+    let Ok(table) = table else {
+        return;
+    };
+    if !created {
+        extend(table, roots);
+        return;
     }
+    let marked = mark_roots(table, roots);
     if marked == 0 {
-        info!("FIM fanotify: no directory could be marked (falling back to lsof)");
-        return;
-    }
-    if TABLE.set(Arc::clone(&table)).is_err() {
-        return;
-    }
-    let reader = Arc::clone(&table);
-    if let Err(e) = std::thread::Builder::new()
-        .name("fim-fanotify".into())
-        .spawn(move || reader_loop(reader))
-    {
-        warn!("FIM fanotify reader thread spawn failed: {}", e);
+        info!("FIM fanotify: no directory could be marked yet (falling back to lsof)");
         return;
     }
     info!(
@@ -113,6 +122,55 @@ pub fn init(roots: &[PathBuf]) {
         marked,
         roots.len()
     );
+}
+
+/// Mark `roots` and their subtrees breadth-first, root by root, until the
+/// mark cap. Returns the number of marks added.
+fn mark_roots(table: &FanotifyTable, roots: &[PathBuf]) -> usize {
+    let mut added = 0usize;
+    for root in roots {
+        let budget = MAX_DIRECTORY_MARKS.saturating_sub(table.marked.len());
+        if budget == 0 {
+            warn!(
+                "FIM fanotify: directory mark cap ({}) reached; {} and deeper directories are attributed by lsof only",
+                MAX_DIRECTORY_MARKS,
+                root.display()
+            );
+            break;
+        }
+        added += mark_tree(table, root, budget);
+    }
+    added
+}
+
+/// Mark the roots of a restarted watcher that the running table does not
+/// cover yet, subtrees breadth-first within the remaining mark budget.
+/// Earlier marks are kept: they only add coverage, and a root marked
+/// before is skipped by key, so a restart with the same paths costs
+/// nothing.
+fn extend(table: &FanotifyTable, roots: &[PathBuf]) {
+    let new_roots = roots_to_mark(&table.marked, roots);
+    if new_roots.is_empty() {
+        return;
+    }
+    let new_roots: Vec<PathBuf> = new_roots.into_iter().cloned().collect();
+    let added = mark_roots(table, &new_roots);
+    info!(
+        "FIM fanotify writer attribution extended: {} directories marked under {} new root(s), {} marked in total",
+        added,
+        new_roots.len(),
+        table.marked.len()
+    );
+}
+
+/// The roots whose own directory carries no mark yet. A root nested in an
+/// already-marked tree was marked with that tree, or fell past the cap,
+/// in which case there is no budget left for it either way.
+fn roots_to_mark<'a>(marked: &DashMap<String, ()>, roots: &'a [PathBuf]) -> Vec<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| !marked.contains_key(&root.to_string_lossy().to_string()))
+        .collect()
 }
 
 /// Mark one directory (e.g. a directory the notify watcher just saw being
@@ -307,6 +365,60 @@ fn reader_loop(table: Arc<FanotifyTable>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roots_to_mark_skips_the_roots_the_table_already_covers() {
+        let marked: DashMap<String, ()> = DashMap::new();
+        marked.insert("/tmp/first".to_string(), ());
+        let roots = vec![
+            PathBuf::from("/tmp/first"),
+            PathBuf::from("/tmp/second"),
+            PathBuf::from("/tmp/first"),
+        ];
+        let new: Vec<String> = roots_to_mark(&marked, &roots)
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(new, vec!["/tmp/second".to_string()]);
+        assert!(roots_to_mark(&marked, &[PathBuf::from("/tmp/first")]).is_empty());
+        assert!(roots_to_mark(&marked, &[]).is_empty());
+    }
+
+    /// Same privilege as the end-to-end test below. A second `init` -- the
+    /// FIM watcher restarted with other paths -- must mark the new root: a
+    /// write under it is attributed although the first init never saw it.
+    #[test]
+    #[ignore]
+    fn fanotify_restart_extends_the_marks_to_a_new_root() {
+        let base =
+            std::env::temp_dir().join(format!("flodbadd-fanotify-restart-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        init(std::slice::from_ref(&first));
+        assert!(is_active(), "fanotify init failed (are we root?)");
+        init(std::slice::from_ref(&second));
+        let file = second.join("persist.txt");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("echo hello > {}; sleep 2", file.display()))
+            .spawn()
+            .unwrap();
+        let mut found = None;
+        for _ in 0..50 {
+            if let Some(att) = get_file_attribution(&file.to_string_lossy()) {
+                found = Some(att);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&base);
+        let (pid, name, path) = found.expect("write under the root added on restart attributed");
+        assert!(pid > 0);
+        assert!(name.contains("sh") || path.contains("sh"), "{name} {path}");
+    }
 
     /// End-to-end on a real kernel; needs CAP_SYS_ADMIN, so it is ignored by
     /// default and run explicitly as root (`cargo test --features fim,ebpf
