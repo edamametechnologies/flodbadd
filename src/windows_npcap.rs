@@ -415,16 +415,71 @@ fn canonical_without_verbatim_prefix(path: &Path) -> PathBuf {
     }
 }
 
+/// Set while one `auto_install_npcap_silent` runs in this process. The posture
+/// daemon's startup check and the capture layer's first start both reach the
+/// installer within a few hundred milliseconds of each other; without this
+/// flag each downloaded and ran its own installer in its own staging
+/// directory (posture gate 35537688348: two `Npcap installer: fetching` lines
+/// 220 ms apart), two NSIS instances raced on one install, and the FIM writer
+/// attribution crossed them (installer A recorded as the writer of installer
+/// B's plugin scratch), which dirtied the idle baseline. The second caller
+/// now waits for the first install to finish instead.
+#[cfg(target_os = "windows")]
+static NPCAP_INSTALL_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// How long a concurrent caller waits for the in-flight install (download,
+/// silent install, runtime configuration) before giving up.
+#[cfg(target_os = "windows")]
+const NPCAP_INSTALL_WAIT_SECS: u64 = 180;
+
 #[cfg(target_os = "windows")]
 pub fn auto_install_npcap_silent(installer_url: Option<String>) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Command;
+    use std::sync::atomic::Ordering;
 
     let npcap_dir = get_npcap_dir();
     let dll_to_check = npcap_dir.join("wpcap.dll");
     if dll_to_check.exists() {
         return Ok(());
     }
+
+    // Single flight per process: a concurrent caller waits for the running
+    // install rather than starting a second one.
+    if NPCAP_INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        npcap_info!("Npcap installer: another install is in progress; waiting for it");
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(NPCAP_INSTALL_WAIT_SECS);
+        while NPCAP_INSTALL_IN_PROGRESS.load(Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        return if dll_to_check.exists() {
+            let _ = configure_npcap_runtime();
+            Ok(())
+        } else {
+            Err(format!(
+                "Npcap install by another caller did not produce {}",
+                dll_to_check.display()
+            ))
+        };
+    }
+    let result = auto_install_npcap_silent_inner(installer_url, &npcap_dir, &dll_to_check);
+    NPCAP_INSTALL_IN_PROGRESS.store(false, Ordering::SeqCst);
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn auto_install_npcap_silent_inner(
+    installer_url: Option<String>,
+    npcap_dir: &Path,
+    dll_to_check: &Path,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Command;
 
     // Stage the installer in a fresh per-invocation directory of its own,
     // `%TEMP%\{GUID}\`, and point the installer's TEMP / TMP at it, so the
