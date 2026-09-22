@@ -325,14 +325,21 @@ async fn fetch_mdns_info_task() {
         {
             Ok(responses) => responses,
             Err(e) => {
-                warn!("Error querying mDNS services: {:?}", e);
+                // Expected whenever there is no multicast route (iOS with the
+                // local-network permission denied, a VPN-only link, no Wi-Fi):
+                // debug, not warn, or it floods the log. And wait out the
+                // pause before retrying: `continue` used to skip it, so an
+                // unreachable network spun this loop at full speed.
+                debug!("Error querying mDNS services: {:?}", e);
+                tokio::time::sleep(pause_duration).await;
                 continue;
             }
         };
         let services = match responses.recv().await {
             Ok(services) => services,
             Err(e) => {
-                warn!("Error receiving mDNS services query response: {:?}", e);
+                debug!("Error receiving mDNS services query response: {:?}", e);
+                tokio::time::sleep(pause_duration).await;
                 continue;
             }
         };
@@ -365,8 +372,9 @@ async fn fetch_mdns_info_task() {
             {
                 Ok(responses) => responses,
                 Err(e) => {
-                    // Only warn to prevent multiple sentry errors
-                    warn!(
+                    // A transport error (no route, link went away mid-pass):
+                    // debug, like the service-list query above.
+                    debug!(
                         "Error querying mDNS service {}: {:?}",
                         service_name.clone(),
                         e
@@ -378,8 +386,7 @@ async fn fetch_mdns_info_task() {
             let instances = match responses.recv().await {
                 Ok(instances) => instances,
                 Err(e) => {
-                    // Only warn to prevent multiple sentry errors
-                    warn!(
+                    debug!(
                         "Error receiving mDNS query response for service {} : {:?}",
                         service_name, e
                     );
