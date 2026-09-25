@@ -101,10 +101,8 @@ mod win {
     const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
     // PROCESS_* access rights (winnt.h). The PTRACE_MODE vocabulary the
     // detector shares across backends maps onto the mask like this:
-    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / DUP_HANDLE /
-    //               ALL_ACCESS -- the control-grade opens (task_for_pid /
-    //               ptrace attach): writing another process's memory,
-    //               injecting a thread, or duplicating a handle out of it
+    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / ALL_ACCESS --
+    //               the debugger-grade opens (task_for_pid / ptrace attach)
     //   READ   (1): VM_READ without any of the above -- the read-only task
     //               port shape (macOS GET_TASK_READ), which updaters, crash
     //               handlers and process monitors take on every process
@@ -115,7 +113,6 @@ mod win {
     const PROCESS_VM_OPERATION: u32 = 0x0008;
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_VM_WRITE: u32 = 0x0020;
-    const PROCESS_DUP_HANDLE: u32 = 0x0040;
     const PROCESS_ALL_ACCESS_MASK: u32 = 0x001F_FFFF;
 
     /// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE
@@ -130,18 +127,21 @@ mod win {
     /// carries VM_READ, so it grades READ: a named sensitive victim is
     /// CRITICAL exactly as before, and only the detector's enumeration
     /// breadth rule (>= 3 distinct read targets) relieves it. The SPECIFIC
-    /// rights a scrape, an injection or a handle theft needs -- VM_WRITE,
-    /// VM_OPERATION, CREATE_THREAD, DUP_HANDLE asked for on their own --
-    /// stay ATTACH. A READ-grade open is dropped before the ring only when
-    /// its requester is OS-shipped, and an image in a user-writable
-    /// %SystemRoot% subtree never is (`is_os_shipped_windows_image`).
+    /// rights a scrape or an injection needs -- VM_WRITE, VM_OPERATION,
+    /// CREATE_THREAD asked for on their own -- stay ATTACH. A READ-grade
+    /// open is dropped before the ring only when its requester is
+    /// OS-shipped, and an image in a user-writable %SystemRoot% subtree
+    /// never is (`is_os_shipped_windows_image`).
+    ///
+    /// DUP_HANDLE is not graded: the kernel's own System process (pid 4, no
+    /// image path) duplicates handles out of services all the time, so an
+    /// ATTACH grade made an idle Windows host a HIGH `process_memory_scrape`
+    /// generator (posture gate run 36113244867, windows-x64 idle baseline,
+    /// 2026-09-25). Handle theft out of lsass stays an open gap
+    /// (DETECTIONGAPS G-49).
     pub(crate) fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
-        let specific_attach = desired_access
-            & (PROCESS_VM_WRITE
-                | PROCESS_VM_OPERATION
-                | PROCESS_CREATE_THREAD
-                | PROCESS_DUP_HANDLE)
-            != 0;
+        let specific_attach =
+            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0;
         let all_access = desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
         if specific_attach && !all_access {
             return Some(2);
@@ -1844,8 +1844,9 @@ mod tests {
 
     /// The PTRACE_MODE mapping is the measurement the memory-scrape check
     /// grades on, so the blanket managed-framework ask must not read as a
-    /// debugger attach while the specific rights (handle duplication
-    /// included) still do.
+    /// debugger attach while the specific rights still do, and handle
+    /// duplication alone is not forwarded (the kernel's System process
+    /// duplicates handles out of services on every idle host).
     #[cfg(all(target_os = "windows", feature = "etw"))]
     #[test]
     fn desired_access_maps_onto_the_ptrace_mode_vocabulary() {
@@ -1859,13 +1860,15 @@ mod tests {
         const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
         const ALL_ACCESS: u32 = 0x001F_FFFF;
 
-        // Control-grade rights asked for on their own are ATTACH.
+        // Debugger-grade rights asked for on their own are ATTACH.
         assert_eq!(grade(VM_WRITE), Some(2));
         assert_eq!(grade(VM_OPERATION), Some(2));
         assert_eq!(grade(CREATE_THREAD), Some(2));
-        assert_eq!(grade(DUP_HANDLE), Some(2));
         assert_eq!(grade(VM_READ | VM_WRITE), Some(2));
-        assert_eq!(grade(VM_READ | DUP_HANDLE), Some(2));
+        // Handle duplication alone is not forwarded; with VM_READ it is a
+        // read.
+        assert_eq!(grade(DUP_HANDLE), None);
+        assert_eq!(grade(VM_READ | DUP_HANDLE), Some(1));
         // The blanket ask every .NET tool makes is READ, not ATTACH; the
         // user-writable %SystemRoot% subtrees are handled by the path mark.
         assert_eq!(grade(ALL_ACCESS), Some(1));
