@@ -366,6 +366,25 @@ fn installer_stage_dir() -> Result<PathBuf, String> {
     Ok(canonical_without_verbatim_prefix(&dir))
 }
 
+/// Removes the installer staging directory when it drops, so every exit path
+/// out of the install cleans up `%TEMP%\{GUID}\` -- not only the success tail.
+/// The early returns (every download source failing, the installer write
+/// failing) used to leave the directory behind on the host; on the shared
+/// self-hosted Windows runner that accumulates until the disk fills. `Drop`
+/// covers the error returns and a panic alike. std only: this file is also
+/// compiled into flodbadd's build script, which carries no extra crates.
+#[cfg(target_os = "windows")]
+struct StageDirGuard {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for StageDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// 32 random hex digits in the `8-4-4-4-12` layout, uppercase. std only:
 /// this file is also compiled into flodbadd's build script, which has no
 /// `uuid` crate (foundation run 35489497849 failed its Windows build on
@@ -493,6 +512,12 @@ fn auto_install_npcap_silent_inner(
     // image path carries the profile's long name, as the FIM events do, not
     // the 8.3 form a hosted runner's %TEMP% expands to.
     let stage_dir = installer_stage_dir()?;
+    // Remove the staging directory on every exit from here on -- the early
+    // error returns below (all sources failing, the installer write failing)
+    // as well as the success tail and any panic.
+    let _stage_guard = StageDirGuard {
+        path: stage_dir.clone(),
+    };
     let installer_path = stage_dir.join("npcap-installer.exe");
 
     // Caller argument wins, then the environment override, then the source list.
@@ -614,7 +639,7 @@ fn auto_install_npcap_silent_inner(
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    let _ = fs::remove_dir_all(&stage_dir);
+    // `_stage_guard` removes the staging directory when this function returns.
     if installed {
         npcap_info!("Npcap installed at {}", npcap_dir.display());
         let _ = configure_npcap_runtime();

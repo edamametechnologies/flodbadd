@@ -101,8 +101,10 @@ mod win {
     const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
     // PROCESS_* access rights (winnt.h). The PTRACE_MODE vocabulary the
     // detector shares across backends maps onto the mask like this:
-    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / ALL_ACCESS --
-    //               the debugger-grade opens (task_for_pid / ptrace attach)
+    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / DUP_HANDLE /
+    //               ALL_ACCESS -- the control-grade opens (task_for_pid /
+    //               ptrace attach): writing another process's memory,
+    //               injecting a thread, or duplicating a handle out of it
     //   READ   (1): VM_READ without any of the above -- the read-only task
     //               port shape (macOS GET_TASK_READ), which updaters, crash
     //               handlers and process monitors take on every process
@@ -113,6 +115,7 @@ mod win {
     const PROCESS_VM_OPERATION: u32 = 0x0008;
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_VM_WRITE: u32 = 0x0020;
+    const PROCESS_DUP_HANDLE: u32 = 0x0040;
     const PROCESS_ALL_ACCESS_MASK: u32 = 0x001F_FFFF;
 
     /// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE
@@ -127,11 +130,18 @@ mod win {
     /// carries VM_READ, so it grades READ: a named sensitive victim is
     /// CRITICAL exactly as before, and only the detector's enumeration
     /// breadth rule (>= 3 distinct read targets) relieves it. The SPECIFIC
-    /// rights a scrape or an injection needs -- VM_WRITE, VM_OPERATION,
-    /// CREATE_THREAD asked for on their own -- stay ATTACH.
+    /// rights a scrape, an injection or a handle theft needs -- VM_WRITE,
+    /// VM_OPERATION, CREATE_THREAD, DUP_HANDLE asked for on their own --
+    /// stay ATTACH. A READ-grade open is dropped before the ring only when
+    /// its requester is OS-shipped, and an image in a user-writable
+    /// %SystemRoot% subtree never is (`is_os_shipped_windows_image`).
     pub(crate) fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
-        let specific_attach =
-            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0;
+        let specific_attach = desired_access
+            & (PROCESS_VM_WRITE
+                | PROCESS_VM_OPERATION
+                | PROCESS_CREATE_THREAD
+                | PROCESS_DUP_HANDLE)
+            != 0;
         let all_access = desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
         if specific_attach && !all_access {
             return Some(2);
@@ -948,6 +958,10 @@ mod win {
                 // publisher verdict (in-process WinVerifyTrust + catalog,
                 // edamame_foundation::publisher_attestation) and drops an
                 // edge only for a Microsoft-signed binary at a canonical path.
+                // The mark deliberately excludes the user-writable subtrees
+                // of %SystemRoot% (Temp, Tasks, ...): a standard user can
+                // drop a binary there without elevation, so its path vouches
+                // for nothing (see is_os_shipped_windows_image).
                 let path_marked = is_os_shipped_windows_image(&requester_path);
                 // Read-grade opens by OS-shipped requesters (csrss, lsass,
                 // svchost, MsMpEng, ...) are the constant background the
@@ -955,10 +969,11 @@ mod win {
                 // rides the event as `platform_path_marked`, never as
                 // `is_platform_binary`: a path is not a kernel fact. Since
                 // `PROCESS_ALL_ACCESS` grades READ, an OS-shipped binary
-                // making the blanket ask now also stays out of the ring --
-                // the same background, and the detector drops a
-                // kernel-vouched platform requester at a canonical path
-                // regardless of grade.
+                // making the blanket ask also stays out of the ring -- the
+                // same background, and the detector drops a kernel-vouched
+                // platform requester at a canonical path regardless of
+                // grade. A binary in a user-writable %SystemRoot% subtree is
+                // not marked, so its opens always reach the detector.
                 if task_access_mode == 1 && path_marked {
                     return;
                 }
@@ -1016,26 +1031,79 @@ mod win {
         }
     }
 
+    /// Subtrees of the Windows directory that a standard (non-elevated) user
+    /// can write to on a default Windows 10/11 install. `%SystemRoot%` as a
+    /// whole is protected, but these leaf directories are created with ACLs
+    /// that grant `BUILTIN\Users` / `NT AUTHORITY\Authenticated Users`
+    /// create/write -- verifiable with `icacls` / `accesschk -w -d`, and the
+    /// long-documented writable-`%WINDIR%` set used in DLL-search-order and
+    /// privilege-escalation research. Paths are relative to the Windows
+    /// directory, lowercased, `/`-separated, and matched as a prefix.
+    ///
+    /// Because a user can drop a binary here without elevation, an image
+    /// under one of these does NOT count as OS-shipped: its path vouches for
+    /// nothing. `serviceprofiles/` is writable by the LocalService /
+    /// NetworkService accounts rather than an interactive user, but a helper
+    /// a service unpacks there is likewise not something the path attests to,
+    /// so it is treated the same way (conservative direction: fail toward
+    /// NOT vouching).
+    const USER_WRITABLE_WINDOWS_SUBTREES: &[&str] = &[
+        "temp/",
+        "tasks/",
+        "tracing/",
+        "debug/",
+        "registration/crmlog/",
+        "serviceprofiles/",
+        "system32/tasks/",
+        "system32/spool/drivers/color/",
+        "system32/spool/printers/",
+        "system32/fxstmp/",
+        "system32/com/dmp/",
+        "syswow64/tasks/",
+        "syswow64/spool/drivers/color/",
+        "syswow64/fxstmp/",
+        "syswow64/com/dmp/",
+    ];
+
+    /// The portion of `p` (already lowercased, `/`-separated) below a Windows
+    /// directory on any drive (`c:/windows/system32/csrss.exe` ->
+    /// `system32/csrss.exe`), or `None` when `p` is not under one.
+    fn windows_dir_relative(p: &str) -> Option<&str> {
+        p.strip_prefix(|c: char| c.is_ascii_alphabetic())?
+            .strip_prefix(":/windows/")
+    }
+
     /// Windows has no kernel-vouched platform-binary fact; until the
     /// in-proc Authenticode check lands, an image under the Windows
     /// directory or the Defender platform roots counts as OS-shipped for
     /// the task-access stream. Interim and path-shaped by design -- the
     /// detector additionally requires `is_canonical_os_path`.
+    ///
+    /// The user-writable subtrees of `%SystemRoot%` are the one exception:
+    /// an image sitting in `C:\Windows\Tasks`, `C:\Windows\Temp`, ... is
+    /// under the Windows directory but was writable without elevation, so it
+    /// is NOT treated as OS-shipped. Without this, an unsigned dumper staged
+    /// in `C:\Windows\Tasks` opening lsass was pre-filtered out of the ring
+    /// (mark set) and produced no finding.
     pub(crate) fn is_os_shipped_windows_image(path: &str) -> bool {
         let p = path.trim().to_ascii_lowercase().replace('\\', "/");
         if p.is_empty() {
             return false;
         }
-        let roots = [
-            "c:/windows/",
+        // Under the Windows directory (any drive): OS-shipped unless it sits
+        // in a user-writable subtree of it.
+        if let Some(win_relative) = windows_dir_relative(&p) {
+            return !USER_WRITABLE_WINDOWS_SUBTREES
+                .iter()
+                .any(|sub| win_relative.starts_with(sub));
+        }
+        // Defender's engine lives outside %SystemRoot% but is OS-shipped
+        // (c: only, as installed).
+        const DEFENDER_ROOTS: [&str; 2] = [
             "c:/program files/windows defender/",
             "c:/programdata/microsoft/windows defender/",
         ];
-        // Any drive letter for the Windows directory (`d:/windows/...`).
-        let other_drive = p.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && p.get(1..)
-                .is_some_and(|rest| rest.starts_with(":/windows/"));
-        roots.iter().any(|r| p.starts_with(r)) || other_drive
+        DEFENDER_ROOTS.iter().any(|r| p.starts_with(r))
     }
 
     #[cfg(test)]
@@ -1056,11 +1124,59 @@ mod win {
             assert!(is_os_shipped_windows_image(
                 r"C:\Program Files\Windows Defender\MsMpEng.exe"
             ));
+            // Non-writable %SystemRoot% content stays OS-shipped even when a
+            // writable-subtree name appears deeper in the path.
+            assert!(is_os_shipped_windows_image(
+                r"C:\Windows\System32\svchost.exe"
+            ));
+            assert!(is_os_shipped_windows_image(
+                r"C:\Windows\SysWOW64\ntdll.dll"
+            ));
+            assert!(is_os_shipped_windows_image(
+                r"C:\Windows\System32\drivers\ndis.sys"
+            ));
+        }
+
+        #[test]
+        fn user_writable_windows_subtrees_are_not_os_shipped() {
+            // The evasion this guards: a dumper staged in a user-writable
+            // subtree of %SystemRoot% must NOT be marked OS-shipped, or the
+            // read-grade ring pre-filter silently drops its open of lsass.
+            for path in [
+                r"C:\Windows\Tasks\dumper.exe",
+                r"C:\Windows\Temp\stealer.exe",
+                r"C:\Windows\Tracing\payload.exe",
+                r"C:\Windows\debug\WIA\evil.exe",
+                r"C:\Windows\Registration\CRMLog\evil.exe",
+                r"C:\Windows\ServiceProfiles\LocalService\evil.exe",
+                r"C:\Windows\System32\Tasks\evil.exe",
+                r"C:\Windows\System32\spool\drivers\color\evil.exe",
+                r"C:\Windows\System32\spool\PRINTERS\evil.exe",
+                r"C:\Windows\System32\FxsTmp\evil.exe",
+                r"C:\Windows\System32\com\dmp\evil.exe",
+                r"C:\Windows\SysWOW64\Tasks\evil.exe",
+                r"C:\Windows\SysWOW64\spool\drivers\color\evil.exe",
+                // Any drive, mixed case, forward slashes all normalize.
+                r"D:/WINDOWS/Temp/evil.exe",
+            ] {
+                assert!(
+                    !is_os_shipped_windows_image(path),
+                    "must not be OS-shipped: {path}"
+                );
+            }
+        }
+
+        #[test]
+        fn non_windows_paths_are_not_os_shipped() {
             assert!(!is_os_shipped_windows_image(
                 r"C:\Users\me\AppData\Local\Temp\stealer.exe"
             ));
             assert!(!is_os_shipped_windows_image(
                 r"C:\Program Files\Python312\python.exe"
+            ));
+            // "windows" only as a non-root path segment does not qualify.
+            assert!(!is_os_shipped_windows_image(
+                r"C:\Users\me\windows\thing.exe"
             ));
             assert!(!is_os_shipped_windows_image(""));
         }
@@ -1728,7 +1844,8 @@ mod tests {
 
     /// The PTRACE_MODE mapping is the measurement the memory-scrape check
     /// grades on, so the blanket managed-framework ask must not read as a
-    /// debugger attach while the specific rights still do.
+    /// debugger attach while the specific rights (handle duplication
+    /// included) still do.
     #[cfg(all(target_os = "windows", feature = "etw"))]
     #[test]
     fn desired_access_maps_onto_the_ptrace_mode_vocabulary() {
@@ -1737,20 +1854,27 @@ mod tests {
         const VM_OPERATION: u32 = 0x0008;
         const VM_READ: u32 = 0x0010;
         const VM_WRITE: u32 = 0x0020;
+        const DUP_HANDLE: u32 = 0x0040;
+        const QUERY_INFORMATION: u32 = 0x0400;
         const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
         const ALL_ACCESS: u32 = 0x001F_FFFF;
 
-        // Specific debugger-grade rights stay ATTACH.
+        // Control-grade rights asked for on their own are ATTACH.
         assert_eq!(grade(VM_WRITE), Some(2));
         assert_eq!(grade(VM_OPERATION), Some(2));
         assert_eq!(grade(CREATE_THREAD), Some(2));
+        assert_eq!(grade(DUP_HANDLE), Some(2));
         assert_eq!(grade(VM_READ | VM_WRITE), Some(2));
-        // Read-only stays READ.
+        assert_eq!(grade(VM_READ | DUP_HANDLE), Some(2));
+        // The blanket ask every .NET tool makes is READ, not ATTACH; the
+        // user-writable %SystemRoot% subtrees are handled by the path mark.
+        assert_eq!(grade(ALL_ACCESS), Some(1));
+        // Read-only (VM_READ with no control right) stays READ.
         assert_eq!(grade(VM_READ), Some(1));
         assert_eq!(grade(VM_READ | QUERY_LIMITED_INFORMATION), Some(1));
-        // The blanket ask every .NET tool makes is READ, not ATTACH.
-        assert_eq!(grade(ALL_ACCESS), Some(1));
+        assert_eq!(grade(VM_READ | QUERY_INFORMATION), Some(1));
         // Query-only opens are never forwarded.
+        assert_eq!(grade(QUERY_INFORMATION), None);
         assert_eq!(grade(QUERY_LIMITED_INFORMATION), None);
         assert_eq!(grade(0), None);
     }
