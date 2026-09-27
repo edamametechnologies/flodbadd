@@ -2556,15 +2556,24 @@ mod tests {
 
     /// The handle the probe opens is this process's own, so this process is
     /// always among the holders: it must never be reported as the writer.
+    /// Another process may hold the file too (on CI, the job's own EDAMAME
+    /// daemon watches %TEMP%), so only this process's absence is asserted.
     #[cfg(target_os = "windows")]
     #[test]
     fn test_windows_open_handle_probe_skips_this_process() {
+        let own_pid = std::process::id();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("held.txt");
         let held = std::fs::File::create(&path).expect("create");
-        assert_eq!(lookup_pid_for_path(&path), None);
+        assert_ne!(
+            lookup_pid_for_path(&path).map(|(pid, _)| pid),
+            Some(own_pid)
+        );
         drop(held);
-        assert_eq!(lookup_pid_for_path(&path), None);
+        assert_ne!(
+            lookup_pid_for_path(&path).map(|(pid, _)| pid),
+            Some(own_pid)
+        );
         assert_eq!(lookup_pid_for_path(&dir.path().join("missing.txt")), None);
     }
 

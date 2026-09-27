@@ -1208,7 +1208,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("edamame_openfiles_fresh_{}", me));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("late_sentinel.txt");
-        let handle = std::fs::File::create(&path).expect("create late sentinel");
+        std::fs::File::create(&path).expect("create late sentinel");
+        // Held for reading: handles held for writing are never resolved on
+        // Windows (their producer may be about to replace the file).
+        let handle = std::fs::File::open(&path).expect("open late sentinel");
         begin_fresh_open_files_scan();
         let after = get_open_file_paths_fresh(me);
         let canon = path
@@ -1469,8 +1472,12 @@ mod tests {
         let dir = std::env::temp_dir().join("flodbadd_open_files_test");
         let _ = std::fs::create_dir_all(&dir);
         let file_path = dir.join("sentinel.txt");
-        let mut f = File::create(&file_path).expect("create sentinel");
-        f.write_all(b"test").expect("write sentinel");
+        File::create(&file_path)
+            .and_then(|mut f| f.write_all(b"test"))
+            .expect("write sentinel");
+        // Held for reading: handles held for writing are never resolved on
+        // Windows (their producer may be about to replace the file).
+        let f = File::open(&file_path).expect("open sentinel");
 
         // Keep the file handle open while we query. Another test in this
         // process may have cached our pid's list before the sentinel was
