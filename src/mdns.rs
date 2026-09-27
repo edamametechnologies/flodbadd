@@ -142,6 +142,16 @@ fn v6_to_mac(ipv6: &str) -> Option<String> {
         (segments[7] & 0xff) as u8,
     ];
 
+    // Only a modified EUI-64 interface ID (ff:fe in the middle) carries the
+    // MAC. Windows, and macOS and Linux by default, use random interface
+    // IDs: reading a MAC out of one invents an address that then merges
+    // unrelated devices (drakarys.local, 2026-09-27, carried
+    // 1F:6C:F3:46:97:86 from fe80::1d6c:f33a:7c46:9786).
+    if eui64_bytes[3] != 0xff || eui64_bytes[4] != 0xfe {
+        trace!("IPv6 address {} has no EUI-64 interface ID", ipv6);
+        return None;
+    }
+
     // Convert EUI-64 to EUI-48 (MAC address)
     let eui48_bytes = [
         eui64_bytes[0] ^ 0x02,
@@ -486,6 +496,20 @@ pub async fn get_mdns_by_hostname(hostname: &str) -> Option<mDNSInfo> {
 #[cfg(test)]
 mod tests {
     use super::is_resolvable_dns_name;
+    use super::v6_to_mac;
+
+    #[test]
+    fn v6_to_mac_reads_only_eui64_interface_ids() {
+        // EUI-64 (ff:fe in the middle): the MAC with the U/L bit flipped back.
+        assert_eq!(
+            v6_to_mac("fe80::0211:22ff:fe33:4455").as_deref(),
+            Some("00:11:22:33:44:55")
+        );
+        // A random (privacy / stable-opaque) interface ID carries no MAC.
+        assert_eq!(v6_to_mac("fe80::1d6c:f33a:7c46:9786"), None);
+        // Not link-local.
+        assert_eq!(v6_to_mac("2a01:e0a:127d:7600::1"), None);
+    }
 
     #[test]
     fn resolvable_dns_name_accepts_normal_host() {
