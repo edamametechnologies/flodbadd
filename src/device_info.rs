@@ -1118,6 +1118,17 @@ impl DeviceInfo {
         debug!("Total devices after merge: {}", devices.len());
     }
 
+    /// Both records carry burned-in (universally administered, non-group)
+    /// MACs, and not one of them is shared. Two NICs, so two devices -- no
+    /// hostname, address or timing argument can reconcile that, because a
+    /// universally administered address does not rotate. Public for callers
+    /// that merge one record into another directly (mDNS enrichment).
+    pub fn has_universal_mac_conflict(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
+        let uaa1 = Self::universal_mac_identity_set(device1);
+        let uaa2 = Self::universal_mac_identity_set(device2);
+        !uaa1.is_empty() && !uaa2.is_empty() && uaa1.is_disjoint(&uaa2)
+    }
+
     // Check if two devices have characteristics that suggest they shouldn't be merged
     fn has_conflicting_characteristics(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
         let hostname_match = !device1.hostname.is_empty()
@@ -1133,8 +1144,12 @@ impl DeviceInfo {
             && device1.device_vendor != device2.device_vendor;
 
         let mac_conflict = if safe_hostname_match {
-            // Safe hostname match - no MAC conflict even if different
-            false
+            // A specific hostname explains away a MAC that could have rotated
+            // (locally administered), but never two disjoint sets of burned-in
+            // MACs. mDNS hands an old tenant's hostname to whoever inherits its
+            // address, so letting the name win here merged the new host into
+            // the old record, ports and all.
+            Self::has_universal_mac_conflict(device1, device2)
         } else {
             // A differing MAC is evidence of a distinct physical device whether or not
             // we managed to resolve a vendor for either side. Gating this on vendor
@@ -1300,9 +1315,19 @@ impl DeviceInfo {
 
     // Check if a hostname-based merge is safe
     fn is_safe_hostname_merge(device1: &DeviceInfo, device2: &DeviceInfo) -> bool {
-        let _ = device2;
         // Allow hostname merge if:
         // 1. the hostname is very specific (not a generic one)
+        // 2. the two records do not carry disjoint burned-in MACs -- a name is
+        //    weaker evidence than hardware (see has_universal_mac_conflict)
+        if Self::has_universal_mac_conflict(device1, device2) {
+            warn!(
+                "Unsafe hostname merge: {} is claimed by records with disjoint universally administered MACs ({:?} vs {:?}) - aborting merge",
+                device1.hostname,
+                device1.get_mac_address(),
+                device2.get_mac_address()
+            );
+            return false;
+        }
 
         let specific_hostname = Self::is_specific_hostname(&device1.hostname);
         if specific_hostname {
@@ -3186,7 +3211,12 @@ mod tests {
 
     #[test]
     fn test_merge_vec_specific_hostname_different_macs_same_vendor() {
-        // Devices with the same specific hostname and vendor should merge even if MACs differ
+        // Two records with the same specific hostname but disjoint burned-in
+        // (universally administered) MACs are two NICs. The name alone used to
+        // merge them; since mDNS hands an old tenant's hostname to whoever
+        // inherits its address, that merged unrelated hosts, ports and all.
+        // The cost is that a multi-NIC laptop seen on both interfaces with no
+        // shared address stays two records until an address overlap ties them.
         let mac_primary = MacAddr6::new(0x00, 0x1C, 0x42, 0x7F, 0xAA, 0x01);
         let mac_secondary = MacAddr6::new(0x00, 0x1C, 0x42, 0x7F, 0xAA, 0x02);
 
@@ -3214,25 +3244,16 @@ mod tests {
 
         assert_eq!(
             devices.len(),
-            1,
-            "Devices with the same specific hostname should merge despite differing MACs"
+            2,
+            "A hostname match must not override disjoint universally administered MACs"
         );
-        assert_eq!(
-            devices[0].mac_address,
-            Some(mac_secondary),
-            "Latest MAC address should be the primary one"
-        );
-        assert!(
-            devices[0]
-                .mac_addresses
-                .iter()
-                .any(|e| e.address == mac_primary)
-                && devices[0]
-                    .mac_addresses
-                    .iter()
-                    .any(|e| e.address == mac_secondary),
-            "All observed MAC addresses should be retained after merge"
-        );
+        assert_eq!(devices[0].mac_address, Some(mac_primary));
+        assert_eq!(devices[1].mac_address, Some(mac_secondary));
+
+        // Same through dedup_vec, the other merge entry point.
+        let mut both = devices.clone();
+        DeviceInfo::dedup_vec(&mut both);
+        assert_eq!(both.len(), 2);
     }
 
     #[test]
@@ -5895,6 +5916,62 @@ mod tests {
         let limit = max_reasonable_open_ports_for_probed(65536);
         assert!(!ourselves.strip_anomalous_open_ports_with_limit(limit));
         assert_eq!(ourselves.open_ports.len(), 2);
+    }
+
+    #[test]
+    fn test_hostname_merge_with_rotating_mac_still_allowed() {
+        // The UAA guard is only about burned-in MACs: a locally administered
+        // (privacy) MAC can rotate, so a specific hostname still ties it to
+        // the record holding the hardware address.
+        let now = Utc::now();
+        let mut devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 90))));
+            d.hostname = "sarah-iphone-13.local".to_string();
+            d.set_mac_address_with_timestamp(
+                MacAddr6::new(0x00, 0x1b, 0x63, 0x41, 0x90, 0xA4),
+                vec![],
+                now,
+            );
+            d
+        }];
+        let new_devices = vec![{
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 91))));
+            d.hostname = "sarah-iphone-13.local".to_string();
+            d.set_mac_address_with_timestamp(
+                MacAddr6::new(0x02, 0x12, 0x34, 0x56, 0x78, 0x9A),
+                vec![],
+                now,
+            );
+            d
+        }];
+        DeviceInfo::merge_vec(&mut devices, &new_devices);
+        assert_eq!(devices.len(), 1);
+    }
+
+    #[test]
+    fn test_universal_mac_conflict_is_not_overridden_by_hostname() {
+        let now = Utc::now();
+        let mut a = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 92))));
+        a.hostname = "drakarys.local.example".to_string();
+        a.set_mac_address_with_timestamp(
+            MacAddr6::new(0x00, 0x11, 0x32, 0xaa, 0xbb, 0x01),
+            vec![],
+            now,
+        );
+        let mut b = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 92))));
+        b.hostname = a.hostname.clone();
+        b.set_mac_address_with_timestamp(
+            MacAddr6::new(0x00, 0x1b, 0x63, 0xaa, 0xbb, 0x02),
+            vec![],
+            now,
+        );
+        assert!(DeviceInfo::has_universal_mac_conflict(&a, &b));
+        assert!(DeviceInfo::has_conflicting_characteristics(&a, &b));
+
+        // No MAC on one side: the name is all there is, no conflict.
+        let c = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 92))));
+        assert!(!DeviceInfo::has_universal_mac_conflict(&a, &c));
+        assert!(!DeviceInfo::has_conflicting_characteristics(&a, &c));
     }
 }
 
