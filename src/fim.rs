@@ -25,14 +25,14 @@ use tracing::{debug, error, info, warn};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
 /// Negative (miss) entries live longer: Keychain atomic-rename staging leaves
-/// no open FD, so re-probing every 1 Hz drain just burns `lsof` / RM budget.
+/// no open FD, so re-probing every 1 Hz drain just burns `lsof` / probe budget.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_NEGATIVE_CACHE_TTL_SECS: u64 = 60;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_MAX_ENTRIES: usize = 5_000;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_PRUNE_INTERVAL: u64 = 500;
-/// Hard cap on live OS probes (`lsof` / Restart Manager) per drain-time
+/// Hard cap on live OS probes (`lsof` / open-handle queries) per drain-time
 /// backfill pass. Candidate selection can still examine up to
 /// [`FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT`] events, but Tier-3 work is
 /// bounded so a Keychain rename storm cannot stall `get_file_events` for
@@ -43,6 +43,13 @@ pub const FIM_BACKFILL_TIER3_PROBE_LIMIT: usize = 4;
 const FIM_HASH_WORK_QUEUE_CAPACITY: usize = 2_048;
 #[cfg(target_os = "windows")]
 const FIM_HASH_QUIET_DELAY_MS: u64 = 250;
+#[cfg(target_os = "windows")]
+const FIM_ATTRIBUTION_WORK_QUEUE_CAPACITY: usize = 2_048;
+/// When a temp event without a writer re-reads the ETW table: the kernel
+/// event of a fresh write is usually delivered after the file monitor's
+/// notification, and a table entry lives `l7_etw::FILE_ATTR_TTL_SECS` (30 s).
+#[cfg(target_os = "windows")]
+const FIM_ATTRIBUTION_RETRY_DELAYS_MS: [u64; 2] = [2_000, 8_000];
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 struct CachedAttribution {
@@ -185,6 +192,8 @@ pub struct FimWatcher {
     last_get_file_events_fetch_timestamp: Arc<TokioRwLock<DateTime<Utc>>>,
     #[cfg(target_os = "windows")]
     _hash_worker: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "windows")]
+    _attribution_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 pub const FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT: usize = 128;
@@ -202,6 +211,14 @@ impl FimWatcher {
         let hash_worker = Some(
             spawn_fim_hash_worker(store.clone(), running.clone(), hash_rx)
                 .context("Failed to spawn FIM hash worker")?,
+        );
+        #[cfg(target_os = "windows")]
+        let (attribution_tx, attribution_rx) =
+            std::sync::mpsc::sync_channel(FIM_ATTRIBUTION_WORK_QUEUE_CAPACITY);
+        #[cfg(target_os = "windows")]
+        let attribution_worker = Some(
+            spawn_fim_attribution_worker(store.clone(), running.clone(), attribution_rx)
+                .context("Failed to spawn FIM attribution worker")?,
         );
 
         #[cfg(target_os = "linux")]
@@ -241,6 +258,8 @@ impl FimWatcher {
         let explicit_clone = explicit_watch_roots.clone();
         #[cfg(target_os = "windows")]
         let hash_tx_clone = hash_tx.clone();
+        #[cfg(target_os = "windows")]
+        let attribution_tx_clone = attribution_tx.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| match result {
                 Ok(event) => {
@@ -276,10 +295,19 @@ impl FimWatcher {
                             } else {
                                 None
                             };
+                            #[cfg(target_os = "windows")]
+                            let attribution_work = fim_attribution_work_item_for_event(
+                                &fim_event,
+                                crate::l7_etw::is_available(),
+                            );
                             store_clone.insert(fim_event);
                             #[cfg(target_os = "windows")]
                             if let Some(hash_work) = hash_work {
                                 queue_fim_hash_work(&hash_tx_clone, hash_work);
+                            }
+                            #[cfg(target_os = "windows")]
+                            if let Some(attribution_work) = attribution_work {
+                                queue_fim_attribution_work(&attribution_tx_clone, attribution_work);
                             }
                         }
                     }
@@ -395,6 +423,8 @@ impl FimWatcher {
             last_get_file_events_fetch_timestamp: Arc::new(TokioRwLock::new(Utc::now())),
             #[cfg(target_os = "windows")]
             _hash_worker: hash_worker,
+            #[cfg(target_os = "windows")]
+            _attribution_worker: attribution_worker,
         })
     }
 
@@ -802,6 +832,132 @@ fn process_fim_hash_work_item(store: &FimEventStore, hash_work: FimHashWorkItem)
     true
 }
 
+/// A temp event still missing its writer, to look up again in the ETW table
+/// once the kernel event has been delivered. Map lookups only: the file is
+/// never opened (see `best_effort_process_attribution`, tier 3).
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct FimAttributionWorkItem {
+    uid: String,
+    path: String,
+    attempt: usize,
+    ready_at: std::time::Instant,
+}
+
+#[cfg(target_os = "windows")]
+fn fim_attribution_work_item_for_event(
+    event: &FimEvent,
+    etw_available: bool,
+) -> Option<FimAttributionWorkItem> {
+    if !etw_available
+        || event.is_sensitive
+        || event.event_type == FimEventType::Delete
+        || event.process_name.is_some()
+        || event.process_path.is_some()
+        || !should_attempt_process_attribution(Path::new(&event.path), false, event.event_type)
+    {
+        return None;
+    }
+    Some(FimAttributionWorkItem {
+        uid: event.uid.clone(),
+        path: event.path.clone(),
+        attempt: 0,
+        ready_at: std::time::Instant::now()
+            + std::time::Duration::from_millis(FIM_ATTRIBUTION_RETRY_DELAYS_MS[0]),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn queue_fim_attribution_work(
+    tx: &std::sync::mpsc::SyncSender<FimAttributionWorkItem>,
+    work: FimAttributionWorkItem,
+) {
+    match tx.try_send(work) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            debug!("FIM: dropping deferred attribution work item because queue is full");
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            debug!("FIM: dropping deferred attribution work item because worker stopped");
+        }
+    }
+}
+
+/// Looks the item up in the ETW table: `None` when it is done (attributed,
+/// or out of attempts), the item to try again later otherwise.
+#[cfg(target_os = "windows")]
+fn process_fim_attribution_work_item(
+    store: &FimEventStore,
+    work: FimAttributionWorkItem,
+) -> Option<FimAttributionWorkItem> {
+    if let Some((pid, name, proc_path)) = kernel_table_attribution(&work.path) {
+        store.update_process_attribution(&work.uid, Some(name), Some(proc_path), Some(pid));
+        return None;
+    }
+    let (attempt, delay_ms) = next_attribution_retry(work.attempt)?;
+    Some(FimAttributionWorkItem {
+        attempt,
+        ready_at: std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+        ..work
+    })
+}
+
+/// The attempt after `attempt` and how long to wait for it, `None` when the
+/// schedule is exhausted.
+#[cfg(target_os = "windows")]
+fn next_attribution_retry(attempt: usize) -> Option<(usize, u64)> {
+    let next = attempt + 1;
+    let at = *FIM_ATTRIBUTION_RETRY_DELAYS_MS.get(next)?;
+    Some((
+        next,
+        at.saturating_sub(FIM_ATTRIBUTION_RETRY_DELAYS_MS[attempt]),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_fim_attribution_worker(
+    store: Arc<FimEventStore>,
+    running: Arc<AtomicBool>,
+    rx: std::sync::mpsc::Receiver<FimAttributionWorkItem>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("fim-attribution-worker".into())
+        .spawn(move || {
+            let mut pending: Vec<FimAttributionWorkItem> = Vec::new();
+            while running.load(Ordering::SeqCst) {
+                while let Ok(work) = rx.try_recv() {
+                    pending.push(work);
+                }
+                let now = std::time::Instant::now();
+                let next = pending
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, work)| work.ready_at)
+                    .map(|(index, work)| (index, work.ready_at));
+                let wait = match next {
+                    Some((index, ready_at)) if ready_at <= now => {
+                        let work = pending.swap_remove(index);
+                        if let Some(retry) = process_fim_attribution_work_item(&store, work) {
+                            if pending.len() < FIM_ATTRIBUTION_WORK_QUEUE_CAPACITY {
+                                pending.push(retry);
+                            }
+                        }
+                        continue;
+                    }
+                    Some((_, ready_at)) => ready_at
+                        .duration_since(now)
+                        .min(std::time::Duration::from_millis(100)),
+                    None => std::time::Duration::from_millis(100),
+                };
+                match rx.recv_timeout(wait) {
+                    Ok(work) => pending.push(work),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+}
+
 #[cfg(target_os = "windows")]
 fn compute_hash_for_work_item(hash_work: &FimHashWorkItem) -> Option<String> {
     if hash_work.size > hash_work.hash_threshold {
@@ -959,7 +1115,7 @@ fn should_backfill_process_attribution(event: &FimEvent) -> bool {
 
 /// Writer of `path` from the kernel-time attribution table of this platform
 /// (ES on macOS, fanotify on Linux, ETW FileIo on Windows): `(pid, name, path)`.
-/// Cheap map lookups only -- no `lsof`, no Restart Manager.
+/// Cheap map lookups only -- no `lsof`, no open-handle query.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn kernel_table_attribution(path: &str) -> Option<(u32, String, String)> {
     #[cfg(target_os = "macos")]
@@ -1101,7 +1257,16 @@ fn best_effort_process_attribution(
         return (name, proc_path, None);
     }
 
-    // Tier 3: Restart Manager + sysinfo, on the artifact path itself.
+    // A temp event (not sensitive) while the ETW session runs gets no probe:
+    // its producer is usually still at work on the file, and ETW records the
+    // writer at write time. The kernel event often arrives after this
+    // notification, so the watcher queues a deferred table lookup
+    // (`FimAttributionWorkItem`) instead; it never touches the file.
+    if !is_sensitive && crate::l7_etw::is_available() {
+        return (None, None, None);
+    }
+
+    // Tier 3: open-handle holders + sysinfo, on the artifact path itself.
     // Only fires when a process is currently holding an open handle to the
     // file. This works for persistently-open files (e.g. Edge `Cookies`)
     // but misses atomic-rename writers (e.g. Chrome's `LevelDB`/`User Data`
@@ -1115,9 +1280,9 @@ fn best_effort_process_attribution(
         }
     }
 
-    // Tier 3b: parent-directory Restart Manager probe for sensitive events.
+    // Tier 3b: parent-directory open-handle probe for sensitive events.
     //
-    // For sensitive FIM events the cost of an extra RM session is worth
+    // For sensitive FIM events the cost of an extra probe is worth
     // it. Atomic-rename writers (Chrome / Edge / Vivaldi browser
     // profiles, Outlook `.ost`, sqlite WAL, etc.) typically keep the
     // *parent directory* open even after the artifact handle is gone --
@@ -1141,7 +1306,7 @@ fn best_effort_process_attribution(
         let mut current = path.parent();
         let mut hops = 0u32;
         while let Some(parent) = current {
-            // Skip the drive root (`C:\`) -- RM on a volume root would
+            // Skip the drive root (`C:\`) -- a probe on a volume root would
             // attribute every process holding the drive as the writer.
             if parent.parent().is_none() {
                 break;
@@ -1250,76 +1415,99 @@ fn lookup_process_details(
     (process_name, process_path)
 }
 
+/// A process (not this one) holding `path` open, from the file system's own
+/// list of handle holders (`FileProcessIdsUsingFileInformation`), queried
+/// through an attributes-only handle that shares everything.
+///
+/// This replaces Restart Manager, whose `RmGetList` first tests whether a
+/// file is free by opening it for read/write with no sharing. While that
+/// exclusive handle is open, the file's producer cannot open it, and a
+/// rename over it is refused: with EDAMAME protection on, uv's launcher
+/// resource update ("Failed to update Windows PE resources ... Access is
+/// denied") and a Node build ("EBUSY: resource busy or locked") failed that
+/// way on windows-latest. A Process Monitor trace (probe run 36305991060)
+/// showed every exclusive open by edamame_posture.exe coming from
+/// rstrtmgr.dll.
 #[cfg(target_os = "windows")]
 fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
-    use windows::core::PWSTR;
-    use windows::Win32::System::RestartManager::{
-        RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
-    };
+    use std::ffi::c_void;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
 
-    let path_wide: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    // Also opens directories (the tier-3b parent probes).
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_PROCESS_IDS_USING_FILE_INFORMATION: u32 = 47;
+    const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+    const MAX_PIDS: usize = 4_096;
 
-    unsafe {
-        let mut session: u32 = 0;
-        let mut session_key = [0u16; 256]; // CCH_RM_SESSION_KEY + 1
-        if RmStartSession(&mut session, None, PWSTR(session_key.as_mut_ptr())).is_err() {
-            return None;
-        }
-
-        let file_ptr = windows::core::PCWSTR(path_wide.as_ptr());
-        let files = [file_ptr];
-        if RmRegisterResources(session, Some(&files), None, None).is_err() {
-            let _ = RmEndSession(session);
-            return None;
-        }
-
-        let mut needed: u32 = 0;
-        let mut count: u32 = 0;
-        let mut reason: u32 = 0;
-        // First call to get the required buffer size
-        let _ = RmGetList(session, &mut needed, &mut count, None, &mut reason);
-        if needed == 0 {
-            let _ = RmEndSession(session);
-            return None;
-        }
-
-        let mut buf = vec![
-            std::mem::zeroed::<windows::Win32::System::RestartManager::RM_PROCESS_INFO>(
-            );
-            needed as usize
-        ];
-        count = needed;
-        let result = RmGetList(
-            session,
-            &mut needed,
-            &mut count,
-            Some(buf.as_mut_ptr()),
-            &mut reason,
-        );
-        let _ = RmEndSession(session);
-
-        if result.is_err() || count == 0 {
-            return None;
-        }
-
-        let info = &buf[0];
-        let pid = info.Process.dwProcessId;
-        let name_slice = &info.strAppName;
-        let name_len = name_slice
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(name_slice.len());
-        let app_name = if name_len > 0 {
-            Some(String::from_utf16_lossy(&name_slice[..name_len]))
-        } else {
-            None
-        };
-        Some((pid, app_name))
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: usize,
+        information: usize,
     }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationFile(
+            handle: *mut c_void,
+            io_status: *mut IoStatusBlock,
+            info: *mut c_void,
+            len: u32,
+            class: u32,
+        ) -> i32;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+
+    // FILE_PROCESS_IDS_USING_FILE_INFORMATION: a ULONG count, then a
+    // ULONG_PTR array, which starts at the second pointer-sized slot.
+    let mut buffer: Vec<usize> = vec![0; 64];
+    loop {
+        let mut io_status = IoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        let status = unsafe {
+            NtQueryInformationFile(
+                file.as_raw_handle() as *mut c_void,
+                &mut io_status,
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * std::mem::size_of::<usize>()) as u32,
+                FILE_PROCESS_IDS_USING_FILE_INFORMATION,
+            )
+        };
+        if (status == STATUS_INFO_LENGTH_MISMATCH || status == STATUS_BUFFER_OVERFLOW)
+            && buffer.len() <= MAX_PIDS
+        {
+            buffer.resize(buffer.len() * 4, 0);
+            continue;
+        }
+        if status < 0 {
+            return None;
+        }
+        break;
+    }
+    drop(file);
+
+    let count = buffer[0] as u32 as usize;
+    // The query handle is ours, so this process is always on the list.
+    let own_pid = std::process::id() as usize;
+    buffer
+        .iter()
+        .skip(1)
+        .take(count)
+        .copied()
+        .find(|pid| *pid != 0 && *pid != own_pid)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .map(|pid| (pid, None))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1468,7 +1656,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             }
         }
 
-        // Tier 3b: parent-directory Restart Manager probe for sensitive
+        // Tier 3b: parent-directory open-handle probe for sensitive
         // atomic-rename writers (Chrome `User Data`, etc.).
         let mut current = fs_path.parent();
         let mut hops = 0u32;
@@ -2303,6 +2491,81 @@ mod tests {
         let events = store.get_all_events();
         assert_eq!(events.len(), 1);
         assert!(events[0].hash.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    fn attribution_test_event(path: &str, sensitive: bool, event_type: FimEventType) -> FimEvent {
+        let ts = Utc::now();
+        FimEvent {
+            path: path.to_string(),
+            event_type,
+            timestamp: ts,
+            size: Some(1),
+            hash: None,
+            process_name: None,
+            process_path: None,
+            process_pid: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: sensitive,
+            labels: Vec::new(),
+            uid: FimEvent::compute_uid(path, &event_type, &ts),
+            last_modified: ts,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_deferred_attribution_only_for_unattributed_temp_events_under_etw() {
+        let temp = r"C:\Users\runneradmin\AppData\Local\Temp\.tmpAb\uv-trampoline-1.exe";
+        let event = attribution_test_event(temp, false, FimEventType::Create);
+        let work = fim_attribution_work_item_for_event(&event, true).expect("temp event queued");
+        assert_eq!(work.uid, event.uid);
+        assert_eq!(work.attempt, 0);
+
+        // No ETW table to read: nothing to defer.
+        assert!(fim_attribution_work_item_for_event(&event, false).is_none());
+        // Sensitive events keep their probes; deletes and attributed events need none.
+        let sensitive = attribution_test_event(temp, true, FimEventType::Create);
+        assert!(fim_attribution_work_item_for_event(&sensitive, true).is_none());
+        let deleted = attribution_test_event(temp, false, FimEventType::Delete);
+        assert!(fim_attribution_work_item_for_event(&deleted, true).is_none());
+        let mut attributed = attribution_test_event(temp, false, FimEventType::Modify);
+        attributed.process_name = Some("uv.exe".to_string());
+        assert!(fim_attribution_work_item_for_event(&attributed, true).is_none());
+        // Outside the temp roots no attribution is attempted at all.
+        let other = attribution_test_event(
+            r"C:\Users\runneradmin\Documents\notes.txt",
+            false,
+            FimEventType::Modify,
+        );
+        assert!(fim_attribution_work_item_for_event(&other, true).is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_deferred_attribution_retries_on_schedule_then_stops() {
+        let (first, delay) = next_attribution_retry(0).expect("a second attempt");
+        assert_eq!(first, 1);
+        assert_eq!(
+            delay,
+            FIM_ATTRIBUTION_RETRY_DELAYS_MS[1] - FIM_ATTRIBUTION_RETRY_DELAYS_MS[0]
+        );
+        assert!(next_attribution_retry(first).is_none());
+    }
+
+    /// The handle the probe opens is this process's own, so this process is
+    /// always among the holders: it must never be reported as the writer.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_open_handle_probe_skips_this_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("held.txt");
+        let held = std::fs::File::create(&path).expect("create");
+        assert_eq!(lookup_pid_for_path(&path), None);
+        drop(held);
+        assert_eq!(lookup_pid_for_path(&path), None);
+        assert_eq!(lookup_pid_for_path(&dir.path().join("missing.txt")), None);
     }
 
     #[test]

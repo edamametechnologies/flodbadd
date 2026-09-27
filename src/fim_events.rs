@@ -38,7 +38,7 @@ pub struct FimEvent {
     pub process_path: Option<String>,
     /// Writer pid when the attribution source knew the instance (kernel-time
     /// ES / fanotify / ETW FileIo tables, live lsof). `None` = unmeasured
-    /// (cache hits, Restart Manager parent-directory probes). Lets the
+    /// (cache hits, parent-directory open-handle probes). Lets the
     /// detector join the writer to its kernel exec record by pid instead of
     /// by image path (DETECTIONGAPSPLAN-2026-09 Inc 6.4 / N-03).
     /// `#[serde(default)]`: the helper ships events to an app that may be one
@@ -181,7 +181,7 @@ impl FimEventStore {
     /// Selecting at the store layer (instead of taking any missing-attribution
     /// event and filtering later) keeps `/tmp` / explicit-watch churn from
     /// occupying the backfill window and starving Keychain / credential-store
-    /// candidates that need Tier-3 `lsof` / Restart Manager probes.
+    /// candidates that need Tier-3 `lsof` / open-handle probes.
     pub fn get_recent_sensitive_events_missing_process_attribution(
         &self,
         max_events: usize,

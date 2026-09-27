@@ -16,7 +16,7 @@
 //     commonly `\??\C:\...` (NT-DOS device prefix) or
 //     `\\?\C:\...` (long-path Win32 prefix).
 //
-//   * Restart Manager (`RmRegisterResources` / `RmGetList`) consumes
+//   * The open-handle probe (`FileProcessIdsUsingFileInformation`) takes
 //     the plain Win32 form, e.g. `C:\Users\frank\AppData\Local\...`.
 //
 // Cross-source attribution -- e.g. "did this `notify` event match an
