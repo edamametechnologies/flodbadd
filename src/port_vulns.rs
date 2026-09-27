@@ -583,6 +583,7 @@ mod tests {
             banner: "".to_string(),
             service: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         }
     }
 

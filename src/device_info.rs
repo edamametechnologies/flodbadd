@@ -142,6 +142,22 @@ impl Ord for MacAddressEntry {
     }
 }
 
+/// Upper bound on [`DeviceInfo::retracted_ports`]. Entries also age out with
+/// the port-evidence window, so this only bounds a pathological burst.
+pub const MAX_RETRACTED_PORTS: usize = 128;
+
+/// A port this host stopped believing in: it was refused by a local scan, or
+/// it expired without being confirmed open in the port-evidence window.
+///
+/// Remembered so that a report of the same port that is not NEWER than the
+/// retraction -- a community peer still relaying what it saw before, or a
+/// stale duplicate record -- cannot put it back (see [`DeviceInfo::merge`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetractedPort {
+    pub port: u16,
+    pub retracted_at: DateTime<Utc>,
+}
+
 // We should really use HashSets instead of Vec, but we don't in order to make it more usable with FFI
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceInfo {
@@ -180,6 +196,14 @@ pub struct DeviceInfo {
     // `serde(default)` so caches written before this field existed still load.
     #[serde(default)]
     pub last_port_scan: Option<DateTime<Utc>>,
+    // Ports this host retracted (refused or expired) and when; see
+    // `RetractedPort`. Local knowledge only: it is cleared before a record is
+    // shared with peers and ignored on records received from them, and
+    // `skip_serializing_if` keeps it off the wire entirely when empty, so the
+    // gossip payload is unchanged. `serde(default)` because it is persisted in
+    // the lanscan cache and caches written before it existed must still load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retracted_ports: Vec<RetractedPort>,
     // Origin tracking for community sharing
     pub origin_ip: String, // IP of the device that first discovered this device
     pub origin_network: String, // Network identifier of where the device was first discovered
@@ -243,6 +267,7 @@ impl DeviceInfo {
             last_seen: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
             // No port evidence yet -- distinct from "scanned, nothing found".
             last_port_scan: None,
+            retracted_ports: Vec::new(),
             last_seen_community: None,
             community_active: false,
             // Origin tracking for community sharing
@@ -541,7 +566,80 @@ impl DeviceInfo {
             }
         }
 
+        // The remaining stamps only ever get a FUTURE clamp. Epoch is a
+        // legitimate value for them ("never modified", "no port evidence"), and
+        // rewriting it to now would invent evidence. A future value, though, is
+        // exactly what a skewed or hostile peer would send: a future
+        // `last_port_scan` or `last_confirmed` would hold port evidence past its
+        // expiry, and a future `last_modified` would win every user-property
+        // merge (custom name, deleted, dismissed) for as long as it stays ahead.
+        let clamp_future = |ts: DateTime<Utc>| -> (DateTime<Utc>, bool) {
+            if ts > now {
+                (now, true)
+            } else {
+                (ts, false)
+            }
+        };
+        let (clamped, was_modified) = clamp_future(self.last_modified);
+        if was_modified {
+            self.last_modified = clamped;
+            modified = true;
+        }
+        if let Some(ts) = self.last_port_scan {
+            let (clamped, was_modified) = clamp_future(ts);
+            if was_modified {
+                self.last_port_scan = Some(clamped);
+                modified = true;
+            }
+        }
+        if let Some(ts) = self.last_seen_community {
+            let (clamped, was_modified) = clamp_future(ts);
+            if was_modified {
+                self.last_seen_community = Some(clamped);
+                modified = true;
+            }
+        }
+        for port in self.open_ports.iter_mut() {
+            if let Some(ts) = port.last_confirmed {
+                let (clamped, was_modified) = clamp_future(ts);
+                if was_modified {
+                    port.last_confirmed = Some(clamped);
+                    modified = true;
+                }
+            }
+        }
+        for entry in self.retracted_ports.iter_mut() {
+            let (clamped, was_modified) = clamp_future(entry.retracted_at);
+            if was_modified {
+                entry.retracted_at = clamped;
+                modified = true;
+            }
+        }
+
         modified
+    }
+
+    /// Every address this record holds: the primary plus the v4/v6 history.
+    pub fn all_ip_addresses(&self) -> Vec<IpAddr> {
+        let mut ips: Vec<IpAddr> =
+            Vec::with_capacity(1 + self.ip_addresses_v4.len() + self.ip_addresses_v6.len());
+        ips.push(self.ip_address);
+        ips.extend(self.ip_addresses_v4.iter().map(|e| IpAddr::V4(e.address)));
+        ips.extend(self.ip_addresses_v6.iter().map(|e| IpAddr::V6(e.address)));
+        ips.sort_unstable();
+        ips.dedup();
+        ips
+    }
+
+    /// Whether `ip` is the primary address or any address in the history.
+    pub fn holds_ip(&self, ip: &IpAddr) -> bool {
+        if self.ip_address == *ip {
+            return true;
+        }
+        match ip {
+            IpAddr::V4(v4) => self.ip_addresses_v4.iter().any(|e| e.address == *v4),
+            IpAddr::V6(v6) => self.ip_addresses_v6.iter().any(|e| e.address == *v6),
+        }
     }
 
     /// Update primary IP to be the most recently seen address.
@@ -996,6 +1094,28 @@ impl DeviceInfo {
 
     // Combine the devices based on the same criteria as above
     pub fn merge_vec(devices: &mut Vec<DeviceInfo>, new_devices: &Vec<DeviceInfo>) {
+        let _ = Self::merge_vec_tracked(devices, new_devices);
+    }
+
+    /// [`Self::merge_vec`], also reporting where each incoming device landed.
+    ///
+    /// Returns one `(incoming, index)` pair per incoming device AFTER the
+    /// incoming list has been deduplicated, so `incoming` is the union of every
+    /// scanned record that describes one device (all its addresses, all its
+    /// open ports) and `index` is the record in `devices` that absorbed it, or
+    /// the one appended for it. Indices stay valid until `devices` is next
+    /// mutated: the existing list is deduplicated before any index is taken,
+    /// and after that the merge only updates in place or appends.
+    ///
+    /// This is what lets a caller apply per-scan evidence (refusals) to the
+    /// record identity resolution chose, instead of to whichever cached record
+    /// happens to hold the probed address -- after DHCP reuse that is a
+    /// different host.
+    pub fn merge_vec_tracked(
+        devices: &mut Vec<DeviceInfo>,
+        new_devices: &Vec<DeviceInfo>,
+    ) -> Vec<(DeviceInfo, usize)> {
+        let mut landed: Vec<(DeviceInfo, usize)> = Vec::new();
         // Always deduplicate the devices before merging
         DeviceInfo::dedup_vec(devices);
         let mut new_devices = new_devices.clone();
@@ -1010,7 +1130,7 @@ impl DeviceInfo {
         for new_device in new_devices {
             let mut found = false;
 
-            for device in devices.iter_mut() {
+            for (index, device) in devices.iter_mut().enumerate() {
                 // Primary IP address match, only when the address names one host
                 // (see the equivalent guard in dedup_vec).
                 let primary_ip_match = new_device.ip_address == device.ip_address
@@ -1103,6 +1223,7 @@ impl DeviceInfo {
                         device.is_local,
                         device.active
                     );
+                    landed.push((new_device.clone(), index));
                     found = true;
                     break;
                 }
@@ -1111,11 +1232,13 @@ impl DeviceInfo {
             // If no match was found, add the new device
             if !found {
                 devices.push(new_device.clone());
+                landed.push((new_device.clone(), devices.len() - 1));
                 debug!("[merge_vec] New device added: {:?} last_seen: {:?} is_local: {:?} active: {:?}", new_device.get_ip_address(), new_device.last_seen, new_device.is_local, new_device.active);
             }
         }
 
         debug!("Total devices after merge: {}", devices.len());
+        landed
     }
 
     /// Both records carry burned-in (universally administered, non-group)
@@ -1466,11 +1589,56 @@ impl DeviceInfo {
             }
         }
 
+        // Retractions travel with the record they were made on. Union them
+        // first so that the port merge below, and the ports this record already
+        // holds, are both judged against everything either side retracted (two
+        // cached records of one device deduplicating into one). Records from
+        // peers never carry any: they are stripped on share and on receipt.
+        for retraction in new_device.retracted_ports.iter() {
+            device.record_port_retraction(retraction.port, retraction.retracted_at);
+        }
+        if !new_device.retracted_ports.is_empty() {
+            let retracted: HashMap<u16, DateTime<Utc>> = device
+                .retracted_ports
+                .iter()
+                .map(|r| (r.port, r.retracted_at))
+                .collect();
+            device.open_ports.retain(|p| match retracted.get(&p.port) {
+                Some(at) => p.last_confirmed.is_some_and(|c| c > *at),
+                None => true,
+            });
+        }
+
         // Merge open ports (union only — local scans must call
         // `reconcile_open_ports_after_scan` first so closed ports can be pruned).
+        //
+        // A port this record retracted is only re-admitted by a report that
+        // says it was seen open AFTER the retraction. Without that, a peer (or
+        // a stale duplicate record) that still carries what it saw before puts
+        // back, every gossip round, the port our own scan just refused or
+        // expired. A report with no confirmation time at all (a peer on a
+        // version that predates `last_confirmed`) cannot prove it is newer, so
+        // it never re-admits a retracted port.
+        //
+        // `last_confirmed` only moves forward and only on an explicit
+        // confirmation: a report without one never refreshes the port's clock,
+        // so relaying an old sighting cannot keep a port alive.
         if !new_device.open_ports.is_empty() {
             // We need to do it manually as the services or banners might be different as it can include timestamps
             for new_port in new_device.open_ports.iter() {
+                if let Some(retracted_at) = device.port_retracted_at(new_port.port) {
+                    if new_port.last_confirmed.is_none_or(|c| c <= retracted_at) {
+                        debug!(
+                            "[merge] Ignoring port {} for {:?}: retracted at {}, reported confirmation {:?} is not newer",
+                            new_port.port,
+                            device.get_ip_address(),
+                            retracted_at,
+                            new_port.last_confirmed
+                        );
+                        continue;
+                    }
+                    device.clear_port_retraction(new_port.port);
+                }
                 let mut found = false;
                 for existing_port in device.open_ports.iter_mut() {
                     if existing_port.port == new_port.port {
@@ -1482,17 +1650,28 @@ impl DeviceInfo {
                         } else {
                             new_port.dismissed
                         };
+                        // Option's ordering puts None first, so this keeps the
+                        // newer of two confirmations and never regresses to None.
+                        let last_confirmed =
+                            existing_port.last_confirmed.max(new_port.last_confirmed);
                         // Use the latest info
                         *existing_port = new_port.clone();
                         // Restore the dismissed flag from the more recent source
                         existing_port.dismissed = dismissed;
+                        existing_port.last_confirmed = last_confirmed;
                         found = true;
                         break;
                     }
                 }
                 // If no match was found, add the new port
                 if !found {
-                    device.open_ports.push(new_port.clone());
+                    let mut port = new_port.clone();
+                    // A report without a per-port time is at best as fresh as the
+                    // reporter's own port evidence for the device.
+                    if port.last_confirmed.is_none() {
+                        port.last_confirmed = new_device.last_port_scan;
+                    }
+                    device.open_ports.push(port);
                 }
             }
 
@@ -1664,6 +1843,16 @@ impl DeviceInfo {
     ///
     /// Per-port `dismissed` is preserved for survivors.
     ///
+    /// Both inputs are for the whole device, not for one of its addresses: the
+    /// caller unions the opens and the refusals over every address of the
+    /// device it probed. A port open on any address survives a refusal on
+    /// another (`open_this_scan` wins), so a service bound to one interface is
+    /// not retracted by the RST another interface sends.
+    ///
+    /// Every port seen open is stamped `last_confirmed = now`; every port this
+    /// retracts is remembered in [`Self::retracted_ports`] so a stale report of
+    /// it cannot merge it back.
+    ///
     /// Also stamps [`Self::last_port_scan`] when this scan produced at least one
     /// definite verdict -- an open port or a refusal. A pass where the target was
     /// silent on everything it was asked deliberately does *not* stamp: we learned
@@ -1674,8 +1863,13 @@ impl DeviceInfo {
         open_this_scan: &[PortInfo],
         definitely_closed: &HashSet<u16>,
     ) {
+        // Freeze any legacy port's confirmation at the evidence the record had
+        // BEFORE this scan re-stamps `last_port_scan`; afterwards the fallback
+        // would read as "confirmed just now" for a port this scan never saw.
+        self.backfill_port_confirmations();
+        let now = Utc::now();
         if !open_this_scan.is_empty() || !definitely_closed.is_empty() {
-            self.last_port_scan = Some(Utc::now());
+            self.last_port_scan = Some(now);
         }
 
         let previous_dismissed: HashMap<u16, bool> = self
@@ -1696,15 +1890,82 @@ impl DeviceInfo {
             if let Some(dismissed) = previous_dismissed.get(&port.port) {
                 port.dismissed = *dismissed;
             }
+            port.last_confirmed = Some(now);
         }
+        // The same port can arrive once per probed address.
+        next.sort_by(|a, b| a.port.cmp(&b.port));
+        next.dedup_by(|a, b| a.port == b.port);
 
         // A fresh open verdict supersedes the carried-forward entry for the same
         // port, so the service name and banner reflect this scan.
         let open_ports_set: HashSet<u16> = next.iter().map(|p| p.port).collect();
+        for port in open_ports_set.iter() {
+            self.clear_port_retraction(*port);
+        }
+        let retracted: Vec<u16> = self
+            .open_ports
+            .iter()
+            .map(|p| p.port)
+            .filter(|port| definitely_closed.contains(port) && !open_ports_set.contains(port))
+            .collect();
+        for port in retracted {
+            self.record_port_retraction(port, now);
+        }
         carried.retain(|p| !open_ports_set.contains(&p.port));
         next.extend(carried);
         next.sort_by(|a, b| a.port.cmp(&b.port));
         self.open_ports = next;
+    }
+
+    /// Give every port that has no `last_confirmed` (a cache or peer record
+    /// written before the field existed) the device's own port-evidence time.
+    ///
+    /// Materialised once rather than read through as a fallback, because the
+    /// device stamp keeps moving with its other ports: a fallback would make a
+    /// legacy port that has gone silent look confirmed on every scan and never
+    /// expire -- the exact defect per-port expiry exists to fix. Frozen here,
+    /// it expires one window after the upgrade unless a scan sees it open.
+    pub fn backfill_port_confirmations(&mut self) {
+        let reference = self.last_port_scan.unwrap_or(self.last_seen);
+        for port in self.open_ports.iter_mut() {
+            if port.last_confirmed.is_none() {
+                port.last_confirmed = Some(reference);
+            }
+        }
+    }
+
+    /// When this record retracted `port`, if it did.
+    pub fn port_retracted_at(&self, port: u16) -> Option<DateTime<Utc>> {
+        self.retracted_ports
+            .iter()
+            .find(|r| r.port == port)
+            .map(|r| r.retracted_at)
+    }
+
+    /// Remember that `port` was retracted at `at` (keeping the later of two
+    /// retractions), bounded to [`MAX_RETRACTED_PORTS`] most recent entries.
+    pub fn record_port_retraction(&mut self, port: u16, at: DateTime<Utc>) {
+        match self.retracted_ports.iter_mut().find(|r| r.port == port) {
+            Some(existing) => {
+                if at > existing.retracted_at {
+                    existing.retracted_at = at;
+                }
+            }
+            None => self.retracted_ports.push(RetractedPort {
+                port,
+                retracted_at: at,
+            }),
+        }
+        if self.retracted_ports.len() > MAX_RETRACTED_PORTS {
+            self.retracted_ports
+                .sort_by(|a, b| b.retracted_at.cmp(&a.retracted_at));
+            self.retracted_ports.truncate(MAX_RETRACTED_PORTS);
+        }
+    }
+
+    /// Forget a retraction because the port has since been confirmed open.
+    pub fn clear_port_retraction(&mut self, port: u16) {
+        self.retracted_ports.retain(|r| r.port != port);
     }
 
     /// Clear `open_ports` when the count exceeds `limit`.
@@ -1765,27 +2026,76 @@ impl DeviceInfo {
     /// has nothing left to dismiss. A stamp in the future (clock skew) yields a
     /// negative age and is kept.
     ///
+    /// The device-level stamp alone is not enough, though: it is refreshed by
+    /// ANY verdict, so a port that starts being silently dropped (a firewall
+    /// rule, a service moved behind a filter) while its neighbours keep
+    /// answering would be carried forever. So each surviving port is also aged
+    /// on its own `last_confirmed` against the same `max_age`, and dropped when
+    /// no scan has seen it open in that window. Ports that survive keep their
+    /// `dismissed` flag. A port with no `last_confirmed` is first backfilled
+    /// ([`Self::backfill_port_confirmations`]).
+    ///
+    /// Every port dropped here is remembered in [`Self::retracted_ports`], and
+    /// retractions older than `max_age` are forgotten: by then any report of the
+    /// port that predates the retraction has itself aged past the window.
+    ///
     /// Returns true when anything was cleared.
     pub fn expire_stale_port_evidence(&mut self, max_age: chrono::Duration) -> bool {
+        let now = Utc::now();
+        let retractions_before = self.retracted_ports.len();
+        self.retracted_ports
+            .retain(|r| now.signed_duration_since(r.retracted_at) <= max_age);
+        let mut changed = self.retracted_ports.len() != retractions_before;
+
         if self.open_ports.is_empty() && self.last_port_scan.is_none() {
-            return false;
+            return changed;
         }
         let reference = self.last_port_scan.unwrap_or(self.last_seen);
-        if Utc::now().signed_duration_since(reference) <= max_age {
-            return false;
+        if now.signed_duration_since(reference) > max_age {
+            if !self.open_ports.is_empty() {
+                info!(
+                    "Expiring {} open port(s) on {:?}: no port verdict since {}",
+                    self.open_ports.len(),
+                    self.get_ip_address(),
+                    reference
+                );
+            }
+            let expired: Vec<u16> = self.open_ports.iter().map(|p| p.port).collect();
+            for port in expired {
+                self.record_port_retraction(port, now);
+            }
+            self.open_ports.clear();
+            self.non_std_ports = false;
+            self.last_port_scan = None;
+            return true;
         }
-        if !self.open_ports.is_empty() {
-            info!(
-                "Expiring {} open port(s) on {:?}: no port verdict since {}",
-                self.open_ports.len(),
-                self.get_ip_address(),
-                reference
-            );
+
+        self.backfill_port_confirmations();
+        let expired: Vec<u16> = self
+            .open_ports
+            .iter()
+            .filter(|p| {
+                p.last_confirmed
+                    .is_some_and(|c| now.signed_duration_since(c) > max_age)
+            })
+            .map(|p| p.port)
+            .collect();
+        if expired.is_empty() {
+            return changed;
         }
-        self.open_ports.clear();
-        self.non_std_ports = false;
-        self.last_port_scan = None;
-        true
+        info!(
+            "Expiring port(s) {:?} on {:?}: not confirmed open within {}s",
+            expired,
+            self.get_ip_address(),
+            max_age.num_seconds()
+        );
+        self.open_ports.retain(|p| !expired.contains(&p.port));
+        for port in expired {
+            self.record_port_retraction(port, now);
+        }
+        self.non_std_ports = self.open_ports.iter().any(|p| p.service.is_empty());
+        changed = true;
+        changed
     }
 
     pub fn clear(&mut self) {
@@ -2298,6 +2608,7 @@ mod tests {
             service: "http".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // Create a device representing a community detection with additional ports
@@ -2316,6 +2627,7 @@ mod tests {
             service: "https".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // Merge the community device into the local device
@@ -2358,6 +2670,7 @@ mod tests {
             service: "custom-admin".to_string(),
             banner: "old-banner".to_string(),
             dismissed: true,
+            last_confirmed: None,
         });
 
         // Fresh scan result for the same port with new metadata (dismissed flag false by default)
@@ -2373,6 +2686,7 @@ mod tests {
             service: "https-alt".to_string(),
             banner: "new-banner".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         DeviceInfo::merge(&mut existing_device, &refreshed_device);
@@ -2418,6 +2732,7 @@ mod tests {
             service: "https-alt".to_string(),
             banner: "new-banner".to_string(),
             dismissed: false, // User explicitly undismissed this port
+            last_confirmed: None,
         });
 
         // Old data (e.g., from a background task clone) where the port was still dismissed
@@ -2433,6 +2748,7 @@ mod tests {
             service: "custom-admin".to_string(),
             banner: "old-banner".to_string(),
             dismissed: true, // Old state where port was dismissed
+            last_confirmed: None,
         });
 
         DeviceInfo::merge(&mut existing_device, &old_data_device);
@@ -2483,6 +2799,7 @@ mod tests {
             service: "http-alt".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // Create a vector of community devices
@@ -2583,6 +2900,7 @@ mod tests {
             service: "http".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // Step 2: Simulate mDNS discovery (happens after initial scan)
@@ -2634,6 +2952,7 @@ mod tests {
             service: "https".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // Merge the rescan device
@@ -2706,6 +3025,7 @@ mod tests {
             service: "http".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // 2. Create a device as if detected by another community member
@@ -2723,6 +3043,7 @@ mod tests {
             service: "https".to_string(),
             banner: "".to_string(),
             dismissed: false,
+            last_confirmed: None,
         });
 
         // 3. Simulate the process in community_lan.rs's LanDeviceShared event
@@ -3018,6 +3339,7 @@ mod tests {
                     service: "ssh".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 80,
@@ -3025,6 +3347,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -3045,6 +3368,7 @@ mod tests {
                     service: "https".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 8080,
@@ -3052,6 +3376,7 @@ mod tests {
                     service: "http-alt".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -3082,6 +3407,7 @@ mod tests {
                 service: "http".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3096,6 +3422,7 @@ mod tests {
                 service: "https".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3127,6 +3454,7 @@ mod tests {
                 service: "ssh".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3145,6 +3473,7 @@ mod tests {
                 service: "http".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3174,6 +3503,7 @@ mod tests {
                 service: "iphone-sync".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3189,6 +3519,7 @@ mod tests {
                 service: "mdns".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3272,6 +3603,7 @@ mod tests {
                 service: "ssh".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3289,6 +3621,7 @@ mod tests {
                 service: "http".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3322,6 +3655,7 @@ mod tests {
                     service: "ssh".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 80,
@@ -3329,6 +3663,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -3349,6 +3684,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 443,
@@ -3356,6 +3692,7 @@ mod tests {
                     service: "https".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -3461,6 +3798,7 @@ mod tests {
                     service: "ssh".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 }];
                 d
             },
@@ -3478,6 +3816,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 }];
                 d
             },
@@ -3542,6 +3881,7 @@ mod tests {
                 service: "ssh".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3556,6 +3896,7 @@ mod tests {
                 service: "http".to_string(),
                 banner: "".to_string(),
                 dismissed: false,
+                last_confirmed: None,
             }];
             d
         }];
@@ -3586,6 +3927,7 @@ mod tests {
                     service: "dns".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 80,
@@ -3593,6 +3935,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "nginx".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 443,
@@ -3600,6 +3943,7 @@ mod tests {
                     service: "https".to_string(),
                     banner: "nginx".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -3617,6 +3961,7 @@ mod tests {
                     service: "ssh".to_string(),
                     banner: "OpenSSH".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 80,
@@ -3624,6 +3969,7 @@ mod tests {
                     service: "http".to_string(),
                     banner: "lighttpd".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
                 PortInfo {
                     port: 111,
@@ -3631,6 +3977,7 @@ mod tests {
                     service: "sunrpc".to_string(),
                     banner: "".to_string(),
                     dismissed: false,
+                    last_confirmed: None,
                 },
             ];
             d
@@ -5532,6 +5879,7 @@ mod tests {
             service: String::new(),
             banner: String::new(),
             dismissed,
+            last_confirmed: None,
         }
     }
 
@@ -5713,8 +6061,9 @@ mod tests {
     #[test]
     fn test_expire_stale_port_evidence_keeps_recently_verified_record() {
         // Any definite verdict re-stamps the device, so a host that is scanned
-        // every cycle -- even throttled to a partial sweep -- never expires,
-        // however old its individual ports are. Ports and dismissals survive.
+        // every cycle -- even throttled to a partial sweep -- never expires as a
+        // whole. Its ports here have no per-port stamp (a legacy cache), so they
+        // are backfilled from the device stamp and survive, dismissals included.
         let max_age = chrono::Duration::days(7);
         let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))));
         device.open_ports = vec![make_port(22, true), make_port(80, false)];
@@ -5918,6 +6267,340 @@ mod tests {
         assert_eq!(ourselves.open_ports.len(), 2);
     }
 
+    fn port_confirmed(port: u16, dismissed: bool, at: DateTime<Utc>) -> PortInfo {
+        let mut p = make_port(port, dismissed);
+        p.last_confirmed = Some(at);
+        p
+    }
+
+    #[test]
+    fn test_expire_drops_filtered_port_while_neighbours_answer() {
+        // drakarys.local: TCP 53/853 became firewall-filtered (probes time out,
+        // never refused) while 80 kept answering. The device stamp stays fresh
+        // through 80, so only a per-port clock can retire 53/853.
+        let max_age = chrono::Duration::days(7);
+        let now = Utc::now();
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 254))));
+        device.open_ports = vec![
+            port_confirmed(53, false, now - max_age - chrono::Duration::hours(1)),
+            port_confirmed(80, true, now - chrono::Duration::hours(1)),
+            port_confirmed(853, false, now - max_age - chrono::Duration::days(2)),
+        ];
+        device.non_std_ports = true;
+        device.last_port_scan = Some(now - chrono::Duration::minutes(5));
+
+        assert!(device.expire_stale_port_evidence(max_age));
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![80]);
+        assert!(
+            device.open_ports[0].dismissed,
+            "survivors keep their dismissal"
+        );
+        assert!(
+            device.non_std_ports,
+            "recomputed from the survivors (80 has no service name)"
+        );
+        assert!(
+            device.last_port_scan.is_some(),
+            "device evidence is still fresh"
+        );
+        assert!(device.port_retracted_at(53).is_some());
+        assert!(device.port_retracted_at(853).is_some());
+        assert!(device.port_retracted_at(80).is_none());
+
+        // Idempotent.
+        assert!(!device.expire_stale_port_evidence(max_age));
+    }
+
+    #[test]
+    fn test_reconcile_stamps_confirmation_and_freezes_legacy_ports() {
+        // A cache written before per-port stamps: 53 has no last_confirmed. The
+        // scan sees only 80. 53 must be frozen at the evidence the record had
+        // BEFORE this scan, not at the scan's own stamp, or it would read as
+        // confirmed forever.
+        let previous_scan = Utc::now() - chrono::Duration::days(3);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        device.open_ports = vec![make_port(53, true)];
+        device.last_port_scan = Some(previous_scan);
+
+        let before = Utc::now();
+        device.reconcile_open_ports_after_scan(&[make_port(80, false)], &HashSet::new());
+
+        let p53 = device.open_ports.iter().find(|p| p.port == 53).unwrap();
+        assert_eq!(p53.last_confirmed, Some(previous_scan));
+        assert!(p53.dismissed);
+        let p80 = device.open_ports.iter().find(|p| p.port == 80).unwrap();
+        assert!(p80.last_confirmed.unwrap() >= before);
+        assert!(device.last_port_scan.unwrap() >= before);
+
+        // With a window shorter than 53's age it goes, 80 stays.
+        assert!(device.expire_stale_port_evidence(chrono::Duration::days(2)));
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![80]);
+    }
+
+    #[test]
+    fn test_reconcile_open_on_any_address_beats_refusal_on_another() {
+        // The caller unions opens and refusals across every address of the
+        // device. A port open on one address and refused on another is open.
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 60))));
+        device.open_ports = vec![make_port(22, false), make_port(80, false)];
+        let refused: HashSet<u16> = [22, 80].into_iter().collect();
+        // 22 reported twice (once per address that answered).
+        device.reconcile_open_ports_after_scan(
+            &[make_port(22, false), make_port(22, false)],
+            &refused,
+        );
+        let ports: Vec<u16> = device.open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec![22]);
+        assert!(device.port_retracted_at(80).is_some());
+        assert!(device.port_retracted_at(22).is_none());
+    }
+
+    #[test]
+    fn test_merge_peer_cannot_resurrect_refused_port() {
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 70))));
+        device.open_ports = vec![make_port(21, false), make_port(443, false)];
+        let refused: HashSet<u16> = [21].into_iter().collect();
+        device.reconcile_open_ports_after_scan(&[make_port(443, false)], &refused);
+        let retracted_at = device.port_retracted_at(21).expect("refusal remembered");
+
+        // A peer on an older version: no per-port time, but a fresh device
+        // stamp. It cannot prove it saw 21 after we retracted it.
+        let mut legacy_peer = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 70))));
+        legacy_peer.open_ports = vec![make_port(21, false)];
+        legacy_peer.last_port_scan = Some(Utc::now());
+        DeviceInfo::merge(&mut device, &legacy_peer);
+        assert!(device.open_ports.iter().all(|p| p.port != 21));
+
+        // A peer relaying a sighting from before the retraction.
+        let mut stale_peer = legacy_peer.clone();
+        stale_peer.open_ports = vec![port_confirmed(
+            21,
+            false,
+            retracted_at - chrono::Duration::hours(1),
+        )];
+        DeviceInfo::merge(&mut device, &stale_peer);
+        assert!(device.open_ports.iter().all(|p| p.port != 21));
+
+        // A peer that saw it open after we retracted it is new evidence.
+        let mut fresh_peer = legacy_peer.clone();
+        fresh_peer.open_ports = vec![port_confirmed(
+            21,
+            false,
+            retracted_at + chrono::Duration::seconds(1),
+        )];
+        DeviceInfo::merge(&mut device, &fresh_peer);
+        assert!(device.open_ports.iter().any(|p| p.port == 21));
+        assert!(device.port_retracted_at(21).is_none());
+    }
+
+    #[test]
+    fn test_merge_peer_cannot_resurrect_expired_port() {
+        let max_age = chrono::Duration::days(7);
+        let now = Utc::now();
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 71))));
+        device.open_ports = vec![
+            port_confirmed(53, false, now - max_age - chrono::Duration::days(1)),
+            port_confirmed(80, false, now),
+        ];
+        device.last_port_scan = Some(now);
+        assert!(device.expire_stale_port_evidence(max_age));
+
+        let mut peer = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 71))));
+        peer.open_ports = vec![port_confirmed(
+            53,
+            false,
+            now - max_age - chrono::Duration::days(1),
+        )];
+        peer.last_port_scan = Some(now);
+        DeviceInfo::merge(&mut device, &peer);
+        assert!(device.open_ports.iter().all(|p| p.port != 53));
+    }
+
+    #[test]
+    fn test_merge_report_without_confirmation_never_refreshes_port_clock() {
+        let t0 = Utc::now() - chrono::Duration::days(5);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 72))));
+        device.open_ports = vec![port_confirmed(8080, false, t0)];
+
+        let mut peer = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 72))));
+        peer.open_ports = vec![make_port(8080, false)];
+        peer.last_port_scan = Some(Utc::now());
+        DeviceInfo::merge(&mut device, &peer);
+        assert_eq!(device.open_ports[0].last_confirmed, Some(t0));
+
+        peer.open_ports = vec![port_confirmed(8080, false, t0 - chrono::Duration::days(1))];
+        DeviceInfo::merge(&mut device, &peer);
+        assert_eq!(
+            device.open_ports[0].last_confirmed,
+            Some(t0),
+            "never regresses"
+        );
+
+        let t1 = Utc::now();
+        peer.open_ports = vec![port_confirmed(8080, false, t1)];
+        DeviceInfo::merge(&mut device, &peer);
+        assert_eq!(device.open_ports[0].last_confirmed, Some(t1));
+    }
+
+    #[test]
+    fn test_merge_new_peer_port_without_confirmation_takes_peer_device_stamp() {
+        let peer_scan = Utc::now() - chrono::Duration::hours(2);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 73))));
+        let mut peer = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 73))));
+        peer.open_ports = vec![make_port(5000, false)];
+        peer.last_port_scan = Some(peer_scan);
+        DeviceInfo::merge(&mut device, &peer);
+        assert_eq!(device.open_ports[0].last_confirmed, Some(peer_scan));
+    }
+
+    #[test]
+    fn test_merge_unions_retractions_and_drops_port_from_stale_duplicate() {
+        // Two cached records of one device deduplicate: one saw 139 refused,
+        // the other still carries 139 from before. The retraction wins.
+        let now = Utc::now();
+        let mut fresh = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 74))));
+        fresh.open_ports = vec![port_confirmed(139, false, now - chrono::Duration::days(2))];
+        let mut other = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 74))));
+        other.record_port_retraction(139, now - chrono::Duration::days(1));
+        DeviceInfo::merge(&mut fresh, &other);
+        assert!(fresh.open_ports.is_empty());
+        assert!(fresh.port_retracted_at(139).is_some());
+    }
+
+    #[test]
+    fn test_retractions_are_bounded_and_age_out() {
+        let max_age = chrono::Duration::days(7);
+        let now = Utc::now();
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 75))));
+        for port in 0..(MAX_RETRACTED_PORTS as u16 + 20) {
+            device.record_port_retraction(port, now - chrono::Duration::seconds(port as i64));
+        }
+        assert_eq!(device.retracted_ports.len(), MAX_RETRACTED_PORTS);
+        // The most recent ones are kept.
+        assert!(device.port_retracted_at(0).is_some());
+        assert!(device
+            .port_retracted_at(MAX_RETRACTED_PORTS as u16 + 19)
+            .is_none());
+
+        device.record_port_retraction(9999, now - max_age - chrono::Duration::hours(1));
+        device.expire_stale_port_evidence(max_age);
+        assert!(device.port_retracted_at(9999).is_none());
+        assert!(device.port_retracted_at(0).is_some());
+    }
+
+    #[test]
+    fn test_legacy_cache_records_load_and_retractions_stay_off_the_wire() {
+        // A PortInfo / DeviceInfo written before these fields existed.
+        let port: PortInfo = serde_json::from_str(
+            r#"{"port":53,"protocol":"TCP","service":"domain","banner":"","dismissed":true}"#,
+        )
+        .expect("legacy PortInfo loads");
+        assert_eq!(port.last_confirmed, None);
+        assert!(port.dismissed);
+
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 76))));
+        let json = serde_json::to_value(&device).unwrap();
+        assert!(
+            json.get("retracted_ports").is_none(),
+            "an empty retraction list is not serialized, so the gossip payload is unchanged"
+        );
+        let mut legacy = json.clone();
+        legacy.as_object_mut().unwrap().remove("last_port_scan");
+        let back: DeviceInfo = serde_json::from_value(legacy).expect("legacy DeviceInfo loads");
+        assert!(back.retracted_ports.is_empty());
+
+        device.record_port_retraction(21, Utc::now());
+        let json = serde_json::to_string(&device).unwrap();
+        let back: DeviceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.retracted_ports.len(), 1, "persisted in the cache");
+    }
+
+    #[test]
+    fn test_validate_timestamps_clamps_every_future_stamp() {
+        let now = Utc::now();
+        let future = now + chrono::Duration::days(365);
+        let mut device = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 77))));
+        device.first_seen = now - chrono::Duration::days(1);
+        device.last_seen = now - chrono::Duration::hours(1);
+        device.last_port_scan = Some(future);
+        device.last_modified = future;
+        device.open_ports = vec![port_confirmed(22, false, future)];
+        device.record_port_retraction(23, future);
+
+        assert!(device.validate_timestamps());
+        let after = Utc::now();
+        assert!(device.last_port_scan.unwrap() <= after);
+        assert!(device.last_modified <= after);
+        assert!(device.open_ports[0].last_confirmed.unwrap() <= after);
+        assert!(device.retracted_ports[0].retracted_at <= after);
+
+        // Epoch is a legitimate "never" for these and is left alone.
+        let mut untouched = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 78))));
+        untouched.first_seen = now - chrono::Duration::days(1);
+        untouched.last_seen = now - chrono::Duration::hours(1);
+        assert!(!untouched.validate_timestamps());
+        assert_eq!(
+            untouched.last_modified,
+            DateTime::<Utc>::from(std::time::UNIX_EPOCH)
+        );
+    }
+
+    #[test]
+    fn test_future_peer_last_modified_is_clamped_before_it_can_win() {
+        // A peer claiming it edited the record far in the future would win every
+        // later user-property merge. Clamped, a later local edit wins again.
+        let mut local = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 79))));
+        let mut peer = local.clone();
+        peer.custom_name = "peer-name".to_string();
+        peer.last_modified = Utc::now() + chrono::Duration::days(365);
+        peer.validate_timestamps();
+        DeviceInfo::merge(&mut local, &peer);
+        assert_eq!(local.custom_name, "peer-name");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut edit = local.clone();
+        edit.custom_name = "mine".to_string();
+        edit.last_modified = Utc::now();
+        DeviceInfo::merge(&mut local, &edit);
+        assert_eq!(local.custom_name, "mine");
+    }
+
+    #[test]
+    fn test_merge_vec_tracked_reports_absorbing_record_and_dhcp_reuse() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 80));
+        let old_mac = MacAddr6::new(0x00, 0x11, 0x32, 0x00, 0x00, 0x01);
+        let new_mac = MacAddr6::new(0x00, 0x1b, 0x63, 0x00, 0x00, 0x02);
+        let now = Utc::now();
+
+        let mut other = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 81))));
+        other.set_mac_address(MacAddr6::new(0x00, 0x11, 0x32, 0x00, 0x00, 0x09), vec![]);
+        let mut old_tenant = DeviceInfo::new(Some(ip));
+        old_tenant.set_mac_address_with_timestamp(old_mac, vec![], now);
+        old_tenant.open_ports = vec![port_confirmed(21, false, now)];
+        let mut devices = vec![other, old_tenant];
+
+        // Same host again: lands on its own record.
+        let mut again = DeviceInfo::new(Some(ip));
+        again.set_mac_address_with_timestamp(old_mac, vec![], now);
+        let landed = DeviceInfo::merge_vec_tracked(&mut devices, &vec![again]);
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].1, 1);
+
+        // A different NIC now answering at the same address: not merged, and
+        // the index points at the record appended for it, not the old tenant.
+        let mut new_tenant = DeviceInfo::new(Some(ip));
+        new_tenant.set_mac_address_with_timestamp(new_mac, vec![], now);
+        new_tenant.open_ports = vec![port_confirmed(22, false, now)];
+        let landed = DeviceInfo::merge_vec_tracked(&mut devices, &vec![new_tenant]);
+        assert_eq!(devices.len(), 3);
+        assert_eq!(landed[0].1, 2);
+        assert_eq!(devices[2].get_mac_address(), Some(new_mac));
+        let old_ports: Vec<u16> = devices[1].open_ports.iter().map(|p| p.port).collect();
+        assert_eq!(old_ports, vec![21], "old tenant's record untouched");
+    }
+
     #[test]
     fn test_hostname_merge_with_rotating_mac_still_allowed() {
         // The UAA guard is only about burned-in MACs: a locally administered
@@ -5972,6 +6655,17 @@ mod tests {
         let c = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 92))));
         assert!(!DeviceInfo::has_universal_mac_conflict(&a, &c));
         assert!(!DeviceInfo::has_conflicting_characteristics(&a, &c));
+    }
+
+    #[test]
+    fn test_holds_ip_and_all_ip_addresses_cover_secondary_addresses() {
+        let v6: Ipv6Addr = "fe80::1234".parse().unwrap();
+        let mut d = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 93))));
+        d.add_ip_addresses(vec![Ipv4Addr::new(10, 0, 0, 93)], vec![v6]);
+        assert!(d.holds_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 93))));
+        assert!(d.holds_ip(&IpAddr::V6(v6)));
+        assert!(!d.holds_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 94))));
+        assert_eq!(d.all_ip_addresses().len(), 3);
     }
 }
 
