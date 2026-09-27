@@ -1,0 +1,1382 @@
+{
+  "description": "Known LAN devices with realistic fingerprints for flodbadd::profiles::classify_device. vendor is spelled as flodbadd's OUI db (src/oui_db.rs, long name) returns it; empty = randomized/private MAC.",
+  "devices": [
+    {
+      "name": "HP LaserJet Pro M404dn",
+      "source": "Apple Bonjour Printing Specification 1.2.1 (_ipp/_ipps/_pdl-datastream/_printer, _universal._sub._ipp for AirPrint) https://developer.apple.com/bonjour/printing-specification/",
+      "vendor": "HP Inc.",
+      "open_ports": [
+        80,
+        443,
+        631,
+        8080,
+        9100
+      ],
+      "mdns_services": [
+        "HP LaserJet Pro M404dn [4A1B2C]._ipp._tcp.local",
+        "HP LaserJet Pro M404dn [4A1B2C]._ipps._tcp.local",
+        "HP LaserJet Pro M404dn [4A1B2C]._pdl-datastream._tcp.local",
+        "HP LaserJet Pro M404dn [4A1B2C]._uscan._tcp.local",
+        "HP LaserJet Pro M404dn [4A1B2C]._http._tcp.local"
+      ],
+      "hostname": "HPF80DAC4A1B2C",
+      "banners": [
+        "HP HTTP Server; HP LaserJet Pro M404dn"
+      ],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "HP printer, mDNS off (JetDirect only)",
+      "source": "Raw/JetDirect printing listens on TCP 9100, LPD on 515, IPP on 631 (RFC 8011, RFC 1179)",
+      "vendor": "HP Inc.",
+      "open_ports": [
+        80,
+        9100
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "Canon PIXMA TS8350",
+      "source": "Apple Bonjour Printing Specification 1.2.1 (_ipp/_ipps/_pdl-datastream/_printer, _universal._sub._ipp for AirPrint) https://developer.apple.com/bonjour/printing-specification/",
+      "vendor": "Canon Inc.",
+      "open_ports": [
+        80,
+        443,
+        631,
+        8611
+      ],
+      "mdns_services": [
+        "Canon TS8300 series._ipp._tcp.local",
+        "Canon TS8300 series._canon-bjnp1._tcp.local",
+        "Canon TS8300 series._uscan._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "Epson EcoTank ET-2850",
+      "source": "Apple Bonjour Printing Specification 1.2.1 (_ipp/_ipps/_pdl-datastream/_printer, _universal._sub._ipp for AirPrint) https://developer.apple.com/bonjour/printing-specification/",
+      "vendor": "Seiko Epson Corporation",
+      "open_ports": [
+        80,
+        443,
+        515,
+        631,
+        9100
+      ],
+      "mdns_services": [
+        "EPSON ET-2850 Series._ipp._tcp.local",
+        "EPSON ET-2850 Series._pdl-datastream._tcp.local",
+        "EPSON ET-2850 Series._scanner._tcp.local"
+      ],
+      "hostname": "EPSON5D3A1F",
+      "banners": [],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "Brother HL-L2350DW",
+      "source": "Apple Bonjour Printing Specification 1.2.1 (_ipp/_ipps/_pdl-datastream/_printer, _universal._sub._ipp for AirPrint) https://developer.apple.com/bonjour/printing-specification/",
+      "vendor": "Brother industries, LTD.",
+      "open_ports": [
+        80,
+        443,
+        515,
+        631,
+        9100
+      ],
+      "mdns_services": [
+        "Brother HL-L2350DW series._ipp._tcp.local",
+        "Brother HL-L2350DW series._printer._tcp.local",
+        "Brother HL-L2350DW series._pdl-datastream._tcp.local"
+      ],
+      "hostname": "BRW3C2AF4123456",
+      "banners": [],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "Sharp MX-3071 MFP",
+      "source": "Raw/JetDirect printing listens on TCP 9100, LPD on 515, IPP on 631 (RFC 8011, RFC 1179)",
+      "vendor": "SHARP Corporation",
+      "open_ports": [
+        80,
+        443,
+        515,
+        631,
+        9100
+      ],
+      "mdns_services": [
+        "SHARP MX-3071._ipp._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Printer"
+    },
+    {
+      "name": "Sonos One",
+      "source": "Sonos 'Configure your firewall to work with Sonos': TCP 1400, 1443, 4444 https://support.sonos.com/en-us/article/configure-your-firewall-to-work-with-sonos",
+      "vendor": "Sonos, Inc.",
+      "open_ports": [
+        1400,
+        1443
+      ],
+      "mdns_services": [
+        "RINCON_5CAAFD123456@Kitchen._sonos._tcp.local",
+        "5CAAFD123456@Kitchen._raop._tcp.local",
+        "Kitchen._airplay._tcp.local",
+        "Kitchen._spotify-connect._tcp.local"
+      ],
+      "hostname": "Sonos-5CAAFD123456",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "HomePod mini",
+      "source": "pyatv docs: Apple TV advertises _mediaremotetv (MRP), _companion-link, _airplay, _raop; HomePod advertises AirPlay, Companion, RAOP but not MRP https://pyatv.dev/documentation/protocols/ https://pyatv.dev/documentation/atvremote/",
+      "vendor": "",
+      "open_ports": [
+        7000
+      ],
+      "mdns_services": [
+        "Kitchen._airplay._tcp.local",
+        "A1B2C3D4E5F6@Kitchen._raop._tcp.local",
+        "Kitchen._companion-link._tcp.local",
+        "70-35-60-63.1 Kitchen._sleep-proxy._udp.local"
+      ],
+      "hostname": "Kitchen",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "HomePod (hostname only)",
+      "source": "pyatv docs: Apple TV advertises _mediaremotetv (MRP), _companion-link, _airplay, _raop; HomePod advertises AirPlay, Companion, RAOP but not MRP https://pyatv.dev/documentation/protocols/ https://pyatv.dev/documentation/atvremote/",
+      "vendor": "Apple, Inc.",
+      "open_ports": [],
+      "mdns_services": [
+        "Salon._airplay._tcp.local"
+      ],
+      "hostname": "HomePod",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "Amazon Echo Dot (4th gen)",
+      "source": "Amazon Echo exposes Spotify Connect (TCP 4070) and Alexa local ports 55442/55443",
+      "vendor": "Amazon Technologies Inc.",
+      "open_ports": [
+        4070,
+        55442,
+        55443
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "Google Nest Mini",
+      "source": "Google Cast discovery: _googlecast._tcp, device ports 8008/8009/8443; Google Home speakers add _googlezone._tcp (https://itp.beverlychou.com/packet-sniffing-a-google-home/)",
+      "vendor": "Google, Inc.",
+      "open_ports": [
+        8008,
+        8009,
+        8443,
+        10001
+      ],
+      "mdns_services": [
+        "Google-Nest-Mini-5e1a2b3c4d._googlecast._tcp.local",
+        "5e1a2b3c-4d5e._googlezone._tcp.local"
+      ],
+      "hostname": "5e1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "Bose SoundTouch 10",
+      "source": "Bose SoundTouch web API port 8090; Bose OUI",
+      "vendor": "Bose Corporation",
+      "open_ports": [
+        8090
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartSpeaker"
+    },
+    {
+      "name": "iPhone (Wi-Fi sync on)",
+      "source": "iOS devices advertise _companion-link and _rdlink, _apple-mobdev2 for Wi-Fi sync; lockdownd listens on TCP 62078 https://acgao.com/working-around-apples-device-name-entitlement-with-mdns/",
+      "vendor": "",
+      "open_ports": [
+        62078
+      ],
+      "mdns_services": [
+        "Philippe's iPhone._companion-link._tcp.local",
+        "Philippe's iPhone._rdlink._tcp.local",
+        "a2:b1:c3:d4:e5:f6@fe80::a0b1:c3ff:fed4:e5f6._apple-mobdev2._tcp.local"
+      ],
+      "hostname": "Philippes-iPhone",
+      "banners": [],
+      "expected_type": "iPhone"
+    },
+    {
+      "name": "iPhone, only companion-link + hostname",
+      "source": "iOS devices advertise _companion-link and _rdlink, _apple-mobdev2 for Wi-Fi sync; lockdownd listens on TCP 62078 https://acgao.com/working-around-apples-device-name-entitlement-with-mdns/",
+      "vendor": "",
+      "open_ports": [],
+      "mdns_services": [
+        "Philippe's iPhone._companion-link._tcp.local",
+        "Philippe's iPhone._rdlink._tcp.local"
+      ],
+      "hostname": "Philippes-iPhone.local",
+      "banners": [],
+      "expected_type": "iPhone"
+    },
+    {
+      "name": "iPhone, no hostname, lockdownd port",
+      "source": "iOS devices advertise _companion-link and _rdlink, _apple-mobdev2 for Wi-Fi sync; lockdownd listens on TCP 62078 https://acgao.com/working-around-apples-device-name-entitlement-with-mdns/",
+      "vendor": "",
+      "open_ports": [
+        62078
+      ],
+      "mdns_services": [
+        "Philippe's iPhone._companion-link._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "iPhone"
+    },
+    {
+      "name": "iPad Air",
+      "source": "iOS devices advertise _companion-link and _rdlink, _apple-mobdev2 for Wi-Fi sync; lockdownd listens on TCP 62078 https://acgao.com/working-around-apples-device-name-entitlement-with-mdns/",
+      "vendor": "",
+      "open_ports": [
+        62078
+      ],
+      "mdns_services": [
+        "Marie's iPad._companion-link._tcp.local",
+        "Marie's iPad._rdlink._tcp.local",
+        "Marie's iPad._remotepairing._tcp.local"
+      ],
+      "hostname": "Maries-iPad",
+      "banners": [],
+      "expected_type": "iPhone"
+    },
+    {
+      "name": "Apple TV 4K",
+      "source": "pyatv docs: Apple TV advertises _mediaremotetv (MRP), _companion-link, _airplay, _raop; HomePod advertises AirPlay, Companion, RAOP but not MRP https://pyatv.dev/documentation/protocols/ https://pyatv.dev/documentation/atvremote/",
+      "vendor": "Apple, Inc.",
+      "open_ports": [
+        7000,
+        49152,
+        49153
+      ],
+      "mdns_services": [
+        "Living Room._airplay._tcp.local",
+        "A1B2C3D4E5F6@Living Room._raop._tcp.local",
+        "Living Room._companion-link._tcp.local",
+        "Living Room._mediaremotetv._tcp.local",
+        "70-35-60-63.1 Living Room._sleep-proxy._udp.local"
+      ],
+      "hostname": "Living-Room",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "MacBook Pro with sharing on",
+      "source": "Apple 'TCP and UDP ports used by Apple software products' https://support.apple.com/en-us/103229 (22 ssh, 445 smb, 5900 screen sharing, 5000/7000 AirPlay receiver, 62078 iPhone sync)",
+      "vendor": "Apple, Inc.",
+      "open_ports": [
+        22,
+        445,
+        5000,
+        5900,
+        7000
+      ],
+      "mdns_services": [
+        "Frank's MacBook Pro._companion-link._tcp.local",
+        "Frank's MacBook Pro._ssh._tcp.local",
+        "Frank's MacBook Pro._sftp-ssh._tcp.local",
+        "Frank's MacBook Pro._smb._tcp.local",
+        "Frank's MacBook Pro._rfb._tcp.local",
+        "Frank's MacBook Pro._device-info._tcp.local",
+        "Frank's MacBook Pro._airplay._tcp.local",
+        "F0189812ABCD@Frank's MacBook Pro._raop._tcp.local"
+      ],
+      "hostname": "Franks-MacBook-Pro",
+      "banners": [],
+      "expected_type": "Apple PC"
+    },
+    {
+      "name": "iMac sharing a printer (instance says Printer)",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Apple, Inc.",
+      "open_ports": [
+        631
+      ],
+      "mdns_services": [
+        "Printer Room iMac._companion-link._tcp.local",
+        "HP LaserJet @ Printer Room iMac._ipp._tcp.local"
+      ],
+      "hostname": "Printer-Room-iMac",
+      "banners": [],
+      "expected_type": "Apple PC"
+    },
+    {
+      "name": "Mac mini, no sharing",
+      "source": "Apple 'TCP and UDP ports used by Apple software products' https://support.apple.com/en-us/103229 (22 ssh, 445 smb, 5900 screen sharing, 5000/7000 AirPlay receiver, 62078 iPhone sync)",
+      "vendor": "Apple, Inc.",
+      "open_ports": [],
+      "mdns_services": [
+        "Mac mini._companion-link._tcp.local"
+      ],
+      "hostname": "Mac-mini",
+      "banners": [],
+      "expected_type": "Apple PC"
+    },
+    {
+      "name": "drakarys (ASUS Windows PC, live case)",
+      "source": "Microsoft 'Service overview and network port requirements for Windows' https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements (135 RPC, 139/445 SMB, 2869 SSDP, 5357 WSDAPI, 7680 Delivery Optimization, 3389 RDP, 5985 WinRM); default hostnames DESKTOP-/LAPTOP-XXXXXXX",
+      "vendor": "ASUSTek COMPUTER INC.",
+      "open_ports": [
+        53,
+        135,
+        139,
+        445,
+        853,
+        2179,
+        2869,
+        5353,
+        7680
+      ],
+      "mdns_services": [
+        "Spotify Desktop Launcher._spotify-connect._tcp.local"
+      ],
+      "hostname": "drakarys",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "Dell Windows 11 desktop",
+      "source": "Microsoft 'Service overview and network port requirements for Windows' https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements (135 RPC, 139/445 SMB, 2869 SSDP, 5357 WSDAPI, 7680 Delivery Optimization, 3389 RDP, 5985 WinRM); default hostnames DESKTOP-/LAPTOP-XXXXXXX",
+      "vendor": "Dell Inc.",
+      "open_ports": [
+        135,
+        139,
+        445,
+        5357
+      ],
+      "mdns_services": [],
+      "hostname": "DESKTOP-4F2K9QX",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "HP Windows 10 laptop (Intel Wi-Fi)",
+      "source": "Microsoft 'Service overview and network port requirements for Windows' https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements (135 RPC, 139/445 SMB, 2869 SSDP, 5357 WSDAPI, 7680 Delivery Optimization, 3389 RDP, 5985 WinRM); default hostnames DESKTOP-/LAPTOP-XXXXXXX",
+      "vendor": "Intel Corporate",
+      "open_ports": [
+        135,
+        139,
+        445,
+        2869,
+        5357,
+        7680
+      ],
+      "mdns_services": [],
+      "hostname": "LAPTOP-7H3JK2L",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "Windows PC, public firewall profile",
+      "source": "Microsoft 'Service overview and network port requirements for Windows' https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements (135 RPC, 139/445 SMB, 2869 SSDP, 5357 WSDAPI, 7680 Delivery Optimization, 3389 RDP, 5985 WinRM); default hostnames DESKTOP-/LAPTOP-XXXXXXX",
+      "vendor": "Micro-Star INT'L CO., LTD.",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "DESKTOP-9ZX81QA",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "Microsoft Surface (no open ports)",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Microsoft Corporation",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "Frank-Surface",
+      "banners": [],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Toshiba laptop running Windows",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Toshiba Client Solutions Co., Ltd.",
+      "open_ports": [
+        135,
+        139,
+        445
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "Fedora desktop",
+      "source": "Avahi on desktop Linux advertises '<host> [<mac>]._workstation._tcp'; OpenSSH banner carries the distro",
+      "vendor": "Intel Corporate",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [
+        "fedora [f0:d5:bf:12:34:56]._workstation._tcp.local"
+      ],
+      "hostname": "fedora",
+      "banners": [
+        "SSH-2.0-OpenSSH_9.6"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Ubuntu server, SSH only",
+      "source": "Avahi on desktop Linux advertises '<host> [<mac>]._workstation._tcp'; OpenSSH banner carries the distro",
+      "vendor": "Super Micro Computer, Inc.",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [],
+      "hostname": "srv01",
+      "banners": [
+        "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Mail server (Postfix/Dovecot)",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Super Micro Computer, Inc.",
+      "open_ports": [
+        22,
+        25,
+        110,
+        143,
+        587,
+        993,
+        995
+      ],
+      "mdns_services": [],
+      "hostname": "mail",
+      "banners": [
+        "220 mail.example.com ESMTP Postfix (Ubuntu)",
+        "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "FTP/SSH/Telnet server",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Giga-Byte Technology Co.,Ltd.",
+      "open_ports": [
+        21,
+        22,
+        23
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [
+        "220 (vsFTPd 3.0.5)"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Linux dev box with ports 3000/3001",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Intel Corporate",
+      "open_ports": [
+        22,
+        3000,
+        3001
+      ],
+      "mdns_services": [],
+      "hostname": "devbox",
+      "banners": [],
+      "expected_type": "PC"
+    },
+    {
+      "name": "VMware Ubuntu server VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "VMware, Inc.",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [
+        "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Hyper-V Windows Server VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "Microsoft Corporation",
+      "open_ports": [
+        135,
+        139,
+        445,
+        3389,
+        5985
+      ],
+      "mdns_services": [],
+      "hostname": "WIN-SRV2022",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "Hyper-V Linux VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "Microsoft Corporation",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [
+        "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "VirtualBox Linux desktop VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "PCS Computer Systems GmbH",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [
+        "devvm [08:00:27:12:34:56]._workstation._tcp.local"
+      ],
+      "hostname": "devvm",
+      "banners": [],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Parallels Windows 11 VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "Parallels, Inc.",
+      "open_ports": [
+        135,
+        139,
+        445,
+        5357
+      ],
+      "mdns_services": [],
+      "hostname": "DESKTOP-PRL0001",
+      "banners": [],
+      "expected_type": "Windows PC"
+    },
+    {
+      "name": "QEMU/KVM Debian VM",
+      "source": "Virtual NIC OUIs: VMware 00:50:56/00:0C:29, VirtualBox 08:00:27 (PCS Computer Systems), Parallels 00:1C:42, QEMU/KVM 52:54:00, Hyper-V 00:15:5D",
+      "vendor": "Realtek (UpTech? also reported)",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [
+        "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"
+      ],
+      "expected_type": "PC"
+    },
+    {
+      "name": "Synology DS920+",
+      "source": "Synology 'What network ports are used by Synology services?' DSM 5000/5001, SMB 139/445 https://kb.synology.com/en-global/DSM/tutorial/What_network_ports_are_used_by_Synology_services",
+      "vendor": "Synology Incorporated",
+      "open_ports": [
+        80,
+        139,
+        443,
+        445,
+        5000,
+        5001
+      ],
+      "mdns_services": [
+        "DS920._smb._tcp.local",
+        "DS920._afpovertcp._tcp.local",
+        "DS920._http._tcp.local"
+      ],
+      "hostname": "DS920",
+      "banners": [],
+      "expected_type": "NAS"
+    },
+    {
+      "name": "Synology, randomized-looking vendor",
+      "source": "Synology 'What network ports are used by Synology services?' DSM 5000/5001, SMB 139/445 https://kb.synology.com/en-global/DSM/tutorial/What_network_ports_are_used_by_Synology_services",
+      "vendor": "",
+      "open_ports": [
+        139,
+        445,
+        5000,
+        5001
+      ],
+      "mdns_services": [
+        "NAS._smb._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "NAS"
+    },
+    {
+      "name": "QNAP TS-453D",
+      "source": "QNAP Qfinder discovery over mDNS _qdiscover._tcp; QTS web UI 8080/443",
+      "vendor": "QNAP Systems, Inc.",
+      "open_ports": [
+        80,
+        139,
+        443,
+        445,
+        8080
+      ],
+      "mdns_services": [
+        "NAS453D._qdiscover._tcp.local",
+        "NAS453D._smb._tcp.local"
+      ],
+      "hostname": "NAS453D",
+      "banners": [],
+      "expected_type": "NAS"
+    },
+    {
+      "name": "WD My Cloud",
+      "source": "Synology 'What network ports are used by Synology services?' DSM 5000/5001, SMB 139/445 https://kb.synology.com/en-global/DSM/tutorial/What_network_ports_are_used_by_Synology_services",
+      "vendor": "Western Digital",
+      "open_ports": [
+        80,
+        139,
+        445
+      ],
+      "mdns_services": [],
+      "hostname": "WDMyCloud",
+      "banners": [],
+      "expected_type": "NAS"
+    },
+    {
+      "name": "Xbox Series X",
+      "source": "Console OUIs (Nintendo, Sony Interactive Entertainment); PS Remote Play TCP 9295; Xbox DHCP hostname XBOXONE",
+      "vendor": "Microsoft Corporation",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "XBOXONE",
+      "banners": [],
+      "expected_type": "GameConsole"
+    },
+    {
+      "name": "PlayStation 5",
+      "source": "Console OUIs (Nintendo, Sony Interactive Entertainment); PS Remote Play TCP 9295; Xbox DHCP hostname XBOXONE",
+      "vendor": "Sony Interactive Entertainment Inc.",
+      "open_ports": [
+        9295
+      ],
+      "mdns_services": [],
+      "hostname": "PS5-8F3A2B",
+      "banners": [],
+      "expected_type": "GameConsole"
+    },
+    {
+      "name": "PlayStation 4 (vendor only)",
+      "source": "Console OUIs (Nintendo, Sony Interactive Entertainment); PS Remote Play TCP 9295; Xbox DHCP hostname XBOXONE",
+      "vendor": "Sony Interactive Entertainment Inc.",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "GameConsole"
+    },
+    {
+      "name": "Nintendo Switch",
+      "source": "Console OUIs (Nintendo, Sony Interactive Entertainment); PS Remote Play TCP 9295; Xbox DHCP hostname XBOXONE",
+      "vendor": "Nintendo Co.,Ltd",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "GameConsole"
+    },
+    {
+      "name": "Chromecast with Google TV",
+      "source": "Android TV Remote v2 service _androidtvremote2._tcp on ports 6466/6467 (Google TV / Chromecast with Google TV)",
+      "vendor": "Google, Inc.",
+      "open_ports": [
+        6466,
+        6467,
+        8008,
+        8009,
+        8443
+      ],
+      "mdns_services": [
+        "Chromecast-1a2b3c4d._googlecast._tcp.local",
+        "Chromecast._androidtvremote2._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Chromecast (3rd gen)",
+      "source": "Google Cast discovery: _googlecast._tcp, device ports 8008/8009/8443; Google Home speakers add _googlezone._tcp (https://itp.beverlychou.com/packet-sniffing-a-google-home/)",
+      "vendor": "Google, Inc.",
+      "open_ports": [
+        8008,
+        8009,
+        8443
+      ],
+      "mdns_services": [
+        "Chromecast-9f8e7d6c._googlecast._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Samsung QLED TV (Tizen)",
+      "source": "Samsung Tizen TV remote WebSocket API on 8001/8002, DLNA 7676/9197; AirPlay 2 receiver (_airplay/_raop) on 2018+ models",
+      "vendor": "Samsung Electronics Co.,Ltd",
+      "open_ports": [
+        7676,
+        8001,
+        8002,
+        9197
+      ],
+      "mdns_services": [
+        "[TV] Samsung Q80 Series (55)._airplay._tcp.local",
+        "6CE8C6ABCDEF@[TV] Samsung Q80 Series (55)._raop._tcp.local"
+      ],
+      "hostname": "Samsung",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "LG OLED TV (webOS)",
+      "source": "LG webOS second-screen API ws 3000 / wss 3001 (webOS TV developer docs); AirPlay 2 and HomeKit (_hap) on 2019+ models",
+      "vendor": "LG Electronics",
+      "open_ports": [
+        3000,
+        3001
+      ],
+      "mdns_services": [
+        "[LG] webOS TV OLED55C1._airplay._tcp.local",
+        "[LG] webOS TV OLED55C1._hap._tcp.local"
+      ],
+      "hostname": "LGwebOSTV",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "LG TV (AirPlay, no API ports)",
+      "source": "LG webOS second-screen API ws 3000 / wss 3001 (webOS TV developer docs); AirPlay 2 and HomeKit (_hap) on 2019+ models",
+      "vendor": "LG Innotek",
+      "open_ports": [],
+      "mdns_services": [
+        "[LG] webOS TV UQ75._airplay._tcp.local",
+        "88C9E8ABCDEF@[LG] webOS TV UQ75._raop._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Roku Streaming Stick",
+      "source": "Roku External Control Protocol on TCP 8060 https://developer.roku.com/docs/developer-program/dev-tools/external-control-api.md",
+      "vendor": "Roku, Inc.",
+      "open_ports": [
+        8060,
+        9080
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Sony Bravia (Google TV)",
+      "source": "Android TV Remote v2 service _androidtvremote2._tcp on ports 6466/6467 (Google TV / Chromecast with Google TV)",
+      "vendor": "Sony Corporation",
+      "open_ports": [
+        6466,
+        6467,
+        8008,
+        8009
+      ],
+      "mdns_services": [
+        "BRAVIA 4K._googlecast._tcp.local",
+        "BRAVIA 4K._androidtvremote2._tcp.local"
+      ],
+      "hostname": "BRAVIA-4K-VH2",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Philips TV (TP Vision)",
+      "source": "Philips-brand TVs are built by TP Vision; its OUI is 'TP Vision Belgium NV'",
+      "vendor": "TP Vision Belgium NV",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Amazon Fire TV Stick",
+      "source": "Fire TV advertises the Whisperplay service _amzn-wplay._tcp",
+      "vendor": "Amazon Technologies Inc.",
+      "open_ports": [],
+      "mdns_services": [
+        "amzn.dmgr:ABCDEF12345._amzn-wplay._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "SmartTV"
+    },
+    {
+      "name": "Hikvision DS-2CD2143",
+      "source": "Hikvision default ports: HTTP 80, HTTPS 443, RTSP 554, SDK/server 8000",
+      "vendor": "Hangzhou Hikvision Digital Technology Co.,Ltd.",
+      "open_ports": [
+        80,
+        443,
+        554,
+        8000
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Camera"
+    },
+    {
+      "name": "Reolink RLC-810A",
+      "source": "Reolink default ports: 80, 443, RTSP 554, RTMP 1935, media 9000 https://support.reolink.com/hc/en-us/articles/900000621783",
+      "vendor": "Reolink Innovation Limited",
+      "open_ports": [
+        80,
+        443,
+        554,
+        1935,
+        9000
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Camera"
+    },
+    {
+      "name": "Axis M3106",
+      "source": "Axis cameras advertise _axis-video._tcp (Axis VAPIX discovery), RTSP 554",
+      "vendor": "Axis Communications AB",
+      "open_ports": [
+        80,
+        443,
+        554
+      ],
+      "mdns_services": [
+        "AXIS M3106-L Mk II - B8A44F123456._axis-video._tcp.local"
+      ],
+      "hostname": "axis-b8a44f123456",
+      "banners": [],
+      "expected_type": "Camera"
+    },
+    {
+      "name": "TP-Link Tapo C200 (RTSP)",
+      "source": "TP-Link Tapo cameras expose RTSP 554, ONVIF 2020 and 443",
+      "vendor": "TP-Link Corporation Limited",
+      "open_ports": [
+        443,
+        554,
+        2020
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Camera"
+    },
+    {
+      "name": "Dahua IPC",
+      "source": "Hikvision default ports: HTTP 80, HTTPS 443, RTSP 554, SDK/server 8000",
+      "vendor": "Zhejiang Dahua Technology Co., Ltd.",
+      "open_ports": [
+        80,
+        554,
+        37777
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Camera"
+    },
+    {
+      "name": "Philips Hue Bridge",
+      "source": "Philips Hue bridge discovery via mDNS _hue._tcp (Hue developer docs), HomeKit _hap._tcp",
+      "vendor": "Philips Lighting BV",
+      "open_ports": [
+        80,
+        443,
+        8080
+      ],
+      "mdns_services": [
+        "Philips Hue - 1A2B3C._hue._tcp.local",
+        "Philips Hue - 1A2B3C._hap._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Shelly Plus 1",
+      "source": "Shelly Gen2 API docs: mDNS _shelly._tcp and _http._tcp, hostname shellyplus1-<mac>",
+      "vendor": "Espressif Inc.",
+      "open_ports": [
+        80
+      ],
+      "mdns_services": [
+        "shellyplus1-a8032ab12345._shelly._tcp.local",
+        "shellyplus1-a8032ab12345._http._tcp.local"
+      ],
+      "hostname": "shellyplus1-a8032ab12345",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Tuya smart plug",
+      "source": "Tuya local protocol listens on TCP 6668",
+      "vendor": "Tuya Smart Inc.",
+      "open_ports": [
+        6668
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Home Assistant on an Intel NUC",
+      "source": "Home Assistant zeroconf announces _home-assistant._tcp, frontend on 8123",
+      "vendor": "Intel Corporate",
+      "open_ports": [
+        8123
+      ],
+      "mdns_services": [
+        "Home._home-assistant._tcp.local",
+        "Home._hap._tcp.local"
+      ],
+      "hostname": "homeassistant",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Home Assistant on a Raspberry Pi (hardware wins)",
+      "source": "Raspberry Pi OUIs B8:27:EB/DC:A6:32/E4:5F:01/D8:3A:DD; Raspberry Pi OS default hostname raspberrypi",
+      "vendor": "Raspberry Pi Trading Ltd",
+      "open_ports": [
+        22,
+        4357,
+        8123
+      ],
+      "mdns_services": [
+        "Home._home-assistant._tcp.local"
+      ],
+      "hostname": "homeassistant",
+      "banners": [],
+      "expected_type": "RaspberryPi"
+    },
+    {
+      "name": "MikroTik hAP (Winbox/API, no DNS seen)",
+      "source": "MikroTik Winbox TCP 8291, RouterOS API 8728; OUI 'Routerboard.com'",
+      "vendor": "Routerboard.com",
+      "open_ports": [
+        21,
+        22,
+        23,
+        80,
+        8291,
+        8728
+      ],
+      "mdns_services": [],
+      "hostname": "MikroTik",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "Zyxel ISP gateway (TR-069)",
+      "source": "TR-069 CWMP connection-request port 7547 on ISP CPE",
+      "vendor": "Zyxel Communications Corporation",
+      "open_ports": [
+        23,
+        53,
+        80,
+        7547
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "AzureWave Wi-Fi module, nothing else",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "AzureWave Technology Inc.",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Unknown"
+    },
+    {
+      "name": "Eve Energy (Matter over Thread)",
+      "source": "Matter core spec 4.3: operational nodes advertise _matter._tcp, commissionable nodes _matterc._udp",
+      "vendor": "",
+      "open_ports": [],
+      "mdns_services": [
+        "A1B2C3D4E5F60718-0000000000000042._matter._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "ESPHome sensor",
+      "source": "ESPHome native API advertises _esphomelib._tcp on 6053",
+      "vendor": "Espressif Inc.",
+      "open_ports": [
+        6053
+      ],
+      "mdns_services": [
+        "living-room-sensor._esphomelib._tcp.local"
+      ],
+      "hostname": "living-room-sensor",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "ecobee thermostat",
+      "source": "HomeKit accessory protocol _hap._tcp",
+      "vendor": "ecobee inc",
+      "open_ports": [],
+      "mdns_services": [
+        "My ecobee._hap._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Netatmo weather station",
+      "source": "Netatmo OUI 70:EE:50",
+      "vendor": "Netatmo",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "IoT"
+    },
+    {
+      "name": "Raspberry Pi 4 (Raspberry Pi OS)",
+      "source": "Raspberry Pi OUIs B8:27:EB/DC:A6:32/E4:5F:01/D8:3A:DD; Raspberry Pi OS default hostname raspberrypi",
+      "vendor": "Raspberry Pi Trading Ltd",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [
+        "raspberrypi [dc:a6:32:12:34:56]._workstation._tcp.local"
+      ],
+      "hostname": "raspberrypi",
+      "banners": [
+        "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"
+      ],
+      "expected_type": "RaspberryPi"
+    },
+    {
+      "name": "Raspberry Pi running Pi-hole",
+      "source": "Raspberry Pi OUIs B8:27:EB/DC:A6:32/E4:5F:01/D8:3A:DD; Raspberry Pi OS default hostname raspberrypi",
+      "vendor": "Raspberry Pi Foundation",
+      "open_ports": [
+        22,
+        53,
+        80
+      ],
+      "mdns_services": [],
+      "hostname": "pihole",
+      "banners": [],
+      "expected_type": "RaspberryPi"
+    },
+    {
+      "name": "Freebox Server",
+      "source": "Home gateways run the LAN DNS forwarder on 53 plus the web UI; Freebox also serves SMB (445) and RTSP (554)",
+      "vendor": "Freebox Sas",
+      "open_ports": [
+        53,
+        80,
+        443,
+        445,
+        554
+      ],
+      "mdns_services": [],
+      "hostname": "freebox-server",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "ASUS RT-AX86U with USB printer server",
+      "source": "ASUSWRT: DNS 53, web 80/8443, USB printer server LPD 515 + raw 9100",
+      "vendor": "ASUSTek COMPUTER INC.",
+      "open_ports": [
+        53,
+        80,
+        515,
+        8443,
+        9100
+      ],
+      "mdns_services": [],
+      "hostname": "RT-AX86U-1A2B",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "TP-Link Archer AX55",
+      "source": "Home gateways run the LAN DNS forwarder on 53 plus the web UI; Freebox also serves SMB (445) and RTSP (554)",
+      "vendor": "Tp-Link Technologies Co.,Ltd.",
+      "open_ports": [
+        53,
+        80,
+        443
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "Netgear Nighthawk",
+      "source": "Home gateways run the LAN DNS forwarder on 53 plus the web UI; Freebox also serves SMB (445) and RTSP (554)",
+      "vendor": "Netgear",
+      "open_ports": [
+        53,
+        80,
+        443,
+        5000
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "Orange Livebox (Sagemcom), DNS filtered",
+      "source": "Home gateways run the LAN DNS forwarder on 53 plus the web UI; Freebox also serves SMB (445) and RTSP (554)",
+      "vendor": "Sagemcom Broadband SAS",
+      "open_ports": [
+        80,
+        443
+      ],
+      "mdns_services": [],
+      "hostname": "livebox",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "FRITZ!Box 7590",
+      "source": "Home gateways run the LAN DNS forwarder on 53 plus the web UI; Freebox also serves SMB (445) and RTSP (554)",
+      "vendor": "AVM Audiovisuelles Marketing und Computersysteme GmbH",
+      "open_ports": [
+        53,
+        80,
+        443,
+        5060
+      ],
+      "mdns_services": [],
+      "hostname": "fritz.box",
+      "banners": [],
+      "expected_type": "Router"
+    },
+    {
+      "name": "UniFi U6 access point",
+      "source": "Managed switches/APs expose SSH/Telnet/HTTP management only",
+      "vendor": "Ubiquiti Inc",
+      "open_ports": [
+        22
+      ],
+      "mdns_services": [],
+      "hostname": "U6-Lite",
+      "banners": [
+        "SSH-2.0-dropbear_2019.78"
+      ],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "UniFi switch",
+      "source": "Managed switches/APs expose SSH/Telnet/HTTP management only",
+      "vendor": "Ubiquiti Inc",
+      "open_ports": [
+        22,
+        80
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "Cisco Catalyst switch",
+      "source": "Managed switches/APs expose SSH/Telnet/HTTP management only",
+      "vendor": "Cisco Systems, Inc",
+      "open_ports": [
+        22,
+        23,
+        80,
+        443
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [
+        "SSH-2.0-Cisco-1.25"
+      ],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "D-Link managed switch",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "D-Link International",
+      "open_ports": [
+        80
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "TP-Link range extender",
+      "source": "Managed switches/APs expose SSH/Telnet/HTTP management only",
+      "vendor": "TP-Link Corporation Limited",
+      "open_ports": [
+        80,
+        443
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "Netgear unmanaged switch",
+      "source": "Managed switches/APs expose SSH/Telnet/HTTP management only",
+      "vendor": "Netgear",
+      "open_ports": [
+        80
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "NetworkDevice"
+    },
+    {
+      "name": "Samsung Galaxy S23",
+      "source": "Android DHCP hostnames android-<id> (<= 7) or the device name (Galaxy-S23, Pixel-8) on 8+",
+      "vendor": "Samsung Electronics Co.,Ltd",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "Galaxy-S23",
+      "banners": [],
+      "expected_type": "Smartphone"
+    },
+    {
+      "name": "Android phone, private MAC",
+      "source": "Android DHCP hostnames android-<id> (<= 7) or the device name (Galaxy-S23, Pixel-8) on 8+",
+      "vendor": "",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "android-3f2a9c1d7e5b4a60",
+      "banners": [],
+      "expected_type": "Smartphone"
+    },
+    {
+      "name": "Google Pixel 8",
+      "source": "Android DHCP hostnames android-<id> (<= 7) or the device name (Galaxy-S23, Pixel-8) on 8+",
+      "vendor": "Google, Inc.",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "Pixel-8",
+      "banners": [],
+      "expected_type": "Smartphone"
+    },
+    {
+      "name": "Xiaomi Redmi Note",
+      "source": "Android DHCP hostnames android-<id> (<= 7) or the device name (Galaxy-S23, Pixel-8) on 8+",
+      "vendor": "Xiaomi Communications Co Ltd",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "Redmi-Note-12",
+      "banners": [],
+      "expected_type": "Smartphone"
+    },
+    {
+      "name": "OnePlus 12",
+      "source": "Android DHCP hostnames android-<id> (<= 7) or the device name (Galaxy-S23, Pixel-8) on 8+",
+      "vendor": "OnePlus Technology (Shenzhen) Co., Ltd",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Smartphone"
+    },
+    {
+      "name": "Algo SIP paging adapter ('lg' inside a word)",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Algo Communication Products Ltd",
+      "open_ports": [
+        80,
+        443
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Unknown"
+    },
+    {
+      "name": "Unknown device in Belgrade ('lg' inside a word)",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "Enel doo Belgrade",
+      "open_ports": [
+        80
+      ],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Unknown"
+    },
+    {
+      "name": "Private MAC, nothing open",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "",
+      "open_ports": [],
+      "mdns_services": [],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Unknown"
+    },
+    {
+      "name": "Spotify Connect instance only",
+      "source": "Hard negative: substring matching misfired on this input under the old matcher/model",
+      "vendor": "",
+      "open_ports": [],
+      "mdns_services": [
+        "Philippe's Speaker Printer._spotify-connect._tcp.local"
+      ],
+      "hostname": "",
+      "banners": [],
+      "expected_type": "Unknown"
+    }
+  ]
+}
