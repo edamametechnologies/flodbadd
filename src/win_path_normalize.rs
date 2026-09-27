@@ -74,14 +74,22 @@ pub fn normalize_win_path(path: &str) -> String {
     canonicalize_separators_and_case(&long_form)
 }
 
-/// Replace 8.3 short-name components (`C:\Users\RUNNER~1\...`) with the
-/// long form while the file exists. ETW records the spelling the writer
-/// used (`%TEMP%` on the CI runners is the short form) and the FIM
-/// watcher reports the watched root's spelling, so the two sides of the
-/// attribution table did not collide and a staged file lost its writer
-/// (2026-09-08). Only paths containing `~` pay the filesystem call.
+/// Replace 8.3 short-name directories (`C:\Users\RUNNER~1\...`) with their
+/// long form. ETW records the spelling the writer used (`%TEMP%` on the CI
+/// runners is the short form) and the FIM watcher reports the watched
+/// root's spelling, so the two sides of the attribution table did not
+/// collide and a staged file lost its writer (2026-09-08).
+///
+/// Only the directory prefix is resolved, never the file itself. Callers
+/// run on every ETW FileIo write and every file monitor event, right as a
+/// producer writes the file, and resolving the whole path opened it: a
+/// handle, even one sharing everything, makes the producer's replace or its
+/// directory's rename fail. With EDAMAME protection on, uv installs on
+/// windows-latest failed that way ("Failed to update Windows PE resources
+/// ... Access is denied", probe runs 36273248402 and 36295564142). An 8.3
+/// alias of the file's own name stays as it is.
 #[cfg(target_os = "windows")]
-fn fold_short_names(path: &str) -> String {
+pub fn fold_short_names(path: &str) -> String {
     if !path.contains('~') {
         return path.to_string();
     }
@@ -93,18 +101,84 @@ fn fold_short_names(path: &str) -> String {
     if !is_drive_path {
         return path.to_string();
     }
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => {
-            let text = canonical.to_string_lossy();
-            strip_long_or_nt_prefix(&text).to_string()
-        }
-        Err(_) => path.to_string(),
+    let Some((directory, rest)) = short_name_directory(path) else {
+        return path.to_string();
+    };
+    match long_directory(directory) {
+        Some(long) => format!("{long}\\{rest}"),
+        None => path.to_string(),
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn fold_short_names(path: &str) -> String {
+pub fn fold_short_names(path: &str) -> String {
     path.to_string()
+}
+
+/// Splits `path` after its last directory component holding a `~`:
+/// `C:\Users\RUNNER~1\AppData\x.exe` gives `C:\Users\RUNNER~1` and
+/// `AppData\x.exe`. `None` when only the file name holds one.
+#[cfg(any(target_os = "windows", test))]
+fn short_name_directory(path: &str) -> Option<(&str, &str)> {
+    let is_separator = |c: char| c == '\\' || c == '/';
+    let file_name_start = path.rfind(is_separator)?;
+    let tilde = path[..file_name_start].rfind('~')?;
+    let directory_end = tilde + path[tilde..].find(is_separator)?;
+    Some((&path[..directory_end], &path[directory_end + 1..]))
+}
+
+/// How many resolved directories each thread keeps.
+#[cfg(target_os = "windows")]
+const LONG_DIRECTORY_CACHE_CAP: usize = 256;
+
+/// Deepest short-name directory (in components below the drive) whose long
+/// form is cached. Profile and program directories (`C:\Users\RUNNER~1`,
+/// `C:\PROGRA~1`) are shallow and stable; deeper aliases name transient
+/// directories, and Windows hands a deleted directory's alias to the next
+/// one created, so those are resolved each time.
+#[cfg(target_os = "windows")]
+const LONG_DIRECTORY_CACHE_MAX_DEPTH: usize = 3;
+
+/// Long form of a short-name directory, `None` when it cannot be resolved.
+#[cfg(target_os = "windows")]
+fn long_directory(directory: &str) -> Option<String> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static LONG_DIRECTORIES: RefCell<HashMap<String, String>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let cacheable = directory
+        .split(|c| c == '\\' || c == '/')
+        .filter(|component| !component.is_empty())
+        .count()
+        <= LONG_DIRECTORY_CACHE_MAX_DEPTH + 1;
+    if cacheable {
+        if let Some(long) = LONG_DIRECTORIES.with(|cache| cache.borrow().get(directory).cloned()) {
+            return Some(long);
+        }
+    }
+
+    let canonical = std::fs::canonicalize(directory).ok()?;
+    let text = canonical.to_string_lossy();
+    let long = strip_long_or_nt_prefix(&text).to_string();
+    // A network drive canonicalizes to `\\?\UNC\...`; keep the short form
+    // rather than fold it into a path of another shape.
+    if long.as_bytes().get(1) != Some(&b':') {
+        return None;
+    }
+    if cacheable {
+        LONG_DIRECTORIES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= LONG_DIRECTORY_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(directory.to_string(), long.clone());
+        });
+    }
+    Some(long)
 }
 
 /// Strip `\\?\` (long-path) and `\??\` (NT-DOS device) prefixes if
@@ -410,6 +484,37 @@ mod tests {
             nt_device_to_drive(r"\Device\HarddiskVolume3\Users\frank\X"),
             r"\Device\HarddiskVolume3\Users\frank\X"
         );
+    }
+
+    #[test]
+    fn short_name_directory_stops_before_the_file_name() {
+        assert_eq!(
+            short_name_directory(
+                r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpAb\uv-trampoline-1.exe"
+            ),
+            Some((
+                r"C:\Users\RUNNER~1",
+                r"AppData\Local\Temp\.tmpAb\uv-trampoline-1.exe"
+            ))
+        );
+        // The last aliased directory bounds the prefix.
+        assert_eq!(
+            short_name_directory(r"C:\PROGRA~1\Tool\CACHE~1\x.bin"),
+            Some((r"C:\PROGRA~1\Tool\CACHE~1", r"x.bin"))
+        );
+        assert_eq!(
+            short_name_directory("C:/Users/RUNNER~1/AppData/x.txt"),
+            Some(("C:/Users/RUNNER~1", "AppData/x.txt"))
+        );
+        // A `~` in the file's own name is never resolved: that would open
+        // the file (Office's `~$doc.docx` owner file, an 8.3 file alias).
+        assert_eq!(
+            short_name_directory(r"C:\Users\frank\Docs\~$report.docx"),
+            None
+        );
+        assert_eq!(short_name_directory(r"C:\Users\frank\REPORT~1.DOC"), None);
+        assert_eq!(short_name_directory(r"C:\Users\frank\x.txt"), None);
+        assert_eq!(short_name_directory("RUNNER~1"), None);
     }
 
     #[test]

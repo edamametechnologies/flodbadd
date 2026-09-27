@@ -611,23 +611,16 @@ fn translate_notify_event_with_attribution(
         // under different events. Downstream identity (finding keys, the
         // attribution table, dedup) is by path string, so the security
         // gate served two temp_modify findings for one staged file, one of
-        // them with a null writer (2026-09-08). Fold to the long form
-        // while the file exists; a deleted path keeps its raw spelling.
+        // them with a null writer (2026-09-08). Fold the short-name
+        // directories to their long form. The file itself is not opened
+        // (the canonicalize this replaces did): its producer is usually
+        // still at work on it (`fold_short_names`).
         #[cfg(target_os = "windows")]
-        let path: std::borrow::Cow<'_, Path> = match std::fs::canonicalize(path) {
-            Ok(canonical) => {
-                let text = canonical.to_string_lossy();
-                let stripped = text
-                    .strip_prefix("\\\\?\\UNC\\")
-                    .map(|rest| format!("\\\\{rest}"))
-                    .or_else(|| text.strip_prefix("\\\\?\\").map(str::to_string))
-                    .unwrap_or_else(|| text.to_string());
-                std::borrow::Cow::Owned(PathBuf::from(stripped))
-            }
-            Err(_) => std::borrow::Cow::Borrowed(path.as_path()),
-        };
+        let folded = PathBuf::from(crate::win_path_normalize::fold_short_names(
+            &path.to_string_lossy(),
+        ));
         #[cfg(target_os = "windows")]
-        let path: &Path = path.as_ref();
+        let path: &Path = folded.as_path();
         let path_str = path.to_string_lossy().to_string();
 
         // Early-drop: skip hashing, attribution, and store insertion for
@@ -647,18 +640,20 @@ fn translate_notify_event_with_attribution(
         // with build-tool exclusive opens (Win32 sharing asymmetry),
         // causing FP-CI-2 MSB8066 "process cannot access the file"
         // failures on Windows runners, and is wasted I/O everywhere else.
+        // For the same reason the Windows size comes from the directory
+        // entry, not from `is_file` / `metadata`, which open the file.
+        #[cfg(target_os = "windows")]
+        let (size, hash) = if event_type != FimEventType::Delete {
+            (file_size_without_opening(path), None)
+        } else {
+            (None, None)
+        };
+        #[cfg(not(target_os = "windows"))]
         let (size, hash) = if event_type != FimEventType::Delete && path.is_file() {
-            #[cfg(target_os = "windows")]
-            {
+            if sensitive {
+                get_file_metadata(path, hash_threshold)
+            } else {
                 (get_file_size_metadata(path), None)
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if sensitive {
-                    get_file_metadata(path, hash_threshold)
-                } else {
-                    (get_file_size_metadata(path), None)
-                }
             }
         } else {
             (None, None)
@@ -840,6 +835,39 @@ fn compute_hash_for_work_item(hash_work: &FimHashWorkItem) -> Option<String> {
 
 fn get_file_size_metadata(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+/// Size of a file, queried by name: `None` for a directory or a path that is
+/// gone. `std::fs::metadata` (and `is_file`) open the file on Windows, and the
+/// file monitor sees a file right as its producer writes it; any open handle
+/// makes the producer's replace or its directory's rename fail.
+#[cfg(target_os = "windows")]
+fn file_size_without_opening(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesExW, GetFileExInfoStandard, FILE_ATTRIBUTE_DIRECTORY,
+        WIN32_FILE_ATTRIBUTE_DATA,
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut data = WIN32_FILE_ATTRIBUTE_DATA::default();
+    unsafe {
+        GetFileAttributesExW(
+            PCWSTR(wide.as_ptr()),
+            GetFileExInfoStandard,
+            &mut data as *mut WIN32_FILE_ATTRIBUTE_DATA as *mut core::ffi::c_void,
+        )
+    }
+    .ok()?;
+    if data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+        return None;
+    }
+    Some((u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow))
 }
 
 #[cfg(not(target_os = "windows"))]
