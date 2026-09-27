@@ -60,21 +60,104 @@ pub async fn mdns_flush() {
     locked_devices.clear();
 }
 
+/// When `mdns_info` last claimed `ip`, if it does.
+fn claim_time(mdns_info: &mDNSInfo, ip: &IpAddr) -> Option<DateTime<Utc>> {
+    match ip {
+        IpAddr::V4(ipv4) => mdns_info
+            .ipv4_addresses
+            .iter()
+            .find(|e| e.address == *ipv4)
+            .map(|e| e.last_seen),
+        IpAddr::V6(ipv6) => mdns_info
+            .ipv6_addresses
+            .iter()
+            .find(|e| e.address == *ipv6)
+            .map(|e| e.last_seen),
+    }
+}
+
+/// The host that most recently claimed `ip`.
+///
+/// An address changes hands (DHCP reuse, a host leaving and another joining),
+/// and whichever record `HashMap` iteration met first used to win -- often the
+/// previous tenant, whose hostname then attached to the new host and pulled it
+/// into the old device record. The freshest claim is the current owner.
+fn freshest_claimant<'a>(
+    devices: &'a HashMap<String, mDNSInfo>,
+    ip: &IpAddr,
+) -> Option<&'a mDNSInfo> {
+    devices
+        .values()
+        .filter_map(|info| claim_time(info, ip).map(|t| (t, info)))
+        .max_by(|(ta, a), (tb, b)| ta.cmp(tb).then_with(|| a.hostname.cmp(&b.hostname)))
+        .map(|(_, info)| info)
+}
+
 pub async fn mdns_get_by_ip(ip: &IpAddr) -> Option<mDNSInfo> {
     let locked_devices = DEVICES.lock().await;
-    locked_devices.iter().find_map(|(_hostname, mdns_info)| {
-        let found = match ip {
-            IpAddr::V4(ipv4) => mdns_info.ipv4_addresses.iter().any(|e| e.address == *ipv4),
-            IpAddr::V6(ipv6) => mdns_info.ipv6_addresses.iter().any(|e| e.address == *ipv6),
-        };
+    let found = freshest_claimant(&locked_devices, ip).cloned();
+    if let Some(ref mdns_info) = found {
+        trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
+    }
+    found
+}
 
-        if found {
-            trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
-            Some(mdns_info.clone())
-        } else {
-            None
+/// Drop what the mDNS cache has not heard within `max_age`.
+///
+/// Address, MAC and service entries each age on their own timestamp; a host
+/// left with no address is removed, since nothing can look it up any more.
+/// Without this the cache only emptied on a network change, so a host that
+/// left kept its address, and whoever inherited that address inherited its
+/// hostname. Callers pass the device activity window: a claim is believed for
+/// as long as a sighting of the device would be.
+pub async fn mdns_expire(max_age: chrono::Duration) {
+    let mut locked_devices = DEVICES.lock().await;
+    expire_entries(&mut locked_devices, max_age, Utc::now());
+}
+
+fn expire_entries(
+    devices: &mut HashMap<String, mDNSInfo>,
+    max_age: chrono::Duration,
+    now: DateTime<Utc>,
+) {
+    let fresh = |ts: &DateTime<Utc>| now.signed_duration_since(*ts) <= max_age;
+    devices.retain(|hostname, info| {
+        info.ipv4_addresses.retain(|e| fresh(&e.last_seen));
+        info.ipv6_addresses.retain(|e| fresh(&e.last_seen));
+        info.mac_addresses.retain(|e| fresh(&e.last_seen));
+        info.services.retain(|e| fresh(&e.last_seen));
+        let keep = !info.ipv4_addresses.is_empty() || !info.ipv6_addresses.is_empty();
+        if !keep {
+            debug!("mDNS entry for {} expired", hostname);
         }
-    })
+        keep
+    });
+}
+
+/// Record that `hostname` answers at `ips` as of `now`, and take those
+/// addresses away from any other host that claimed them. One address belongs
+/// to one host at a time; see [`freshest_claimant`].
+fn claim_addresses(devices: &mut HashMap<String, mDNSInfo>, hostname: &str, ips: &[IpAddr]) {
+    for (other, info) in devices.iter_mut() {
+        if other == hostname {
+            continue;
+        }
+        let before = info.ipv4_addresses.len() + info.ipv6_addresses.len();
+        info.ipv4_addresses
+            .retain(|e| !ips.contains(&IpAddr::V4(e.address)));
+        info.ipv6_addresses
+            .retain(|e| !ips.contains(&IpAddr::V6(e.address)));
+        if info.ipv4_addresses.len() + info.ipv6_addresses.len() != before {
+            debug!(
+                "mDNS: {} now answers at {:?}; dropped the stale claim held by {}",
+                hostname, ips, other
+            );
+        }
+    }
+    // A host stripped of every address can no longer be found by address.
+    devices.retain(|other, info| {
+        other == hostname || !info.ipv4_addresses.is_empty() || !info.ipv6_addresses.is_empty()
+    });
 }
 
 pub async fn mdns_get_by_ipv6(ipv6: &IpAddr) -> Option<mDNSInfo> {
@@ -99,23 +182,12 @@ pub async fn mdns_get_by_ipv6(ipv6: &IpAddr) -> Option<mDNSInfo> {
 
 pub async fn mdns_get_hostname_by_ip(ip: &IpAddr) -> Option<String> {
     let locked_devices = DEVICES.lock().await;
-    locked_devices.iter().find_map(|(_hostname, mdns_info)| {
-        let found = match ip {
-            IpAddr::V4(ipv4) => mdns_info.ipv4_addresses.iter().any(|e| e.address == *ipv4),
-            IpAddr::V6(ipv6) => mdns_info.ipv6_addresses.iter().any(|e| e.address == *ipv6),
-        };
-
-        if found {
+    freshest_claimant(&locked_devices, ip)
+        .filter(|mdns_info| !mdns_info.hostname.is_empty())
+        .map(|mdns_info| {
             trace!("Found mDNS entry for {}: {:?}", ip, mdns_info);
-            if !mdns_info.hostname.is_empty() {
-                Some(mdns_info.hostname.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    })
+            mdns_info.hostname.clone()
+        })
 }
 
 fn v6_to_mac(ipv6: &str) -> Option<String> {
@@ -200,6 +272,7 @@ async fn process_host(host: Host, service_name: String) {
             // Fill in the info for this host
             let mut locked_devices = DEVICES.lock().await;
             let now = Utc::now();
+            claim_addresses(&mut locked_devices, hostname, &ip_addresses);
             let mdns_info = locked_devices.entry(hostname.clone()).or_insert(mDNSInfo {
                 ipv4_addresses: Vec::new(),
                 ipv6_addresses: Vec::new(),
@@ -497,6 +570,121 @@ pub async fn get_mdns_by_hostname(hostname: &str) -> Option<mDNSInfo> {
 mod tests {
     use super::is_resolvable_dns_name;
     use super::v6_to_mac;
+    use super::*;
+
+    fn info(hostname: &str, ipv4: &[(Ipv4Addr, DateTime<Utc>)]) -> mDNSInfo {
+        mDNSInfo {
+            ipv4_addresses: ipv4
+                .iter()
+                .map(|(a, t)| IpAddressEntry {
+                    address: *a,
+                    last_seen: *t,
+                })
+                .collect(),
+            ipv6_addresses: Vec::new(),
+            mac_addresses: Vec::new(),
+            services: Vec::new(),
+            hostname: hostname.to_string(),
+            instances: SortedVec::new(),
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn freshest_claimant_wins_a_shared_address() {
+        let ip = Ipv4Addr::new(192, 168, 1, 30);
+        let now = Utc::now();
+        let mut devices = HashMap::new();
+        devices.insert(
+            "old-tenant.local".to_string(),
+            info(
+                "old-tenant.local",
+                &[(ip, now - chrono::Duration::hours(3))],
+            ),
+        );
+        devices.insert(
+            "new-tenant.local".to_string(),
+            info("new-tenant.local", &[(ip, now)]),
+        );
+        let found = freshest_claimant(&devices, &IpAddr::V4(ip)).unwrap();
+        assert_eq!(found.hostname, "new-tenant.local");
+        assert!(freshest_claimant(&devices, &IpAddr::V4(Ipv4Addr::new(192, 168, 1, 31))).is_none());
+    }
+
+    #[test]
+    fn claiming_an_address_takes_it_from_the_previous_holder() {
+        let ip = Ipv4Addr::new(192, 168, 1, 40);
+        let other_ip = Ipv4Addr::new(192, 168, 1, 41);
+        let now = Utc::now();
+        let mut devices = HashMap::new();
+        devices.insert(
+            "old-tenant.local".to_string(),
+            info("old-tenant.local", &[(ip, now), (other_ip, now)]),
+        );
+        devices.insert("gone.local".to_string(), info("gone.local", &[(ip, now)]));
+
+        claim_addresses(&mut devices, "new-tenant.local", &[IpAddr::V4(ip)]);
+
+        let old = devices.get("old-tenant.local").unwrap();
+        assert_eq!(
+            old.ipv4_addresses
+                .iter()
+                .map(|e| e.address)
+                .collect::<Vec<_>>(),
+            vec![other_ip],
+            "keeps its other address"
+        );
+        assert!(
+            !devices.contains_key("gone.local"),
+            "a host left with no address cannot be looked up and is dropped"
+        );
+    }
+
+    #[test]
+    fn expire_entries_ages_out_on_each_timestamp() {
+        let now = Utc::now();
+        let max_age = chrono::Duration::seconds(1200);
+        let fresh_ip = Ipv4Addr::new(192, 168, 1, 50);
+        let stale_ip = Ipv4Addr::new(192, 168, 1, 51);
+        let mut devices = HashMap::new();
+        let mut host = info(
+            "printer.local",
+            &[
+                (fresh_ip, now),
+                (stale_ip, now - chrono::Duration::seconds(1300)),
+            ],
+        );
+        host.mac_addresses.push(MacAddressEntry {
+            address: MacAddr6::new(0x00, 0x11, 0x22, 0x33, 0x44, 0x55),
+            last_seen: now - chrono::Duration::days(1),
+        });
+        devices.insert("printer.local".to_string(), host);
+        devices.insert(
+            "left.local".to_string(),
+            info(
+                "left.local",
+                &[(
+                    Ipv4Addr::new(192, 168, 1, 52),
+                    now - chrono::Duration::days(2),
+                )],
+            ),
+        );
+
+        expire_entries(&mut devices, max_age, now);
+
+        let printer = devices.get("printer.local").unwrap();
+        assert_eq!(
+            printer
+                .ipv4_addresses
+                .iter()
+                .map(|e| e.address)
+                .collect::<Vec<_>>(),
+            vec![fresh_ip]
+        );
+        assert!(printer.mac_addresses.is_empty());
+        assert!(!devices.contains_key("left.local"));
+    }
 
     #[test]
     fn v6_to_mac_reads_only_eui64_interface_ids() {
