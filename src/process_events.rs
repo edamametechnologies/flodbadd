@@ -341,7 +341,8 @@ mod tests {
             push(ev(ProcessEventKind::Fork, pid));
         }
         let after = counters();
-        assert_eq!(after.fork - before.fork, 50);
+        // At least ours: a live sensor elsewhere in the process may push too.
+        assert!(after.fork - before.fork >= 50);
         let stored = recent(usize::MAX);
         assert!(stored.len() <= PROCESS_EVENT_RING_MAX);
         assert!(
