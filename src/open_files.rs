@@ -679,6 +679,10 @@ mod win_handles {
     //! owning pid, and every caller within the window reads its pid's bucket
     //! from the shared copy. Per-handle work (DuplicateHandle, GetFileType,
     //! GetFinalPathNameByHandleW) is unchanged and still done per pid.
+    //!
+    //! Handles their owner holds with write, append, delete or ACL-change
+    //! rights are left out of the buckets, so they are never duplicated (see
+    //! [`resolvable`]).
 
     use arc_swap::ArcSwapOption;
     use std::collections::HashMap;
@@ -784,10 +788,30 @@ mod win_handles {
     /// STATUS_INFO_LENGTH_MISMATCH round trips.
     static LAST_BUF_SIZE: AtomicU32 = AtomicU32::new(INITIAL_BUF_SIZE);
 
-    /// Bucket raw handle-table entries by owning pid (pure; unit-tested).
+    /// Access rights of a handle whose file or directory is being written,
+    /// replaced or secured: FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE,
+    /// WRITE_DAC, WRITE_OWNER.
+    const WRITER_ACCESS: u32 = 0x0000_0002 | 0x0000_0004 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000;
+
+    /// Whether this handle's path may be resolved without getting in its
+    /// owner's way. Resolving duplicates the handle into this process, and
+    /// the duplicate keeps the file object open until it is closed: a writer
+    /// that patches or replaces the file it has just written is refused with
+    /// "Access is denied" meanwhile. uv failed exactly so while EDAMAME ran
+    /// on windows-latest ("Failed to update Windows PE resources:
+    /// ...\uv-trampoline-NNNN.exe", fleet E2E and probe run 36273248402:
+    /// Hermes' uv installs failed 3/3 with EDAMAME, succeeded 3/3 without).
+    /// Read handles, what the sensitive-file detections need, are still
+    /// resolved; writes to sensitive paths are the file monitor's to see.
+    pub(super) fn resolvable(entry: &HandleEntry) -> bool {
+        entry.granted_access & WRITER_ACCESS == 0
+    }
+
+    /// Bucket raw handle-table entries by owning pid, leaving out the handles
+    /// that are not [`resolvable`] (pure; unit-tested).
     pub(super) fn bucket_by_pid(entries: &[HandleEntry]) -> HashMap<u32, Vec<u16>> {
         let mut by_pid: HashMap<u32, Vec<u16>> = HashMap::new();
-        for entry in entries {
+        for entry in entries.iter().filter(|entry| resolvable(entry)) {
             by_pid
                 .entry(entry.unique_process_id as u32)
                 .or_default()
@@ -958,6 +982,28 @@ mod win_handles {
         #[test]
         fn bucket_by_pid_empty_table() {
             assert!(bucket_by_pid(&[]).is_empty());
+        }
+
+        #[test]
+        fn handles_held_for_writing_or_replacing_are_never_resolved() {
+            let with_access = |handle: u16, granted_access: u32| HandleEntry {
+                granted_access,
+                ..entry(42, handle)
+            };
+            const FILE_READ_DATA: u32 = 0x0001;
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+            const READ_CONTROL: u32 = 0x0002_0000;
+            let entries = [
+                with_access(0x10, FILE_READ_DATA | SYNCHRONIZE | READ_CONTROL),
+                with_access(0x14, 0x0012_019f), // FILE_GENERIC_READ | FILE_GENERIC_WRITE
+                with_access(0x18, 0x0000_0004 | SYNCHRONIZE), // append
+                with_access(0x1c, 0x0001_0000 | FILE_READ_DATA), // delete (rename / replace)
+                with_access(0x20, 0x0004_0000 | READ_CONTROL), // WRITE_DAC (securing a new directory)
+                with_access(0x24, 0x0008_0000),                // WRITE_OWNER
+                with_access(0x28, 0),
+            ];
+            let by_pid = bucket_by_pid(&entries);
+            assert_eq!(by_pid[&42], vec![0x10, 0x28]);
         }
 
         #[test]
