@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tracing::debug;
 
 pub static FIM_EVENT_RETENTION_TIMEOUT: ChronoDuration = ChronoDuration::hours(8);
@@ -76,19 +77,20 @@ impl FimEvent {
     }
 }
 
+/// Minimum spacing of the retention sweep (a full `retain` over the store).
+const RETENTION_SWEEP_INTERVAL_MS: i64 = 5_000;
+
 pub struct FimEventStore {
     events: DashMap<String, FimEvent>,
     max_events: usize,
     retention: ChronoDuration,
+    /// Unix milliseconds of the last retention sweep (see `prune_if_needed`).
+    last_retention_sweep_ms: AtomicI64,
 }
 
 impl FimEventStore {
     pub fn new() -> Self {
-        Self {
-            events: DashMap::new(),
-            max_events: FIM_MAX_EVENTS,
-            retention: FIM_EVENT_RETENTION_TIMEOUT,
-        }
+        Self::with_limits(FIM_MAX_EVENTS, FIM_EVENT_RETENTION_TIMEOUT)
     }
 
     pub fn with_limits(max_events: usize, retention: ChronoDuration) -> Self {
@@ -96,12 +98,28 @@ impl FimEventStore {
             events: DashMap::new(),
             max_events,
             retention,
+            last_retention_sweep_ms: AtomicI64::new(i64::MIN),
         }
     }
 
     pub fn insert(&self, event: FimEvent) {
         self.events.insert(event.uid.clone(), event);
         self.prune_if_needed();
+    }
+
+    /// Insert a batch and prune once. The app core merges thousands of
+    /// helper events per sync (a `pip install`, a build); pruning per event
+    /// made that merge quadratic in the store size.
+    pub fn insert_batch<I: IntoIterator<Item = FimEvent>>(&self, events: I) -> usize {
+        let mut inserted = 0usize;
+        for event in events {
+            self.events.insert(event.uid.clone(), event);
+            inserted += 1;
+        }
+        if inserted > 0 {
+            self.prune_if_needed();
+        }
+        inserted
     }
 
     pub fn get_all_events(&self) -> Vec<FimEvent> {
@@ -280,25 +298,52 @@ impl FimEventStore {
         })
     }
 
+    /// Retention and size cap, amortized.
+    ///
+    /// Both used to run in full on EVERY insert: a `retain` over the whole
+    /// store, and -- once the store sat at `max_events`, which a busy dev host
+    /// reaches within minutes -- a collect + sort of every entry to evict one.
+    /// Inserting a 7 000-event burst into a full store therefore cost 7 000
+    /// full sorts; on the dev Mac the app core's FIM mirror spent 4-11 minutes
+    /// per sync in that loop (2026-09-28 FP simulation), and the helper paid
+    /// the same per event on its own store. Now:
+    ///   * the retention sweep runs at most every `RETENTION_SWEEP_INTERVAL_MS`
+    ///     (an expired event may outlive its cutoff by that much), and
+    ///   * the cap evicts down to a low watermark 10% under `max_events`, so
+    ///     at the cap the O(n) selection runs once per `max_events / 10`
+    ///     inserts instead of once per insert. The store never holds more than
+    ///     `max_events` after an insert returns.
     fn prune_if_needed(&self) {
         let now = Utc::now();
-        let cutoff = now - self.retention;
-
-        // Remove expired events
-        self.events.retain(|_, v| v.timestamp > cutoff);
+        let now_ms = now.timestamp_millis();
+        let last = self.last_retention_sweep_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) >= RETENTION_SWEEP_INTERVAL_MS
+            && self
+                .last_retention_sweep_ms
+                .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let cutoff = now - self.retention;
+            self.events.retain(|_, v| v.timestamp > cutoff);
+        }
 
         // Cap by snapshot length with saturating_sub: concurrent DashMap
         // mutations can shrink live len below max_events after the check.
         if self.events.len() > self.max_events {
-            let mut events: Vec<(String, DateTime<Utc>)> = self
+            let low_watermark = self.max_events - self.max_events / 10;
+            let mut events: Vec<(DateTime<Utc>, String)> = self
                 .events
                 .iter()
-                .map(|e| (e.key().clone(), e.value().timestamp))
+                .map(|e| (e.value().timestamp, e.key().clone()))
                 .collect();
-            events.sort_by(|a, b| a.1.cmp(&b.1));
-
-            let to_remove = events.len().saturating_sub(self.max_events);
-            for (uid, _) in events.into_iter().take(to_remove) {
+            let to_remove = events.len().saturating_sub(low_watermark);
+            if to_remove == 0 {
+                return;
+            }
+            if to_remove < events.len() {
+                events.select_nth_unstable(to_remove - 1);
+            }
+            for (_, uid) in events.into_iter().take(to_remove) {
                 self.events.remove(&uid);
                 debug!("FIM: pruned event {}", uid);
             }
@@ -704,6 +749,74 @@ mod tests {
             });
         }
         assert!(store.event_count() <= 5);
+    }
+
+    fn batch_event(i: i64, base: DateTime<Utc>) -> FimEvent {
+        let ts = base + ChronoDuration::milliseconds(i);
+        let path = format!("/tmp/batch/file_{}.txt", i);
+        FimEvent {
+            path: path.clone(),
+            event_type: FimEventType::Create,
+            timestamp: ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            process_pid: None,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid(&path, &FimEventType::Create, &ts),
+            last_modified: ts,
+        }
+    }
+
+    /// The cap keeps the NEWEST events and never exceeds `max_events`, for a
+    /// batch and for per-event inserts into a full store.
+    #[test]
+    fn test_fim_event_store_batch_insert_keeps_newest_under_cap() {
+        let store = FimEventStore::with_limits(100, FIM_EVENT_RETENTION_TIMEOUT);
+        let base = Utc::now();
+        assert_eq!(
+            store.insert_batch((0..250).map(|i| batch_event(i, base))),
+            250
+        );
+        assert!(store.event_count() <= 100);
+        let oldest_kept = store
+            .get_all_events()
+            .iter()
+            .map(|e| e.timestamp)
+            .min()
+            .unwrap();
+        assert!(oldest_kept >= base + ChronoDuration::milliseconds(150));
+        for i in 250..400 {
+            store.insert(batch_event(i, base));
+            assert!(store.event_count() <= 100);
+        }
+        let newest = store.get_all_events()[0].timestamp;
+        assert_eq!(newest, base + ChronoDuration::milliseconds(399));
+    }
+
+    /// Regression (FP simulation 2026-09-28): merging a burst into a full
+    /// store must not cost one full sort per event. 20 000 inserts into a
+    /// 10 000-entry store took minutes in a debug build when every insert
+    /// sorted the store; amortized eviction keeps it well under that.
+    #[test]
+    fn test_fim_event_store_burst_into_full_store_is_not_quadratic() {
+        let store = FimEventStore::new();
+        let base = Utc::now() - ChronoDuration::minutes(30);
+        store.insert_batch((0..FIM_MAX_EVENTS as i64).map(|i| batch_event(i, base)));
+        let started = std::time::Instant::now();
+        for i in 0..20_000i64 {
+            store.insert(batch_event(FIM_MAX_EVENTS as i64 + i, base));
+        }
+        assert!(store.event_count() <= FIM_MAX_EVENTS);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "20k inserts into a full store took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

@@ -54,6 +54,25 @@ impl CloudSignature for SensitivePathsDB {
     }
 }
 
+/// Whether a normalized path matches one catalog pattern.
+///
+/// A pattern is a substring of the path, except that a trailing `$` anchors
+/// it at the END of the path: `/cookies$` is a file named exactly `Cookies`
+/// (Chromium's cookie store at a profile or Electron app root), not every
+/// path that merely contains `/cookies` (pip's vendored
+/// `requests/cookies.py`, `undici-types/cookies.d.ts`). The caller normalizes
+/// the haystack (separators always, case where the table is lowercase).
+///
+/// A client older than the anchor never matches a `$` pattern, so an anchored
+/// entry ships next to the plain substring that keeps older clients covered
+/// where one exists (`/network/cookies`).
+pub fn catalog_pattern_matches(haystack: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('$') {
+        Some(anchored) if !anchored.is_empty() => haystack.ends_with(anchored),
+        _ => haystack.contains(pattern),
+    }
+}
+
 impl SensitivePathsDB {
     pub fn new_from_json(json: &SensitivePathsJSON) -> Self {
         info!(
@@ -127,7 +146,10 @@ impl SensitivePathsDB {
                 continue;
             }
             for (label, patterns) in &self.labels {
-                if patterns.iter().any(|pat| normalized.contains(pat.as_str())) {
+                if patterns
+                    .iter()
+                    .any(|pat| catalog_pattern_matches(&normalized, pat))
+                {
                     result.insert(label.clone());
                 }
             }
@@ -219,7 +241,10 @@ pub fn classify_sensitive_path_labels_sync(paths: &[String]) -> Vec<String> {
             continue;
         }
         for (label, patterns) in labels.as_ref() {
-            if patterns.iter().any(|pat| normalized.contains(pat.as_str())) {
+            if patterns
+                .iter()
+                .any(|pat| catalog_pattern_matches(&normalized, pat))
+            {
                 result.insert(label.clone());
             }
         }
@@ -262,7 +287,7 @@ pub async fn is_sensitive_path_from_model(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let db = SENSITIVE_PATHS.data.read().await;
     for pat in db.get_patterns_for_platform() {
-        if normalized.contains(pat) {
+        if catalog_pattern_matches(&normalized, pat) {
             return true;
         }
     }
@@ -428,7 +453,10 @@ mod tests {
 
         let missing: Vec<&String> = model_patterns
             .iter()
-            .filter(|pat| !crate::open_files::is_sensitive_path(&format!("/home/user{pat}")))
+            .filter(|pat| {
+                let probe = pat.strip_suffix('$').unwrap_or(pat);
+                !crate::open_files::is_sensitive_path(&format!("/home/user{probe}"))
+            })
             .collect();
         assert!(
             missing.is_empty(),
@@ -493,7 +521,7 @@ mod tests {
     /// up flagged-but-uncounted while the macOS keychain counted.
     ///
     /// Directory-prefix patterns are exempt when a label matches files *inside*
-    /// them (e.g. `browser_store` matches `/cookies`, which fires on
+    /// them (e.g. `browser_store` matches `/network/cookies`, which fires on
     /// `.../User Data/Default/Network/Cookies`), so the check is on the label
     /// substrings, not on the pattern strings being equal.
     #[tokio::test]
@@ -503,7 +531,7 @@ mod tests {
         // known false-positive case.
         const LABELLESS_BY_DESIGN: &[&str] = &[
             // browser_store matches the credential files inside these dirs
-            // (/cookies, /login data, /web data, /key4.db, /logins.json).
+            // (Cookies, /login data, /web data, /key4.db, /logins.json).
             // Windows-only today; the macOS/Linux profile roots are absent from
             // the catalog, so browser credential stores are classified as
             // sensitive on Windows only. Tracked as a residual BS-12 gap rather
@@ -611,6 +639,70 @@ mod tests {
                      is normalized to forward slashes so this can never match",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_catalog_pattern_anchor() {
+        assert!(catalog_pattern_matches("/a/b/cookies", "/cookies$"));
+        assert!(!catalog_pattern_matches("/a/b/cookies.py", "/cookies$"));
+        assert!(!catalog_pattern_matches("/a/cookies/x", "/cookies$"));
+        assert!(catalog_pattern_matches("/a/cookies.py", "/cookies"));
+        // A lone `$` is not an anchor.
+        assert!(catalog_pattern_matches("/a/$", "$"));
+    }
+
+    /// Browser cookie stores are the files browsers name so: Chromium and
+    /// Electron `Cookies` (profile root, or `Network/` since Chromium 96),
+    /// Firefox `cookies.sqlite`, Safari `Cookies.binarycookies`. A source file
+    /// NAMED after cookies (pip's vendored `requests/cookies.py`, its `.pyc`,
+    /// `undici-types/cookies.d.ts`) is not one.
+    #[tokio::test]
+    #[serial]
+    async fn test_browser_cookie_stores_are_labeled_and_cookie_sources_are_not() {
+        let stores = [
+            "/Users/u/Library/Application Support/Google/Chrome/Default/Cookies",
+            "/Users/u/Library/Application Support/Google/Chrome/Profile 1/Network/Cookies",
+            "/Users/u/Library/Application Support/Google/Chrome/Default/Network/Cookies-journal",
+            "C:\\Users\\u\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Network\\Cookies",
+            "/home/u/.config/Slack/Cookies",
+            "/home/u/.mozilla/firefox/abcd.default-release/cookies.sqlite",
+            "/Users/u/Library/Application Support/Firefox/Profiles/x.default/cookies.sqlite-wal",
+            "/Users/u/Library/Cookies/Cookies.binarycookies",
+            "/Users/u/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+        ];
+        for path in stores {
+            let labels = classify_sensitive_path_labels(&[path.to_string()]).await;
+            assert!(
+                labels.contains(&"browser_store".to_string()),
+                "{path} must carry browser_store, got {labels:?}"
+            );
+            assert!(
+                classify_sensitive_path_labels_sync(&[path.to_string()])
+                    .contains(&"browser_store".to_string()),
+                "{path}: sync classifier disagrees"
+            );
+        }
+        let sources = [
+            "/private/var/tmp/x/.venv/lib/python3.14/site-packages/pip/_vendor/requests/cookies.py",
+            "/tmp/x/.venv/lib/python3.14/site-packages/pip/_vendor/requests/__pycache__/cookies.cpython-314.pyc",
+            "/tmp/b/node_modules/undici-types/cookies.d.ts",
+            "/home/u/src/app/cookies/handler.go",
+        ];
+        for path in sources {
+            let labels = classify_sensitive_path_labels(&[path.to_string()]).await;
+            assert!(
+                !labels.contains(&"browser_store".to_string()),
+                "{path} must not carry browser_store, got {labels:?}"
+            );
+            assert!(
+                !is_sensitive_path_from_model(path).await,
+                "{path} must not be a sensitive path"
+            );
+            assert!(
+                !crate::open_files::is_sensitive_path(path),
+                "{path}: sync sensitive-path check disagrees"
+            );
         }
     }
 

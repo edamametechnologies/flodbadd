@@ -28,7 +28,11 @@ const FALLBACK_COMMON: &[&str] = &[
     "/id_ecdsa",
     "/id_dsa",
     "/Login Data",
-    "/Cookies",
+    "/Cookies$",
+    "/Cookies-journal$",
+    "/Network/Cookies",
+    "/cookies.sqlite",
+    "/Cookies.binarycookies",
     "/Web Data",
     "/.git-credentials",
     "/.vault-token",
@@ -110,7 +114,9 @@ pub async fn refresh_patterns_snapshot() {
 pub fn is_sensitive_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let patterns = PATTERNS_SNAPSHOT.load();
-    patterns.iter().any(|pat| normalized.contains(pat.as_str()))
+    patterns
+        .iter()
+        .any(|pat| crate::sensitive_paths::catalog_pattern_matches(&normalized, pat))
 }
 
 /// Returns the combined list of sensitive patterns (common + platform).
