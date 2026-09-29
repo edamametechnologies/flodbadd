@@ -24,8 +24,8 @@
 //! running, so nothing will look the table up.
 
 use std::path::PathBuf;
-use std::sync::RwLock;
 
+use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 
 /// Lower-cased, forward-slash form used for prefix matching.
@@ -82,7 +82,14 @@ struct Roots {
     recursive: bool,
 }
 
-static ROOTS: Lazy<RwLock<Roots>> = Lazy::new(|| RwLock::new(Roots::default()));
+/// Published snapshot, replaced whole by `set_roots` / `clear_roots`. The
+/// readers are the Endpoint Security and ETW callback threads -- one call per
+/// kernel write event -- which must never block and cannot `.await`, so they
+/// take a lock-free snapshot (the crate's pattern for sync-path config, e.g.
+/// `sensitive_paths`) instead of a lock. A try-lock would have to drop the
+/// event's attribution whenever two sensor threads met on it; a raw
+/// `std::sync::RwLock` (what this was) escapes the undeadlock diagnostics.
+static ROOTS: Lazy<ArcSwap<Roots>> = Lazy::new(|| ArcSwap::from_pointee(Roots::default()));
 
 /// Publish the FIM watch roots. Both the raw and the canonical spelling of
 /// each root are kept: Endpoint Security reports `/private/var/...` where
@@ -105,24 +112,21 @@ pub fn set_roots(roots: &[PathBuf], recursive: bool) {
             }
         }
     }
-    if let Ok(mut guard) = ROOTS.write() {
-        guard.roots = set.into_iter().collect();
-        guard.recursive = recursive;
-    }
+    ROOTS.store(std::sync::Arc::new(Roots {
+        roots: set.into_iter().collect(),
+        recursive,
+    }));
 }
 
 /// Forget the roots. After this nothing is attributable until a watcher
 /// publishes again.
 pub fn clear_roots() {
-    if let Ok(mut guard) = ROOTS.write() {
-        guard.roots.clear();
-        guard.recursive = false;
-    }
+    ROOTS.store(std::sync::Arc::new(Roots::default()));
 }
 
 /// Number of installed root spellings. For logging and tests.
 pub fn root_count() -> usize {
-    ROOTS.read().map(|g| g.roots.len()).unwrap_or(0)
+    ROOTS.load().roots.len()
 }
 
 /// Whether a kernel-time write to `path` is worth recording.
@@ -132,17 +136,15 @@ pub fn root_count() -> usize {
 /// not a permissive verdict: the effect is that less is recorded, never that
 /// something unwatched is treated as watched.
 pub fn is_attributable(path: &str) -> bool {
-    let Ok(guard) = ROOTS.read() else {
-        return false;
-    };
-    if guard.roots.is_empty() {
+    let roots = ROOTS.load();
+    if roots.roots.is_empty() {
         return false;
     }
     let normalized = normalize(path);
-    guard
+    roots
         .roots
         .iter()
-        .any(|root| path_under_root(&normalized, root, guard.recursive))
+        .any(|root| path_under_root(&normalized, root, roots.recursive))
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use threatmodels_rs::*;
 use tracing::{error, info, trace, warn};
 use undeadlock::*;
@@ -877,8 +877,8 @@ lazy_static! {
     // can wait instead of spawning duplicate expensive work ("single-flight").
     static ref ENDPOINT_PENDING: DashSet<String> = DashSet::new();
 
-    static ref LAST_WHITELIST_RUN: Mutex<DateTime<Utc>> =
-        Mutex::new(DateTime::<Utc>::from(std::time::UNIX_EPOCH));
+    static ref LAST_WHITELIST_RUN: CustomMutex<DateTime<Utc>> =
+        CustomMutex::new(DateTime::<Utc>::from(std::time::UNIX_EPOCH));
 
     // Flag indicating a full whitelist recompute is required.
     static ref NEED_FULL_RECOMPUTE_WHITELIST: AtomicBool = AtomicBool::new(false);
@@ -1460,15 +1460,7 @@ pub async fn recompute_whitelist_for_sessions(
     let flag_full_recompute = NEED_FULL_RECOMPUTE_WHITELIST.swap(false, Ordering::SeqCst);
 
     // Snapshot last run timestamp (used to decide incremental vs. full recompute)
-    let last_run_ts = {
-        // Recover from poisoning instead of panicking: a poisoned lock here
-        // would kill every subsequent whitelist recompute. The protected value
-        // is just a timestamp, so the recovered inner value is safe to use.
-        let guard = LAST_WHITELIST_RUN
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard
-    };
+    let last_run_ts = *LAST_WHITELIST_RUN.lock().await;
 
     // Decide whether to run a full recompute or an incremental pass.  The
     // decision now depends solely on the module-wide flag that is set whenever
@@ -1672,13 +1664,7 @@ pub async fn recompute_whitelist_for_sessions(
     }
 
     // Update last run timestamp
-    {
-        // Recover from poisoning instead of panicking (see the read site above).
-        let mut guard = LAST_WHITELIST_RUN
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = Utc::now();
-    }
+    *LAST_WHITELIST_RUN.lock().await = Utc::now();
 
     info!(
         "Whitelist recomputation completed with {} exceptions for {} sessions",

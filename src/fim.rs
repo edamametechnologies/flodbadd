@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
-use tokio::sync::RwLock as TokioRwLock;
 use tracing::{debug, error, info, warn};
+use undeadlock::CustomRwLock;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const FIM_ATTRIBUTION_CACHE_TTL_SECS: u64 = 10;
@@ -189,7 +189,7 @@ pub struct FimWatcher {
     /// incremental call returns only events whose `last_modified` is strictly
     /// newer than this timestamp, so backfilled attribution / content-hash
     /// updates on existing events are picked up alongside fresh inserts.
-    last_get_file_events_fetch_timestamp: Arc<TokioRwLock<DateTime<Utc>>>,
+    last_get_file_events_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
     #[cfg(target_os = "windows")]
     _hash_worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
@@ -420,7 +420,7 @@ impl FimWatcher {
             store,
             watch_paths: actual_paths,
             running,
-            last_get_file_events_fetch_timestamp: Arc::new(TokioRwLock::new(Utc::now())),
+            last_get_file_events_fetch_timestamp: Arc::new(CustomRwLock::new(Utc::now())),
             #[cfg(target_os = "windows")]
             _hash_worker: hash_worker,
             #[cfg(target_os = "windows")]
@@ -458,12 +458,12 @@ impl FimWatcher {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Clone the cursor handle (`Arc<RwLock<DateTime<Utc>>>`) so callers can
+    /// Clone the cursor handle (`Arc<CustomRwLock<DateTime<Utc>>>`) so callers can
     /// drive the incremental fetch loop without holding any outer
     /// `FIM_WATCHER` read guard while waiting on the cursor lock. The cursor
     /// is shared with `get_events` and is advanced unconditionally on each
     /// call to it.
-    pub fn fetch_cursor(&self) -> Arc<TokioRwLock<DateTime<Utc>>> {
+    pub fn fetch_cursor(&self) -> Arc<CustomRwLock<DateTime<Utc>>> {
         self.last_get_file_events_fetch_timestamp.clone()
     }
 
