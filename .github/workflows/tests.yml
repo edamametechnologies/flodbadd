@@ -518,8 +518,13 @@ jobs:
           dump_vulnerability_findings: true
           exit_on_vulnerability_findings: true
 
+      # The test steps are continue-on-error, so their failure surfaces only
+      # in these two steps. `!cancelled()` replaces the implicit `success()`:
+      # with it, a failing vulnerability gate above skipped both, and the run
+      # listed the gate as its only failure, which release_all.sh
+      # --ignore-dump soft-passes: a test failure read as a gate-only failure.
       - name: Slack alerts
-        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')
+        if: ${{ !cancelled() && (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')) }}
         uses: slackapi/slack-github-action@v1.26.0
         with:
           channel-id: "C072J0U9TH7"
@@ -533,7 +538,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Fail job if tests failed
-        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')
+        if: ${{ !cancelled() && (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && matrix.platform == 'linux')) }}
         shell: bash
         run: |
           echo "## Test Results Summary (Native - ${{ matrix.os }}-${{ matrix.platform }})"
@@ -864,11 +869,13 @@ jobs:
           dump_vulnerability_findings: true
           exit_on_vulnerability_findings: true
 
+      # See the native job: `!cancelled()`, so a failing gate cannot skip
+      # these two steps and turn a test failure into a gate-only failure.
       - name: Slack alerts
         # Won't work on 18.04 because of glibc version
         # Won't work on ARM64 Alpine because of JavaScript support
         # eBPF test failure only matters if NOT on 18.04 (which doesn't support eBPF well)
-        if: (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))) && !contains(matrix.container_name, '18.04') && !contains(matrix.container_name, 'aarch64-musl')
+        if: ${{ !cancelled() && (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))) && !contains(matrix.container_name, '18.04') && !contains(matrix.container_name, 'aarch64-musl') }}
         uses: slackapi/slack-github-action@v1.26.0
         with:
           channel-id: "C072J0U9TH7"
@@ -883,7 +890,7 @@ jobs:
 
       - name: Fail job if tests failed
         # eBPF test failure only matters if NOT on 18.04 (which doesn't support eBPF well)
-        if: steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))
+        if: ${{ !cancelled() && (steps.tests.outcome != 'success' || (steps.ebpf_test.outcome == 'failure' && !contains(matrix.container_name, '18.04'))) }}
         shell: bash
         run: |
           echo "## Test Results Summary (Container - ${{ matrix.container_name }})"
