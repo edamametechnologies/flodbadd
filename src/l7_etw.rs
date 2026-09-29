@@ -322,6 +322,16 @@ mod win {
             let fc = Arc::clone(&file_insert_counter);
             let av = Arc::clone(&available);
 
+            // Statics are never dropped, so nothing stops the sessions when
+            // the host exits unless it calls `shutdown`; the CRT's exit hook
+            // covers a host whose `main` returns (the helper service) or a
+            // DLL being unloaded. `std::process::exit` bypasses it
+            // (`ExitProcess`): such hosts call `shutdown` themselves.
+            // SAFETY: registers a plain `extern "C"` function with the CRT.
+            if unsafe { atexit(shutdown_at_exit) } != 0 {
+                warn!("ETW: could not register the exit hook; sessions stop only on an explicit shutdown()");
+            }
+
             if let Err(e) = std::thread::Builder::new()
                 .name("etw-client".into())
                 .spawn(move || {
@@ -440,6 +450,9 @@ mod win {
         /// Private real-time session for `Microsoft-Windows-Kernel-Audit-API-Calls`
         /// (PsOpenProcess). Runs on its own thread; `ProcessTrace` blocks.
         fn run_audit_session(process_table: Arc<DashMap<u32, EtwProcessInfo>>) {
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                return;
+            }
             THREAD_PROCESS_TABLE.with(|t| {
                 *t.borrow_mut() = Some(Arc::clone(&process_table));
             });
@@ -485,6 +498,17 @@ mod win {
                     );
                     return;
                 }
+                if !AUDIT_SESSION.started(session_handle) {
+                    // `shutdown` ran while the session was starting.
+                    AUDIT_SESSION.ended();
+                    let _ = ControlTraceW(
+                        session_handle,
+                        PCWSTR::null(),
+                        props,
+                        EVENT_TRACE_CONTROL_STOP,
+                    );
+                    return;
+                }
 
                 let mut params = ENABLE_TRACE_PARAMETERS::default();
                 params.Version = 2;
@@ -504,6 +528,7 @@ mod win {
                         "ETW audit-api-calls provider not enabled: {:?} (task-access stream disabled)",
                         enabled
                     );
+                    AUDIT_SESSION.ended();
                     let _ = ControlTraceW(
                         session_handle,
                         PCWSTR::null(),
@@ -521,6 +546,7 @@ mod win {
                 let trace_handle = OpenTraceW(&mut logfile);
                 if trace_handle.Value == u64::MAX {
                     debug!("ETW audit-api-calls OpenTrace failed (task-access stream disabled)");
+                    AUDIT_SESSION.ended();
                     let _ = ControlTraceW(
                         session_handle,
                         PCWSTR::null(),
@@ -532,6 +558,9 @@ mod win {
                 info!("ETW audit-api-calls session open (PsOpenProcess task-access stream)");
                 let handles = [trace_handle];
                 let _ = ProcessTrace(&handles, None, None);
+                // The session ended (`shutdown`, or another controller stopped
+                // it): it is no longer ours to stop.
+                AUDIT_SESSION.ended();
                 let _ = CloseTrace(trace_handle);
                 let _ = ControlTraceW(
                     session_handle,
@@ -550,6 +579,9 @@ mod win {
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
         ) {
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                return;
+            }
             Self::prime_process_table_from_running_processes(&process_table);
 
             THREAD_PROCESS_TABLE.with(|t| {
@@ -639,6 +671,17 @@ mod win {
                     );
                     return;
                 }
+                if !KERNEL_SESSION.started(session_handle) {
+                    // `shutdown` ran while the session was starting.
+                    KERNEL_SESSION.ended();
+                    let _ = ControlTraceW(
+                        session_handle,
+                        PCWSTR::null(),
+                        props,
+                        EVENT_TRACE_CONTROL_STOP,
+                    );
+                    return;
+                }
 
                 debug!("ETW kernel trace session started");
 
@@ -681,6 +724,7 @@ mod win {
                 let trace_handle = OpenTraceW(&mut logfile);
                 if trace_handle.Value == u64::MAX {
                     error!("ETW OpenTrace failed");
+                    KERNEL_SESSION.ended();
                     let _ = ControlTraceW(
                         session_handle,
                         PCWSTR::null(),
@@ -696,6 +740,12 @@ mod win {
                 // ProcessTrace blocks until the session is stopped or an error occurs
                 let handles = [trace_handle];
                 let _ = ProcessTrace(&handles, None, None);
+                // The session ended (`shutdown`, or another controller stopped
+                // it): it is no longer ours to stop, and nothing is feeding
+                // the tables any more.
+                KERNEL_SESSION.ended();
+                available.store(false, Ordering::Release);
+                info!("ETW kernel trace session ended");
 
                 let _ = CloseTrace(trace_handle);
                 let _ = ControlTraceW(
@@ -1739,13 +1789,121 @@ mod win {
     unsafe impl Send for FlodbaddL7Etw {}
     unsafe impl Sync for FlodbaddL7Etw {}
 
+    static INSTANCE: OnceCell<FlodbaddL7Etw> = OnceCell::new();
+
     pub fn global() -> &'static FlodbaddL7Etw {
-        static INSTANCE: OnceCell<FlodbaddL7Etw> = OnceCell::new();
         INSTANCE.get_or_init(FlodbaddL7Etw::init)
     }
 
     pub fn get_init_status() -> &'static str {
         global().init_status()
+    }
+
+    /// Set by `shutdown`: no session starts after it, and a session that was
+    /// starting while it ran stops itself (`SessionControl::started`).
+    static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+    static KERNEL_SESSION: SessionControl = SessionControl::new();
+    static AUDIT_SESSION: SessionControl = SessionControl::new();
+
+    /// One trace session this process started. ETW sessions are kernel
+    /// objects that outlive the process that started them: a real-time
+    /// session nobody stops keeps producing events for no consumer until the
+    /// machine reboots, and the NT Kernel Logger stays taken.
+    struct SessionControl {
+        /// `CONTROLTRACE_HANDLE` returned by our `StartTraceW`.
+        handle: AtomicU64,
+        /// From our `StartTraceW` until our `ProcessTrace` returns. Cleared
+        /// as soon as the session ends, whoever ended it, so `shutdown`
+        /// never stops a session that a later EDAMAME process has started
+        /// under the same name.
+        live: AtomicBool,
+    }
+
+    impl SessionControl {
+        const fn new() -> Self {
+            Self {
+                handle: AtomicU64::new(0),
+                live: AtomicBool::new(false),
+            }
+        }
+
+        /// Record a session this process just started. `false` when
+        /// `shutdown` already ran: the caller stops the session at once.
+        /// `live` is published before `SHUTDOWN` is read, and `shutdown`
+        /// sets `SHUTDOWN` before reading `live`, so one of the two always
+        /// sees the other and the session cannot outlive a shutdown.
+        fn started(&self, handle: CONTROLTRACE_HANDLE) -> bool {
+            self.handle.store(handle.Value, Ordering::SeqCst);
+            self.live.store(true, Ordering::SeqCst);
+            !SHUTDOWN.load(Ordering::SeqCst)
+        }
+
+        fn ended(&self) {
+            self.live.store(false, Ordering::SeqCst);
+        }
+
+        /// Stop the session if this process still runs it. Returns whether a
+        /// stop was issued.
+        fn stop_if_live(&self, kernel_logger: bool) -> bool {
+            if !self.live.swap(false, Ordering::SeqCst) {
+                return false;
+            }
+            let handle = CONTROLTRACE_HANDLE {
+                Value: self.handle.load(Ordering::SeqCst),
+            };
+            // Stop by handle, not by name: the name is shared with every
+            // other EDAMAME process on the host. The properties buffer only
+            // receives the final session statistics.
+            let buf_size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + 1024;
+            let mut buf = vec![0u8; buf_size];
+            // SAFETY: `buf` is sized and zeroed for an EVENT_TRACE_PROPERTIES
+            // plus the logger-name area ControlTraceW may write back.
+            let status = unsafe {
+                let props = &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
+                props.Wnode.BufferSize = buf_size as u32;
+                if kernel_logger {
+                    props.Wnode.Guid = SYSTEM_TRACE_CONTROL_GUID;
+                }
+                props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+                ControlTraceW(handle, PCWSTR::null(), props, EVENT_TRACE_CONTROL_STOP)
+            };
+            if status.is_err() {
+                debug!(
+                    "ETW: stopping session {:#x} returned {:?}",
+                    handle.Value, status
+                );
+            }
+            true
+        }
+    }
+
+    /// Stop the kernel trace session and the audit-API-calls session this
+    /// process started, so they do not outlive it. Idempotent and final:
+    /// nothing restarts them in this process, and `is_available` reads
+    /// `false` afterwards. Does not initialize ETW when it never ran.
+    pub fn shutdown() {
+        if SHUTDOWN.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let kernel = KERNEL_SESSION.stop_if_live(true);
+        let audit = AUDIT_SESSION.stop_if_live(false);
+        if let Some(instance) = INSTANCE.get() {
+            instance.available.store(false, Ordering::Release);
+        }
+        if kernel || audit {
+            info!(
+                "ETW sessions stopped on shutdown (kernel trace: {}, audit-api-calls: {})",
+                kernel, audit
+            );
+        }
+    }
+
+    extern "C" {
+        fn atexit(callback: extern "C" fn()) -> std::os::raw::c_int;
+    }
+
+    extern "C" fn shutdown_at_exit() {
+        shutdown();
     }
 }
 
@@ -1803,9 +1961,20 @@ mod win {
     pub fn get_init_status() -> &'static str {
         global().init_status()
     }
+
+    pub fn shutdown() {}
 }
 
 pub use win::EtwProcessInfo;
+
+/// Stop the ETW trace sessions this process started (Windows with the `etw`
+/// feature; a no-op elsewhere). ETW sessions are kernel objects that outlive
+/// their process, so a host that ends with `std::process::exit` -- which
+/// bypasses the CRT exit hook registered when the sessions start -- calls
+/// this on its shutdown path. Idempotent and final for the process.
+pub fn shutdown() {
+    win::shutdown();
+}
 
 pub fn get_l7_for_session(session: &Session) -> Option<SessionL7> {
     win::global().get_l7_for_session(session)

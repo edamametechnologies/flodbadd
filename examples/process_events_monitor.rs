@@ -17,6 +17,11 @@
 //!   cargo run --example process_events_monitor --features ebpf,examples -- --seconds 20 --storm 200   (Linux, root)
 //!   cargo run --example process_events_monitor --features etw,examples -- --seconds 20 --storm 200    (Windows, admin)
 //!
+//! Exit paths (the kernel trace sessions must not outlive the process): by
+//! default `main` returns, which runs the ETW exit hook; `--shutdown` calls
+//! `l7_etw::shutdown()` explicitly first; `--hard-exit` ends with
+//! `std::process::exit`, which bypasses the exit hook (as a host that exits
+//! that way must call `shutdown()` itself). Check with `logman query -ets`.
 //! `--show-requester <a,b>` lists only the task accesses whose requester
 //! name or path contains one of the texts, with the raw access mask.
 
@@ -90,12 +95,16 @@ fn main() {
 
     let mut seconds: u64 = 15;
     let mut storm: u32 = 0;
+    let mut explicit_shutdown = false;
+    let mut hard_exit = false;
     let mut show_requester: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).unwrap_or(seconds),
             "--storm" => storm = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--shutdown" => explicit_shutdown = true,
+            "--hard-exit" => hard_exit = true,
             "--show-requester" => show_requester = args.next(),
             other => eprintln!("ignoring unknown arg: {other}"),
         }
@@ -216,5 +225,17 @@ fn main() {
             event.is_platform_binary,
             event.net_dst
         );
+    }
+
+    if explicit_shutdown {
+        flodbadd::l7_etw::shutdown();
+        println!(
+            "explicit shutdown: etw available={}",
+            flodbadd::l7_etw::is_available()
+        );
+    }
+    if hard_exit {
+        println!("hard exit (std::process::exit)");
+        std::process::exit(0);
     }
 }

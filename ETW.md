@@ -37,7 +37,9 @@ without taking the other down.
 
 Both call `ControlTraceW(..., EVENT_TRACE_CONTROL_STOP)` on their session name
 before `StartTraceW`, so a session left behind by a previous daemon instance is
-torn down rather than blocking the start.
+torn down rather than blocking the start. `l7_etw::shutdown()` stops the two
+sessions this process started (see "2026-09-29 -- the sessions stop with their
+process" below).
 
 A manifest provider cannot ride the NT Kernel Logger, which is why
 `Microsoft-Windows-Kernel-Audit-API-Calls` needs a session of its own.
@@ -363,6 +365,33 @@ the caller passed it, before generic mapping):
 | `GENERIC_WRITE` | `0x40000000` | 2 (was never forwarded) |
 | `PROCESS_QUERY_LIMITED_INFORMATION` | -- | not forwarded |
 
+### 2026-09-29 -- the sessions stop with their process
+
+ETW sessions are kernel objects: they outlive the process that started them.
+The sessions lived in a static `OnceCell` with no stop path, so after the host
+exited the NT Kernel Logger kept producing process, TCP/IP and FileIo events
+for no consumer, and stayed taken, until the next EDAMAME start or a reboot.
+The Azure runner showed it on 2026-09-29: both `NT Kernel Logger` (keywords
+`process,net,fileio`) and `EDAMAME-KernelAuditApiCalls` were running with no
+EDAMAME process on the host.
+
+`l7_etw::shutdown()` (a no-op off Windows / without `etw`) stops both
+sessions, idempotently and for good in that process; `is_available()` reads
+false afterwards. It stops by the handle this process's `StartTraceW` returned,
+and only while that session is still ours: a session another EDAMAME process
+has since started under the same name is left alone. A session that was
+starting while `shutdown` ran stops itself. Kernel session end also clears
+`is_available()`, whoever ended it.
+
+`init` registers `shutdown` with the CRT exit hook (`atexit`). That covers a
+host whose `main` returns (the helper service returns once the SCM stops it)
+and a DLL being unloaded. `std::process::exit` calls `ExitProcess` directly and
+skips the hook: such a host calls `shutdown()` on its way out.
+
+Measured on the runner with `process_events_monitor`: returning from `main`
+left no EDAMAME session behind (`logman query -ets`); `--hard-exit`
+(`std::process::exit`) left both running; `--shutdown --hard-exit` left none.
+
 ## Privilege, deployment and failure modes
 
 Both sessions need Administrator or LocalSystem. `edamame_helper` runs as a
@@ -454,9 +483,11 @@ has to re-derive that from `EnableFlags`, not as a roadmap.
 - **The remembered `FileObject` map is thread-local.** That is correct today
   because one trace thread delivers all FileIo events, and it is not safe to
   assume if a second consumer thread is ever added.
-- **`init` is `OnceCell`-driven and has no stop path.** The sessions live for
-  the lifetime of the process; `ProcessTrace` blocks on its thread until the
-  session is stopped externally.
+- **The sessions stop at exit only on a normal exit or an explicit
+  `shutdown()`.** A host that ends with `std::process::exit` without calling
+  `shutdown()`, or that is killed, leaves both sessions running until the next
+  EDAMAME start stops them (see 2026-09-29 above). `shutdown` is final: nothing
+  restarts ETW in that process.
 
 ## Troubleshooting
 
