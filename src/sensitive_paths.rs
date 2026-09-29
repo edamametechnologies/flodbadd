@@ -654,9 +654,12 @@ mod tests {
 
     /// Browser cookie stores are the files browsers name so: Chromium and
     /// Electron `Cookies` (profile root, or `Network/` since Chromium 96),
-    /// Firefox `cookies.sqlite`, Safari `Cookies.binarycookies`. A source file
-    /// NAMED after cookies (pip's vendored `requests/cookies.py`, its `.pyc`,
-    /// `undici-types/cookies.d.ts`) is not one.
+    /// Firefox `cookies.sqlite` and its SQLite companions, Safari
+    /// `Cookies.binarycookies`. A source file NAMED after cookies (pip's
+    /// vendored `requests/cookies.py`, its `.pyc`,
+    /// `undici-types/cookies.d.ts`) is not one, nor is another database
+    /// whose name only starts like Firefox's (AppleMediaServices'
+    /// `cookies.sqlitedb`).
     #[tokio::test]
     #[serial]
     async fn test_browser_cookie_stores_are_labeled_and_cookie_sources_are_not() {
@@ -668,6 +671,8 @@ mod tests {
             "/home/u/.config/Slack/Cookies",
             "/home/u/.mozilla/firefox/abcd.default-release/cookies.sqlite",
             "/Users/u/Library/Application Support/Firefox/Profiles/x.default/cookies.sqlite-wal",
+            "/Users/u/Library/Application Support/Firefox/Profiles/x.default/cookies.sqlite-shm",
+            "C:\\Users\\u\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\x.default\\cookies.sqlite-journal",
             "/Users/u/Library/Cookies/Cookies.binarycookies",
             "/Users/u/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
         ];
@@ -688,6 +693,8 @@ mod tests {
             "/tmp/x/.venv/lib/python3.14/site-packages/pip/_vendor/requests/__pycache__/cookies.cpython-314.pyc",
             "/tmp/b/node_modules/undici-types/cookies.d.ts",
             "/home/u/src/app/cookies/handler.go",
+            "/Users/u/Library/AppleMediaServices/Accounts/00BC799C-38F4-442C-84A8-798F0B1505D2/cookies.sqlitedb",
+            "/Users/u/Library/AppleMediaServices/Accounts/00BC799C-38F4-442C-84A8-798F0B1505D2/cookies.sqlitedb-wal",
         ];
         for path in sources {
             let labels = classify_sensitive_path_labels(&[path.to_string()]).await;
