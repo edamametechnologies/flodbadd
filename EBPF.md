@@ -29,8 +29,7 @@ absent. Only a failure of the `tcp_set_state` kprobe disables the L7 helper.
 |---|---|---|---|
 | `track_connect_v4` | `tcp_v4_connect` | kprobe | Stash process info keyed by `struct sock *` |
 | `track_connect_v6` | `tcp_v6_connect` | kprobe | Same, IPv6 |
-| `minimal_probe` | `tcp_set_state` | kprobe | On `TCP_ESTABLISHED`, join the 4-tuple to the stashed process info |
-| `socket_cleanup` | `__sk_free` | kprobe | Delete the `socket_to_process` row |
+| `minimal_probe` | `tcp_set_state` | kprobe | On `TCP_ESTABLISHED`, join the 4-tuple to the stashed process info; on `TCP_CLOSE`, retire the connection (see below) |
 | `trace_sched_fork` | `sched/sched_process_fork` | tracepoint | Fork event + child to parent row |
 | `trace_sched_exec` | `sched/sched_process_exec` | tracepoint | Exec event with the binary path |
 | `trace_sched_exit` | `sched/sched_process_exit` | tracepoint | Exit event, group leaders only |
@@ -39,7 +38,7 @@ absent. Only a failure of the `tcp_set_state` kprobe disables the L7 helper.
 | `cg_connect4` / `cg_connect6` | cgroup v2 root | `cgroup/connect{4,6}` | Egress intent at `connect(2)` |
 | `cg_sendmsg4` / `cg_sendmsg6` | cgroup v2 root | `cgroup/sendmsg{4,6}` | Egress intent at unconnected UDP send |
 
-Six kprobes, three tracepoints, one BPF-LSM program, four cgroup programs.
+Four kprobes, three tracepoints, one BPF-LSM program, four cgroup programs.
 
 The `tcp_v4_connect` / `tcp_v6_connect` pair exists for one reason: they run
 in the caller's user context, so `bpf_get_current_pid_tgid()` names the
@@ -49,22 +48,29 @@ connect probes write `socket_to_process` keyed by the socket pointer;
 `tcp_set_state` reads that row back and only falls through to the current
 task when there is none.
 
-`socket_cleanup` deletes the `socket_to_process` row when the socket is
-freed. It deliberately leaves `l7_connections` alone so userspace can still
-resolve a session whose socket is already gone.
+Connection lifetime (since 2026-09-29): on `TCP_CLOSE` the same probe
+deletes the `socket_to_process` row (also for a connect that never got
+established) and moves the `l7_connections` row into the
+`l7_closed_connections` LRU. The live map therefore holds the host's
+established connections only, and a session resolved after its socket closed
+-- a short-lived connection picked up on the capture's next pass -- is still
+found in the closed map, which evicts its oldest entries instead of refusing
+new ones. `src/l7_ebpf.rs` looks up the live map first, then the closed one.
 
-Note on `l7_connections` lifetime: the C source says those rows are "cleaned
-up by TTL in userspace", but no such sweep exists today. `src/l7_ebpf.rs`
-only ever calls `get()` on the map. Rows are overwritten on key collision
-and otherwise persist for the life of the process, bounded by the 65536
-entry cap.
+Before that, nothing ever deleted from either map: the `__sk_free` cleanup
+program was never attached by the loader, and the userspace TTL the C source
+promised did not exist. A HASH map refuses new keys once full, so after 65,536
+connections in the process lifetime L7 attribution silently stopped for every
+new connection, and connect-time identities stopped being stashed (the probe
+then fell back to the softirq context's task).
 
 ## L7 object maps
 
 | Map | Type | Max entries | Key / value |
 |---|---|---|---|
-| `l7_connections` | HASH | 65536 | `session_key` (5-tuple + family) -> `process_info` |
-| `socket_to_process` | HASH | 65536 | `struct sock *` (u64) -> `process_info` |
+| `l7_connections` | HASH | 65536 | `session_key` (5-tuple + family) -> `process_info`, established to close |
+| `l7_closed_connections` | LRU_HASH | 16384 | Same key / value, rows retired at `TCP_CLOSE` |
+| `socket_to_process` | HASH | 65536 | `struct sock *` (u64) -> `process_info`, connect to close |
 | `proc_events` | RINGBUF | 262144 bytes (256 KiB) | `proc_event` records |
 | `proc_parent` | HASH | 65536 | child pid -> parent pid |
 | `proc_tp_cfg` | ARRAY | 1 | Live tracepoint field offsets from the loader |

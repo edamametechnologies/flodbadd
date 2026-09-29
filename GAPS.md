@@ -29,11 +29,11 @@ Each resolution is tagged with its source: `Ebpf`, `MacosLibproc`, `ExactMatch`,
 | Gap | Severity | Details |
 |-----|----------|---------|
 | TCP-only kprobe coverage | Medium | eBPF hooks `tcp_set_state`, `tcp_v4_connect`, `tcp_v6_connect` -- no UDP process attribution at the kernel level. UDP falls through to netstat exact match or port cache. |
-| BPF map size fixed at 65,536 | Low | `MAX_ENTRIES = 65536` in eBPF C program. Long-running systems with high session churn may silently drop new entries when the map is full. No user-space eviction of stale map entries. |
+| BPF map size fixed at 65,536 | Low | `MAX_ENTRIES = 65536` in eBPF C program. Since 2026-09-29 `l7_connections` and `socket_to_process` hold live connections only (rows retired at `TCP_CLOSE`), so the cap bounds concurrent connections, not the process lifetime; closed rows go to the `l7_closed_connections` LRU (16,384). |
 | Kernel 5.3+ requirement | Low | Minimum kernel version for BTF/tracepoint support. Pre-5.3 kernels silently fall back to netstat. |
 | `unprivileged_bpf_disabled` pre-flight only | Low | Checked once at init. If sysctl changes at runtime, eBPF stays in its initial state (either loaded or not). |
 | Container/LinuxKit limitations | Medium | Docker Desktop (LinuxKit kernel) lacks kprobe support. eBPF silently disabled. Not clearly surfaced to the user beyond log messages. |
-| No eBPF map garbage collection | Medium | The `l7_connections` BPF hashmap is written by kernel kprobes but never pruned from user space. Stale entries for closed connections accumulate until the map is full. |
+| ~~No eBPF map garbage collection~~ | Fixed 2026-09-29 | The `tcp_set_state` probe retires a connection at `TCP_CLOSE`: its `l7_connections` row moves to the `l7_closed_connections` LRU and its `socket_to_process` row is deleted. Before, nothing deleted either (the `__sk_free` program was never attached) and both filled at 65,536. |
 | Process path limited to 256 bytes | Low | `process_path` field in eBPF `ProcessInfo` struct is 256 bytes. Deeply nested paths are truncated. |
 | eBPF object embedded at compile time | Low | If clang/llvm not available at build time, eBPF object is empty and all lookups return `None`. Build-time dependency not always obvious. |
 
@@ -152,9 +152,7 @@ Forward DNS (from packet capture) takes priority over reverse DNS when both are 
 
 **Issue:** Both `l7_connections` and `dns_sockets` BPF hashmaps have `MAX_ENTRIES = 65536` but are never pruned from user space. Kernel kprobes insert entries; nothing removes stale entries for closed connections.
 
-**Current mitigation:** Fixed map size (65,536) prevents unbounded growth, but stale entries consume slots and eventually prevent new entries from being tracked.
-
-**Potential fix:** Periodic user-space sweep that checks map entries against active sessions and deletes stale ones.
+**Fixed for `l7_connections` (2026-09-29):** the kernel retires a connection at `TCP_CLOSE` (moved to the `l7_closed_connections` LRU for late lookups), and `socket_to_process` loses its row at the same point. `dns_sockets` is keyed by source port (and pid while a query is in flight), so its key space bounds it; it is unchanged.
 
 ---
 
@@ -198,7 +196,7 @@ confirmed it.
 | ES file attribution untestable in-process | Low | Endpoint Security suppresses events from its client's own process tree including children, so a single test binary is its own client and never sees its own writes. `tests/fim_attribution_benchmark_test.rs` can only validate init, the tier cascade and the `lsof` fallback. |
 | ETW TCP/IP decode may never key an IPv4 session | Medium | `handle_tcp_event` selects the IPv4 or IPv6 payload by event version alone, never by opcode. Modern kernels emit version 2 for IPv4 Connect/Accept/Reconnect and use separate opcodes for the IPv6 variants, so IPv4 tuples may decode through the V6 arm and never key a session. This would explain the benchmark result that ETW never wins the Windows L7 race mechanically rather than as a latency race. Unverified; no Windows host was available when it was found. |
 | Two ETW consumers on one host contend for the kernel session | Low | `init` unconditionally stops any pre-existing NT Kernel Logger session, and both the helper and the posture daemon now build the `etw` feature. On a host running both, the second to start takes the kernel session from the first. |
-| No garbage collection of the eBPF connection map | Medium | `l7_connections` is written by the kernel programs and only ever read from user space. `__sk_free` deletes the socket row but not the connection row, and the in-code comment claiming a userspace TTL describes a sweep that does not exist. Rows persist until the 65,536 cap is reached. Already listed under the Linux eBPF table above; repeated here because the comment is misleading. |
+| ~~No garbage collection of the eBPF connection map~~ | Fixed 2026-09-29 | `l7_connections` rows are retired at `TCP_CLOSE` in the kernel (moved to the `l7_closed_connections` LRU); the unattached `__sk_free` program and its misleading userspace-TTL comment are gone. |
 | Linux task-access probe is ATTACH-only | Low | The `ptrace_may_access` kprobe filters to `PTRACE_MODE_ATTACH`. Read-mode access is deliberately not reported because it is far too noisy, and is covered instead by the procfs open-file route. macOS reports both modes, so the platforms are not symmetric here. |
 
 ---
@@ -265,7 +263,7 @@ let to_resolve: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
 1. **Long-running capture tests** - Verify memory doesn't grow unbounded over 24+ hours
 2. **High packet rate tests** - Stress test with 100k+ packets/second
 3. **Cache eviction tests** - Verify LRU/TTL eviction works correctly under load
-4. **eBPF map saturation** - Test behavior when `l7_connections` BPF map reaches 65,536 entries
+4. **eBPF map saturation** - `l7_ebpf` unit test `closed_connections_leave_the_live_map_and_stay_resolvable` checks that closed connections leave the live map; a 65,536-concurrent-connection saturation test is still missing
 5. **DNS-over-HTTPS detection** - Verify sessions to known DoH providers are at least flagged as DNS-related even without domain extraction
 6. **Cross-platform L7 accuracy** - Covered by `tests/l7_benchmark_test.rs` and `.github/workflows/l7_benchmark.yml`, which run six variants across the three platforms with and without the kernel feature. Results are in `L7.md`.
 7. **Short-lived connection coverage** - Measure what percentage of sub-100ms connections are successfully attributed to processes on each platform

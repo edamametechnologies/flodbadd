@@ -453,7 +453,13 @@ mod linux {
     // Internal singleton that owns the BPF instance and user-space map copy
     pub struct Inner {
         _bpf: Ebpf,
+        /// Established connections (`l7_connections`); the kernel retires a
+        /// row at TCP_CLOSE.
         map: AyaHashMap<MapData, SessionKey, ProcessInfo>,
+        /// Retired rows (`l7_closed_connections`, LRU) so a session resolved
+        /// after its socket closed still finds its process. `None` only if
+        /// the embedded object lacks the map (fail-open: live lookups only).
+        closed_map: Option<AyaHashMap<MapData, SessionKey, ProcessInfo>>,
     }
 
     impl Inner {
@@ -917,61 +923,105 @@ mod linux {
                 }
             );
 
-            info!("eBPF L7 helper initialised successfully: {}", msg);
-
-            (Some(Inner { _bpf: bpf, map }), msg)
-        }
-
-        fn lookup_session(&self, session: &Session) -> Option<SessionL7> {
-            let key = session_to_key(session);
-            match self.map.get(&key, 0) {
-                Ok(info) => {
-                    // Convert C strings to Rust strings safely
-                    let process_name = String::from_utf8_lossy(
-                        &info.process_name
-                            [..info.process_name.iter().position(|&c| c == 0).unwrap_or(16)],
-                    )
-                    .to_string();
-
-                    let process_path = String::from_utf8_lossy(
-                        &info.process_path[..info
-                            .process_path
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(256)],
-                    )
-                    .to_string();
-
-                    let username = String::from_utf8_lossy(
-                        &info.username[..info.username.iter().position(|&c| c == 0).unwrap_or(32)],
-                    )
-                    .to_string();
-
-                    Some(SessionL7 {
-                        pid: info.pid,
-                        process_name: if process_name.is_empty() {
-                            format!("pid-{}", info.pid)
-                        } else {
-                            process_name
-                        },
-                        process_path: if process_path.is_empty() {
-                            format!("/proc/{}", info.pid)
-                        } else {
-                            process_path
-                        },
-                        username: if username.is_empty() || username == "unknown" {
-                            format!("uid-{}", info.uid)
-                        } else {
-                            username
-                        },
-                        ..SessionL7::default()
-                    })
-                }
-                Err(e) => {
-                    debug!("eBPF map lookup error: {}", e);
+            // Closed-connection LRU, filled by the kernel at TCP_CLOSE.
+            // Fail-open: without it only live connections resolve.
+            let closed_map = match bpf.take_map("l7_closed_connections") {
+                Some(m) => match AyaHashMap::try_from(m) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        warn!(
+                            "eBPF: closed-connection map unusable: {} (live lookups only)",
+                            e
+                        );
+                        None
+                    }
+                },
+                None => {
+                    warn!("eBPF: l7_closed_connections missing from object (live lookups only)");
                     None
                 }
-            }
+            };
+
+            info!("eBPF L7 helper initialised successfully: {}", msg);
+
+            (
+                Some(Inner {
+                    _bpf: bpf,
+                    map,
+                    closed_map,
+                }),
+                msg,
+            )
+        }
+
+        /// Live connection first, then one retired at TCP_CLOSE.
+        fn lookup_session(&self, session: &Session) -> Option<SessionL7> {
+            let key = session_to_key(session);
+            let info = match self.map.get(&key, 0) {
+                Ok(info) => info,
+                Err(live_err) => match self.closed_map.as_ref().map(|m| m.get(&key, 0)) {
+                    Some(Ok(info)) => info,
+                    _ => {
+                        debug!("eBPF map lookup error: {}", live_err);
+                        return None;
+                    }
+                },
+            };
+            Some(session_l7_from_info(&info))
+        }
+
+        #[cfg(test)]
+        fn live_contains(&self, session: &Session) -> bool {
+            self.map.get(&session_to_key(session), 0).is_ok()
+        }
+
+        #[cfg(test)]
+        fn closed_contains(&self, session: &Session) -> bool {
+            self.closed_map
+                .as_ref()
+                .is_some_and(|m| m.get(&session_to_key(session), 0).is_ok())
+        }
+    }
+
+    fn session_l7_from_info(info: &ProcessInfo) -> SessionL7 {
+        // Convert C strings to Rust strings safely
+        let process_name = String::from_utf8_lossy(
+            &info.process_name[..info.process_name.iter().position(|&c| c == 0).unwrap_or(16)],
+        )
+        .to_string();
+
+        let process_path = String::from_utf8_lossy(
+            &info.process_path[..info
+                .process_path
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(256)],
+        )
+        .to_string();
+
+        let username = String::from_utf8_lossy(
+            &info.username[..info.username.iter().position(|&c| c == 0).unwrap_or(32)],
+        )
+        .to_string();
+
+        SessionL7 {
+            pid: info.pid,
+            process_name: if process_name.is_empty() {
+                format!("pid-{}", info.pid)
+            } else {
+                process_name
+            },
+            process_path: if process_path.is_empty() {
+                format!("/proc/{}", info.pid)
+            } else {
+                process_path
+            },
+            username: if username.is_empty() || username == "unknown" {
+                format!("uid-{}", info.uid)
+            } else {
+                username
+            },
+            ..SessionL7::default()
         }
     }
 
@@ -1012,6 +1062,90 @@ mod linux {
     /// Get the detailed initialization status message
     pub fn get_init_status() -> &'static str {
         global().init_status()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::sessions::Protocol;
+        use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        /// Connections are retired at TCP_CLOSE: out of the live map (which
+        /// used to keep every connection ever made and stop accepting new
+        /// ones at 65,536), yet still resolvable from the closed-connection
+        /// LRU for a lookup that comes after the close. Needs root and a
+        /// kernel that attaches the kprobes (the Linux CI job, the
+        /// core-ebpf-test VM); skips elsewhere.
+        #[test]
+        fn closed_connections_leave_the_live_map_and_stay_resolvable() {
+            let Some(inner) = global().inner.as_ref() else {
+                println!("Skipping: eBPF not available ({})", global().init_status());
+                return;
+            };
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            const CONNECTIONS: usize = 64;
+            let acceptor = std::thread::spawn(move || {
+                for _ in 0..CONNECTIONS {
+                    let (stream, _) = listener.accept().unwrap();
+                    drop(stream);
+                }
+            });
+
+            // Hold every connection open first: established rows are live.
+            let mut streams = Vec::new();
+            let mut sessions = Vec::new();
+            for _ in 0..CONNECTIONS {
+                let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+                let local = stream.local_addr().unwrap();
+                sessions.push(Session {
+                    protocol: Protocol::TCP,
+                    src_ip: local.ip(),
+                    src_port: local.port(),
+                    dst_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    dst_port: port,
+                });
+                streams.push(stream);
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while sessions.iter().any(|s| !inner.live_contains(s)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let live = sessions.iter().filter(|s| inner.live_contains(s)).count();
+            assert_eq!(
+                live, CONNECTIONS,
+                "established connections are in the live map"
+            );
+            let own_pid = std::process::id();
+            for session in &sessions {
+                let l7 = inner
+                    .lookup_session(session)
+                    .expect("live connection resolves");
+                assert_eq!(l7.pid, own_pid, "attributed to the connecting process");
+            }
+
+            // Close them: the acceptor closes its side, then ours go through
+            // FIN / TIME_WAIT, which is where the kernel sets TCP_CLOSE.
+            drop(streams);
+            acceptor.join().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while sessions.iter().any(|s| inner.live_contains(s)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let still_live = sessions.iter().filter(|s| inner.live_contains(s)).count();
+            assert_eq!(still_live, 0, "closed connections left the live map");
+            for session in &sessions {
+                assert!(
+                    inner.closed_contains(session),
+                    "retired row kept: {session:?}"
+                );
+                let l7 = inner
+                    .lookup_session(session)
+                    .expect("closed connection still resolves");
+                assert_eq!(l7.pid, own_pid);
+            }
+        }
     }
 }
 

@@ -84,6 +84,13 @@ struct process_info {
 };
 
 /* eBPF maps */
+
+/* Established TCP connections -> the process that owns them. An entry lives
+ * from TCP_ESTABLISHED to TCP_CLOSE (tcp_set_state below), so the map holds
+ * the host's live connections only. Before 2026-09-29 nothing ever deleted
+ * from it: a plain HASH map refuses new keys once full, so after 65,536
+ * connections in the process lifetime Linux L7 attribution silently stopped
+ * for every new connection. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -91,7 +98,21 @@ struct {
     __type(value, struct process_info);
 } l7_connections SEC(".maps");
 
-/* Helper map to track socket to process mappings */
+/* Connections that have closed, moved here at TCP_CLOSE so a lookup that
+ * comes after the close (a short-lived connection resolved on the capture's
+ * next pass) still finds its process. LRU: the oldest closed entries make
+ * room, so this map never refuses an insert. */
+#define CLOSED_MAX_ENTRIES 16384
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, CLOSED_MAX_ENTRIES);
+    __type(key, struct session_key);
+    __type(value, struct process_info);
+} l7_closed_connections SEC(".maps");
+
+/* Helper map to track socket to process mappings: the connecting process,
+ * captured in its own context at tcp_v{4,6}_connect, keyed by the socket
+ * pointer until the socket closes. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -337,21 +358,33 @@ static __always_inline void get_process_info(struct process_info *info) {
 
 /*
  * Kprobe handler for tcp_set_state
- * Called when a TCP socket changes state (e.g., becomes ESTABLISHED)
+ * Called when a TCP socket changes state. ESTABLISHED records the connection
+ * and its process; CLOSE retires it (every TCP socket that was established
+ * reaches TCP_CLOSE through here, including via TIME_WAIT: tcp_time_wait ->
+ * tcp_done). The kprobe runs at function entry, before the kernel unhashes
+ * the socket, so the addresses and ports still describe the connection.
  * Works for both IPv4 and IPv6 connections
  */
 SEC("kprobe/tcp_set_state")
 int minimal_probe(struct pt_regs *ctx) {
     struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
     int new_state = (int)PT_REGS_PARM2(ctx);
-    
+
     if (!sk) return 0;
-    
-    /* Only track TCP ESTABLISHED connections */
-    if (new_state != TCP_ESTABLISHED) {
+
+    /* Only ESTABLISHED (record) and CLOSE (retire) matter */
+    if (new_state != TCP_ESTABLISHED && new_state != TCP_CLOSE) {
         return 0;
     }
-    
+
+    __u64 sock_ptr = (__u64)sk;
+    if (new_state == TCP_CLOSE) {
+        /* The connect-time identity was only needed until ESTABLISHED; a
+         * connect that never got there (refused, timed out) closes too.
+         * Keyed by the socket pointer, so drop it before any address check. */
+        bpf_map_delete_elem(&socket_to_process, &sock_ptr);
+    }
+
     /* Read socket family */
     __u16 family = 0;
     bpf_probe_read_kernel(&family, sizeof(family), (void *)sk + SKC_FAMILY_OFFSET);
@@ -382,10 +415,20 @@ int minimal_probe(struct pt_regs *ctx) {
     if (!should_track_connection(&key)) {
         return 0;
     }
-    
+
+    if (new_state == TCP_CLOSE) {
+        /* Retire the live entry: move it to the closed-connection LRU so a
+         * late lookup still resolves, and free its slot in the live map. */
+        struct process_info *live = bpf_map_lookup_elem(&l7_connections, &key);
+        if (live) {
+            bpf_map_update_elem(&l7_closed_connections, &key, live, BPF_ANY);
+            bpf_map_delete_elem(&l7_connections, &key);
+        }
+        return 0;
+    }
+
     /* Try to get process info from socket_to_process map first
      * (captured earlier in tcp_v4_connect/tcp_v6_connect when we were in user context) */
-    __u64 sock_ptr = (__u64)sk;
     struct process_info *stored_info = bpf_map_lookup_elem(&socket_to_process, &sock_ptr);
     
     struct process_info info = {0};
@@ -454,23 +497,11 @@ int track_connect_v6(struct pt_regs *ctx) {
 }
 
 /*
- * Kprobe handler for __sk_free
- * Called when a socket is being freed - clean up our tracking
+ * There is no __sk_free cleanup program: the loader never attached one
+ * (__sk_free is static and may be inlined), so `socket_to_process` and
+ * `l7_connections` were never cleaned and both filled up. Cleanup happens at
+ * TCP_CLOSE in the tcp_set_state probe above, which is always attached.
  */
-SEC("kprobe/__sk_free")
-int socket_cleanup(struct pt_regs *ctx) {
-    struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
-    
-    if (!sk) return 0;
-    
-    __u64 sock_ptr = (__u64)sk;
-    bpf_map_delete_elem(&socket_to_process, &sock_ptr);
-    
-    /* Note: We keep l7_connections entries for userspace to query
-     * They will be cleaned up by TTL in userspace */
-    
-    return 0;
-}
 
 SEC("tracepoint/sched/sched_process_fork")
 int trace_sched_fork(void *ctx)
