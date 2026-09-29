@@ -164,7 +164,7 @@ evicted and lock-dropped events):
 |---|---|---|
 | `Exec` | Session A, Process/Start | `process_path`, `parent_process_path` from the table, `argv_sha256` over the command line (raw argv never enters the ring) |
 | `Exit` | Session A, Process/End | Identity copied out of the process table entry being removed |
-| `TaskAccess` | Session B, PsOpenProcess | `target_pid`, `target_process_path`, `task_access_mode`, `platform_path_marked` |
+| `TaskAccess` | Session B, PsOpenProcess | `target_pid`, `target_process_path`, `task_access_mode`, `task_access_mask` (the raw `DesiredAccess`), `platform_path_marked` |
 
 `Fork` and `NetConnect` have no Windows producer. `signing_id`, `team_id`,
 `uid`, `argv_len` and `is_platform_binary` stay `None` on every Windows event:
@@ -335,6 +335,34 @@ The commit message records that this is not a helper-CPU fix: on a release build
 the FIM path already reported 0 ms per batch with the helper idling at 6-12%.
 It removes work that was never read.
 
+### 2026-09-29 -- every PROCESS_ALL_ACCESS spelling grades READ; the raw mask rides the event
+
+On 2026-09-18 the blanket ask stopped grading ATTACH, but only for the exact
+Vista value `0x001F_FFFF`. .NET asks for the legacy `0x001F_0FFF`
+(`STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFF`), so Chocolatey's
+`Process.Handle` opens kept grading ATTACH and the detector's read relief could
+never apply (FP-WIN-23: `choco.exe` 4 HIGH + 2 CRITICAL `access:attach` on the
+released-2.0.2 cli and helper gates, runs 36508482670 / 36508252126). Masks
+spelled only in generic or special rights graded query-only and were never
+forwarded. The grading (`task_access_mode_for_desired_access`) is now a pure,
+always-compiled function, unit-tested on every host, and `ProcessEvent` carries
+the raw mask as `task_access_mask`.
+
+Measured on the Azure windows-x64 runner with `process_events_monitor` and a
+.NET Framework probe opening a live `ping.exe` (the kernel reports the mask as
+the caller passed it, before generic mapping):
+
+| Open | Mask reported | Mode now |
+|---|---|---|
+| .NET Framework `Process.Handle` | `0x1f0fff` | 1 (READ; was 2) |
+| pwsh 7 (.NET) `(Get-Process).Handle` | `0x1f0fff` | 1 (READ; was 2) |
+| `Process.MainModule` | `0x410` | 1 |
+| `OpenProcess(0x1FFFFF)` | `0x1fffff` | 1 |
+| `OpenProcess(VM_WRITE \| VM_OPERATION)` | `0x28` | 2 |
+| `MAXIMUM_ALLOWED` / `GENERIC_ALL` / `GENERIC_READ` | `0x2000000` / `0x10000000` / `0x80000000` | 1 (were never forwarded) |
+| `GENERIC_WRITE` | `0x40000000` | 2 (was never forwarded) |
+| `PROCESS_QUERY_LIMITED_INFORMATION` | -- | not forwarded |
+
 ## Privilege, deployment and failure modes
 
 Both sessions need Administrator or LocalSystem. `edamame_helper` runs as a
@@ -410,6 +438,19 @@ has to re-derive that from `EnableFlags`, not as a roadmap.
 - **The connection table has no TTL.** Entries are removed when the owning
   process's Process/End event arrives. A missed End event leaks a row until the
   daemon restarts.
+- **A short-lived requester can lose its identity.** The PsOpenProcess event
+  arrives on Session B, the requester's Process/Start and Process/End on
+  Session A, and each session flushes on its own timer. A requester that exits
+  within about a second can leave the process table (its End handled first)
+  before its open is handled, and the kernel query fails as well: the edge
+  carries an empty image, and the detector drops edges with no requester
+  (measured 2026-09-29 on the Azure runner: every open by a .NET probe that
+  exits at once, and a pwsh one-liner). A requester whose Start was handled
+  after it exited keeps a bare image name, which is not path-marked as
+  OS-shipped: the shape of the `WMIC.exe` -> `Runner.Worker.exe` CRITICAL on
+  the released-2.0.2 cli gate (run 36508482670: `access:read`, process path
+  `WMIC.exe`, no parent). Its mask graded READ, so the all-access fix above
+  does not change it.
 - **The remembered `FileObject` map is thread-local.** That is correct today
   because one trace thread delivers all FileIo events, and it is not safe to
   assume if a second consumer thread is ever added.
@@ -451,7 +492,8 @@ feature built in. `logman query -ets` lists live sessions.
    under `%SystemRoot%` or the Defender roots are dropped as background. Drive
    the check with an explicit `0x0438` open, not a `0x0410` one.
 4. `examples/process_events_monitor.rs` prints ring counters and up to 32
-   task-access edges with their mode:
+   task-access edges with their mode and raw mask (`--show-requester a,b`
+   keeps only requesters whose name or path contains one of the texts):
    `cargo run --example process_events_monitor --features etw,examples -- --seconds 20`
 
 ### Connection table empty

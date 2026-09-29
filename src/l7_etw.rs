@@ -21,6 +21,103 @@ use crate::sessions::{Session, SessionL7};
 use crate::win_path_normalize::normalize_win_path;
 use tracing::info;
 
+// PTRACE_MODE vocabulary the detector shares across backends
+// (`ProcessEvent::task_access_mode`).
+const TASK_ACCESS_READ: u32 = 1;
+const TASK_ACCESS_ATTACH: u32 = 2;
+
+// PROCESS_* access rights (winnt.h), plus the generic and special rights an
+// `OpenProcess` caller may put in the same mask. The PTRACE_MODE vocabulary
+// maps onto the mask like this:
+//   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD asked for on their
+//               own -- the debugger-grade opens (task_for_pid / ptrace attach)
+//   READ   (1): VM_READ without any of the above -- the read-only task port
+//               shape (macOS GET_TASK_READ), which updaters, crash handlers
+//               and process monitors take on every process -- and the
+//               blanket asks (every right at once, see below)
+//   neither   : query-only opens, never forwarded
+// Before 2026-09-08 VM_READ alone was ATTACH-grade, so Google Updater
+// reading svchost graded like a scraper on the idle baseline.
+const PROCESS_CREATE_THREAD: u32 = 0x0002;
+const PROCESS_VM_OPERATION: u32 = 0x0008;
+const PROCESS_VM_READ: u32 = 0x0010;
+const PROCESS_VM_WRITE: u32 = 0x0020;
+const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+/// `PROCESS_ALL_ACCESS` as the pre-Vista SDK spells it:
+/// `STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFF`. .NET Framework still
+/// asks for exactly this (`NativeMethods.PROCESS_ALL_ACCESS`); the Vista+
+/// value `0x1FFFFF` (0xFFFF specific rights) is a superset of it.
+const PROCESS_ALL_ACCESS_LEGACY: u32 = 0x001F_0FFF;
+const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const GENERIC_READ: u32 = 0x8000_0000;
+const DEBUGGER_GRADE_RIGHTS: u32 = PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD;
+
+/// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE vocabulary
+/// (`1` READ, `2` ATTACH). `None` is a query-only open, never forwarded.
+///
+/// Graded by the rights the mask actually carries, whatever the caller's SDK
+/// or framework calls them:
+///
+/// - A blanket ask -- every right of the process object at once -- is READ,
+///   not ATTACH. It is what managed frameworks request for any operation
+///   (.NET's `System.Diagnostics.Process` asks for it to read a process name
+///   or take `Process.Handle`), so grading it as an attach made every .NET
+///   tool that walks processes a CRITICAL generator (Chocolatey opening the CI
+///   runner worker on the `edamame_cli` / `edamame_helper` Windows gates). It
+///   still carries VM_READ, so a named sensitive victim stays CRITICAL and
+///   only the detector's enumeration breadth rule (>= 3 distinct read
+///   targets) relieves it. Its spellings: the Vista+ `0x1FFFFF`, the legacy
+///   `0x1F0FFF` that .NET Framework (Chocolatey) still sends -- until
+///   2026-09-29 only the exact Vista value counted, so the legacy one graded
+///   ATTACH and the read relief could never apply --, `GENERIC_ALL`, and
+///   `MAXIMUM_ALLOWED`.
+/// - Generic rights are expanded through the process object's generic
+///   mapping first: `GENERIC_READ` carries VM_READ, `GENERIC_WRITE` carries
+///   VM_WRITE / VM_OPERATION / CREATE_THREAD. Before, a mask spelled only in
+///   generic or special bits graded as query-only and never reached the
+///   detector, whatever it could do to the target.
+/// - The SPECIFIC rights a scrape or an injection needs -- VM_WRITE,
+///   VM_OPERATION, CREATE_THREAD asked for on their own -- stay ATTACH.
+/// - Read and query rights alone (VM_READ with or without
+///   QUERY_[LIMITED_]INFORMATION) are READ; query rights alone are not
+///   forwarded.
+///
+/// A READ-grade open is dropped before the ring only when its requester is
+/// OS-shipped, and an image in a user-writable %SystemRoot% subtree never is
+/// (`is_os_shipped_windows_image`).
+///
+/// DUP_HANDLE is not graded: the kernel's own System process (pid 4, no image
+/// path) duplicates handles out of services all the time, so an ATTACH grade
+/// made an idle Windows host a HIGH `process_memory_scrape` generator
+/// (posture gate run 36113244867, windows-x64 idle baseline, 2026-09-25).
+/// Handle theft out of lsass stays an open gap (DETECTIONGAPS G-49).
+///
+/// Pure and platform-neutral so the mapping is unit-tested on every host, not
+/// only on a Windows build with the `etw` feature.
+pub fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
+    let blanket = desired_access & PROCESS_ALL_ACCESS_LEGACY == PROCESS_ALL_ACCESS_LEGACY
+        || desired_access & (GENERIC_ALL | MAXIMUM_ALLOWED) != 0;
+    if blanket {
+        return Some(TASK_ACCESS_READ);
+    }
+    let mut rights = desired_access;
+    if desired_access & GENERIC_READ != 0 {
+        rights |= PROCESS_VM_READ | PROCESS_QUERY_INFORMATION;
+    }
+    if desired_access & GENERIC_WRITE != 0 {
+        rights |= DEBUGGER_GRADE_RIGHTS;
+    }
+    if rights & DEBUGGER_GRADE_RIGHTS != 0 {
+        return Some(TASK_ACCESS_ATTACH);
+    }
+    if rights & PROCESS_VM_READ != 0 {
+        return Some(TASK_ACCESS_READ);
+    }
+    None
+}
+
 #[cfg(all(target_os = "windows", feature = "etw"))]
 mod win {
     use super::*;
@@ -97,60 +194,9 @@ mod win {
         GUID::from_u128(0xe02a841c_75a3_4fa7_afc8_ae09cf9b7f23);
     const AUDIT_SESSION_NAME: &str = "EDAMAME-KernelAuditApiCalls";
     /// Event id of `PsOpenProcess` in that provider; payload
-    /// `TargetProcessId: u32, DesiredAccess: u32, ReturnCode: u32`.
+    /// `TargetProcessId: u32, DesiredAccess: u32, ReturnCode: u32`. The mask
+    /// is graded by `super::task_access_mode_for_desired_access`.
     const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
-    // PROCESS_* access rights (winnt.h). The PTRACE_MODE vocabulary the
-    // detector shares across backends maps onto the mask like this:
-    //   ATTACH (2): VM_WRITE / VM_OPERATION / CREATE_THREAD / ALL_ACCESS --
-    //               the debugger-grade opens (task_for_pid / ptrace attach)
-    //   READ   (1): VM_READ without any of the above -- the read-only task
-    //               port shape (macOS GET_TASK_READ), which updaters, crash
-    //               handlers and process monitors take on every process
-    //   neither   : query-only opens, never forwarded
-    // Before 2026-09-08 VM_READ alone was ATTACH-grade, so Google Updater
-    // reading svchost graded like a scraper on the idle baseline.
-    const PROCESS_CREATE_THREAD: u32 = 0x0002;
-    const PROCESS_VM_OPERATION: u32 = 0x0008;
-    const PROCESS_VM_READ: u32 = 0x0010;
-    const PROCESS_VM_WRITE: u32 = 0x0020;
-    const PROCESS_ALL_ACCESS_MASK: u32 = 0x001F_FFFF;
-
-    /// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE
-    /// vocabulary. `None` is a query-only open, never forwarded.
-    ///
-    /// `PROCESS_ALL_ACCESS` is deliberately NOT debugger-grade. It is what
-    /// managed frameworks ask for on any operation -- .NET's
-    /// `System.Diagnostics.Process` requests it to read a process name --
-    /// so grading the blanket ask as an attach made every .NET tool that
-    /// enumerates processes a CRITICAL generator (Chocolatey opening the CI
-    /// runner worker, `edamame_cli` Windows gate 2026-09-18). It still
-    /// carries VM_READ, so it grades READ: a named sensitive victim is
-    /// CRITICAL exactly as before, and only the detector's enumeration
-    /// breadth rule (>= 3 distinct read targets) relieves it. The SPECIFIC
-    /// rights a scrape or an injection needs -- VM_WRITE, VM_OPERATION,
-    /// CREATE_THREAD asked for on their own -- stay ATTACH. A READ-grade
-    /// open is dropped before the ring only when its requester is
-    /// OS-shipped, and an image in a user-writable %SystemRoot% subtree
-    /// never is (`is_os_shipped_windows_image`).
-    ///
-    /// DUP_HANDLE is not graded: the kernel's own System process (pid 4, no
-    /// image path) duplicates handles out of services all the time, so an
-    /// ATTACH grade made an idle Windows host a HIGH `process_memory_scrape`
-    /// generator (posture gate run 36113244867, windows-x64 idle baseline,
-    /// 2026-09-25). Handle theft out of lsass stays an open gap
-    /// (DETECTIONGAPS G-49).
-    pub(crate) fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
-        let specific_attach =
-            desired_access & (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD) != 0;
-        let all_access = desired_access & PROCESS_ALL_ACCESS_MASK == PROCESS_ALL_ACCESS_MASK;
-        if specific_attach && !all_access {
-            return Some(2);
-        }
-        if all_access || desired_access & PROCESS_VM_READ != 0 {
-            return Some(1);
-        }
-        None
-    }
 
     // File attribution table limits -- same as ES on macOS (l7_es.rs)
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
@@ -968,13 +1014,13 @@ mod win {
                 // detector drops anyway; keep them out of the ring. The mark
                 // rides the event as `platform_path_marked`, never as
                 // `is_platform_binary`: a path is not a kernel fact. Since
-                // `PROCESS_ALL_ACCESS` grades READ, an OS-shipped binary
-                // making the blanket ask also stays out of the ring -- the
-                // same background, and the detector drops a kernel-vouched
-                // platform requester at a canonical path regardless of
-                // grade. A binary in a user-writable %SystemRoot% subtree is
-                // not marked, so its opens always reach the detector.
-                if task_access_mode == 1 && path_marked {
+                // the blanket asks grade READ, an OS-shipped binary making
+                // one also stays out of the ring -- the same background, and
+                // the detector drops a kernel-vouched platform requester at a
+                // canonical path regardless of grade. A binary in a
+                // user-writable %SystemRoot% subtree is not marked, so its
+                // opens always reach the detector.
+                if task_access_mode == TASK_ACCESS_READ && path_marked {
                     return;
                 }
                 proc_events::push(proc_events::ProcessEvent {
@@ -995,6 +1041,7 @@ mod win {
                     target_pid: Some(target_pid),
                     target_process_path: target_path,
                     task_access_mode: Some(task_access_mode),
+                    task_access_mask: Some(desired_access),
                     net_dst: None,
                 });
             }
@@ -1380,6 +1427,7 @@ mod win {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            task_access_mask: None,
                             net_dst: None,
                         });
                         table.insert(
@@ -1426,6 +1474,7 @@ mod win {
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,
+                                task_access_mask: None,
                                 net_dst: None,
                             });
                         }
@@ -1842,44 +1891,87 @@ mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
 
-    /// The PTRACE_MODE mapping is the measurement the memory-scrape check
-    /// grades on, so the blanket managed-framework ask must not read as a
-    /// debugger attach while the specific rights still do, and handle
-    /// duplication alone is not forwarded (the kernel's System process
-    /// duplicates handles out of services on every idle host).
-    #[cfg(all(target_os = "windows", feature = "etw"))]
-    #[test]
-    fn desired_access_maps_onto_the_ptrace_mode_vocabulary() {
-        use super::win::task_access_mode_for_desired_access as grade;
-        const CREATE_THREAD: u32 = 0x0002;
-        const VM_OPERATION: u32 = 0x0008;
-        const VM_READ: u32 = 0x0010;
-        const VM_WRITE: u32 = 0x0020;
-        const DUP_HANDLE: u32 = 0x0040;
-        const QUERY_INFORMATION: u32 = 0x0400;
-        const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        const ALL_ACCESS: u32 = 0x001F_FFFF;
+    const CREATE_THREAD: u32 = 0x0002;
+    const VM_OPERATION: u32 = 0x0008;
+    const VM_READ: u32 = 0x0010;
+    const VM_WRITE: u32 = 0x0020;
+    const DUP_HANDLE: u32 = 0x0040;
+    const TERMINATE: u32 = 0x0001;
+    const QUERY_INFORMATION: u32 = 0x0400;
+    const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const READ: Option<u32> = Some(1);
+    const ATTACH: Option<u32> = Some(2);
 
-        // Debugger-grade rights asked for on their own are ATTACH.
-        assert_eq!(grade(VM_WRITE), Some(2));
-        assert_eq!(grade(VM_OPERATION), Some(2));
-        assert_eq!(grade(CREATE_THREAD), Some(2));
-        assert_eq!(grade(VM_READ | VM_WRITE), Some(2));
-        // Handle duplication alone is not forwarded; with VM_READ it is a
-        // read.
-        assert_eq!(grade(DUP_HANDLE), None);
-        assert_eq!(grade(VM_READ | DUP_HANDLE), Some(1));
-        // The blanket ask every .NET tool makes is READ, not ATTACH; the
-        // user-writable %SystemRoot% subtrees are handled by the path mark.
-        assert_eq!(grade(ALL_ACCESS), Some(1));
-        // Read-only (VM_READ with no control right) stays READ.
-        assert_eq!(grade(VM_READ), Some(1));
-        assert_eq!(grade(VM_READ | QUERY_LIMITED_INFORMATION), Some(1));
-        assert_eq!(grade(VM_READ | QUERY_INFORMATION), Some(1));
-        // Query-only opens are never forwarded.
+    /// The PTRACE_MODE mapping is the measurement the memory-scrape check
+    /// grades on. Runs on every host: the mapping is pure, and a regression
+    /// here otherwise shows only on a Windows CI gate as a CRITICAL.
+    #[test]
+    fn all_access_is_one_blanket_ask_whatever_the_sdk_calls_it() {
+        use super::task_access_mode_for_desired_access as grade;
+        // Vista+ `PROCESS_ALL_ACCESS` (.NET Core, native code built with a
+        // current SDK) and the legacy value .NET Framework still sends
+        // (Chocolatey's `Process.Handle`). Both are READ, never ATTACH: the
+        // legacy one graded ATTACH until 2026-09-29, so the detector's read
+        // relief could never apply to choco.exe on the Windows CI gates.
+        const ALL_ACCESS_VISTA: u32 = 0x001F_FFFF;
+        const ALL_ACCESS_LEGACY: u32 = 0x001F_0FFF;
+        assert_eq!(grade(ALL_ACCESS_VISTA), READ);
+        assert_eq!(grade(ALL_ACCESS_LEGACY), READ);
+        assert_eq!(grade(ALL_ACCESS_LEGACY | QUERY_LIMITED_INFORMATION), READ);
+        // The generic and special spellings of the same ask.
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+        assert_eq!(grade(GENERIC_ALL), READ);
+        assert_eq!(grade(MAXIMUM_ALLOWED), READ);
+        assert_eq!(grade(MAXIMUM_ALLOWED | SYNCHRONIZE), READ);
+        // One right short of the blanket ask is a chosen set, and a chosen
+        // set carrying VM_WRITE is an attach.
+        assert_eq!(grade(ALL_ACCESS_LEGACY & !TERMINATE), ATTACH);
+    }
+
+    #[test]
+    fn read_and_query_masks_grade_read_and_query_only_is_not_forwarded() {
+        use super::task_access_mode_for_desired_access as grade;
+        // VM_READ with or without query rights: the read-only task-port shape
+        // (`Process.MainModule`, psapi `GetModuleFileNameEx`, psutil).
+        assert_eq!(grade(VM_READ), READ);
+        assert_eq!(grade(VM_READ | QUERY_INFORMATION), READ);
+        assert_eq!(grade(VM_READ | QUERY_LIMITED_INFORMATION), READ);
+        assert_eq!(grade(VM_READ | QUERY_INFORMATION | SYNCHRONIZE), READ);
+        // Handle duplication with VM_READ is still a read.
+        assert_eq!(grade(VM_READ | DUP_HANDLE), READ);
+        // `GENERIC_READ` maps onto VM_READ | QUERY_INFORMATION.
+        assert_eq!(grade(0x8000_0000), READ);
+        // Query-only opens (every process lister, Task Manager, sysinfo) and
+        // handle duplication alone are never forwarded.
         assert_eq!(grade(QUERY_INFORMATION), None);
         assert_eq!(grade(QUERY_LIMITED_INFORMATION), None);
+        assert_eq!(grade(QUERY_LIMITED_INFORMATION | SYNCHRONIZE), None);
+        assert_eq!(
+            grade(QUERY_LIMITED_INFORMATION | SYNCHRONIZE | TERMINATE),
+            None
+        );
+        assert_eq!(grade(DUP_HANDLE), None);
+        // `GENERIC_EXECUTE` maps onto SYNCHRONIZE-level rights only.
+        assert_eq!(grade(0x2000_0000), None);
         assert_eq!(grade(0), None);
+    }
+
+    #[test]
+    fn debugger_grade_rights_stay_attach() {
+        use super::task_access_mode_for_desired_access as grade;
+        assert_eq!(grade(VM_WRITE), ATTACH);
+        assert_eq!(grade(VM_OPERATION), ATTACH);
+        assert_eq!(grade(CREATE_THREAD), ATTACH);
+        assert_eq!(grade(VM_READ | VM_WRITE), ATTACH);
+        // The classic CreateRemoteThread injection mask.
+        assert_eq!(
+            grade(CREATE_THREAD | QUERY_INFORMATION | VM_OPERATION | VM_WRITE | VM_READ),
+            ATTACH
+        );
+        // `GENERIC_WRITE` maps onto VM_WRITE / VM_OPERATION / CREATE_THREAD.
+        assert_eq!(grade(0x4000_0000), ATTACH);
     }
 
     #[test]

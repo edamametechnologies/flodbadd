@@ -85,6 +85,7 @@ mod macos {
             target_pid: Some(target_pid),
             target_process_path: Some(target_path),
             task_access_mode: Some(mode),
+            task_access_mask: None,
             net_dst: None,
         });
     }
@@ -451,6 +452,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            task_access_mask: None,
                             net_dst: None,
                         });
                     }
@@ -566,6 +568,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            task_access_mask: None,
                             net_dst: None,
                         });
                     }
@@ -624,6 +627,7 @@ mod macos {
                             target_pid: None,
                             target_process_path: None,
                             task_access_mode: None,
+                            task_access_mask: None,
                             net_dst: None,
                         });
                     }

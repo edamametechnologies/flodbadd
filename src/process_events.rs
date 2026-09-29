@@ -105,6 +105,14 @@ pub struct ProcessEvent {
     /// tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_access_mode: Option<u32>,
+    /// `TaskAccess` only: the raw request the backend graded into
+    /// `task_access_mode` -- the Windows `OpenProcess` desired-access mask,
+    /// the Linux PTRACE_MODE word (with its _FSCREDS / _REALCREDS / _NOAUDIT
+    /// flags) -- so a grading question can be answered from the event itself
+    /// rather than inferred from the grade. `None` where the backend has no
+    /// mask (macOS Endpoint Security: the event type is the grade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_access_mask: Option<u32>,
     /// `NetConnect` only: where the process connected / sent to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_dst: Option<NetDestination>,
@@ -289,6 +297,7 @@ mod tests {
             target_pid: None,
             target_process_path: None,
             task_access_mode: None,
+            task_access_mask: None,
             net_dst: None,
         }
     }
@@ -365,8 +374,22 @@ mod tests {
             !json.contains("signing_id"),
             "unmeasured fields elided: {json}"
         );
+        assert!(!json.contains("task_access_mask"), "{json}");
         assert!(json.contains("\"target_pid\":7"));
         let back: ProcessEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, event);
+
+        // The raw mask rides the wire when measured (helper -> core), and an
+        // event from a helper that predates it still decodes (mask absent).
+        event.task_access_mode = Some(1);
+        event.task_access_mask = Some(0x001F_0FFF);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"task_access_mask\":2035711"), "{json}");
+        let back: ProcessEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_access_mask, Some(0x001F_0FFF));
+        let older = json.replace(",\"task_access_mask\":2035711", "");
+        let back: ProcessEvent = serde_json::from_str(&older).unwrap();
+        assert_eq!(back.task_access_mask, None);
+        assert_eq!(back.task_access_mode, Some(1));
     }
 }

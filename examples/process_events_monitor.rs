@@ -16,6 +16,9 @@
 //!   cargo run --example process_events_monitor --features endpointsecurity,examples -- --seconds 20 --storm 200
 //!   cargo run --example process_events_monitor --features ebpf,examples -- --seconds 20 --storm 200   (Linux, root)
 //!   cargo run --example process_events_monitor --features etw,examples -- --seconds 20 --storm 200    (Windows, admin)
+//!
+//! `--show-requester <a,b>` lists only the task accesses whose requester
+//! name or path contains one of the texts, with the raw access mask.
 
 use std::time::{Duration, Instant};
 
@@ -87,11 +90,13 @@ fn main() {
 
     let mut seconds: u64 = 15;
     let mut storm: u32 = 0;
+    let mut show_requester: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).unwrap_or(seconds),
             "--storm" => storm = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--show-requester" => show_requester = args.next(),
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
@@ -157,18 +162,36 @@ fn main() {
             .filter(|e| e.kind == ProcessEventKind::TaskAccess)
             .count()
     );
+    // `--show-requester <a,b,...>`: only task accesses whose requester name or
+    // path contains one of the texts (case-insensitive), so a driven open is
+    // not lost behind the first 32 of a busy host.
+    let requester_filter: Option<Vec<String>> = show_requester
+        .as_deref()
+        .map(|s| s.split(',').map(|n| n.trim().to_lowercase()).collect());
     for event in all
         .iter()
         .filter(|e| e.kind == ProcessEventKind::TaskAccess)
+        .filter(|e| {
+            requester_filter.as_ref().is_none_or(|needles| {
+                let name = e.process_name.to_lowercase();
+                let path = e.process_path.to_lowercase();
+                needles
+                    .iter()
+                    .any(|n| name.contains(n.as_str()) || path.contains(n.as_str()))
+            })
+        })
         .take(32)
     {
         println!(
-            "  task_access by pid={} {} -> target pid={:?} {:?} mode={:?}",
+            "  task_access by pid={} {} ({}) -> target pid={:?} {:?} mode={:?} mask={:#x?} marked={}",
             event.pid,
             event.process_name,
+            event.process_path,
             event.target_pid,
             event.target_process_path,
-            event.task_access_mode
+            event.task_access_mode,
+            event.task_access_mask,
+            event.platform_path_marked
         );
     }
 

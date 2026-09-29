@@ -316,6 +316,7 @@ mod linux {
                     target_pid: None,
                     target_process_path: None,
                     task_access_mode: None,
+                    task_access_mask: None,
                     net_dst: None,
                 }
             }
@@ -342,6 +343,7 @@ mod linux {
                 target_pid: None,
                 target_process_path: None,
                 task_access_mode: None,
+                task_access_mask: None,
                 net_dst: None,
             },
             4 => {
@@ -375,8 +377,10 @@ mod linux {
                     target_pid,
                     target_process_path: target_path,
                     // READ (0x01) / ATTACH (0x02) bits only; the _FSCREDS /
-                    // _REALCREDS / _NOAUDIT flags are irrelevant here.
+                    // _REALCREDS / _NOAUDIT flags are irrelevant to the
+                    // grade, so they ride only in the raw mask.
                     task_access_mode: Some(uid & 0x3),
+                    task_access_mask: Some(uid),
                     net_dst: None,
                 }
             }
@@ -423,6 +427,7 @@ mod linux {
                     target_pid: None,
                     target_process_path: None,
                     task_access_mode: None,
+                    task_access_mask: None,
                     net_dst: Some(pe::NetDestination {
                         ip: ip.to_string(),
                         port,
