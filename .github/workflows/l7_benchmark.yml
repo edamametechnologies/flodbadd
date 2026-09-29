@@ -109,8 +109,11 @@ jobs:
             benchmark_with_ebpf.json
             benchmark_no_ebpf.json
 
+      # The benchmark steps are continue-on-error, so their failure never
+      # fails the job and `failure()` alone never fired for them: test their
+      # outcomes. `failure()` still covers a setup or build step failing.
       - name: Slack alert on failure
-        if: failure()
+        if: failure() || steps.benchmark_with_ebpf.outcome == 'failure' || steps.benchmark_no_ebpf.outcome == 'failure'
         continue-on-error: true
         uses: slackapi/slack-github-action@v1.26.0
         with:
@@ -219,8 +222,11 @@ jobs:
             benchmark_with_es.json
             benchmark_no_es.json
 
+      # The benchmark steps are continue-on-error, so their failure never
+      # fails the job and `failure()` alone never fired for them: test their
+      # outcomes. `failure()` still covers a setup or build step failing.
       - name: Slack alert on failure
-        if: failure()
+        if: failure() || steps.benchmark_with_es.outcome == 'failure' || steps.benchmark_no_es.outcome == 'failure'
         continue-on-error: true
         uses: slackapi/slack-github-action@v1.26.0
         with:
@@ -320,8 +326,11 @@ jobs:
             benchmark_with_etw.json
             benchmark_no_etw.json
 
+      # The benchmark steps are continue-on-error, so their failure never
+      # fails the job and `failure()` alone never fired for them: test their
+      # outcomes. `failure()` still covers a setup or build step failing.
       - name: Slack alert on failure
-        if: failure()
+        if: failure() || steps.benchmark_with_etw.outcome == 'failure' || steps.benchmark_no_etw.outcome == 'failure'
         continue-on-error: true
         uses: slackapi/slack-github-action@v1.26.0
         with:
