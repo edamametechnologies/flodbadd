@@ -259,14 +259,20 @@ fi
 echo ""
 echo "=== Rust Environment ==="
 
+# rustup's env file for the CARGO_HOME in use. The Alpine container jobs
+# set CARGO_HOME=$HOME/.cargo-alpine: on the shared self-hosted home,
+# $HOME/.cargo holds a glibc cargo left by sibling Ubuntu jobs, which
+# cannot run on musl.
+CARGO_ENV_FILE="${CARGO_HOME:-$HOME/.cargo}/env"
+
 if command -v cargo &> /dev/null; then
     RUST_VERSION=$(rustc --version 2>/dev/null || echo "unknown")
     CARGO_VERSION=$(cargo --version 2>/dev/null || echo "unknown")
     echo "✅ Rust: $RUST_VERSION"
     echo "✅ Cargo: $CARGO_VERSION"
-elif [[ -f "$HOME/.cargo/env" ]]; then
-    echo "⚠️  Cargo not in PATH, but found at ~/.cargo/env"
-    echo "   Run: source ~/.cargo/env"
+elif [[ -f "$CARGO_ENV_FILE" ]]; then
+    echo "⚠️  Cargo not in PATH, but found at $CARGO_ENV_FILE"
+    echo "   Run: source $CARGO_ENV_FILE"
 else
     echo "⚠️  Rust/Cargo not found"
 fi
@@ -394,28 +400,41 @@ else
         echo "Running flodbadd check_ebpf example via cargo..."
         
         # Source cargo env if needed
-        if [[ -f "$HOME/.cargo/env" ]]; then
-            source "$HOME/.cargo/env"
+        if [[ -f "$CARGO_ENV_FILE" ]]; then
+            # shellcheck source=/dev/null
+            source "$CARGO_ENV_FILE"
         fi
-        
-        CARGO_OUTPUT=$($SUDO_CMD cargo run --release --features packetcapture,asyncpacketcapture,ebpf --example check_ebpf 2>&1 || true)
-        
-        if echo "$CARGO_OUTPUT" | grep -qi "eBPF support: Enabled\|eBPF available: true"; then
-            EBPF_STATUS="enabled"
-            EBPF_DETAIL="check_ebpf example reports eBPF enabled"
-            echo "✅ eBPF is ENABLED (via check_ebpf example)"
-        elif echo "$CARGO_OUTPUT" | grep -qi "not embedded\|clang"; then
-            EBPF_STATUS="not_embedded"
-            EBPF_DETAIL="eBPF not compiled (clang missing)"
-            echo "❌ eBPF NOT EMBEDDED"
+
+        # Full path: sudo's secure_path drops ~/.cargo/bin, and a bare
+        # `sudo -E cargo` printed "sudo: cargo: command not found", which
+        # this check read as an inconclusive pass on every native Linux run.
+        CARGO_BIN=$(command -v cargo 2>/dev/null || true)
+        if [[ -z "$CARGO_BIN" && -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]]; then
+            CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
+        fi
+        if [[ -z "$CARGO_BIN" ]]; then
+            echo "⚠️  cargo not found"
+            EBPF_STATUS="no_binary"
         else
-            EBPF_STATUS="unknown"
-            echo "⚠️  Status unclear from cargo output"
+            CARGO_OUTPUT=$($SUDO_CMD "$CARGO_BIN" run --release --features packetcapture,asyncpacketcapture,ebpf --example check_ebpf 2>&1 || true)
+
+            if echo "$CARGO_OUTPUT" | grep -qi "eBPF support: Enabled\|eBPF available: true"; then
+                EBPF_STATUS="enabled"
+                EBPF_DETAIL="check_ebpf example reports eBPF enabled"
+                echo "✅ eBPF is ENABLED (via check_ebpf example)"
+            elif echo "$CARGO_OUTPUT" | grep -qi "not embedded\|clang"; then
+                EBPF_STATUS="not_embedded"
+                EBPF_DETAIL="eBPF not compiled (clang missing)"
+                echo "❌ eBPF NOT EMBEDDED"
+            else
+                EBPF_STATUS="unknown"
+                echo "⚠️  Status unclear from cargo output"
+            fi
+
+            echo ""
+            echo "check_ebpf output:"
+            echo "$CARGO_OUTPUT" | tail -10
         fi
-        
-        echo ""
-        echo "check_ebpf output:"
-        echo "$CARGO_OUTPUT" | tail -10
     else
         echo "⚠️  No binary or cargo path available for runtime test"
         EBPF_STATUS="no_binary"
@@ -449,7 +468,21 @@ if [[ -n "$EBPF_DETAIL" ]]; then
 fi
 echo ""
 
-# Exit code based on status
+# Exit code based on status. Only a verified runtime passes (or a platform
+# without eBPF, handled above). An inconclusive run used to exit 0, so a
+# check that could not run at all passed CI without testing anything: on the
+# native Linux jobs `sudo -E cargo` was "command not found" on every run.
+#   0  eBPF verified; kernel_restricted also passes (the build is verified and
+#      a restricted kernel is expected in some containers) with a warning
+#   1  eBPF not working: not compiled in, failed to load, disabled
+#   2  inconclusive or skipped: no verdict, which is not a pass
+annotate() {
+    # Annotation on the GitHub Actions run summary; plain output elsewhere.
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        echo "::$1 title=eBPF diagnostic::$2"
+    fi
+    return 0
+}
 case "$EBPF_STATUS" in
     enabled)
         echo "✅ eBPF is fully functional"
@@ -458,19 +491,24 @@ case "$EBPF_STATUS" in
     kernel_restricted)
         echo "⚠️  eBPF build OK, but kernel restrictions prevent loading"
         echo "   This is expected on some CI runners and containers"
+        annotate warning "eBPF built, but the kernel refused to load it ($CONTAINER_TYPE): the runtime path was not exercised"
         exit 0  # Not a failure - build is correct
         ;;
     not_embedded)
         echo "❌ eBPF was not compiled into the binary"
         echo "   Ensure clang and llvm are installed during build"
+        annotate error "eBPF was not compiled into the binary"
         exit 1  # This is a build failure
         ;;
-    skipped|no_binary)
-        echo "⏭️  Runtime test was skipped"
-        exit 0
+    load_failed|disabled)
+        echo "❌ eBPF is embedded but not running (status: $EBPF_STATUS)"
+        annotate error "eBPF is embedded but not running (status: $EBPF_STATUS)"
+        exit 1
         ;;
     *)
-        echo "⚠️  eBPF status inconclusive"
-        exit 0  # Don't fail on inconclusive
+        # skipped, no_binary, unknown, unknown_embedded: no verdict.
+        echo "❌ eBPF status inconclusive: $EBPF_STATUS (no verdict is not a pass)"
+        annotate error "no verdict (status: $EBPF_STATUS); an inconclusive run fails"
+        exit 2
         ;;
 esac
