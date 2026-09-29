@@ -121,6 +121,8 @@ linux_test: ebpf_setup
 	@echo "Debug filesystem: $$(mount | grep debugfs || echo 'Not mounted')"
 	@echo "BPF filesystem: $$(mount | grep bpf || echo 'Not mounted')"
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim -- --nocapture --test-threads=1
+	@echo "Running the ignored fanotify end-to-end tests (need root, which this target has)..."
+	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim --lib -- --ignored fanotify --nocapture --test-threads=1
 
 linux_test_no_ebpf:
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
