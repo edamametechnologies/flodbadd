@@ -408,16 +408,13 @@ mod tests {
     #[serial]
     async fn test_update_sensitive_paths() {
         let status = update("main", false).await.expect("Update failed");
-        // FormatError is a legitimate transient state during a rollout: when a
-        // new field is added to `sensitive-paths-db.json` but threatmodels has
-        // not been pushed yet, the live JSON parse fails and the runtime keeps
-        // its embedded fallback. The CloudModel infrastructure must keep
-        // working in all three states.
+        // A FormatError means the published `sensitive-paths-db.json` does not
+        // parse with this code: every client keeps its embedded fallback and
+        // silently ignores the published catalog. That is a failure, not a
+        // transient state -- the release order publishes threatmodels first,
+        // so the published JSON carries every field the code on main reads.
         assert!(
-            matches!(
-                status,
-                UpdateStatus::Updated | UpdateStatus::NotUpdated | UpdateStatus::FormatError
-            ),
+            matches!(status, UpdateStatus::Updated | UpdateStatus::NotUpdated),
             "Unexpected update status: {:?}",
             status
         );
