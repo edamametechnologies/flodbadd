@@ -1,5 +1,5 @@
 use crate::dns_patterns::is_reverse_dns_pattern;
-use crate::sessions::{DomainResolutionType, Session, SessionInfo, WhitelistState};
+use crate::sessions::{Session, SessionInfo, WhitelistState};
 use crate::whitelists_db::WHITELISTS;
 use anyhow::{anyhow, Context, Result};
 use chrono;
@@ -30,20 +30,68 @@ static WHITELIST_REVISION: AtomicU64 = AtomicU64::new(0);
 // Constants
 const WHITELISTS_FILE_NAME: &str = "whitelists-db.json";
 
-// CDN/cloud providers that use shared IPs across many domains
-// These require domain resolution before whitelisting to prevent false positives
-const CDN_PROVIDERS: &[&str] = &[
-    "fastly",
-    "cloudflare",
+/// Name of the whitelist that custom whitelists (set, created or learned) are
+/// loaded under.
+pub const CUSTOM_WHITELIST_NAME: &str = "custom_whitelist";
+
+/// AS owners whose addresses are shared by many tenants: CDNs and the cloud
+/// front ends (object storage, load balancers, edge caches). An address there
+/// names the provider, not the destination: gist.githubusercontent.com and
+/// raw.githubusercontent.com answer on the same Fastly addresses, and any
+/// customer's S3 bucket, Azure storage account or Cloudflare site sits behind
+/// the provider's front-end addresses. Matched case-insensitively as a
+/// substring of the MaxMind AS owner.
+const SHARED_INFRASTRUCTURE_OWNERS: &[&str] = &[
+    "akamai",
     "amazon",
     "aws",
-    "google",
-    "microsoft",
     "azure",
-    "akamai",
-    "cloudfront",
     "cdn",
+    "cloudflare",
+    "cloudfront",
+    "edgecast",
+    "fastly",
+    "google",
+    "highwinds",
+    "imperva",
+    "incapsula",
+    "limelight",
+    "microsoft",
+    "stackpath",
 ];
+
+/// Whether an AS owner runs shared infrastructure (see
+/// [`SHARED_INFRASTRUCTURE_OWNERS`]): an address in it does not identify a
+/// destination, only a domain does.
+pub fn is_shared_infrastructure_owner(owner: &str) -> bool {
+    let owner_lower = owner.to_lowercase();
+    SHARED_INFRASTRUCTURE_OWNERS
+        .iter()
+        .any(|provider| owner_lower.contains(provider))
+}
+
+/// Whether a session's destination name identifies what was contacted: a
+/// name is present, it is not one of the resolver's placeholders
+/// ("Unknown", "Resolving"), and it is not a reverse-DNS name built from the
+/// address (`cdn-185-199-110-133.github.com`), which says nothing the address
+/// does not. A session without an identifying name is matched by address.
+pub fn is_identifying_domain(domain: Option<&str>) -> bool {
+    match domain.map(str::trim) {
+        Some(d) => {
+            !d.is_empty()
+                && !d.eq_ignore_ascii_case("Unknown")
+                && !d.eq_ignore_ascii_case("Resolving")
+                && !is_reverse_dns_pattern(d)
+        }
+        None => false,
+    }
+}
+
+/// Whitelist evaluation covers egress only: sessions this host (or a local
+/// peer) opened toward a non-local destination.
+pub fn is_egress_session(session: &SessionInfo) -> bool {
+    session.is_self_src || (session.is_local_src && !session.is_local_dst)
+}
 
 /// Endpoint rule supporting domain(s), IPs and ports with list/range semantics.
 ///
@@ -53,6 +101,11 @@ const CDN_PROVIDERS: &[&str] = &[
 /// - IPs can be a single `ip` or a list in `ips`. Each entry can be an IP, CIDR,
 ///   or explicit inclusive range in the form `start-end` for IPv4/IPv6.
 /// - Ports can be a single `port` or a list/ranges via `ports`.
+/// - Matching is domain first: a session whose destination has an identifying
+///   name (see [`is_identifying_domain`]) matches an entry with domains only by
+///   name; the entry's addresses stand in only for sessions without a name.
+///   An address-only entry does not cover a named destination on shared
+///   infrastructure (see [`is_shared_infrastructure_owner`]).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)] // Enforce no unknown fields
 pub struct WhitelistEndpoint {
@@ -68,6 +121,71 @@ pub struct WhitelistEndpoint {
     pub as_owner: Option<String>,
     pub process: Option<String>,
     pub description: Option<String>,
+    /// When `true`, the entry matches only sessions whose destination has no
+    /// identifying name (no forward DNS answer, no TLS SNI; an address-derived
+    /// reverse name does not count). The learner writes such entries, keyed on
+    /// the AS, for traffic to shared infrastructure it could not identify
+    /// (connections opened before the capture started, for instance), so a
+    /// learned CDN or cloud network never admits a named destination.
+    /// Omitted from the JSON when unset, so lists without such entries keep
+    /// the format older releases read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_only: Option<bool>,
+}
+
+impl WhitelistEndpoint {
+    fn is_unresolved_only(&self) -> bool {
+        self.unresolved_only == Some(true)
+    }
+
+    /// What an entry allows, for comparing whitelists: the domain set when it
+    /// has one (its addresses only stand in for unnamed sessions and rotate on
+    /// CDNs), otherwise its addresses and network; plus ports, protocol and
+    /// process. The description is not part of it.
+    fn identity(&self) -> String {
+        let mut domains: Vec<String> = self
+            .domain
+            .iter()
+            .chain(self.domains.iter().flatten())
+            .map(|d| d.to_lowercase())
+            .collect();
+        domains.sort();
+        domains.dedup();
+        let mut ports: Vec<(u16, u16)> = self
+            .port
+            .iter()
+            .map(|p| (*p, *p))
+            .chain(self.ports.iter().flatten().map(|spec| match spec {
+                PortSpec::Single(v) => (*v, *v),
+                PortSpec::Range { start, end } => (*start.min(end), *start.max(end)),
+            }))
+            .collect();
+        ports.sort();
+        ports.dedup();
+        let (ips, as_number) = if domains.is_empty() {
+            let mut ips: Vec<String> = self
+                .ip
+                .iter()
+                .chain(self.ips.iter().flatten())
+                .cloned()
+                .collect();
+            ips.sort();
+            ips.dedup();
+            (ips, self.as_number)
+        } else {
+            (Vec::new(), None)
+        };
+        serde_json::json!({
+            "domains": domains,
+            "ips": ips,
+            "as_number": as_number,
+            "ports": ports,
+            "protocol": self.protocol.as_ref().map(|p| p.to_uppercase()),
+            "process": self.process.as_ref().map(|p| p.to_lowercase()),
+            "unresolved_only": self.is_unresolved_only(),
+        })
+        .to_string()
+    }
 }
 
 /// Port specification supporting single values or inclusive ranges.
@@ -95,38 +213,34 @@ pub struct WhitelistsJSON {
 }
 
 impl WhitelistsJSON {
-    /// Compare two whitelists and return the number of differences
+    /// Compare two whitelists: the percentage of this (new) whitelist's
+    /// entries that allow something the old one's entries did not.
+    ///
+    /// Entries are compared on what they allow (see
+    /// `WhitelistEndpoint::identity`), not field for field: a new address on a
+    /// known domain (CDN rotation) or a different description is not a change.
+    /// Removals are not counted.
     ///
     /// # Arguments
-    /// * `old_whitelist` - The old whitelist to compare against
-    /// * `new_whitelist` - The new whitelist to compare
+    /// * `old_whitelist_json` - The old whitelist to compare against
     ///
     /// # Returns
-    /// * `f64` - The pourcentage of differences found
+    /// * `f64` - The percentage of new entries not in the old whitelist
     pub fn compare_whitelist(self, old_whitelist_json: WhitelistsJSON) -> f64 {
         let mut different = 0;
         let mut total = 0;
         for new_whitelist in &self.whitelists {
-            // Let's find the whitelist entry in the old whitelist
-            let old_whitelist = old_whitelist_json
+            let old_identities: HashSet<String> = old_whitelist_json
                 .whitelists
                 .iter()
-                .find(|old_whitelist| old_whitelist.name == new_whitelist.name);
+                .filter(|old_whitelist| old_whitelist.name == new_whitelist.name)
+                .flat_map(|old_whitelist| old_whitelist.endpoints.iter())
+                .map(WhitelistEndpoint::identity)
+                .collect();
             for new_endpoint in &new_whitelist.endpoints {
-                // Check if the old whitelist have this whitelist
-                if old_whitelist.is_none() {
-                    total += 1;
+                total += 1;
+                if !old_identities.contains(&new_endpoint.identity()) {
                     different += 1;
-                    continue;
-                }
-                let old_whitelist_endpoints = old_whitelist.unwrap().endpoints.clone();
-                // Check if the new endpoint is in the old whitelist endpoints
-                if old_whitelist_endpoints.contains(new_endpoint) {
-                    total += 1;
-                    continue; // No difference, skip to next endpoint
-                } else {
-                    total += 1;
-                    different += 1; // Found a new endpoint
                 }
             }
         }
@@ -135,6 +249,26 @@ impl WhitelistsJSON {
         } else {
             (different as f64 / total as f64) * 100.0
         }
+    }
+
+    /// The entries of `custom_whitelist` in this whitelist that allow
+    /// something `custom_whitelist` in `old` does not (see
+    /// [`WhitelistsJSON::compare_whitelist`]).
+    pub fn entries_not_in(&self, old: &WhitelistsJSON) -> Vec<WhitelistEndpoint> {
+        let old_identities: HashSet<String> = old
+            .whitelists
+            .iter()
+            .filter(|w| w.name == CUSTOM_WHITELIST_NAME)
+            .flat_map(|w| w.endpoints.iter())
+            .map(WhitelistEndpoint::identity)
+            .collect();
+        self.whitelists
+            .iter()
+            .filter(|w| w.name == CUSTOM_WHITELIST_NAME)
+            .flat_map(|w| w.endpoints.iter())
+            .filter(|ep| !old_identities.contains(&ep.identity()))
+            .cloned()
+            .collect()
     }
 
     pub fn create_empty_whitelist() -> WhitelistsJSON {
@@ -208,20 +342,28 @@ impl Whitelists {
         Self::new_from_sessions_with_options(sessions, true)
     }
 
-    // Create a whitelist from a list of sessions with configurable options
+    /// Create a whitelist (`custom_whitelist`) from a list of sessions.
+    ///
+    /// One entry per distinct destination, learned the way matching reads it:
+    /// - a destination with an identifying name (forward DNS, TLS SNI, or a
+    ///   reverse name that is not built from the address) becomes a domain
+    ///   entry. Its address is kept as the stand-in for sessions without a
+    ///   name, except on shared infrastructure, where an address identifies
+    ///   nothing;
+    /// - an unnamed destination on shared infrastructure (a CDN or cloud front
+    ///   end: see [`is_shared_infrastructure_owner`]) becomes an entry for its
+    ///   network (AS) that covers unnamed sessions only
+    ///   ([`WhitelistEndpoint::unresolved_only`]): shared addresses are never
+    ///   learned;
+    /// - any other unnamed destination becomes an address-only entry.
+    ///
+    /// If `include_process` is true, entries carry the process name, and
+    /// sessions without a resolved process are skipped.
     pub fn new_from_sessions_with_options(
         sessions: &Vec<SessionInfo>,
         include_process: bool,
     ) -> Self {
         let whitelists = Arc::new(CustomDashMap::new("whitelists"));
-
-        // Helper function to check if an AS owner indicates a CDN/cloud provider
-        fn is_cdn_provider(owner: &str, cdn_providers: &[&str]) -> bool {
-            let owner_lower = owner.to_lowercase();
-            cdn_providers
-                .iter()
-                .any(|&provider| owner_lower.contains(provider))
-        }
 
         // Create a whitelist with the current sessions
         let mut endpoints = Vec::new();
@@ -229,72 +371,14 @@ impl Whitelists {
         let mut unique_fingerprints = std::collections::HashSet::new();
 
         for session in sessions {
-            // Check if domain is unresolved or unreliable
-            let domain_unresolved = session.dst_domain == Some("Unknown".to_string())
-                || session.dst_domain == Some("Resolving".to_string())
-                || session.dst_domain.is_none();
-
-            // Check if domain came from reverse DNS and looks like a reverse DNS pattern
-            // (e.g., "cdn-185-199-111-133.github.com" or "51.241.186.35.bc.googleusercontent.com")
-            // These are unreliable for CDN providers as they don't represent the actual requested domain
-            // Not feature-gated: `is_reverse_dns_pattern` is pure string analysis
-            // (see `crate::dns_patterns`). It used to be imported from the
-            // `packetcapture`-gated `sni` module, so every build without that
-            // feature -- including the default `edamame_core` build the EDAMAME
-            // app ships -- hardcoded this to `false` and silently disabled the
-            // CDN reverse-DNS skip below.
-            let domain_is_reverse_pattern = session.dst_domain_type
-                == DomainResolutionType::Reverse
-                && session
-                    .dst_domain
-                    .as_ref()
-                    .map_or(false, |d| is_reverse_dns_pattern(d));
-
-            // For CDN providers, Forward DNS or SNI is preferred for reliable domain resolution.
-            // However, we must support environments without eBPF (Windows, macOS, containers):
-            // - Without eBPF, we can't capture forward DNS queries from the kernel
-            // - These environments rely on reverse DNS lookups which may not resolve
-            // - Skipping all unresolved CDN sessions would break whitelist generation entirely
-            //
-            // Strategy:
-            // - If we have Forward DNS or SNI: use that domain (reliable, eBPF/SNI available)
-            // - If we have reverse DNS with infrastructure pattern: skip (unreliable for CDNs)
-            // - If domain is unresolved: allow IP-only whitelisting (supports non-eBPF setups)
-            //
-            // This way, we filter out known unreliable reverse DNS patterns (like cdn-X-X-X-X.example.com)
-            // while still allowing whitelist generation on platforms without precise DNS capture.
-            let should_skip_cdn_session = if domain_is_reverse_pattern {
-                // Reverse DNS pattern detected (e.g., "cdn-185-199-111-133.github.com")
-                // These are unreliable for CDNs - skip them
-                if let Some(ref asn) = session.dst_asn {
-                    if is_cdn_provider(&asn.owner, CDN_PROVIDERS) {
-                        warn!(
-                            "Skipping CDN session with reverse DNS pattern: {}:{} -> {}:{} (AS owner: {}, domain: {:?})",
-                            session.session.src_ip,
-                            session.session.src_port,
-                            session.session.dst_ip,
-                            session.session.dst_port,
-                            asn.owner,
-                            session.dst_domain
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                // Domain is either:
-                // - Resolved via Forward DNS or SNI (reliable) - include
-                // - Resolved via reverse DNS but NOT a pattern - include with domain
-                // - Unresolved ("Unknown", "Resolving", or None) - include with IP only
-                false
-            };
-
-            if should_skip_cdn_session {
-                continue;
-            }
+            // Not feature-gated: `is_reverse_dns_pattern` (behind
+            // `is_identifying_domain`) is pure string analysis (see
+            // `crate::dns_patterns`), so every build applies it.
+            let identified = is_identifying_domain(session.dst_domain.as_deref());
+            let shared_infrastructure = session
+                .dst_asn
+                .as_ref()
+                .map_or(false, |asn| is_shared_infrastructure_owner(&asn.owner));
 
             // When include_process is enabled, we need a valid process name.
             // Skip sessions without resolved process info to avoid creating wildcard entries.
@@ -325,38 +409,10 @@ impl Whitelists {
                 None
             };
 
-            // For whitelisting, only use domains that came from reliable sources (Forward DNS or SNI)
-            // Reverse DNS can produce misleading names for CDNs
-            let reliable_domain = if domain_unresolved {
-                None
-            } else if session.dst_domain_type == DomainResolutionType::Forward
-                || session.dst_domain_type == DomainResolutionType::SNI
-            {
-                session.dst_domain.clone()
-            } else {
-                // Reverse DNS - only use if it doesn't look like a reverse DNS
-                // pattern. Same fail-open as above when this was gated on
-                // `packetcapture`: `use_domain = true` accepted EVERY reverse-DNS
-                // name as a reliable whitelist domain, including per-edge-IP CDN
-                // names that cannot match on the next connection.
-                let use_domain = session
-                    .dst_domain
-                    .as_ref()
-                    .map_or(false, |d| !is_reverse_dns_pattern(d));
-
-                if use_domain {
-                    session.dst_domain.clone()
-                } else {
-                    None
-                }
-            };
-
             // Propagate ASN info when the capture pipeline resolved it. The
             // MaxMind lookup runs per-session, so the (owner, number, country)
-            // triple is available even when DNS attachment failed. This is the
-            // only reliable aggregator for IP-only endpoints behind rotating
-            // CDNs: without it, every new CDN IP becomes a new whitelist entry
-            // and the auto-whitelist never converges on hosted CI runners.
+            // triple is available even when DNS attachment failed. It is what
+            // an unnamed session on shared infrastructure is learned by.
             let (ep_as_number, ep_as_country, ep_as_owner) = match &session.dst_asn {
                 Some(asn) => {
                     let country = if asn.country.is_empty() {
@@ -374,13 +430,54 @@ impl Whitelists {
                 None => (None, None, None),
             };
 
+            let destination = format!("{}:{}", session.session.dst_ip, session.session.dst_port);
+            let (domain, ip, unresolved_only, description) = if identified {
+                // Named destination: the name is the identity. The address
+                // only stands in for later sessions to it that carry no name,
+                // and on shared infrastructure it would stand in for every
+                // tenant behind that address, so it is not learned there.
+                let name = session.dst_domain.clone();
+                let ip = if shared_infrastructure {
+                    None
+                } else {
+                    Some(session.session.dst_ip.to_string())
+                };
+                let description = format!(
+                    "Learned from {} ({})",
+                    name.as_deref().unwrap_or_default(),
+                    destination
+                );
+                (name, ip, None, description)
+            } else if shared_infrastructure {
+                // Unnamed session on shared infrastructure (for instance a
+                // connection opened before the capture started): its address
+                // identifies nothing and rotates, so the network is learned,
+                // for unnamed sessions only. A named destination on it still
+                // needs a domain entry.
+                let description = format!(
+                    "Learned from unnamed traffic to AS{} {} (e.g. {})",
+                    ep_as_number.unwrap_or_default(),
+                    ep_as_owner.as_deref().unwrap_or_default(),
+                    destination
+                );
+                (None, None, Some(true), description)
+            } else {
+                // Unnamed session to an address that is not shared
+                // infrastructure (or whose network is unknown): the address
+                // is the identity.
+                let description = format!("Learned from unnamed destination {}", destination);
+                (
+                    None,
+                    Some(session.session.dst_ip.to_string()),
+                    None,
+                    description,
+                )
+            };
+
             let endpoint = WhitelistEndpoint {
-                // Only include domain if it's from a reliable source
-                domain: reliable_domain,
+                domain,
                 domains: None,
-                // Always include the IP address as a fallback to when the domain is set but not resolved
-                // (but only for non-CDN providers, as CDNs are skipped above)
-                ip: Some(session.session.dst_ip.to_string()),
+                ip,
                 // Always include the port
                 port: Some(session.session.dst_port),
                 // Always include the protocol
@@ -390,15 +487,10 @@ impl Whitelists {
                 as_owner: ep_as_owner,
                 // Process name is set above (with validation when include_process is true)
                 process: process_name,
-                description: Some(format!(
-                    "Auto-generated from session: {}:{} -> {}:{}",
-                    session.session.src_ip,
-                    session.session.src_port,
-                    session.session.dst_ip,
-                    session.session.dst_port
-                )),
+                description: Some(description),
                 ports: None,
                 ips: None,
+                unresolved_only,
             };
 
             // Create a fingerprint tuple that uniquely identifies this endpoint
@@ -413,6 +505,7 @@ impl Whitelists {
                 endpoint.as_country.clone(),
                 endpoint.as_owner.clone(),
                 endpoint.process.clone(),
+                endpoint.unresolved_only,
             );
 
             // Only add the endpoint if we haven't seen this fingerprint before
@@ -422,7 +515,7 @@ impl Whitelists {
         }
 
         let whitelist_info = WhitelistInfo {
-            name: "custom_whitelist".to_string(),
+            name: CUSTOM_WHITELIST_NAME.to_string(),
             extends: None,
             endpoints,
         };
@@ -479,6 +572,92 @@ impl Whitelists {
         Ok(all_endpoints)
     }
 
+    /// Evaluate one session against the whitelist `whitelist_name` of this
+    /// model (with its `extends` chain), independently of the whitelist the
+    /// capture has loaded. Returns whether it conforms and, when it does not,
+    /// why. A whitelist that is not defined, or that has no endpoints,
+    /// conforms nothing.
+    pub fn match_session(
+        &self,
+        whitelist_name: &str,
+        session: &SessionInfo,
+    ) -> (bool, Option<String>) {
+        let endpoints = match self.get_all_endpoints(whitelist_name, &mut HashSet::new()) {
+            Ok(endpoints) => endpoints,
+            Err(e) => {
+                return (
+                    false,
+                    Some(format!(
+                        "Whitelist '{}' cannot be evaluated: {}",
+                        whitelist_name, e
+                    )),
+                )
+            }
+        };
+        match_endpoints(whitelist_name, &endpoints, &SessionFields::of(session))
+    }
+
+    /// Learn from a set of sessions on top of an existing custom whitelist.
+    ///
+    /// `base` is the whitelist to extend (it must define
+    /// `custom_whitelist`). Every egress session in `sessions` that does not
+    /// conform to it becomes an entry (see
+    /// [`Whitelists::new_from_sessions_with_options`], without process), and
+    /// the result is factorized. The base entries are kept as they are:
+    /// process bindings and inheritance survive.
+    ///
+    /// Returns the new whitelist, the entries it allows that the base did not,
+    /// the number of egress sessions evaluated and how many did not conform.
+    pub fn augment_with_sessions(
+        base: &WhitelistsJSON,
+        sessions: &[SessionInfo],
+    ) -> Result<AugmentOutcome> {
+        let base_model = Whitelists::new_from_json(base.clone());
+        let mut evaluated = 0usize;
+        let mut non_conforming: Vec<SessionInfo> = Vec::new();
+        for session in sessions.iter().filter(|s| is_egress_session(s)) {
+            evaluated += 1;
+            if !base_model.match_session(CUSTOM_WHITELIST_NAME, session).0 {
+                non_conforming.push(session.clone());
+            }
+        }
+
+        let learned = Whitelists::new_from_sessions(&non_conforming);
+        let learned_endpoints = learned
+            .whitelists
+            .get(CUSTOM_WHITELIST_NAME)
+            .map(|info| info.endpoints.clone())
+            .unwrap_or_default();
+
+        let mut whitelists = Vec::with_capacity(base.whitelists.len());
+        for info in &base.whitelists {
+            if info.name == CUSTOM_WHITELIST_NAME {
+                let mut endpoints = info.endpoints.clone();
+                endpoints.extend(learned_endpoints.iter().cloned());
+                whitelists.push(Whitelists::factorize_whitelist(&WhitelistInfo {
+                    name: info.name.clone(),
+                    extends: info.extends.clone(),
+                    endpoints,
+                }));
+            } else {
+                whitelists.push(info.clone());
+            }
+        }
+
+        let augmented = WhitelistsJSON {
+            date: chrono::Local::now().format("%B %dth %Y").to_string(),
+            signature: None,
+            whitelists,
+        };
+        let added = augmented.entries_not_in(base);
+        Ok(AugmentOutcome {
+            whitelist: augmented,
+            added,
+            evaluated,
+            non_conforming: non_conforming.len(),
+        })
+    }
+
     //--------------------------------------------------------------------
     /// Merge two JSON whitelist blobs (same `WhitelistsJSON` format) and
     /// return a single JSON string with endpoints deduplicated.
@@ -510,6 +689,7 @@ impl Whitelists {
                 "as_country": ep.as_country,
                 "as_owner": ep.as_owner,
                 "process": ep.process,
+                "unresolved_only": ep.is_unresolved_only(),
             });
             if let Some(domains) = &ep.domains {
                 let mut d = domains.clone();
@@ -609,6 +789,9 @@ impl Whitelists {
             as_country: Option<String>,
             as_owner: Option<String>,
             process: Option<String>,
+            // Entries that cover unnamed sessions only never merge with
+            // entries that cover every session.
+            unresolved_only: bool,
         }
 
         fn normalize_ports(single: Option<u16>, list: &Option<Vec<PortSpec>>) -> Vec<PortSpec> {
@@ -726,6 +909,7 @@ impl Whitelists {
                 as_country: ep.as_country.clone(),
                 as_owner: ep.as_owner.clone(),
                 process: ep.process.clone(),
+                unresolved_only: ep.is_unresolved_only(),
             };
 
             let ports = normalize_ports(ep.port, &ep.ports);
@@ -843,6 +1027,7 @@ impl Whitelists {
                 description,
                 ports,
                 ips: ips,
+                unresolved_only: key.unresolved_only.then_some(true),
             });
         }
 
@@ -852,6 +1037,121 @@ impl Whitelists {
             endpoints,
         }
     }
+}
+
+/// Result of [`Whitelists::augment_with_sessions`].
+#[derive(Debug, Clone)]
+pub struct AugmentOutcome {
+    /// The base whitelist plus the learned entries, factorized.
+    pub whitelist: WhitelistsJSON,
+    /// Entries of the new `custom_whitelist` that allow something the base did not.
+    pub added: Vec<WhitelistEndpoint>,
+    /// Egress sessions evaluated.
+    pub evaluated: usize,
+    /// Egress sessions that did not conform to the base whitelist.
+    pub non_conforming: usize,
+}
+
+/// Parse and check a custom whitelist JSON before anything is loaded: it
+/// must parse (unknown fields are refused), define `custom_whitelist`, and
+/// every whitelist in it must resolve its `extends` chain within the JSON.
+/// A custom whitelist replaces the built-in lists, so a parent it names that
+/// the JSON does not define would leave the list without those endpoints.
+pub fn parse_custom_whitelists(whitelist_json: &str) -> Result<WhitelistsJSON> {
+    let parsed: WhitelistsJSON =
+        serde_json::from_str(whitelist_json).context("the custom whitelist JSON is malformed")?;
+    if !parsed
+        .whitelists
+        .iter()
+        .any(|info| info.name == CUSTOM_WHITELIST_NAME)
+    {
+        return Err(anyhow!(
+            "the custom whitelist JSON defines no whitelist named '{}'",
+            CUSTOM_WHITELIST_NAME
+        ));
+    }
+    let model = Whitelists::new_from_json(parsed.clone());
+    for info in &parsed.whitelists {
+        model
+            .get_all_endpoints(&info.name, &mut HashSet::new())
+            .with_context(|| format!("whitelist '{}' does not resolve", info.name))?;
+    }
+    Ok(parsed)
+}
+
+/// The session attributes an endpoint is matched on.
+struct SessionFields<'a> {
+    domain: Option<&'a str>,
+    ip: String,
+    port: u16,
+    protocol: String,
+    as_number: Option<u32>,
+    as_country: Option<&'a str>,
+    as_owner: Option<&'a str>,
+    process: Option<&'a str>,
+}
+
+impl<'a> SessionFields<'a> {
+    fn of(session: &'a SessionInfo) -> Self {
+        SessionFields {
+            domain: session.dst_domain.as_deref(),
+            ip: session.session.dst_ip.to_string(),
+            port: session.session.dst_port,
+            protocol: session.session.protocol.to_string(),
+            as_number: session.dst_asn.as_ref().map(|asn| asn.as_number),
+            as_country: session.dst_asn.as_ref().map(|asn| asn.country.as_str()),
+            as_owner: session.dst_asn.as_ref().map(|asn| asn.owner.as_str()),
+            process: session.l7.as_ref().map(|l7| l7.process_name.as_str()),
+        }
+    }
+}
+
+/// Match a session against a flattened endpoint list.
+fn match_endpoints(
+    whitelist_name: &str,
+    endpoints: &[WhitelistEndpoint],
+    fields: &SessionFields,
+) -> (bool, Option<String>) {
+    if endpoints.is_empty() {
+        return (
+            false,
+            Some(format!(
+                "Whitelist '{}' contains no endpoints",
+                whitelist_name
+            )),
+        );
+    }
+    for endpoint in endpoints {
+        let (matches, _reason) = endpoint_matches_with_reason(
+            fields.domain,
+            Some(fields.ip.as_str()),
+            fields.port,
+            &fields.protocol,
+            fields.as_number,
+            fields.as_country,
+            fields.as_owner,
+            fields.process,
+            endpoint,
+        );
+        if matches {
+            return (true, None);
+        }
+    }
+    (
+        false,
+        Some(format!(
+            "No matching endpoint found in whitelist '{}' for domain: {:?}, ip: {}, port: {}, protocol: {}, ASN: {:?}, country: {:?}, owner: {:?}, process: {:?}",
+            whitelist_name,
+            fields.domain,
+            fields.ip,
+            fields.port,
+            fields.protocol,
+            fields.as_number,
+            fields.as_country,
+            fields.as_owner,
+            fields.process
+        )),
+    )
 }
 
 lazy_static! {
@@ -871,7 +1171,9 @@ lazy_static! {
     };
 
     // Cache aggregated endpoints per whitelist per signature
-    static ref ENDPOINT_CACHE: CustomDashMap<String, Arc<Vec<WhitelistEndpoint>>> = CustomDashMap::new("whitelist_endpoint_cache");
+    // Flattening errors (an undefined whitelist or parent) are cached too, so
+    // every session reports why it cannot conform.
+    static ref ENDPOINT_CACHE: CustomDashMap<String, Arc<Result<Vec<WhitelistEndpoint>, String>>> = CustomDashMap::new("whitelist_endpoint_cache");
 
     // Tracks whitelists currently being flattened so that concurrent callers
     // can wait instead of spawning duplicate expensive work ("single-flight").
@@ -892,6 +1194,20 @@ pub async fn is_valid_whitelist(whitelist_name: &str) -> bool {
         .await
         .whitelists
         .contains_key(whitelist_name)
+}
+
+/// Names of the whitelists in the current model (default or custom), sorted.
+pub async fn whitelist_names() -> Vec<String> {
+    let mut names: Vec<String> = LISTS
+        .data
+        .read()
+        .await
+        .whitelists
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Checks if a given session is in the specified whitelist.
@@ -942,18 +1258,20 @@ pub async fn is_session_in_whitelist(
             })
             .await;
 
-            let eps = eps_result
-                .unwrap_or_else(|e| {
-                    warn!("Join error flattening whitelist '{}': {}", key, e);
-                    Err(anyhow!("flatten join error"))
-                })
-                .unwrap_or_else(|err| {
+            let eps = match eps_result {
+                Ok(Ok(eps)) => Ok(eps),
+                Ok(Err(err)) => {
                     warn!(
                         "Error retrieving endpoints for whitelist '{}': {}",
                         key, err
                     );
-                    Vec::new()
-                });
+                    Err(err.to_string())
+                }
+                Err(e) => {
+                    warn!("Join error flattening whitelist '{}': {}", key, e);
+                    Err(format!("flatten join error: {}", e))
+                }
+            };
 
             let arc_eps = Arc::new(eps);
             ENDPOINT_CACHE.insert(key.clone(), arc_eps.clone());
@@ -970,46 +1288,49 @@ pub async fn is_session_in_whitelist(
         }
     };
 
-    if endpoints_arc.is_empty() {
-        return (
-            false,
-            Some(format!(
-                "Whitelist '{}' contains no endpoints",
-                whitelist_name
-            )),
-        );
-    }
-
-    // Match the session against the endpoints
-    for endpoint in endpoints_arc.iter() {
-        let (matches, _reason) = endpoint_matches_with_reason(
-            session_domain,
-            session_ip,
-            port,
-            protocol,
-            as_number,
-            as_country,
-            as_owner,
-            process,
-            endpoint,
-        );
-
-        if matches {
-            trace!("Matched whitelist endpoint: {:?}", endpoint);
-            return (true, None);
+    let endpoints = match endpoints_arc.as_ref() {
+        Ok(endpoints) => endpoints,
+        Err(err) => {
+            return (
+                false,
+                Some(format!(
+                    "Whitelist '{}' cannot be evaluated: {}",
+                    whitelist_name, err
+                )),
+            )
         }
+    };
+
+    let fields = SessionFields {
+        domain: session_domain,
+        ip: session_ip.unwrap_or_default().to_string(),
+        port,
+        protocol: protocol.to_string(),
+        as_number,
+        as_country,
+        as_owner,
+        process,
+    };
+    let (matches, reason) = match_endpoints(whitelist_name, endpoints, &fields);
+    if matches {
+        trace!("Session matched whitelist '{}'", whitelist_name);
     }
-
-    // If we got here, no endpoint matched
-    let reason = format!(
-        "No matching endpoint found in whitelist '{}' for domain: {:?}, ip: {:?}, port: {}, protocol: {}, ASN: {:?}, country: {:?}, owner: {:?}, process: {:?}",
-        whitelist_name, session_domain, session_ip, port, protocol, as_number, as_country, as_owner, process
-    );
-
-    (false, Some(reason))
+    (matches, reason)
 }
 
 /// Helper function to match the session against a whitelist endpoint with reason.
+///
+/// Domain first. After the protocol, port and process gates:
+/// - an entry with domains matches a session whose destination has an
+///   identifying name (see [`is_identifying_domain`]) only by name. Its
+///   addresses stand in only for sessions without a name: a learned
+///   `raw.githubusercontent.com` entry never admits `gist.githubusercontent.com`
+///   because the two share Fastly addresses;
+/// - an address-only entry matches by address, except a named destination on
+///   shared infrastructure (see [`is_shared_infrastructure_owner`]), which only
+///   a domain entry identifies;
+/// - an AS-only entry is checked on its AS fields;
+/// - an entry marked `unresolved_only` never matches a named destination.
 fn endpoint_matches_with_reason(
     session_domain: Option<&str>,
     session_ip: Option<&str>,
@@ -1050,108 +1371,138 @@ fn endpoint_matches_with_reason(
         return (false, Some(reasons.join(", ")));
     }
 
-    // Check if we have a domain/domains match
-    let domain_match = domains_match(session_domain, &endpoint.domain, &endpoint.domains);
-    let domain_specified =
-        endpoint.domain.is_some() || endpoint.domains.as_ref().map_or(false, |v| !v.is_empty());
+    let named_destination = is_identifying_domain(session_domain);
 
-    // If domain is specified and matches, other checks are irrelevant
-    if domain_specified && domain_match {
-        return (true, None);
+    if endpoint.is_unresolved_only() && named_destination {
+        return (
+            false,
+            Some(format!(
+                "Entry covers destinations without a name only; this one is named {:?}",
+                session_domain
+            )),
+        );
     }
 
-    // Check if we have an IP match (single or any from list)
-    let ip_match = ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips);
+    let domain_specified =
+        endpoint.domain.is_some() || endpoint.domains.as_ref().map_or(false, |v| !v.is_empty());
     let ip_specified =
         endpoint.ip.is_some() || endpoint.ips.as_ref().map_or(false, |list| !list.is_empty());
 
-    // If IP is specified and matches, return true
-    if ip_specified && ip_match {
-        return (true, None);
+    if domain_specified {
+        if named_destination {
+            // The name is the identity: no address fallback.
+            if domains_match(session_domain, &endpoint.domain, &endpoint.domains) {
+                return (true, None);
+            }
+            return (
+                false,
+                Some(format!(
+                    "Domain mismatch: {:?} not matching {:?}{}",
+                    session_domain,
+                    endpoint.domain.as_ref().or(endpoint
+                        .domains
+                        .as_ref()
+                        .and_then(|domains| domains.first())),
+                    if ip_specified {
+                        " (the entry's addresses only stand in for destinations without a name)"
+                    } else {
+                        ""
+                    }
+                )),
+            );
+        }
+        // No identifying name: the entry's addresses are the stand-in.
+        if ip_specified && ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips) {
+            return (true, None);
+        }
+        return (
+            false,
+            Some(format!(
+                "Domain mismatch: the destination has no name ({:?}) and its address {:?} is not one of the entry's {:?}",
+                session_domain,
+                session_ip,
+                endpoint.ip.as_ref().or(endpoint.ips.as_ref().and_then(|ips| ips.first()))
+            )),
+        );
     }
 
-    // Track whether we need to check the domain or IP
-    let entity_matched = (domain_specified && domain_match) || (ip_specified && ip_match);
-    let needs_entity_match = domain_specified || ip_specified;
-
-    // If entity matching is required but failed, we don't match
-    if needs_entity_match && !entity_matched {
-        let mut reasons = Vec::new();
-        if domain_specified {
-            reasons.push(format!(
-                "Domain mismatch: {:?} not matching {:?}",
-                session_domain, endpoint.domain
-            ));
+    if ip_specified {
+        if named_destination && as_owner.map_or(false, is_shared_infrastructure_owner) {
+            return (
+                false,
+                Some(format!(
+                    "Address entry does not cover the named destination {:?}: {:?} is shared infrastructure ({:?}), where only a domain entry identifies a destination",
+                    session_domain, session_ip, as_owner
+                )),
+            );
         }
-        if ip_specified {
-            reasons.push(format!(
+        if ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips) {
+            return (true, None);
+        }
+        return (
+            false,
+            Some(format!(
                 "IP mismatch: {:?} not matching {:?}",
-                session_ip, endpoint.ip
-            ));
-        }
-        return (false, Some(reasons.join(", ")));
+                session_ip,
+                endpoint
+                    .ip
+                    .as_ref()
+                    .or(endpoint.ips.as_ref().and_then(|ips| ips.first()))
+            )),
+        );
     }
 
-    // AS checks are only relevant if no domain/IP were specified or if they weren't provided in the session
-    let should_check_as = (!domain_specified && !ip_specified)
-        || (endpoint.as_number.is_some()
-            || endpoint.as_owner.is_some()
-            || endpoint.as_country.is_some());
-
-    if should_check_as {
-        // Check AS number if specified (most specific identifier)
-        if let Some(whitelist_asn) = endpoint.as_number {
-            match as_number {
-                Some(session_asn) if session_asn == whitelist_asn => {
-                    // ASN matches, continue to next checks
-                }
-                _ => {
-                    return (
-                        false,
-                        Some(format!(
-                            "AS number mismatch: {:?} not matching {:?}",
-                            as_number, endpoint.as_number
-                        )),
-                    );
-                }
+    // No domain and no address: the AS fields, when present, are the identity.
+    // Check AS number if specified (most specific identifier)
+    if let Some(whitelist_asn) = endpoint.as_number {
+        match as_number {
+            Some(session_asn) if session_asn == whitelist_asn => {
+                // ASN matches, continue to next checks
+            }
+            _ => {
+                return (
+                    false,
+                    Some(format!(
+                        "AS number mismatch: {:?} not matching {:?}",
+                        as_number, endpoint.as_number
+                    )),
+                );
             }
         }
+    }
 
-        // Check AS owner if specified
-        if let Some(ref whitelist_owner) = endpoint.as_owner {
-            match as_owner {
-                Some(session_owner) if session_owner.eq_ignore_ascii_case(whitelist_owner) => {
-                    // Owner matches, continue
-                }
-                _ => {
-                    return (
-                        false,
-                        Some(format!(
-                            "Owner mismatch: {:?} not matching {:?}",
-                            as_owner, endpoint.as_owner
-                        )),
-                    );
-                }
+    // Check AS owner if specified
+    if let Some(ref whitelist_owner) = endpoint.as_owner {
+        match as_owner {
+            Some(session_owner) if session_owner.eq_ignore_ascii_case(whitelist_owner) => {
+                // Owner matches, continue
+            }
+            _ => {
+                return (
+                    false,
+                    Some(format!(
+                        "Owner mismatch: {:?} not matching {:?}",
+                        as_owner, endpoint.as_owner
+                    )),
+                );
             }
         }
+    }
 
-        // Check AS country if specified
-        if let Some(ref whitelist_country) = endpoint.as_country {
-            match as_country {
-                Some(session_country)
-                    if session_country.eq_ignore_ascii_case(whitelist_country) =>
-                {
-                    // Country matches, continue
-                }
-                _ => {
-                    return (
-                        false,
-                        Some(format!(
-                            "Country mismatch: {:?} not matching {:?}",
-                            as_country, endpoint.as_country
-                        )),
-                    );
-                }
+    // Check AS country if specified
+    if let Some(ref whitelist_country) = endpoint.as_country {
+        match as_country {
+            Some(session_country) if session_country.eq_ignore_ascii_case(whitelist_country) => {
+                // Country matches, continue
+            }
+            _ => {
+                return (
+                    false,
+                    Some(format!(
+                        "Country mismatch: {:?} not matching {:?}",
+                        as_country, endpoint.as_country
+                    )),
+                );
             }
         }
     }
@@ -1388,7 +1739,12 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
 }
 
 /// Sets custom whitelist data, replacing the current data (default or previous custom).
-/// Clears the endpoint cache upon successful update or reset.
+/// An empty string resets to the built-in lists. Clears the endpoint cache upon
+/// successful update or reset.
+///
+/// All or nothing: the JSON is checked first (see [`parse_custom_whitelists`]),
+/// and a JSON that fails the check leaves the current whitelists in place and
+/// returns the error.
 pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::Error> {
     info!("Attempting to set custom whitelists.");
     // Clear the custom whitelists if the JSON is empty
@@ -1401,38 +1757,32 @@ pub async fn set_custom_whitelists(whitelist_json: &str) -> Result<(), anyhow::E
         return Ok(());
     }
 
-    let whitelist_result = serde_json::from_str::<WhitelistsJSON>(whitelist_json);
-
-    match whitelist_result {
-        Ok(whitelist_data) => {
-            info!("Successfully parsed custom whitelist JSON.");
-            // Factorize each whitelist before loading
-            let mut factored = whitelist_data.clone();
-            factored.whitelists = factored
-                .whitelists
-                .into_iter()
-                .map(|info| Whitelists::factorize_whitelist(&info))
-                .collect();
-
-            let whitelist = Whitelists::new_from_json(factored);
-            LISTS.set_custom_data(whitelist).await;
-            ENDPOINT_CACHE.clear(); // Clear cache after successful set
-            NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
-            WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
-            return Ok(());
-        }
+    let whitelist_data = match parse_custom_whitelists(whitelist_json) {
+        Ok(whitelist_data) => whitelist_data,
         Err(e) => {
             error!(
-                "Error parsing custom whitelist JSON: {}. Resetting to default.",
+                "Refusing custom whitelist JSON: {:#}. The current whitelists stay in place.",
                 e
             );
-            LISTS.reset_to_default().await;
-            ENDPOINT_CACHE.clear(); // Clear cache after reset due to error
-            NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
-            WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
-            return Err(anyhow!("Error parsing custom whitelist JSON: {}", e));
+            return Err(anyhow!("Refusing custom whitelist JSON: {:#}", e));
         }
-    }
+    };
+
+    info!("Successfully parsed custom whitelist JSON.");
+    // Factorize each whitelist before loading
+    let mut factored = whitelist_data;
+    factored.whitelists = factored
+        .whitelists
+        .into_iter()
+        .map(|info| Whitelists::factorize_whitelist(&info))
+        .collect();
+
+    let whitelist = Whitelists::new_from_json(factored);
+    LISTS.set_custom_data(whitelist).await;
+    ENDPOINT_CACHE.clear(); // Clear cache after successful set
+    NEED_FULL_RECOMPUTE_WHITELIST.store(true, Ordering::SeqCst);
+    WHITELIST_REVISION.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Incrementally recomputes whitelist conformance for the provided session map.
@@ -1545,9 +1895,7 @@ pub async fn recompute_whitelist_for_sessions(
         // Skip if we don't have a snapshot (might have been removed)
         if let Some(snapshot) = session_snapshots.get(session_key) {
             // Egress-only whitelist policy: only evaluate sessions where traffic originates from us/local
-            let is_egress =
-                snapshot.is_self_src || (snapshot.is_local_src && !snapshot.is_local_dst);
-            if !is_egress {
+            if !is_egress_session(snapshot) {
                 // Mark as conforming for whitelist purposes and continue
                 evaluation_results.push((session_key.clone(), true, None));
                 continue;
@@ -1712,6 +2060,7 @@ pub async fn get_whitelists() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::DomainResolutionType;
     use serial_test::serial;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1734,6 +2083,7 @@ mod tests {
             as_owner: None,
             process: None,
             description: None,
+            unresolved_only: None,
         }
     }
 
@@ -1971,8 +2321,9 @@ mod tests {
     }
 
     #[test]
-    fn test_endpoint_matches_ip_and_domain_are_alternatives() {
-        // Either identity is sufficient when both are declared.
+    fn test_endpoint_matches_domain_first_address_only_for_unnamed_sessions() {
+        // An entry with a domain and an address: the name decides for a named
+        // session; the address stands in only when the session has no name.
         let e = WhitelistEndpoint {
             domain: Some("dns.google".into()),
             ip: Some("8.8.8.8".into()),
@@ -1987,24 +2338,193 @@ mod tests {
             m(Some("dns.google"), Some("1.1.1.1")).0,
             "domain matches, ip does not"
         );
+        let (ok, why) = m(Some("other.example"), Some("8.8.8.8"));
         assert!(
-            m(Some("other.example"), Some("8.8.8.8")).0,
-            "ip matches, domain does not"
+            !ok,
+            "a named destination on a learned address must match by name, not by address"
         );
-        assert!(m(None, Some("8.8.8.8")).0);
-        let (ok, why) = m(Some("other.example"), Some("1.1.1.1"));
+        assert!(why.unwrap().contains("Domain mismatch"));
+        assert!(
+            m(None, Some("8.8.8.8")).0,
+            "unnamed session: address stands in"
+        );
+        assert!(
+            m(Some("Unknown"), Some("8.8.8.8")).0,
+            "resolver placeholder is no name"
+        );
+        assert!(
+            m(Some("Resolving"), Some("8.8.8.8")).0,
+            "resolver placeholder is no name"
+        );
+        assert!(
+            m(Some("dns-8-8-8-8.example.net"), Some("8.8.8.8")).0,
+            "an address-derived reverse name is no name"
+        );
+        let (ok, why) = m(None, Some("1.1.1.1"));
         assert!(!ok);
-        let why = why.unwrap();
-        assert!(
-            why.contains("Domain mismatch") && why.contains("IP mismatch"),
-            "{}",
-            why
-        );
+        assert!(why.unwrap().contains("Domain mismatch"));
         let (ok, _) = m(None, None);
         assert!(
             !ok,
             "no session identity at all cannot satisfy an identified endpoint"
         );
+    }
+
+    /// Two names on the same shared addresses: a whitelist that learned
+    /// raw.githubusercontent.com (with its Fastly addresses, or as
+    /// address-only entries for them) does not admit gist.githubusercontent.com.
+    #[test]
+    fn test_gist_fetch_on_shared_github_addresses_does_not_conform() {
+        let raw = WhitelistEndpoint {
+            domain: Some("raw.githubusercontent.com".into()),
+            ips: Some(vec![
+                "185.199.108.133".into(),
+                "185.199.109.133".into(),
+                "185.199.110.133".into(),
+                "185.199.111.133".into(),
+            ]),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            as_number: Some(54113),
+            as_owner: Some("FASTLY".into()),
+            ..ep()
+        };
+        let legacy_address_only = WhitelistEndpoint {
+            ips: Some(vec!["185.199.108.133".into(), "185.199.110.133".into()]),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            as_number: Some(54113),
+            as_owner: Some("FASTLY".into()),
+            ..ep()
+        };
+        for entry in [&raw, &legacy_address_only] {
+            let (ok, why) = endpoint_matches_with_reason(
+                Some("gist.githubusercontent.com"),
+                Some("185.199.110.133"),
+                443,
+                "TCP",
+                Some(54113),
+                Some("US"),
+                Some("FASTLY"),
+                Some("python3"),
+                entry,
+            );
+            assert!(!ok, "gist fetch conformed through {:?}", entry);
+            assert!(why.is_some());
+        }
+        // The legitimate fetch still conforms by name.
+        assert!(
+            endpoint_matches_with_reason(
+                Some("raw.githubusercontent.com"),
+                Some("185.199.110.133"),
+                443,
+                "TCP",
+                Some(54113),
+                Some("US"),
+                Some("FASTLY"),
+                None,
+                &raw,
+            )
+            .0
+        );
+    }
+
+    #[test]
+    fn test_address_only_entry_covers_named_destination_off_shared_infrastructure() {
+        // A single-tenant address identifies its destination, named or not.
+        let e = WhitelistEndpoint {
+            ip: Some("203.0.113.10".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            ..ep()
+        };
+        let m = |d: Option<&str>, owner: Option<&str>| {
+            endpoint_matches_with_reason(
+                d,
+                Some("203.0.113.10"),
+                443,
+                "TCP",
+                Some(64500),
+                Some("US"),
+                owner,
+                None,
+                &e,
+            )
+        };
+        assert!(m(Some("artifacts.example.com"), Some("EXAMPLE-HOSTING")).0);
+        assert!(m(None, Some("EXAMPLE-HOSTING")).0);
+        assert!(
+            m(Some("artifacts.example.com"), None).0,
+            "unknown network: the address decides"
+        );
+        let (ok, why) = m(Some("tenant.example.com"), Some("CLOUDFLARENET"));
+        assert!(
+            !ok,
+            "a named destination on shared infrastructure needs a domain entry"
+        );
+        assert!(why.unwrap().contains("shared infrastructure"));
+        assert!(
+            m(None, Some("CLOUDFLARENET")).0,
+            "unnamed: the address still stands in"
+        );
+    }
+
+    #[test]
+    fn test_unresolved_only_entry_never_matches_a_named_destination() {
+        let e = WhitelistEndpoint {
+            as_number: Some(8075),
+            as_owner: Some("MICROSOFT-CORP-MSN-AS-BLOCK".into()),
+            as_country: Some("US".into()),
+            port: Some(443),
+            protocol: Some("TCP".into()),
+            unresolved_only: Some(true),
+            ..ep()
+        };
+        let m = |d: Option<&str>| {
+            endpoint_matches_with_reason(
+                d,
+                Some("52.239.172.36"),
+                443,
+                "TCP",
+                Some(8075),
+                Some("US"),
+                Some("MICROSOFT-CORP-MSN-AS-BLOCK"),
+                None,
+                &e,
+            )
+        };
+        assert!(m(None).0, "unnamed session on the learned network conforms");
+        assert!(m(Some("Unknown")).0);
+        let (ok, why) = m(Some("other-tenant.blob.core.windows.net"));
+        assert!(
+            !ok,
+            "a named destination on the network needs a domain entry"
+        );
+        assert!(why.unwrap().contains("without a name"));
+        // Another network does not match either way.
+        assert!(
+            !endpoint_matches_with_reason(
+                None,
+                Some("1.2.3.4"),
+                443,
+                "TCP",
+                Some(13335),
+                Some("US"),
+                Some("CLOUDFLARENET"),
+                None,
+                &e
+            )
+            .0
+        );
+        // Serialized only when set: lists without it keep the old format.
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"unresolved_only\":true"), "{}", json);
+        let plain = serde_json::to_string(&ep()).unwrap();
+        assert!(!plain.contains("unresolved_only"), "{}", plain);
+        // And an old list without the field still parses.
+        let parsed: WhitelistEndpoint =
+            serde_json::from_str(r#"{"domain":"a.com","port":443}"#).unwrap();
+        assert_eq!(parsed.unresolved_only, None);
     }
 
     #[test]
@@ -2424,6 +2944,7 @@ mod tests {
                 description: Some("Test endpoint".to_string()),
                 ports: None,
                 ips: None,
+                unresolved_only: None,
             }],
         };
 
@@ -2520,6 +3041,7 @@ mod tests {
                     description: None,
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: Some("a.com".into()),
@@ -2534,6 +3056,7 @@ mod tests {
                     description: Some("d2".into()),
                     ports: None,
                     ips: Some(vec!["10.0.0.2".into()]),
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: None,
@@ -2548,6 +3071,7 @@ mod tests {
                     description: None,
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
             ],
         };
@@ -2597,6 +3121,7 @@ mod tests {
                     description: Some("First GitHub IP".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: Some("github.com".into()),
@@ -2611,6 +3136,7 @@ mod tests {
                     description: Some("Second GitHub IP".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: Some("github.com".into()),
@@ -2625,6 +3151,7 @@ mod tests {
                     description: Some("Third GitHub IP".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 // IP-only endpoint (no domain) - should remain separate
                 WhitelistEndpoint {
@@ -2640,6 +3167,7 @@ mod tests {
                     description: Some("Internal IP only".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
             ],
         };
@@ -2709,6 +3237,7 @@ mod tests {
                     description: Some("Azure IP 1".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: None,
@@ -2723,6 +3252,7 @@ mod tests {
                     description: Some("Azure IP 2".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: None,
@@ -2737,6 +3267,7 @@ mod tests {
                     description: Some("Azure IP 3".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 // Different ASN (GitHub, AS 36459) - must stay separate from
                 // the Microsoft fold above.
@@ -2753,6 +3284,7 @@ mod tests {
                     description: Some("GitHub IP".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 // No ASN at all - must stay per-IP (the safe fallback when we
                 // have zero aggregation signal).
@@ -2769,6 +3301,7 @@ mod tests {
                     description: Some("Internal IP, no ASN".into()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
             ],
         };
@@ -2849,6 +3382,7 @@ mod tests {
                     description: None,
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 WhitelistEndpoint {
                     domain: None,
@@ -2863,6 +3397,7 @@ mod tests {
                     description: None,
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
                 // Same Google ASN but TCP/443 - different protocol slot.
                 WhitelistEndpoint {
@@ -2878,6 +3413,7 @@ mod tests {
                     description: None,
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 },
             ],
         };
@@ -2917,8 +3453,10 @@ mod tests {
 
         let now = Utc::now();
 
-        // Two IP-only sessions to different Microsoft IPs (no DNS attachment,
-        // both carrying the same ASN record from the MaxMind lookup).
+        // Two IP-only sessions to different addresses of one single-tenant
+        // network (no DNS attachment, both carrying the same ASN record from
+        // the MaxMind lookup). Shared infrastructure is learned differently:
+        // see test_new_from_sessions_learns_unnamed_shared_traffic_by_network.
         let make_ms_session = |dst_ip: Ipv4Addr, src_port: u16| SessionInfo {
             session: Session {
                 protocol: Protocol::TCP,
@@ -2939,8 +3477,8 @@ mod tests {
             l7: None,
             src_asn: None,
             dst_asn: Some(Record {
-                as_number: 8075,
-                owner: "MICROSOFT-CORP-MSN-AS-BLOCK".to_string(),
+                as_number: 64500,
+                owner: "EXAMPLE-HOSTING-AS".to_string(),
                 country: "US".to_string(),
             }),
             is_whitelisted: WhitelistState::Unknown,
@@ -2954,8 +3492,8 @@ mod tests {
         };
 
         let sessions = vec![
-            make_ms_session(Ipv4Addr::new(20, 42, 65, 84), 50000),
-            make_ms_session(Ipv4Addr::new(20, 42, 73, 27), 50001),
+            make_ms_session(Ipv4Addr::new(198, 51, 100, 84), 50000),
+            make_ms_session(Ipv4Addr::new(198, 51, 100, 27), 50001),
         ];
 
         let whitelist = Whitelists::new_from_sessions(&sessions);
@@ -2968,10 +3506,10 @@ mod tests {
         for ep in endpoints {
             assert_eq!(
                 ep.as_number,
-                Some(8075),
+                Some(64500),
                 "ASN must be propagated from session"
             );
-            assert_eq!(ep.as_owner.as_deref(), Some("MICROSOFT-CORP-MSN-AS-BLOCK"));
+            assert_eq!(ep.as_owner.as_deref(), Some("EXAMPLE-HOSTING-AS"));
             assert_eq!(ep.as_country.as_deref(), Some("US"));
             assert!(
                 ep.domain.is_none(),
@@ -2998,6 +3536,7 @@ mod tests {
                     as_owner: e.as_owner.clone(),
                     process: e.process.clone(),
                     description: e.description.clone(),
+                    unresolved_only: e.unresolved_only,
                 })
                 .collect(),
         });
@@ -3009,7 +3548,236 @@ mod tests {
         let folded = &factored.endpoints[0];
         let ips = folded.ips.as_ref().expect("Fold should produce ips list");
         assert_eq!(ips.len(), 2);
-        assert_eq!(folded.as_number, Some(8075));
+        assert_eq!(folded.as_number, Some(64500));
+    }
+
+    fn learner_session(
+        dst: [u8; 4],
+        dst_port: u16,
+        dst_domain: Option<&str>,
+        asn: Option<(u32, &str)>,
+    ) -> SessionInfo {
+        use crate::asn_db::Record;
+        use crate::sessions::{Protocol, SessionStats, SessionStatus};
+        let now = Utc::now();
+        SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(10, 1, 0, 4)),
+                src_port: 50123,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(dst[0], dst[1], dst[2], dst[3])),
+                dst_port,
+            },
+            status: SessionStatus::default(),
+            stats: SessionStats::new(now),
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: true,
+            is_self_dst: false,
+            src_domain: None,
+            dst_domain: dst_domain.map(str::to_string),
+            dst_service: None,
+            l7: None,
+            src_asn: None,
+            dst_asn: asn.map(|(as_number, owner)| Record {
+                as_number,
+                owner: owner.to_string(),
+                country: "US".to_string(),
+            }),
+            is_whitelisted: WhitelistState::Unknown,
+            criticality: String::new(),
+            dismissed: false,
+            whitelist_reason: None,
+            src_domain_type: DomainResolutionType::None,
+            dst_domain_type: DomainResolutionType::None,
+            uid: uuid::Uuid::new_v4().to_string(),
+            last_modified: now,
+        }
+    }
+
+    /// Unnamed sessions to shared infrastructure (connections a CI runner
+    /// opened before the capture started, for instance) are learned by
+    /// network, for unnamed sessions only: their rotating addresses are never
+    /// learned, and a named destination on the network still needs a domain.
+    #[test]
+    fn test_new_from_sessions_learns_unnamed_shared_traffic_by_network() {
+        let sessions = vec![
+            learner_session(
+                [20, 42, 65, 84],
+                443,
+                None,
+                Some((8075, "MICROSOFT-CORP-MSN-AS-BLOCK")),
+            ),
+            learner_session(
+                [20, 42, 73, 27],
+                443,
+                Some("Unknown"),
+                Some((8075, "MICROSOFT-CORP-MSN-AS-BLOCK")),
+            ),
+            learner_session(
+                [40, 80, 44, 0],
+                443,
+                None,
+                Some((8075, "MICROSOFT-CORP-MSN-AS-BLOCK")),
+            ),
+        ];
+        let json = WhitelistsJSON::from(Whitelists::new_from_sessions(&sessions));
+        let endpoints = &json.whitelists[0].endpoints;
+        assert_eq!(endpoints.len(), 1, "one network entry: {:?}", endpoints);
+        let ep = &endpoints[0];
+        assert_eq!(ep.unresolved_only, Some(true));
+        assert_eq!(ep.as_number, Some(8075));
+        assert!(
+            ep.ip.is_none() && ep.ips.is_none(),
+            "shared addresses are never learned"
+        );
+        assert!(ep.domain.is_none());
+
+        // The model matches what it learned, and nothing named.
+        let model = Whitelists::new_from_json(json);
+        assert!(
+            model
+                .match_session(
+                    CUSTOM_WHITELIST_NAME,
+                    &learner_session(
+                        [20, 42, 99, 1],
+                        443,
+                        None,
+                        Some((8075, "MICROSOFT-CORP-MSN-AS-BLOCK"))
+                    )
+                )
+                .0
+        );
+        let (ok, _) = model.match_session(
+            CUSTOM_WHITELIST_NAME,
+            &learner_session(
+                [20, 42, 99, 1],
+                443,
+                Some("other-tenant.blob.core.windows.net"),
+                Some((8075, "MICROSOFT-CORP-MSN-AS-BLOCK")),
+            ),
+        );
+        assert!(!ok);
+    }
+
+    /// A named destination on shared infrastructure is learned by name only;
+    /// elsewhere its address is kept as the stand-in for unnamed sessions.
+    #[test]
+    fn test_new_from_sessions_named_destinations() {
+        let sessions = vec![
+            learner_session(
+                [185, 199, 108, 133],
+                443,
+                Some("raw.githubusercontent.com"),
+                Some((54113, "FASTLY")),
+            ),
+            learner_session(
+                [140, 82, 112, 5],
+                443,
+                Some("api.github.com"),
+                Some((36459, "GITHUB")),
+            ),
+        ];
+        let json = WhitelistsJSON::from(Whitelists::new_from_sessions(&sessions));
+        let endpoints = &json.whitelists[0].endpoints;
+        let raw = endpoints
+            .iter()
+            .find(|e| e.domain.as_deref() == Some("raw.githubusercontent.com"))
+            .expect("raw entry");
+        assert!(
+            raw.ip.is_none(),
+            "no shared address on a named entry: {:?}",
+            raw
+        );
+        let api = endpoints
+            .iter()
+            .find(|e| e.domain.as_deref() == Some("api.github.com"))
+            .expect("api entry");
+        assert_eq!(api.ip.as_deref(), Some("140.82.112.5"));
+
+        let model = Whitelists::new_from_json(json);
+        // gist on raw's addresses: not learned, not conforming.
+        let (ok, why) = model.match_session(
+            CUSTOM_WHITELIST_NAME,
+            &learner_session(
+                [185, 199, 108, 133],
+                443,
+                Some("gist.githubusercontent.com"),
+                Some((54113, "FASTLY")),
+            ),
+        );
+        assert!(!ok, "{:?}", why);
+        // An unnamed session to GitHub's own address conforms through api's stand-in.
+        assert!(
+            model
+                .match_session(
+                    CUSTOM_WHITELIST_NAME,
+                    &learner_session([140, 82, 112, 5], 443, None, Some((36459, "GITHUB")))
+                )
+                .0
+        );
+    }
+
+    /// Learning from a job's sessions on top of a reviewed whitelist: only
+    /// what does not conform is added, the base entries (with their process
+    /// binding) are kept, and the added entries are reported.
+    #[test]
+    fn test_augment_with_sessions_learns_only_non_conforming_sessions() {
+        let base: WhitelistsJSON = serde_json::from_str(
+            r#"{"date":"x","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[
+                {"domain":"api.github.com","port":443,"protocol":"TCP","process":"git"},
+                {"domain":"registry.npmjs.org","port":443,"protocol":"TCP"}
+            ]}]}"#,
+        )
+        .unwrap();
+        let mut git = learner_session(
+            [140, 82, 112, 5],
+            443,
+            Some("api.github.com"),
+            Some((36459, "GITHUB")),
+        );
+        git.l7 = Some(crate::sessions::SessionL7 {
+            process_name: "git".to_string(),
+            ..Default::default()
+        });
+        let npm = learner_session(
+            [104, 16, 1, 34],
+            443,
+            Some("registry.npmjs.org"),
+            Some((13335, "CLOUDFLARENET")),
+        );
+        let gist = learner_session(
+            [185, 199, 110, 133],
+            443,
+            Some("gist.githubusercontent.com"),
+            Some((54113, "FASTLY")),
+        );
+        let mut inbound =
+            learner_session([37, 77, 150, 112], 2142, None, Some((210644, "PROTON66")));
+        inbound.is_self_src = false;
+        inbound.is_local_src = false;
+        inbound.is_local_dst = true;
+
+        let outcome = Whitelists::augment_with_sessions(&base, &[git, npm, gist, inbound]).unwrap();
+        assert_eq!(outcome.evaluated, 3, "the inbound session is not egress");
+        assert_eq!(outcome.non_conforming, 1);
+        assert_eq!(outcome.added.len(), 1, "{:?}", outcome.added);
+        assert_eq!(
+            outcome.added[0].domain.as_deref(),
+            Some("gist.githubusercontent.com")
+        );
+        let custom = outcome
+            .whitelist
+            .whitelists
+            .iter()
+            .find(|w| w.name == CUSTOM_WHITELIST_NAME)
+            .unwrap();
+        assert!(custom
+            .endpoints
+            .iter()
+            .any(|e| e.domain.as_deref() == Some("api.github.com")
+                && e.process.as_deref() == Some("git")));
+        assert_eq!(custom.endpoints.len(), 3);
     }
 
     #[tokio::test]
@@ -3100,6 +3868,7 @@ mod tests {
                 description: None,
                 ports: None,
                 ips: None,
+                unresolved_only: None,
             }],
         };
         let map = CustomDashMap::new("whitelists");
@@ -3229,6 +3998,7 @@ mod tests {
                     description: Some("Auto-generated endpoint".to_string()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3282,6 +4052,7 @@ mod tests {
                     ),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3319,7 +4090,7 @@ mod tests {
             "signature": null,
             "whitelists": [
                 {
-                    "name": "test_whitelist",
+                    "name": "custom_whitelist",
                     "extends": null,
                     "endpoints": [
                         {
@@ -3369,6 +4140,115 @@ mod tests {
             result.is_err(),
             "Should fail with invalid JSON missing required fields"
         );
+    }
+
+    /// A custom whitelist JSON that fails the check is refused as a whole and
+    /// leaves the loaded whitelist in place.
+    #[tokio::test]
+    #[serial]
+    async fn test_set_custom_whitelists_refusal_keeps_the_loaded_whitelist() {
+        let good = r#"{"date":"d","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[{"domain":"a.example","port":443,"protocol":"TCP"}]}]}"#;
+        set_custom_whitelists(good).await.expect("valid list loads");
+        let refused = [
+            ("not json", "malformed"),
+            (
+                r#"{"date":"d","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[{"domain":"a.example","color":"red"}]}]}"#,
+                "unknown field",
+            ),
+            (
+                r#"{"date":"d","signature":null,"whitelists":[{"name":"mine","extends":null,"endpoints":[]}]}"#,
+                "no custom_whitelist",
+            ),
+            (
+                r#"{"date":"d","signature":null,"whitelists":[{"name":"custom_whitelist","extends":["github"],"endpoints":[]}]}"#,
+                "undefined parent",
+            ),
+        ];
+        for (json, what) in refused {
+            let result = set_custom_whitelists(json).await;
+            assert!(result.is_err(), "{} must be refused", what);
+            assert!(is_custom().await, "{}: the loaded list must stay", what);
+            let current = current_json().await;
+            let custom = current
+                .whitelists
+                .iter()
+                .find(|w| w.name == CUSTOM_WHITELIST_NAME)
+                .unwrap_or_else(|| panic!("{}: custom_whitelist gone", what));
+            assert_eq!(custom.endpoints.len(), 1, "{}", what);
+            assert_eq!(custom.endpoints[0].domain.as_deref(), Some("a.example"));
+        }
+        assert!(parse_custom_whitelists(good).is_ok());
+        set_custom_whitelists("").await.unwrap();
+    }
+
+    /// An undefined whitelist name conforms nothing, and says why.
+    #[tokio::test]
+    #[serial]
+    async fn test_recompute_with_undefined_whitelist_fails_closed() {
+        overwrite_with_test_data(model(vec![wl(
+            "github_ubuntu",
+            None,
+            vec![WhitelistEndpoint {
+                domain: Some("api.github.com".into()),
+                ..ep()
+            }],
+        )]))
+        .await;
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let egress = learner_session(
+            [140, 82, 112, 5],
+            443,
+            Some("api.github.com"),
+            Some((36459, "GITHUB")),
+        );
+        sessions.insert(egress.session.clone(), egress.clone());
+        let name = Arc::new(CustomRwLock::new("github_Linux".to_string()));
+        let exceptions = Arc::new(CustomRwLock::new(Vec::new()));
+        let conformance = Arc::new(AtomicBool::new(true));
+        let last = Arc::new(CustomRwLock::new(Utc::now()));
+        recompute_whitelist_for_sessions(&name, &sessions, &exceptions, &conformance, &last).await;
+        let info = sessions.get(&egress.session).unwrap();
+        assert_eq!(info.is_whitelisted, WhitelistState::NonConforming);
+        assert!(
+            info.whitelist_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot be evaluated"),
+            "{:?}",
+            info.whitelist_reason
+        );
+        assert!(!conformance.load(Ordering::Relaxed));
+        assert_eq!(exceptions.read().await.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_whitelist_counts_what_entries_allow() {
+        let parse = |json: &str| -> WhitelistsJSON { serde_json::from_str(json).unwrap() };
+        let old = parse(
+            r#"{"date":"a","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[
+            {"domain":"s3.eu-west-1.amazonaws.com","ips":["3.5.72.72"],"port":443,"protocol":"TCP","description":"first"},
+            {"as_number":8075,"port":443,"protocol":"TCP","unresolved_only":true}
+        ]}]}"#,
+        );
+        // Rotated addresses and a new description: nothing new is allowed.
+        let rotated = parse(
+            r#"{"date":"b","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[
+            {"domain":"s3.eu-west-1.amazonaws.com","ips":["3.5.72.72","52.92.36.170"],"port":443,"protocol":"tcp","description":"second"},
+            {"as_number":8075,"port":443,"protocol":"TCP","unresolved_only":true}
+        ]}]}"#,
+        );
+        assert_eq!(rotated.clone().compare_whitelist(old.clone()), 0.0);
+        assert!(rotated.entries_not_in(&old).is_empty());
+        // A new port on a known domain, and the network entry covering named
+        // sessions too, are changes.
+        let widened = parse(
+            r#"{"date":"b","signature":null,"whitelists":[{"name":"custom_whitelist","extends":null,"endpoints":[
+            {"domain":"s3.eu-west-1.amazonaws.com","ports":[80,443],"protocol":"TCP"},
+            {"as_number":8075,"port":443,"protocol":"TCP"}
+        ]}]}"#,
+        );
+        assert_eq!(widened.clone().compare_whitelist(old.clone()), 100.0);
+        assert_eq!(widened.entries_not_in(&old).len(), 2);
     }
 
     /// Test augment functionality by testing merge_custom_whitelists
@@ -3486,6 +4366,7 @@ mod tests {
                 ),
                 ports: None,
                 ips: None,
+                unresolved_only: None,
             }],
         };
 
@@ -3652,6 +4533,7 @@ mod tests {
                     description: Some("Custom Node.js service".to_string()),
                     ports: None,
                     ips: None,
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3734,6 +4616,7 @@ mod tests {
                     as_owner: None,
                     process: None,
                     description: Some("Old endpoint".to_string()),
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3759,6 +4642,7 @@ mod tests {
                         as_owner: None,
                         process: None,
                         description: Some("Old endpoint".to_string()),
+                        unresolved_only: None,
                     },
                     WhitelistEndpoint {
                         domain: Some("new-example.com".to_string()),
@@ -3773,6 +4657,7 @@ mod tests {
                         as_owner: None,
                         process: None,
                         description: Some("New endpoint".to_string()),
+                        unresolved_only: None,
                     },
                 ],
             }],
@@ -3812,6 +4697,7 @@ mod tests {
                     as_owner: None,
                     process: None,
                     description: Some("New endpoint".to_string()),
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3843,6 +4729,7 @@ mod tests {
                     as_owner: None,
                     process: None,
                     description: Some("Test endpoint".to_string()),
+                    unresolved_only: None,
                 }],
             }],
         };
@@ -3879,6 +4766,7 @@ mod tests {
                             as_owner: None,
                             process: None,
                             description: Some("A old endpoint".to_string()),
+                            unresolved_only: None,
                         },
                         WhitelistEndpoint {
                             domain: Some("b.com".to_string()),
@@ -3893,6 +4781,7 @@ mod tests {
                             as_owner: None,
                             process: None,
                             description: Some("B old endpoint".to_string()),
+                            unresolved_only: None,
                         },
                     ],
                 },
@@ -3912,6 +4801,7 @@ mod tests {
                         as_owner: None,
                         process: None,
                         description: Some("X endpoint".to_string()),
+                        unresolved_only: None,
                     }],
                 },
             ],
@@ -3943,8 +4833,10 @@ mod tests {
                             as_owner: None,
                             process: None,
                             description: Some("A old endpoint".to_string()),
+                            unresolved_only: None,
                         },
-                        // modified IP (counts as new endpoint in your code)
+                        // new address on a known domain: not a change (the
+                        // address only stands in for unnamed sessions)
                         WhitelistEndpoint {
                             domain: Some("b.com".to_string()),
                             domains: None,
@@ -3958,6 +4850,7 @@ mod tests {
                             as_owner: None,
                             process: None,
                             description: Some("B endpoint new IP".to_string()),
+                            unresolved_only: None,
                         },
                         // brand new endpoint
                         WhitelistEndpoint {
@@ -3973,6 +4866,7 @@ mod tests {
                             as_owner: None,
                             process: None,
                             description: Some("C new endpoint".to_string()),
+                            unresolved_only: None,
                         },
                     ],
                 },
@@ -3993,6 +4887,7 @@ mod tests {
                         as_owner: None,
                         process: None,
                         description: Some("X endpoint".to_string()),
+                        unresolved_only: None,
                     }],
                 },
                 // new whitelist_c
@@ -4012,18 +4907,19 @@ mod tests {
                         as_owner: None,
                         process: None,
                         description: Some("New list endpoint".to_string()),
+                        unresolved_only: None,
                     }],
                 },
             ],
         };
 
         let result = new_whitelist.compare_whitelist(old_whitelist);
-        // Let's reason: total endpoints in new list = 3 (whitelist_a) + 1 (whitelist_b) + 1 (whitelist_c) = 5
-        // Different ones:
-        //  - whitelist_a: b.com new IP, c.com new
+        // Total endpoints in new list = 3 (whitelist_a) + 1 (whitelist_b) + 1 (whitelist_c) = 5
+        // Different ones (what the entry allows, not its fields):
+        //  - whitelist_a: c.com new (b.com's new address and description are not a change)
         //  - whitelist_c: all endpoints new (1)
-        //  => different = 3 / total 5 = 60%
-        assert_eq!(result, 60.0);
+        //  => different = 2 / total 5 = 40%
+        assert_eq!(result, 40.0);
     }
 
     /// Test that CDN sessions without resolved domains are skipped
@@ -4261,74 +5157,77 @@ mod tests {
         let whitelist = Whitelists::new_from_sessions(&sessions);
         let whitelist_json = WhitelistsJSON::from(whitelist);
 
-        // Should have 5 endpoints (only CDN reverse DNS pattern sessions are skipped):
-        // 1. cdn_resolved (gist.githubusercontent.com)
-        // 2. non_cdn_unresolved (10.0.0.1:8080 - IP-only)
-        // 3. non_cdn_resolved (example.com)
-        // 4. no_asn_unresolved (192.168.1.200:22 - IP-only)
-        // 5. cloudflare_unresolved (104.16.0.1:443 - IP-only, CDN with unresolved domain is now included)
-        // NOT included: cdn_reverse_pattern (CDN with reverse DNS pattern - skipped)
+        // 6 endpoints, one per session:
+        // 1. cdn_reverse_pattern: an address-derived name on Fastly is no name
+        //    -> network entry for unnamed sessions (AS 54113), no address
+        // 2. cdn_resolved (gist.githubusercontent.com) -> domain entry, no
+        //    shared address
+        // 3. non_cdn_unresolved (10.0.0.1:8080) -> address-only
+        // 4. non_cdn_resolved (example.com on Edgecast, a CDN) -> domain entry,
+        //    no shared address
+        // 5. no_asn_unresolved (192.168.1.200:22) -> address-only (network unknown)
+        // 6. cloudflare_unresolved -> network entry for unnamed sessions (AS 13335)
         assert_eq!(
             whitelist_json.whitelists.len(),
             1,
             "Should have one whitelist"
         );
         let endpoints = &whitelist_json.whitelists[0].endpoints;
-        assert_eq!(
-            endpoints.len(),
-            5,
-            "Should have 5 endpoints (only CDN reverse DNS pattern sessions skipped)"
-        );
+        assert_eq!(endpoints.len(), 6, "{:#?}", endpoints);
 
-        // Verify cdn_resolved is included with domain
         assert!(
             endpoints.iter().any(
-                |ep| ep.domain == Some("gist.githubusercontent.com".to_string())
-                    && ep.ip == Some("185.199.108.133".to_string())
+                |ep| ep.domain == Some("gist.githubusercontent.com".to_string()) && ep.ip.is_none()
             ),
-            "CDN session with resolved domain should be included"
+            "Named CDN destination is learned by name, without the shared address"
         );
-
-        // Verify non_cdn_unresolved is included (IP-only)
         assert!(
             endpoints.iter().any(|ep| ep.domain.is_none()
                 && ep.ip == Some("10.0.0.1".to_string())
-                && ep.port == Some(8080)),
-            "Non-CDN session with unresolved domain should be included (IP-only)"
+                && ep.port == Some(8080)
+                && ep.unresolved_only.is_none()),
+            "Unnamed single-tenant destination is learned by address"
         );
-
-        // Verify non_cdn_resolved is included with domain
         assert!(
             endpoints
                 .iter()
-                .any(|ep| ep.domain == Some("example.com".to_string())
-                    && ep.ip == Some("93.184.216.34".to_string())),
-            "Non-CDN session with resolved domain should be included"
+                .any(|ep| ep.domain == Some("example.com".to_string()) && ep.ip.is_none()),
+            "Named destination on a CDN is learned by name only"
         );
-
-        // Verify no_asn_unresolved is included (IP-only, backwards compatibility)
         assert!(
             endpoints.iter().any(|ep| ep.domain.is_none()
                 && ep.ip == Some("192.168.1.200".to_string())
                 && ep.port == Some(22)),
             "Session with no ASN and unresolved domain should be included (backwards compatibility)"
         );
-
-        // Verify CDN session with reverse DNS pattern is NOT included
-        assert!(
-            !endpoints
-                .iter()
-                .any(|ep| ep.ip == Some("185.199.110.133".to_string())),
-            "CDN session with reverse DNS pattern should be skipped"
-        );
-
-        // Verify CDN session with unresolved domain IS included (supports non-eBPF environments)
-        assert!(
-            endpoints
-                .iter()
-                .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
-            "CDN session with unresolved domain should be included (non-eBPF support)"
-        );
+        for (asn, what) in [
+            (54113, "Fastly reverse-pattern"),
+            (13335, "Cloudflare unresolved"),
+        ] {
+            assert!(
+                endpoints.iter().any(|ep| ep.as_number == Some(asn)
+                    && ep.domain.is_none()
+                    && ep.ip.is_none()
+                    && ep.ips.is_none()
+                    && ep.unresolved_only == Some(true)),
+                "{} session is learned by network for unnamed sessions only",
+                what
+            );
+        }
+        for shared_ip in [
+            "185.199.110.133",
+            "185.199.108.133",
+            "104.16.0.1",
+            "93.184.216.34",
+        ] {
+            assert!(
+                !endpoints
+                    .iter()
+                    .any(|ep| ep.ip.as_deref() == Some(shared_ip)),
+                "shared address {} must never be learned",
+                shared_ip
+            );
+        }
     }
 
     /// Test that CDN reverse DNS patterns are detected and skipped correctly
@@ -4494,47 +5393,47 @@ mod tests {
         let whitelist = Whitelists::new_from_sessions(&sessions);
         let whitelist_json = WhitelistsJSON::from(whitelist);
 
-        // Should have 2 endpoints:
-        // 1. Cloudflare unresolved (included for non-eBPF support)
-        // 2. Fastly resolved (included with domain)
-        // NOT included: 5 reverse DNS pattern sessions (skipped)
+        // Address-derived reverse names are no names: each of the 5 reverse
+        // pattern sessions (5 shared-infrastructure owners) and the unresolved
+        // Cloudflare session become a network entry for unnamed sessions, and
+        // the forward-resolved gist session a domain entry. No address of any
+        // of them is learned.
         assert_eq!(
             whitelist_json.whitelists.len(),
             1,
             "Should have one whitelist"
         );
         let endpoints = &whitelist_json.whitelists[0].endpoints;
-        assert_eq!(
-            endpoints.len(),
-            2,
-            "Should have 2 endpoints (CDN reverse DNS pattern sessions skipped)"
-        );
+        assert_eq!(endpoints.len(), 7, "{:#?}", endpoints);
 
-        // Verify the resolved CDN session is included with domain
         assert!(
             endpoints.iter().any(
-                |ep| ep.domain == Some("gist.githubusercontent.com".to_string())
-                    && ep.ip == Some("185.199.108.133".to_string())
+                |ep| ep.domain == Some("gist.githubusercontent.com".to_string()) && ep.ip.is_none()
             ),
-            "Forward DNS resolved CDN session should be included with domain"
+            "Forward DNS resolved CDN session should be learned by name"
         );
-
-        // Verify the unresolved CDN session is included (IP-only)
-        assert!(
+        assert_eq!(
             endpoints
                 .iter()
-                .any(|ep| ep.ip == Some("104.16.0.1".to_string())),
-            "CDN session with unresolved domain should be included (IP-only) for non-eBPF support"
+                .filter(|ep| ep.unresolved_only == Some(true) && ep.domain.is_none())
+                .count(),
+            6,
+            "unnamed shared-infrastructure sessions are learned by network, unnamed only"
         );
-
-        // Verify reverse DNS pattern sessions are NOT included
-        for (_, _, ip_str) in &reverse_dns_patterns {
+        for (domain, _, ip_str) in &reverse_dns_patterns {
             assert!(
-                !endpoints.iter().any(|ep| ep.ip == Some(ip_str.to_string())),
-                "CDN session with reverse DNS pattern from {} should be skipped",
-                ip_str
+                !endpoints
+                    .iter()
+                    .any(|ep| ep.ip == Some(ip_str.to_string())
+                        || ep.domain.as_deref() == Some(domain)),
+                "reverse DNS pattern session {} ({}) must not be learned by name or address",
+                ip_str,
+                domain
             );
         }
+        assert!(!endpoints
+            .iter()
+            .any(|ep| ep.ip == Some("104.16.0.1".to_string())));
     }
 
     /// Test that sessions without ASN info are not skipped (backwards compatibility)

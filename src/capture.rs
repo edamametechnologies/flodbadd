@@ -348,24 +348,41 @@ impl FlodbaddCapture {
         self.invalidate_update_cooldown().await;
     }
 
+    /// Enforce the whitelist `whitelist_name` (a built-in named list, or
+    /// `custom_whitelist`); an empty name turns whitelist evaluation off.
+    ///
+    /// A name that is not defined fails closed: it is still what gets
+    /// enforced, so every egress session is non-conforming ("Whitelist 'x'
+    /// cannot be evaluated"), and the error says the name is unknown.
     pub async fn set_whitelist(&self, whitelist_name: &str) -> Result<()> {
-        // Check if the whitelist is valid (either a standard whitelist or our custom one)
-        let is_custom = whitelist_name == "custom_whitelist";
-        if !whitelist_name.is_empty() && !is_custom && !is_valid_whitelist(whitelist_name).await {
-            error!("Invalid whitelist name: {}", whitelist_name);
-            return Err(anyhow!("Invalid whitelist name: {}", whitelist_name));
+        let is_custom = whitelist_name == whitelists::CUSTOM_WHITELIST_NAME;
+
+        // A named list is one of the built-in lists: leave custom data first,
+        // so the name is checked against those lists rather than against a
+        // custom whitelist that would be dropped anyway.
+        if !is_custom {
+            whitelists::reset_to_default().await;
         }
+        let unknown = !whitelist_name.is_empty() && !is_valid_whitelist(whitelist_name).await;
 
         // Set the new whitelist name
         *self.whitelist_name.write().await = whitelist_name.to_string();
 
-        // If switching to a standard (non-custom) whitelist, reset the CloudModel
-        if !is_custom {
-            whitelists::reset_to_default().await;
-        }
-
         // Reset the internal whitelist state tracking
         self.reset_whitelist().await;
+
+        if unknown {
+            let known = whitelists::whitelist_names().await.join(", ");
+            error!(
+                "Unknown whitelist '{}' (defined: {}): every egress session is non-conforming",
+                whitelist_name, known
+            );
+            return Err(anyhow!(
+                "unknown whitelist '{}' (defined: {}); it is enforced as an empty list, so every egress session is non-conforming",
+                whitelist_name,
+                known
+            ));
+        }
 
         // Force immediate whitelist recomputation after changing whitelist
         // This ensures that existing sessions are immediately re-evaluated against the new whitelist
@@ -746,9 +763,12 @@ impl FlodbaddCapture {
                 info!("Custom whitelists set successfully (session update will be triggered by orchestrator)");
             }
             Err(e) => {
-                error!("Error setting custom whitelists: {}", e);
-                // Set name to empty string after error
-                *self.whitelist_name.write().await = "".to_string();
+                // All or nothing: the refused JSON left the current whitelists
+                // in place, so the active name stays too.
+                error!(
+                    "Error setting custom whitelists, the current whitelist stays active: {}",
+                    e
+                );
             }
         }
     }
@@ -888,6 +908,7 @@ impl FlodbaddCapture {
                 ep.as_number,
                 ep.as_country.clone(),
                 ep.as_owner.clone(),
+                ep.unresolved_only,
             );
             unique.insert(fingerprint)
         });

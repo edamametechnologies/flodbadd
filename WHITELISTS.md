@@ -37,6 +37,7 @@ pub struct WhitelistEndpoint {
     pub description: Option<String>,  // Human-readable description for documentation
     pub ports: Option<Vec<PortSpec>>, // List of ports and/or ranges
     pub ips: Option<Vec<String>>,     // List of IP specs (IP, CIDR, or explicit range "start-end")
+    pub unresolved_only: Option<bool>, // Match only sessions whose destination has no name
 }
 
 // Port specification supports a single port or an inclusive range
@@ -153,109 +154,68 @@ fn get_all_endpoints(&self, whitelist_name: &str, visited: &mut HashSet<String>)
 }
 ```
 
-## Advanced Matching Algorithm
+## Matching
 
-### Multi-Criteria Matching Priority
+`endpoint_matches_with_reason` decides whether one session matches one
+endpoint. A session conforms when it matches any endpoint of the whitelist
+(with its `extends` chain); an undefined whitelist, or one without endpoints,
+conforms nothing.
 
-The whitelist system follows a precise matching order for optimal performance and security:
+1. **Gates**: protocol, port (`port`/`ports`) and process must match when the
+   endpoint sets them.
+2. **Named or not**: a session's destination has an identifying name when it
+   has a forward DNS answer or a TLS SNI name. The resolver's placeholders
+   (`Unknown`, `Resolving`) and reverse-DNS names built from the address
+   (`cdn-185-199-110-133.github.com`, see `dns_patterns::is_reverse_dns_pattern`)
+   are not names (`is_identifying_domain`).
+3. **Domain first**: an endpoint with `domain`/`domains` matches a named
+   session only by name. Its `ip`/`ips` stand in only for sessions without a
+   name.
+4. **Addresses**: an endpoint with addresses and no domain matches by
+   address, except a named destination on shared infrastructure (an AS owner
+   that is a CDN or a cloud front end, `is_shared_infrastructure_owner`):
+   many sites answer on those addresses, so only a domain entry identifies
+   one of them.
+5. **Networks**: an endpoint with neither domain nor address matches on its
+   AS fields (`as_number`, `as_owner`, `as_country`).
+6. **`unresolved_only: true`** restricts an endpoint to sessions without a
+   name.
 
-```rust
-pub fn endpoint_matches_with_reason(
-    session_domain: Option<&str>,
-    session_ip: Option<&str>, 
-    port: u16,
-    protocol: &str,
-    as_number: Option<u32>,
-    as_country: Option<&str>,
-    as_owner: Option<&str>,
-    process: Option<&str>,
-    endpoint: &WhitelistEndpoint,
-) -> (bool, Option<String>) {
-    // 1. Fundamental criteria must match first
-    if !ports_match(port, endpoint.port, &endpoint.ports) {
-        return (false, Some(format!("Port mismatch: {} vs {:?}", port, endpoint.port)));
-    }
-    
-    if !protocol_matches(protocol, &endpoint.protocol) {
-        return (false, Some(format!("Protocol mismatch: {} vs {:?}", protocol, endpoint.protocol)));
-    }
-    
-    if !process_matches(process, &endpoint.process) {
-        return (false, Some(format!("Process mismatch: {:?} vs {:?}", process, endpoint.process)));
-    }
-    
-    // 2. Entity identification (domain has priority over IP)
-    let domain_specified = endpoint.domain.is_some();
-    let ip_specified = endpoint.ip.is_some();
-    
-    if domain_specified {
-        if domain_matches(session_domain, &endpoint.domain) {
-            return check_as_criteria(as_number, as_country, as_owner, endpoint);
-        } else if !ip_specified {
-            return (false, Some("Domain mismatch and no IP fallback".to_string()));
-        }
-    }
-    
-    if ip_specified {
-        if ip_matches_any(session_ip, &endpoint.ip, &endpoint.ips) {
-            return check_as_criteria(as_number, as_country, as_owner, endpoint);
-        } else if domain_specified {
-            return (false, Some("Both domain and IP mismatch".to_string()));
-        }
-    }
-    
-    // 3. If neither domain nor IP specified, only AS/process matching
-    if !domain_specified && !ip_specified {
-        return check_as_criteria(as_number, as_country, as_owner, endpoint);
-    }
-    
-    (false, Some("No matching criteria found".to_string()))
-}
-```
+Evaluation covers egress sessions only (`is_egress_session`).
 
 ## Session-based Whitelist Generation
 
 ### Automatic Whitelist Creation from Traffic
 
-The system can generate whitelists automatically from observed network sessions:
+`Whitelists::new_from_sessions` learns one entry per distinct destination,
+the way matching reads it:
 
-```rust
-impl Whitelists {
-    pub fn new_from_sessions(sessions: &Vec<SessionInfo>) -> Self {
-        let mut endpoints = Vec::new();
-        
-        for session in sessions {
-            // Extract endpoint information from session
-            let endpoint = WhitelistEndpoint {
-                domain: session.dst_domain.clone(),
-                ip: Some(session.session.dst_ip.to_string()),
-                port: Some(session.session.dst_port),
-                protocol: Some(session.session.protocol.to_string()),
-                as_number: session.dst_asn.as_ref().map(|asn| asn.as_number),
-                as_country: session.dst_asn.as_ref().map(|asn| asn.country.clone()),
-                as_owner: session.dst_asn.as_ref().map(|asn| asn.owner.clone()),
-                process: session.l7.as_ref().map(|l7| l7.process_name.clone()),
-                description: Some(format!("Auto-generated from session to {}", session.session.dst_ip)),
-            };
-            endpoints.push(endpoint);
-        }
-        
-        // Deduplicate endpoints based on fingerprint
-        let mut unique_fingerprints = HashSet::new();
-        endpoints.retain(|ep| {
-            let fingerprint = (
-                ep.domain.clone(), ep.ip.clone(), ep.port,
-                ep.protocol.clone(), ep.as_number, ep.as_country.clone(),
-                ep.as_owner.clone(), ep.process.clone()
-            );
-            unique_fingerprints.insert(fingerprint)
-        });
-        
-        // Create whitelist structure
-        Self::create_custom_whitelist(endpoints)
-    }
-}
-```
+- a named destination becomes a domain entry; its address is kept as the
+  stand-in for unnamed sessions, except on shared infrastructure, where an
+  address identifies nothing and is not learned;
+- an unnamed destination on shared infrastructure (a connection opened before
+  the capture started, for instance) becomes an entry for its AS with
+  `unresolved_only: true`;
+- any other unnamed destination becomes an address entry.
+
+`Whitelists::augment_with_sessions` learns on top of a given whitelist: the
+sessions that do not conform to it become entries, the given entries are kept
+as they are, and the result is factorized. It reports the entries that allow
+something new.
+
+`WhitelistsJSON::compare_whitelist` compares on what entries allow: domains
+(or addresses and network for entries without a domain), ports, protocol and
+process. A new address on a known domain, or a new description, is not a
+change.
+
+### Loading a custom whitelist
+
+`set_custom_whitelists` checks the JSON first (`parse_custom_whitelists`):
+it must parse (unknown fields are refused), define `custom_whitelist`, and
+resolve every `extends` within the JSON. A JSON that fails the check is
+refused and the whitelists in force stay. `FlodbaddCapture::set_whitelist`
+with a name that is not defined still enforces it (every egress session is
+non-conforming) and returns an error.
 
 ### Whitelist Merging and Composition
 
