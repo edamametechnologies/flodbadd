@@ -1949,7 +1949,13 @@ impl FlodbaddCapture {
                             }
                         }
                     }
-                    if let Some(domain) = dst_domain {
+                    // A name taken from the session's own TLS ClientHello is
+                    // the one the client asked for; the resolver's names are
+                    // per address, and CDN tenants share addresses, so they
+                    // never replace it.
+                    if let Some(domain) = dst_domain
+                        .filter(|_| session_info.dst_domain_type != DomainResolutionType::SNI)
+                    {
                         if domain != "Unknown" && domain != "Resolving" {
                             if session_info.dst_domain.as_ref() != Some(&domain) {
                                 session_info.dst_domain = Some(domain);

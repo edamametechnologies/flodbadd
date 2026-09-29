@@ -31,6 +31,108 @@ const TCP_PSH: u8 = 0x08; // PSH (push) flag in TCP
 // A high-traffic connection (60k packets/10s) would fill this in ~0.17 seconds
 const MAX_HISTORY_LENGTH: usize = 1000;
 
+/// Ports below this are IANA system ports: the side holding one is the
+/// service.
+const SYSTEM_PORT_CEILING: u16 = 1024;
+
+/// IANA dynamic (ephemeral) range: a port here belongs to a client.
+const DYNAMIC_PORT_FLOOR: u16 = 49_152;
+
+/// Lowest port this host's OS picks for an outgoing connection by default
+/// (Linux `ip_local_port_range` 32768-60999; macOS and Windows use the IANA
+/// dynamic range). A local port below it was not picked for a connection
+/// this host opened, so this host is listening on it.
+#[cfg(target_os = "linux")]
+const LOCAL_EPHEMERAL_PORT_FLOOR: u16 = 32_768;
+#[cfg(not(target_os = "linux"))]
+const LOCAL_EPHEMERAL_PORT_FLOOR: u16 = DYNAMIC_PORT_FLOOR;
+
+/// The same flow keyed the other way round.
+fn mirrored(session: &Session) -> Session {
+    Session {
+        protocol: session.protocol.clone(),
+        src_ip: session.dst_ip,
+        src_port: session.dst_port,
+        dst_ip: session.src_ip,
+        dst_port: session.src_port,
+    }
+}
+
+/// Whether the source of a packet is the server of its flow, for a packet
+/// that does not say so itself (no SYN) between two ports that both carry a
+/// service name. In order:
+/// 1. a system port (< 1024) against a higher one: the system port serves;
+/// 2. a dynamic port (>= 49152) against a lower one: the dynamic port is the
+///    client's;
+/// 3. exactly one end is this host: it serves when its port is below the
+///    range its OS picks outgoing ports from (an inbound connection from a
+///    client that uses a low source port, `remote:2142 -> host:3389`, is
+///    keyed as inbound);
+/// 4. otherwise the lower port serves.
+///
+/// Equal ports (NTP 123 to 123, mDNS 5353 to 5353) say nothing: the packet
+/// keeps its direction, so the first packet of the flow decides.
+fn packet_source_serves(session: &Session, own_ips: &HashSet<IpAddr>) -> bool {
+    let (src_port, dst_port) = (session.src_port, session.dst_port);
+    if src_port == dst_port {
+        return false;
+    }
+    if (src_port < SYSTEM_PORT_CEILING) != (dst_port < SYSTEM_PORT_CEILING) {
+        return src_port < SYSTEM_PORT_CEILING;
+    }
+    if (src_port >= DYNAMIC_PORT_FLOOR) != (dst_port >= DYNAMIC_PORT_FLOOR) {
+        return dst_port >= DYNAMIC_PORT_FLOOR;
+    }
+    let src_is_own = own_ips.contains(&session.src_ip);
+    let dst_is_own = own_ips.contains(&session.dst_ip);
+    if src_is_own != dst_is_own {
+        let own_port = if src_is_own { src_port } else { dst_port };
+        let own_side_listens = own_port < LOCAL_EPHEMERAL_PORT_FLOOR;
+        return if src_is_own {
+            own_side_listens
+        } else {
+            !own_side_listens
+        };
+    }
+    src_port < dst_port
+}
+
+/// The key (client as source, server as destination) of a flow first seen
+/// through this packet.
+fn orient_new_flow(
+    session: &Session,
+    flags: Option<u8>,
+    src_is_service_port: bool,
+    dst_is_service_port: bool,
+    own_ips: &HashSet<IpAddr>,
+) -> Session {
+    if src_is_service_port && !dst_is_service_port {
+        // Source is likely a server, swap to make the client (initiator) the source
+        return mirrored(session);
+    }
+    if !(src_is_service_port && dst_is_service_port) {
+        // Destination is the service, or neither port says: keep the packet's direction
+        return session.clone();
+    }
+    // Both are service ports: the handshake flags decide when present.
+    if let Some(flags) = flags {
+        if session.protocol == Protocol::TCP && flags & TcpFlags::SYN != 0 {
+            return if flags & TcpFlags::ACK == 0 {
+                // SYN without ACK: the source opens the connection
+                session.clone()
+            } else {
+                // SYN+ACK: the source answers
+                mirrored(session)
+            };
+        }
+    }
+    if packet_source_serves(session, own_ips) {
+        mirrored(session)
+    } else {
+        session.clone()
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ParsedPacket {
     SessionPacket(SessionPacketData),
@@ -210,78 +312,30 @@ pub async fn process_parsed_packet(
     let src_is_service_port = !src_service_name.is_empty();
     let dst_is_service_port = !dst_service_name.is_empty();
 
-    // Determine the session key based on actual packet direction and port information
-    // We'll use the following logic:
-    // 1. Keep original direction by default (source is initiator)
-    // 2. If destination has a well-known service port and source doesn't, keep original
-    // 3. If source has a well-known service port and destination doesn't, swap them
-    // 4. If both are service ports, use TCP flags or default to keeping original direction
-    let key = if src_is_service_port && !dst_is_service_port {
-        // Source is likely a server, swap to make the client (initiator) the source
-        Session {
-            protocol: parsed_packet.session.protocol.clone(),
-            src_ip: parsed_packet.session.dst_ip,
-            src_port: parsed_packet.session.dst_port,
-            dst_ip: parsed_packet.session.src_ip,
-            dst_port: parsed_packet.session.src_port,
-        }
-    } else if src_is_service_port && dst_is_service_port {
-        // Both are service ports - first try TCP flags, then use port numbers as tiebreaker
-        if let Some(flags) = parsed_packet.flags {
-            if parsed_packet.session.protocol == Protocol::TCP
-                && flags & TcpFlags::SYN != 0
-                && flags & TcpFlags::ACK == 0
-            {
-                // SYN without ACK - keep original direction
-                parsed_packet.session.clone()
-            } else if parsed_packet.session.protocol == Protocol::TCP
-                && flags & TcpFlags::SYN != 0
-                && flags & TcpFlags::ACK != 0
-            {
-                // SYN+ACK - swap direction
-                Session {
-                    protocol: parsed_packet.session.protocol.clone(),
-                    src_ip: parsed_packet.session.dst_ip,
-                    src_port: parsed_packet.session.dst_port,
-                    dst_ip: parsed_packet.session.src_ip,
-                    dst_port: parsed_packet.session.src_port,
-                }
-            } else {
-                // For other flag combinations, use port numbers as tiebreaker
-                // Lower port number is likely to be the more canonical service
-                if parsed_packet.session.src_port < parsed_packet.session.dst_port {
-                    // Source has the smaller port, so it's likely the server - swap direction
-                    Session {
-                        protocol: parsed_packet.session.protocol.clone(),
-                        src_ip: parsed_packet.session.dst_ip,
-                        src_port: parsed_packet.session.dst_port,
-                        dst_ip: parsed_packet.session.src_ip,
-                        dst_port: parsed_packet.session.src_port,
-                    }
-                } else {
-                    // Destination has smaller port, keep original direction
-                    parsed_packet.session.clone()
-                }
-            }
-        } else {
-            // No flags (e.g., UDP), use port numbers as tiebreaker
-            if parsed_packet.session.src_port < parsed_packet.session.dst_port {
-                // Source has the smaller port, so it's likely the server - swap direction
-                Session {
-                    protocol: parsed_packet.session.protocol.clone(),
-                    src_ip: parsed_packet.session.dst_ip,
-                    src_port: parsed_packet.session.dst_port,
-                    dst_ip: parsed_packet.session.src_ip,
-                    dst_port: parsed_packet.session.src_port,
-                }
-            } else {
-                // Destination has smaller port, keep original direction
-                parsed_packet.session.clone()
-            }
-        }
+    // Key the flow client -> server. A flow keeps the orientation its first
+    // packet (usually the SYN) gave it: a later packet whose ports alone would
+    // orient it the other way updates that session instead of opening a
+    // mirror session keyed the other way round.
+    let oriented = orient_new_flow(
+        &parsed_packet.session,
+        parsed_packet.flags,
+        src_is_service_port,
+        dst_is_service_port,
+        own_ips,
+    );
+    // A pure SYN opens a new connection and says who opened it: it is never
+    // folded into an earlier flow keyed the other way.
+    let opens_connection = parsed_packet.session.protocol == Protocol::TCP
+        && parsed_packet.flags.map_or(false, |flags| {
+            flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK == 0
+        });
+    let key = if !opens_connection
+        && !sessions.contains_key(&oriented)
+        && sessions.contains_key(&mirrored(&oriented))
+    {
+        mirrored(&oriented)
     } else {
-        // Keep original direction
-        parsed_packet.session.clone()
+        oriented
     };
 
     // Determine if this packet is from originator to responder or vice versa
@@ -309,6 +363,26 @@ pub async fn process_parsed_packet(
             .updated_sessions_cumulative
             .fetch_add(1, Ordering::Relaxed);
         update_session_stats(&mut entry.stats, &parsed_packet, now, is_originator);
+        // The ClientHello follows the handshake, so for a connection seen from
+        // its SYN it reaches this path, not the new-session one: take the SNI
+        // here too. The name the client asked for is this session's own; the
+        // resolver's names are per address, which CDN tenants share.
+        if entry.dst_domain_type != DomainResolutionType::SNI {
+            if let Some(sni_info) = parsed_packet
+                .tls_client_hello
+                .as_ref()
+                .filter(|_| is_originator)
+                .and_then(|payload| sni::extract_sni(payload))
+            {
+                trace!(
+                    "Extracted SNI hostname '{}' for session {:?}",
+                    sni_info.hostname,
+                    key
+                );
+                entry.dst_domain = Some(sni_info.hostname);
+                entry.dst_domain_type = DomainResolutionType::SNI;
+            }
+        }
         entry.last_modified = now;
         return;
     }
@@ -493,6 +567,14 @@ pub async fn process_parsed_packet(
     // All async work is done -- now do a quick atomic insert.
     // Use entry() so we handle the race where another packet created
     // this session while we were doing lookups.
+    let mirror_key = mirrored(&key);
+    if let Some(mut mirror) = sessions.get_mut(&mirror_key).filter(|_| !opens_connection) {
+        // Another packet of this flow created it the other way round while we
+        // did the lookups: keep that orientation.
+        update_session_stats(&mut mirror.stats, &parsed_packet, now, !is_originator);
+        mirror.last_modified = now;
+        return;
+    }
     match sessions.entry(key.clone()) {
         Entry::Occupied(mut occ) => {
             let info = occ.get_mut();
@@ -876,6 +958,290 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::{collections::HashSet, sync::Arc};
     use undeadlock::CustomRwLock;
+
+    fn tcp_packet(
+        src: (Ipv4Addr, u16),
+        dst: (Ipv4Addr, u16),
+        flags: u8,
+        payload: usize,
+        client_hello: Option<Vec<u8>>,
+    ) -> SessionPacketData {
+        SessionPacketData {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(src.0),
+                src_port: src.1,
+                dst_ip: IpAddr::V4(dst.0),
+                dst_port: dst.1,
+            },
+            packet_length: payload,
+            ip_packet_length: payload + 40,
+            flags: Some(flags),
+            timestamp: Utc::now(),
+            tls_client_hello: client_hello,
+        }
+    }
+
+    /// A named port below 3389, used as a client's source port.
+    async fn named_low_client_port() -> u16 {
+        for port in [1433u16, 3306, 1723, 2049, 1521, 2083] {
+            if !get_name_from_port(port).await.is_empty() {
+                return port;
+            }
+        }
+        panic!("no named port below 3389 in the port database");
+    }
+
+    /// An inbound connection to the host's port 3389 from a client whose
+    /// source port is named and lower: the whole flow, handshake and data in
+    /// both directions, is one inbound session (never egress).
+    #[tokio::test]
+    #[serial]
+    async fn test_inbound_connection_from_low_named_port_stays_inbound() {
+        let client_port = named_low_client_port().await;
+        assert!(
+            !get_name_from_port(3389).await.is_empty(),
+            "3389 must be a named service port for this case"
+        );
+        let host = Ipv4Addr::new(192, 0, 2, 10);
+        let client = Ipv4Addr::new(203, 0, 113, 7);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+
+        let packets = vec![
+            tcp_packet((client, client_port), (host, 3389), TcpFlags::SYN, 0, None),
+            tcp_packet(
+                (host, 3389),
+                (client, client_port),
+                TcpFlags::SYN | TcpFlags::ACK,
+                0,
+                None,
+            ),
+            tcp_packet((client, client_port), (host, 3389), TcpFlags::ACK, 0, None),
+            tcp_packet(
+                (client, client_port),
+                (host, 3389),
+                TcpFlags::ACK | TcpFlags::PSH,
+                19,
+                None,
+            ),
+            tcp_packet(
+                (host, 3389),
+                (client, client_port),
+                TcpFlags::ACK | TcpFlags::PSH,
+                19,
+                None,
+            ),
+            tcp_packet((client, client_port), (host, 3389), TcpFlags::RST, 0, None),
+        ];
+        for packet in packets {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+
+        assert_eq!(sessions.len(), 1, "one flow, one session");
+        let inbound = Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(client),
+            src_port: client_port,
+            dst_ip: IpAddr::V4(host),
+            dst_port: 3389,
+        };
+        let info = sessions.get(&inbound).expect("keyed client -> host:3389");
+        assert!(info.is_self_dst && !info.is_self_src, "inbound, not egress");
+        assert!(!crate::whitelists::is_egress_session(&info));
+        assert_eq!(
+            info.stats.orig_pkts, 4,
+            "the client's packets count as the originator's"
+        );
+        assert_eq!(info.stats.resp_pkts, 2);
+    }
+
+    /// The same flow first seen mid-stream (the handshake before the capture,
+    /// or dropped): the host's side holds a port its OS would not pick for an
+    /// outgoing connection, so the host is the server.
+    #[tokio::test]
+    #[serial]
+    async fn test_midstream_inbound_flow_keyed_to_the_listening_host() {
+        let client_port = named_low_client_port().await;
+        let host = Ipv4Addr::new(192, 0, 2, 11);
+        let client = Ipv4Addr::new(198, 51, 100, 23);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+
+        // Either packet may come first.
+        for packet in [
+            tcp_packet(
+                (host, 3389),
+                (client, client_port),
+                TcpFlags::ACK | TcpFlags::PSH,
+                40,
+                None,
+            ),
+            tcp_packet(
+                (client, client_port),
+                (host, 3389),
+                TcpFlags::ACK | TcpFlags::PSH,
+                40,
+                None,
+            ),
+        ] {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+        assert_eq!(sessions.len(), 1);
+        let entry = sessions.iter().next().unwrap();
+        assert_eq!(entry.key().dst_ip, IpAddr::V4(host));
+        assert_eq!(entry.key().dst_port, 3389);
+        assert!(!crate::whitelists::is_egress_session(entry.value()));
+    }
+
+    /// Egress keeps its direction: the host's own ephemeral port against a
+    /// named remote port, first seen mid-stream from the remote side.
+    #[tokio::test]
+    #[serial]
+    async fn test_midstream_egress_flow_stays_egress() {
+        let host = Ipv4Addr::new(10, 1, 0, 4);
+        let remote = Ipv4Addr::new(140, 82, 112, 5);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+        for packet in [
+            tcp_packet(
+                (remote, 443),
+                (host, 50123),
+                TcpFlags::ACK | TcpFlags::PSH,
+                1200,
+                None,
+            ),
+            tcp_packet((host, 50123), (remote, 443), TcpFlags::ACK, 0, None),
+        ] {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+        assert_eq!(sessions.len(), 1);
+        let entry = sessions.iter().next().unwrap();
+        assert_eq!(entry.key().src_ip, IpAddr::V4(host));
+        assert_eq!(entry.key().dst_port, 443);
+        assert!(crate::whitelists::is_egress_session(entry.value()));
+    }
+
+    #[test]
+    fn test_packet_source_serves_rules() {
+        let own: HashSet<IpAddr> = [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]
+            .into_iter()
+            .collect();
+        let s = |src: ([u8; 4], u16), dst: ([u8; 4], u16)| Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::from(src.0)),
+            src_port: src.1,
+            dst_ip: IpAddr::V4(Ipv4Addr::from(dst.0)),
+            dst_port: dst.1,
+        };
+        // System port serves.
+        assert!(packet_source_serves(
+            &s(([1, 1, 1, 1], 443), ([10, 0, 0, 1], 3306)),
+            &own
+        ));
+        assert!(!packet_source_serves(
+            &s(([10, 0, 0, 1], 3306), ([1, 1, 1, 1], 443)),
+            &own
+        ));
+        // Dynamic port is the client's.
+        assert!(!packet_source_serves(
+            &s(([1, 1, 1, 1], 50000), ([2, 2, 2, 2], 3389)),
+            &own
+        ));
+        // The host listens below its OS's ephemeral floor.
+        assert!(packet_source_serves(
+            &s(([10, 0, 0, 1], 3389), ([1, 1, 1, 1], 1433)),
+            &own
+        ));
+        assert!(!packet_source_serves(
+            &s(([1, 1, 1, 1], 1433), ([10, 0, 0, 1], 3389)),
+            &own
+        ));
+        // Equal ports: the packet keeps its direction.
+        assert!(!packet_source_serves(
+            &s(([10, 0, 0, 1], 123), ([1, 1, 1, 1], 123)),
+            &own
+        ));
+        // Neither end is this host: the lower port serves.
+        assert!(packet_source_serves(
+            &s(([1, 1, 1, 1], 1433), ([2, 2, 2, 2], 3389)),
+            &own
+        ));
+    }
+
+    fn client_hello(hostname: &str) -> Vec<u8> {
+        let name = hostname.as_bytes();
+        let mut sni = vec![0x00, 0x00];
+        sni.extend_from_slice(&((name.len() + 5) as u16).to_be_bytes());
+        sni.extend_from_slice(&((name.len() + 3) as u16).to_be_bytes());
+        sni.push(0x00);
+        sni.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        sni.extend_from_slice(name);
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f, 0x01, 0x00]);
+        body.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        body.extend_from_slice(&sni);
+        let mut handshake = vec![
+            0x01,
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
+        handshake.extend_from_slice(&body);
+        let mut record = vec![0x16, 0x03, 0x01];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    /// The ClientHello comes after the handshake, so it reaches the session
+    /// the SYN created: its SNI names the session.
+    #[tokio::test]
+    #[serial]
+    async fn test_sni_after_handshake_names_the_session() {
+        let host = Ipv4Addr::new(10, 1, 0, 4);
+        let fastly = Ipv4Addr::new(185, 199, 110, 133);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+        let hello = client_hello("gist.githubusercontent.com");
+        for packet in [
+            tcp_packet((host, 50124), (fastly, 443), TcpFlags::SYN, 0, None),
+            tcp_packet(
+                (fastly, 443),
+                (host, 50124),
+                TcpFlags::SYN | TcpFlags::ACK,
+                0,
+                None,
+            ),
+            tcp_packet((host, 50124), (fastly, 443), TcpFlags::ACK, 0, None),
+            tcp_packet(
+                (host, 50124),
+                (fastly, 443),
+                TcpFlags::ACK | TcpFlags::PSH,
+                hello.len(),
+                Some(hello.clone()),
+            ),
+        ] {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+        assert_eq!(sessions.len(), 1);
+        let info = sessions.iter().next().unwrap();
+        assert_eq!(
+            info.dst_domain.as_deref(),
+            Some("gist.githubusercontent.com")
+        );
+        assert_eq!(info.dst_domain_type, DomainResolutionType::SNI);
+    }
 
     #[tokio::test]
     #[serial]
