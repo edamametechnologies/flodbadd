@@ -138,6 +138,13 @@ pub fn parse_process_start(data: &[u8], version: u8, ptr: usize) -> Option<Proce
 /// bare file name: the first token (quoted or up to the first space) when it
 /// ends with the image name, so `python.exe` becomes
 /// `C:\hostedtoolcache\...\python.exe` without touching the filesystem.
+///
+/// The token is returned in its Win32 form: a namespace prefix in front of a
+/// drive path (`\??\C:\...`, the way the console subsystem starts
+/// `conhost.exe`, or the long-path `\\?\C:\...`) is dropped. Path predicates
+/// downstream (the OS-shipped mark, canonical system paths) compare the
+/// Win32 form; with the prefix, conhost read as a binary outside the Windows
+/// directory.
 pub fn image_path_from_command_line(image_file_name: &str, command_line: &str) -> Option<String> {
     let cmd = command_line.trim();
     if cmd.is_empty() {
@@ -148,7 +155,7 @@ pub fn image_path_from_command_line(image_file_name: &str, command_line: &str) -
     } else {
         cmd.split(' ').next().unwrap_or("")
     };
-    let first = first.trim();
+    let first = strip_namespace_prefix(first.trim());
     if first.is_empty() || !(first.contains('\\') || first.contains('/')) {
         return None;
     }
@@ -158,6 +165,25 @@ pub fn image_path_from_command_line(image_file_name: &str, command_line: &str) -
     } else {
         None
     }
+}
+
+/// `\??\C:\x`, `\\?\C:\x` and `\\.\C:\x` name the file `C:\x`. Only a
+/// prefix followed by a drive path is dropped; `\\?\UNC\...` and device
+/// paths stay as they are.
+fn strip_namespace_prefix(path: &str) -> &str {
+    for prefix in ["\\??\\", "\\\\?\\", "\\\\.\\"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let b = rest.as_bytes();
+            if b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'\\' | b'/')
+            {
+                return rest;
+            }
+        }
+    }
+    path
 }
 
 #[cfg(test)]
@@ -252,6 +278,31 @@ mod tests {
         assert_eq!(
             image_path_from_command_line("python.exe", "\"C:\\x\\other.exe\" a"),
             None
+        );
+    }
+
+    #[test]
+    fn namespace_prefixed_executable_tokens_read_as_win32_paths() {
+        // How the console subsystem starts conhost.exe.
+        assert_eq!(
+            image_path_from_command_line(
+                "conhost.exe",
+                r"\??\C:\Windows\system32\conhost.exe 0xffffffff -ForceV1"
+            ),
+            Some(r"C:\Windows\system32\conhost.exe".to_string())
+        );
+        assert_eq!(
+            image_path_from_command_line("app.exe", r#""\\?\D:\Tools\app.exe" --flag"#),
+            Some(r"D:\Tools\app.exe".to_string())
+        );
+        assert_eq!(
+            image_path_from_command_line("app.exe", r"\\.\C:\Tools\app.exe"),
+            Some(r"C:\Tools\app.exe".to_string())
+        );
+        // No drive path after the prefix: kept as it is.
+        assert_eq!(
+            image_path_from_command_line("app.exe", r"\\?\UNC\server\share\app.exe"),
+            Some(r"\\?\UNC\server\share\app.exe".to_string())
         );
     }
 }
