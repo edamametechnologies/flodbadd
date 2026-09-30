@@ -1117,13 +1117,28 @@ mod linux {
                 live, CONNECTIONS,
                 "established connections are in the live map"
             );
-            let own_pid = std::process::id();
+            // The kprobes record the tgid in the kernel's initial PID
+            // namespace. In a container (the CI container jobs) this process
+            // has another pid there: the exact pid is checked only in the
+            // initial namespace, and everywhere every connection must name
+            // one and the same process.
+            let own_pid = in_initial_pid_namespace().then(std::process::id);
+            let mut attributed = std::collections::BTreeSet::new();
             for session in &sessions {
                 let l7 = inner
                     .lookup_session(session)
                     .expect("live connection resolves");
-                assert_eq!(l7.pid, own_pid, "attributed to the connecting process");
+                match own_pid {
+                    Some(own) => assert_eq!(l7.pid, own, "attributed to the connecting process"),
+                    None => assert_ne!(l7.pid, 0, "attributed to a process"),
+                }
+                attributed.insert(l7.pid);
             }
+            assert_eq!(
+                attributed.len(),
+                1,
+                "every connection attributed to the connecting process: {attributed:?}"
+            );
 
             // Close them: the acceptor closes its side, then ours go through
             // FIN / TIME_WAIT, which is where the kernel sets TCP_CLOSE.
@@ -1143,8 +1158,19 @@ mod linux {
                 let l7 = inner
                     .lookup_session(session)
                     .expect("closed connection still resolves");
-                assert_eq!(l7.pid, own_pid);
+                assert!(
+                    attributed.contains(&l7.pid),
+                    "closed connection keeps its process"
+                );
             }
+        }
+
+        /// Whether this process runs in the kernel's initial PID namespace,
+        /// whose inode is fixed (PROC_PID_INIT_INO).
+        fn in_initial_pid_namespace() -> bool {
+            std::fs::read_link("/proc/self/ns/pid")
+                .map(|link| link.to_string_lossy() == "pid:[4026531836]")
+                .unwrap_or(false)
         }
     }
 }
