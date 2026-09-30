@@ -405,6 +405,7 @@ mod tests {
             .arg(format!("echo hello > {}; sleep 2", file.display()))
             .spawn()
             .unwrap();
+        let child_pid = child.id();
         let mut found = None;
         for _ in 0..50 {
             if let Some(att) = get_file_attribution(&file.to_string_lossy()) {
@@ -416,8 +417,10 @@ mod tests {
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&base);
         let (pid, name, path) = found.expect("write under the root added on restart attributed");
-        assert!(pid > 0);
-        assert!(name.contains("sh") || path.contains("sh"), "{name} {path}");
+        // The writer is the shell spawned above. Its name is no portable
+        // check: `sh` is BusyBox on Alpine, and a shell can exec its last
+        // command in place.
+        assert_eq!(pid, child_pid, "attributed to {name} {path}");
     }
 
     /// End-to-end on a real kernel; needs CAP_SYS_ADMIN, so it is ignored by
@@ -441,6 +444,7 @@ mod tests {
             .arg(format!("echo hello > {}; sleep 2", file.display()))
             .spawn()
             .unwrap();
+        let child_pid = child.id();
         let mut found = None;
         for _ in 0..50 {
             if let Some(att) = get_file_attribution(&file.to_string_lossy()) {
@@ -451,8 +455,9 @@ mod tests {
         }
         let _ = child.wait();
         let (pid, name, path) = found.expect("writer attributed");
-        assert!(pid > 0);
-        assert!(name.contains("sh") || path.contains("sh"), "{name} {path}");
+        // The shell spawned above, whatever its image is called (BusyBox on
+        // Alpine).
+        assert_eq!(pid, child_pid, "attributed to {name} {path}");
         assert!(events_total() >= 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
