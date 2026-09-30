@@ -42,23 +42,17 @@ const PROCESS_CREATE_THREAD: u32 = 0x0002;
 const PROCESS_VM_OPERATION: u32 = 0x0008;
 const PROCESS_VM_READ: u32 = 0x0010;
 const PROCESS_VM_WRITE: u32 = 0x0020;
-const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
 /// `PROCESS_ALL_ACCESS` as the pre-Vista SDK spells it:
 /// `STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFF`. .NET Framework still
 /// asks for exactly this (`NativeMethods.PROCESS_ALL_ACCESS`); the Vista+
 /// value `0x1FFFFF` (0xFFFF specific rights) is a superset of it.
 const PROCESS_ALL_ACCESS_LEGACY: u32 = 0x001F_0FFF;
-const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
-const GENERIC_ALL: u32 = 0x1000_0000;
-const GENERIC_WRITE: u32 = 0x4000_0000;
-const GENERIC_READ: u32 = 0x8000_0000;
 const DEBUGGER_GRADE_RIGHTS: u32 = PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD;
 
 /// Map an `OpenProcess` desired-access mask onto the PTRACE_MODE vocabulary
 /// (`1` READ, `2` ATTACH). `None` is a query-only open, never forwarded.
 ///
-/// Graded by the rights the mask actually carries, whatever the caller's SDK
-/// or framework calls them:
+/// Graded by the specific rights the mask carries:
 ///
 /// - A blanket ask -- every right of the process object at once -- is READ,
 ///   not ATTACH. It is what managed frameworks request for any operation
@@ -68,16 +62,18 @@ const DEBUGGER_GRADE_RIGHTS: u32 = PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PRO
 ///   runner worker on the `edamame_cli` / `edamame_helper` Windows gates). It
 ///   still carries VM_READ, so a named sensitive victim stays CRITICAL and
 ///   only the detector's enumeration breadth rule (>= 3 distinct read
-///   targets) relieves it. Its spellings: the Vista+ `0x1FFFFF`, the legacy
-///   `0x1F0FFF` that .NET Framework (Chocolatey) still sends -- until
+///   targets) relieves it. Its spellings: the Vista+ `0x1FFFFF` and the
+///   legacy `0x1F0FFF` that .NET Framework (Chocolatey) still sends -- until
 ///   2026-09-29 only the exact Vista value counted, so the legacy one graded
-///   ATTACH and the read relief could never apply --, `GENERIC_ALL`, and
-///   `MAXIMUM_ALLOWED`.
-/// - Generic rights are expanded through the process object's generic
-///   mapping first: `GENERIC_READ` carries VM_READ, `GENERIC_WRITE` carries
-///   VM_WRITE / VM_OPERATION / CREATE_THREAD. Before, a mask spelled only in
-///   generic or special bits graded as query-only and never reached the
-///   detector, whatever it could do to the target.
+///   ATTACH and the read relief could never apply.
+/// - A mask spelled only in generic rights or `MAXIMUM_ALLOWED` is not
+///   forwarded. Expanding them (GENERIC_ALL / MAXIMUM_ALLOWED as the blanket
+///   ask, GENERIC_READ / GENERIC_WRITE through the generic mapping) was tried
+///   on 2026-09-29 and raised CRITICAL findings from benign helpers on an idle
+///   Windows runner: conhost opening its console clients with
+///   MAXIMUM_ALLOWED, Firefox's crashhelper opening firefox with GENERIC_ALL.
+///   Forwarding them waits for a relief for a helper opening the program
+///   that started it from the same install.
 /// - The SPECIFIC rights a scrape or an injection needs -- VM_WRITE,
 ///   VM_OPERATION, CREATE_THREAD asked for on their own -- stay ATTACH.
 /// - Read and query rights alone (VM_READ with or without
@@ -97,22 +93,13 @@ const DEBUGGER_GRADE_RIGHTS: u32 = PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PRO
 /// Pure and platform-neutral so the mapping is unit-tested on every host, not
 /// only on a Windows build with the `etw` feature.
 pub fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
-    let blanket = desired_access & PROCESS_ALL_ACCESS_LEGACY == PROCESS_ALL_ACCESS_LEGACY
-        || desired_access & (GENERIC_ALL | MAXIMUM_ALLOWED) != 0;
-    if blanket {
+    if desired_access & PROCESS_ALL_ACCESS_LEGACY == PROCESS_ALL_ACCESS_LEGACY {
         return Some(TASK_ACCESS_READ);
     }
-    let mut rights = desired_access;
-    if desired_access & GENERIC_READ != 0 {
-        rights |= PROCESS_VM_READ | PROCESS_QUERY_INFORMATION;
-    }
-    if desired_access & GENERIC_WRITE != 0 {
-        rights |= DEBUGGER_GRADE_RIGHTS;
-    }
-    if rights & DEBUGGER_GRADE_RIGHTS != 0 {
+    if desired_access & DEBUGGER_GRADE_RIGHTS != 0 {
         return Some(TASK_ACCESS_ATTACH);
     }
-    if rights & PROCESS_VM_READ != 0 {
+    if desired_access & PROCESS_VM_READ != 0 {
         return Some(TASK_ACCESS_READ);
     }
     None
@@ -2088,12 +2075,14 @@ mod tests {
         assert_eq!(grade(ALL_ACCESS_VISTA), READ);
         assert_eq!(grade(ALL_ACCESS_LEGACY), READ);
         assert_eq!(grade(ALL_ACCESS_LEGACY | QUERY_LIMITED_INFORMATION), READ);
-        // The generic and special spellings of the same ask.
+        // The generic and special spellings of the same ask are not
+        // forwarded (conhost and Firefox's crashhelper send them; see the
+        // grader's doc).
         const GENERIC_ALL: u32 = 0x1000_0000;
         const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
-        assert_eq!(grade(GENERIC_ALL), READ);
-        assert_eq!(grade(MAXIMUM_ALLOWED), READ);
-        assert_eq!(grade(MAXIMUM_ALLOWED | SYNCHRONIZE), READ);
+        assert_eq!(grade(GENERIC_ALL), None);
+        assert_eq!(grade(MAXIMUM_ALLOWED), None);
+        assert_eq!(grade(MAXIMUM_ALLOWED | SYNCHRONIZE), None);
         // One right short of the blanket ask is a chosen set, and a chosen
         // set carrying VM_WRITE is an attach.
         assert_eq!(grade(ALL_ACCESS_LEGACY & !TERMINATE), ATTACH);
@@ -2110,8 +2099,8 @@ mod tests {
         assert_eq!(grade(VM_READ | QUERY_INFORMATION | SYNCHRONIZE), READ);
         // Handle duplication with VM_READ is still a read.
         assert_eq!(grade(VM_READ | DUP_HANDLE), READ);
-        // `GENERIC_READ` maps onto VM_READ | QUERY_INFORMATION.
-        assert_eq!(grade(0x8000_0000), READ);
+        // `GENERIC_READ` alone is not expanded.
+        assert_eq!(grade(0x8000_0000), None);
         // Query-only opens (every process lister, Task Manager, sysinfo) and
         // handle duplication alone are never forwarded.
         assert_eq!(grade(QUERY_INFORMATION), None);
@@ -2139,8 +2128,8 @@ mod tests {
             grade(CREATE_THREAD | QUERY_INFORMATION | VM_OPERATION | VM_WRITE | VM_READ),
             ATTACH
         );
-        // `GENERIC_WRITE` maps onto VM_WRITE / VM_OPERATION / CREATE_THREAD.
-        assert_eq!(grade(0x4000_0000), ATTACH);
+        // `GENERIC_WRITE` alone is not expanded.
+        assert_eq!(grade(0x4000_0000), None);
     }
 
     #[test]
