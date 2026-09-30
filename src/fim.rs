@@ -1800,48 +1800,16 @@ pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
     crate::sensitive_paths::default_sensitive_watch_paths_for_home(home)
 }
 
-/// Directories that must never become a recursive FIM watch root. Watching
-/// one of these means walking (and `inotify_add_watch`-ing) the whole
-/// filesystem tree beneath it: on Linux that walk goes through `/proc` and
-/// `/sys`, never finishes, and its bookkeeping grows the daemon by hundreds
-/// of kilobytes per second (seen 2026-09-03 on the Azure runners: the
-/// runner-protection daemon reached 17-24 GB RSS in 6-8 h and OOM-killed
-/// the GitHub runner service).
-#[cfg(not(target_os = "windows"))]
-const FORBIDDEN_WORKSPACE_ROOTS: &[&str] = &[
-    "/",
-    "/bin",
-    "/boot",
-    "/dev",
-    "/etc",
-    "/home",
-    "/lib",
-    "/lib64",
-    "/opt",
-    "/proc",
-    "/root",
-    "/run",
-    "/sbin",
-    "/srv",
-    "/sys",
-    "/usr",
-    "/var",
-    "/Applications",
-    "/Library",
-    "/System",
-    "/Users",
-    "/Volumes",
-    "/private",
-];
-#[cfg(target_os = "windows")]
-const FORBIDDEN_WORKSPACE_ROOTS: &[&str] = &[
-    "C:\\",
-    "C:\\Windows",
-    "C:\\Program Files",
-    "C:\\Program Files (x86)",
-    "C:\\Users",
-];
-
+/// Whether `path` must never become a recursive FIM watch root: the
+/// filesystem root, or one of the catalog's forbidden watch roots
+/// (`sensitive-paths-db.json::fim_forbidden_watch_roots`, see
+/// [`crate::sensitive_paths::fim_forbidden_watch_roots`]). Watching one of
+/// these means walking (and `inotify_add_watch`-ing) the whole filesystem
+/// tree beneath it: on Linux that walk goes through `/proc` and `/sys`,
+/// never finishes, and its bookkeeping grows the daemon by hundreds of
+/// kilobytes per second (seen 2026-09-03 on the Azure runners: the
+/// runner-protection daemon reached 17-24 GB RSS in 6-8 h and OOM-killed the
+/// GitHub runner service).
 fn is_forbidden_root_path(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
@@ -1850,31 +1818,33 @@ fn is_forbidden_root_path(path: &Path) -> bool {
         return true;
     }
     let lower = trimmed.to_ascii_lowercase();
-    FORBIDDEN_WORKSPACE_ROOTS.iter().any(|root| {
-        let r = root
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_ascii_lowercase();
-        // The `/` entry trims to an empty string and is covered above; it
-        // must not match every path.
-        !r.is_empty() && lower == r
-    })
+    crate::sensitive_paths::fim_forbidden_watch_roots()
+        .iter()
+        .any(|root| {
+            let r = root
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase();
+            // The `/` entry trims to an empty string and is covered above; it
+            // must not match every path.
+            !r.is_empty() && lower == r
+        })
 }
 
 /// True for paths that [`FimWatcher::start`] must never watch recursively,
 /// whatever caller asked for them: a filesystem root or a top-level system
-/// tree (see [`FORBIDDEN_WORKSPACE_ROOTS`]). `/tmp` and `/var/tmp` are not
-/// in that list and stay watchable.
+/// tree (see [`is_forbidden_root_path`]). `/tmp` and `/var/tmp` are not in
+/// the catalog's list and stay watchable.
 fn is_forbidden_recursive_root(path: &Path) -> bool {
     is_forbidden_root_path(path)
 }
 
 /// A CI workspace root is acceptable only when it is an existing directory
-/// that is neither a filesystem root nor one of the top-level system trees
-/// in [`FORBIDDEN_WORKSPACE_ROOTS`], and sits at least two components below
-/// the root. The systemd-started runner-protection daemon has no
-/// `GITHUB_WORKSPACE` and a cwd of `/`, which is exactly the case this must
-/// reject.
+/// that is neither a filesystem root nor one of the catalog's top-level
+/// system trees ([`is_forbidden_root_path`]), and sits at least two
+/// components below the root. The systemd-started runner-protection daemon
+/// has no `GITHUB_WORKSPACE` and a cwd of `/`, which is exactly the case this
+/// must reject.
 pub fn is_acceptable_workspace_root(path: &Path) -> bool {
     if !path.is_dir() || is_forbidden_recursive_root(path) {
         return false;

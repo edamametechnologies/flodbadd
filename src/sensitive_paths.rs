@@ -23,6 +23,20 @@ pub struct WatchRootsJSON {
     pub windows_home_relative: Vec<String>,
 }
 
+/// Directories the FIM watcher must never watch recursively, whatever asked
+/// for them: a filesystem root or a top-level system tree. Watching one
+/// means walking (and watching) the whole tree beneath it -- on Linux
+/// through `/proc` and `/sys`, which never finishes and grows the daemon
+/// without bound. `unix` applies on macOS, Linux and the mobile targets,
+/// `windows` on Windows; compared case-insensitively with `\` folded to `/`
+/// and trailing separators ignored. The filesystem root itself is always
+/// refused, listed or not.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FimForbiddenWatchRootsJSON {
+    pub unix: Vec<String>,
+    pub windows: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SensitivePathsJSON {
     pub date: String,
@@ -32,6 +46,7 @@ pub struct SensitivePathsJSON {
     pub labels: HashMap<String, Vec<String>>,
     pub watch_roots: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
+    pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
 }
 
 #[derive(Clone)]
@@ -43,6 +58,7 @@ pub struct SensitivePathsDB {
     pub labels: HashMap<String, Vec<String>>,
     pub watch_roots: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
+    pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
 }
 
 impl CloudSignature for SensitivePathsDB {
@@ -91,6 +107,7 @@ impl SensitivePathsDB {
             labels: json.labels.clone(),
             watch_roots: json.watch_roots.clone(),
             fim_excluded_path_patterns: json.fim_excluded_path_patterns.clone(),
+            fim_forbidden_watch_roots: json.fim_forbidden_watch_roots.clone(),
         }
     }
 
@@ -198,6 +215,12 @@ fn build_fallback_watch_roots() -> WatchRootsJSON {
         .unwrap_or_default()
 }
 
+fn build_fallback_fim_forbidden_watch_roots() -> FimForbiddenWatchRootsJSON {
+    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        .map(|json| json.fim_forbidden_watch_roots)
+        .unwrap_or_default()
+}
+
 fn build_fallback_fim_excluded_patterns() -> Vec<String> {
     serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
         .map(|json| {
@@ -216,6 +239,8 @@ lazy_static! {
         ArcSwap::from_pointee(build_fallback_watch_roots());
     static ref FIM_EXCLUDED_PATTERNS_SNAPSHOT: ArcSwap<Vec<String>> =
         ArcSwap::from_pointee(build_fallback_fim_excluded_patterns());
+    static ref FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT: ArcSwap<FimForbiddenWatchRootsJSON> =
+        ArcSwap::from_pointee(build_fallback_fim_forbidden_watch_roots());
 }
 
 pub async fn refresh_labels_snapshot() {
@@ -228,6 +253,7 @@ pub async fn refresh_labels_snapshot() {
         .map(|p| p.to_lowercase())
         .collect();
     FIM_EXCLUDED_PATTERNS_SNAPSHOT.store(Arc::new(exclusions));
+    FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT.store(Arc::new(db.fim_forbidden_watch_roots.clone()));
 }
 
 /// Synchronous label classifier backed by the cloud model snapshot.
@@ -355,6 +381,18 @@ pub fn is_fim_excluded_path(path: &str) -> bool {
 /// lowercased) for diagnostics / tests.
 pub fn fim_excluded_path_patterns() -> Vec<String> {
     FIM_EXCLUDED_PATTERNS_SNAPSHOT.load().as_ref().clone()
+}
+
+/// The FIM forbidden watch roots of the current platform
+/// (`sensitive-paths-db.json::fim_forbidden_watch_roots`): `windows` on
+/// Windows, `unix` everywhere else.
+pub fn fim_forbidden_watch_roots() -> Vec<String> {
+    let snap = FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT.load();
+    if cfg!(target_os = "windows") {
+        snap.windows.clone()
+    } else {
+        snap.unix.clone()
+    }
 }
 
 #[cfg(test)]
