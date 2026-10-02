@@ -277,6 +277,18 @@ impl FimWatcher {
                             }
                         }
                     }
+                    // A deleted directory's marks went with its inodes: free
+                    // them, so the cap counts live marks and a directory
+                    // re-created at the same path is marked again.
+                    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+                    if matches!(
+                        event.kind,
+                        EventKind::Remove(notify::event::RemoveKind::Folder)
+                    ) {
+                        for p in &event.paths {
+                            crate::fim_fanotify::forget_directory(p);
+                        }
+                    }
                     if let Some(fim_events) =
                         translate_notify_event(&event, hash_threshold, explicit_clone.as_ref())
                     {

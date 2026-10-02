@@ -33,10 +33,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+use undeadlock::CustomDashMap;
 
 /// Upper bound on directory marks (the kernel default `max_user_marks` is
 /// 8192 per user; leave room for other consumers).
 const MAX_DIRECTORY_MARKS: usize = 4096;
+/// Marks the start-time walk leaves for directories created after start.
+/// The walk is breadth-first over whatever already exists under a broad root
+/// (a CI runner's whole home holds thousands of directories) and used to
+/// spend the whole cap, so a directory created afterwards -- a credential or
+/// agent-config directory, a new project -- was never marked and its writes
+/// reached FIM without a writer. 512 leaves seven eighths of the cap to the
+/// walk and is far more than the shallow directories a session creates.
+const RUNTIME_MARK_RESERVE: usize = 512;
+/// How deep below a watch root a directory created after start may still
+/// take a reserved mark: the root itself (0), a new directory in it (1) and
+/// one level more (`~/.cursor/rules`, `<project>/.claude`). Deeper new
+/// directories (build trees) only get what the walk left.
+const RESERVE_MAX_DEPTH: usize = 2;
 /// How long a path -> writer entry stays valid. FIM events are translated
 /// within milliseconds of the write; a minute covers hash-worker latency.
 const ATTRIBUTION_TTL: Duration = Duration::from_secs(60);
@@ -53,7 +67,10 @@ struct WriterAttribution {
 struct FanotifyTable {
     entries: DashMap<String, WriterAttribution>,
     fan: Fanotify,
-    marked: DashMap<String, ()>,
+    marked: CustomDashMap<String, ()>,
+    /// Every watch root `init` was given, existing yet or not: what
+    /// [`remark_directory`] measures a new directory's depth against.
+    roots: CustomDashMap<String, ()>,
     events_total: std::sync::atomic::AtomicU64,
 }
 
@@ -92,7 +109,8 @@ pub fn init(roots: &[PathBuf]) {
         let table = Arc::new(FanotifyTable {
             entries: DashMap::new(),
             fan,
-            marked: DashMap::new(),
+            marked: CustomDashMap::new("fim_fanotify_marked"),
+            roots: CustomDashMap::new("fim_fanotify_roots"),
             events_total: std::sync::atomic::AtomicU64::new(0),
         });
         let reader = Arc::clone(&table);
@@ -108,6 +126,9 @@ pub fn init(roots: &[PathBuf]) {
     let Ok(table) = table else {
         return;
     };
+    for root in roots {
+        table.roots.insert(root_key(root), ());
+    }
     if !created {
         extend(table, roots);
         return;
@@ -125,16 +146,19 @@ pub fn init(roots: &[PathBuf]) {
 }
 
 /// Mark `roots` and their subtrees breadth-first, root by root, until the
-/// mark cap. Returns the number of marks added.
+/// walk's share of the cap ([`walk_budget`]). Returns the number of marks
+/// added.
 fn mark_roots(table: &FanotifyTable, roots: &[PathBuf]) -> usize {
     let mut added = 0usize;
     for root in roots {
-        let budget = MAX_DIRECTORY_MARKS.saturating_sub(table.marked.len());
+        let budget = walk_budget().saturating_sub(table.marked.len());
         if budget == 0 {
             warn!(
-                "FIM fanotify: directory mark cap ({}) reached; {} and deeper directories are attributed by lsof only",
+                "FIM fanotify: directory walk budget ({} of {} marks) reached; {} and deeper directories are attributed by lsof only ({} marks stay reserved for directories created later)",
+                walk_budget(),
                 MAX_DIRECTORY_MARKS,
-                root.display()
+                root.display(),
+                RUNTIME_MARK_RESERVE
             );
             break;
         }
@@ -166,23 +190,84 @@ fn extend(table: &FanotifyTable, roots: &[PathBuf]) {
 /// The roots whose own directory carries no mark yet. A root nested in an
 /// already-marked tree was marked with that tree, or fell past the cap,
 /// in which case there is no budget left for it either way.
-fn roots_to_mark<'a>(marked: &DashMap<String, ()>, roots: &'a [PathBuf]) -> Vec<&'a PathBuf> {
+fn roots_to_mark<'a>(marked: &CustomDashMap<String, ()>, roots: &'a [PathBuf]) -> Vec<&'a PathBuf> {
     roots
         .iter()
         .filter(|root| !marked.contains_key(&root.to_string_lossy().to_string()))
         .collect()
 }
 
-/// Mark one directory (e.g. a directory the notify watcher just saw being
-/// created under a watch root). No-op before `init`, past the cap, or when
+/// Mark one directory the notify watcher just saw being created under a
+/// watch root. Within the walk's share of the cap any directory is marked;
+/// beyond it only a root or a directory at most [`RESERVE_MAX_DEPTH`] below
+/// one takes a reserved mark. No-op before `init`, past the cap, or when
 /// already marked.
 pub fn remark_directory(dir: &Path) {
     if let Some(table) = TABLE.get() {
-        if table.marked.len() >= MAX_DIRECTORY_MARKS {
+        let roots: Vec<String> = table.roots.iter().map(|root| root.key().clone()).collect();
+        let depth = depth_below_roots(&dir.to_string_lossy(), &roots);
+        if !may_mark_new_directory(table.marked.len(), depth) {
             return;
         }
         mark_one(table, dir);
     }
+}
+
+/// Forget the marks of a deleted directory and of everything under it. The
+/// kernel drops a mark with its inode; the key left behind kept counting
+/// against the cap and stopped a directory re-created at the same path from
+/// being marked again. No-op before `init`.
+pub fn forget_directory(dir: &Path) {
+    if let Some(table) = TABLE.get() {
+        let key = root_key(dir);
+        let prefix = format!("{key}/");
+        table
+            .marked
+            .retain(|marked, _| marked != &key && !marked.starts_with(&prefix));
+    }
+}
+
+/// The walk's share of the cap: what is left is reserved for directories
+/// created after start ([`RUNTIME_MARK_RESERVE`]).
+fn walk_budget() -> usize {
+    MAX_DIRECTORY_MARKS - RUNTIME_MARK_RESERVE
+}
+
+/// A path as the tables key it: as given, without a trailing separator.
+fn root_key(path: &Path) -> String {
+    let key = path.to_string_lossy();
+    let trimmed = key.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Depth of `dir` below the nearest watch root containing it (0: the root
+/// itself), `None` outside every root.
+fn depth_below_roots(dir: &str, roots: &[String]) -> Option<usize> {
+    let dir = dir.trim_end_matches('/');
+    roots
+        .iter()
+        .filter_map(|root| {
+            let root = root.trim_end_matches('/');
+            if dir == root || (root.is_empty() && dir.is_empty()) {
+                return Some(0);
+            }
+            let rest = dir.strip_prefix(root)?.strip_prefix('/')?;
+            Some(rest.split('/').filter(|part| !part.is_empty()).count())
+        })
+        .min()
+}
+
+/// Whether a directory created after start may take a mark now, `marked`
+/// marks being held.
+fn may_mark_new_directory(marked: usize, depth: Option<usize>) -> bool {
+    if marked < walk_budget() {
+        return true;
+    }
+    marked < MAX_DIRECTORY_MARKS && depth.is_some_and(|depth| depth <= RESERVE_MAX_DEPTH)
 }
 
 /// Kernel-attributed writer of `path`, if a write to it was seen within
@@ -368,7 +453,7 @@ mod tests {
 
     #[test]
     fn roots_to_mark_skips_the_roots_the_table_already_covers() {
-        let marked: DashMap<String, ()> = DashMap::new();
+        let marked: CustomDashMap<String, ()> = CustomDashMap::new("test_marked");
         marked.insert("/tmp/first".to_string(), ());
         let roots = vec![
             PathBuf::from("/tmp/first"),
@@ -382,6 +467,130 @@ mod tests {
         assert_eq!(new, vec!["/tmp/second".to_string()]);
         assert!(roots_to_mark(&marked, &[PathBuf::from("/tmp/first")]).is_empty());
         assert!(roots_to_mark(&marked, &[]).is_empty());
+    }
+
+    #[test]
+    fn depth_is_measured_from_the_nearest_root() {
+        let roots = vec![
+            "/home/runner".to_string(),
+            "/home/runner/.cursor/rules".to_string(),
+            "/tmp".to_string(),
+        ];
+        assert_eq!(depth_below_roots("/home/runner", &roots), Some(0));
+        assert_eq!(depth_below_roots("/home/runner/.aws", &roots), Some(1));
+        assert_eq!(
+            depth_below_roots("/home/runner/.cursor/rules/sub", &roots),
+            Some(1)
+        );
+        assert_eq!(
+            depth_below_roots("/home/runner/demo/.claude", &roots),
+            Some(2)
+        );
+        assert_eq!(
+            depth_below_roots("/home/runner/work/app/target/debug/build", &roots),
+            Some(5)
+        );
+        assert_eq!(depth_below_roots("/tmp/x/", &roots), Some(1));
+        // A name sharing the root's prefix is not under it.
+        assert_eq!(depth_below_roots("/home/runnerx/a", &roots), None);
+        assert_eq!(depth_below_roots("/var/log", &roots), None);
+        assert_eq!(depth_below_roots("/etc", &["/".to_string()]), Some(1));
+    }
+
+    #[test]
+    fn the_reserve_goes_to_shallow_new_directories_only() {
+        // Within the walk's share, any new directory.
+        assert!(may_mark_new_directory(0, None));
+        assert!(may_mark_new_directory(walk_budget() - 1, Some(7)));
+        // Beyond it, a root or a shallow directory below one, up to the cap.
+        assert!(may_mark_new_directory(walk_budget(), Some(0)));
+        assert!(may_mark_new_directory(walk_budget(), Some(1)));
+        assert!(may_mark_new_directory(
+            MAX_DIRECTORY_MARKS - 1,
+            Some(RESERVE_MAX_DEPTH)
+        ));
+        assert!(!may_mark_new_directory(
+            walk_budget(),
+            Some(RESERVE_MAX_DEPTH + 1)
+        ));
+        assert!(!may_mark_new_directory(walk_budget(), None));
+        assert!(!may_mark_new_directory(MAX_DIRECTORY_MARKS, Some(0)));
+    }
+
+    /// Wait for a kernel-attributed writer of `file` (100 ms polls, 5 s).
+    fn attributed_writer(file: &Path) -> Option<(u32, String, String)> {
+        for _ in 0..50 {
+            if let Some(att) = get_file_attribution(&file.to_string_lossy()) {
+                return Some(att);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
+
+    /// Root, and the table is process-wide, so this runs ALONE: it spends
+    /// the walk budget on purpose (`cargo test --features fim,ebpf --lib --
+    /// --ignored --exact fim_fanotify::tests::a_directory_created_after_the_walk_budget_is_still_attributed`).
+    /// A root whose walk fills the budget, then a directory created under it
+    /// afterwards: its writes are still attributed (the reserve), a deep new
+    /// directory does not take the reserve, and a directory deleted and
+    /// created again is marked again.
+    #[test]
+    #[ignore]
+    fn a_directory_created_after_the_walk_budget_is_still_attributed() {
+        let base =
+            std::env::temp_dir().join(format!("flodbadd-fanotify-budget-{}", std::process::id()));
+        let bulk = base.join("bulk");
+        for i in 0..(walk_budget() + 16) {
+            std::fs::create_dir_all(bulk.join(format!("d{i:05}"))).unwrap();
+        }
+        init(std::slice::from_ref(&base));
+        assert!(is_active(), "fanotify init failed (are we root?)");
+        let table = TABLE.get().unwrap();
+        assert_eq!(
+            table.marked.len(),
+            walk_budget(),
+            "the walk stops at its share"
+        );
+
+        // A credential directory created afterwards, one level below the root.
+        let aws = base.join(".aws");
+        std::fs::create_dir_all(&aws).unwrap();
+        remark_directory(&aws);
+        let creds = aws.join("credentials");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("echo key > {}; sleep 2", creds.display()))
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let found = attributed_writer(&creds);
+        let _ = child.wait();
+        let (pid, name, path) =
+            found.expect("write in a directory created after the walk attributed");
+        assert_eq!(pid, child_pid, "attributed to {name} {path}");
+
+        // A deep new directory (a build tree) does not take the reserve.
+        let deep = bulk.join("d00000").join("target").join("debug");
+        std::fs::create_dir_all(&deep).unwrap();
+        remark_directory(&deep);
+        assert!(!table
+            .marked
+            .contains_key(&deep.to_string_lossy().to_string()));
+
+        // Deleted and created again: marked again.
+        std::fs::remove_dir_all(&aws).unwrap();
+        forget_directory(&aws);
+        assert!(!table
+            .marked
+            .contains_key(&aws.to_string_lossy().to_string()));
+        std::fs::create_dir_all(&aws).unwrap();
+        remark_directory(&aws);
+        assert!(table
+            .marked
+            .contains_key(&aws.to_string_lossy().to_string()));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Same privilege as the end-to-end test below. A second `init` -- the
