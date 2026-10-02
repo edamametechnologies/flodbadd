@@ -53,6 +53,10 @@ pub mod ip;
 ))]
 pub mod l7;
 pub mod l7_ebpf;
+/// Endpoint-consistency rule shared by the socket-table, cache and libproc
+/// attribution fallbacks. Always compiled: `l7_macos` uses it without
+/// `packetcapture`.
+pub mod l7_endpoints;
 pub mod l7_es;
 pub mod l7_etw;
 #[cfg(target_os = "macos")]

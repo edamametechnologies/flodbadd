@@ -16,8 +16,14 @@
 //    - `l7_map`: The primary cache storing `L7Resolution` results or pending states for sessions.
 //    - `port_process_cache`: Caches process info (`ProcessCacheEntry`) keyed by local (port, protocol),
 //      now including process start time for PID reuse protection. Used as a fallback, especially for short-lived connections. Includes a grace period for terminated processes.
-//    - `host_service_cache`: Caches known local services (port, protocol, L7 info) keyed by hostname ("localhost").
+//      An entry records the conversation it was learned from (local address, remote end) and answers only that conversation.
+//    - `host_service_cache`: Caches known local services (local endpoint, peer when connected, protocol, L7 info) keyed by hostname ("localhost").
 //      Used as a fallback for inbound connections to the local machine.
+//
+// Every fallback (socket rows without a full 4-tuple, both caches, the macOS libproc UDP scan) attributes a
+// session only from evidence consistent with BOTH of its ends (`l7_endpoints::evidence_end`): the evidence's
+// local address and port are one end of the session, a wildcard address standing only for an address this
+// host owns, and its peer, when known, is the other end. A port number alone is not evidence.
 // - `Cache Cleanup Task`: Periodically removes stale entries from caches (`start_cache_cleanup_task`).
 //
 // Resolution Logic:
@@ -27,9 +33,10 @@
 // 3. For each connection in the queue, it attempts resolution in the following order:
 //    a. **Host Cache (`try_resolve_from_host_cache`)**: Checks if the destination matches a known local service.
 //    b. **Exact Match (`try_exact_match`)**: Looks for a socket entry matching the connection's full 4-tuple (TCP)
-//       or local IP/port (UDP) in the fetched socket list.
-//    c. **Port Cache (`try_resolve_from_cache`)**: If exact match fails, checks the port cache using the connection's
-//       local port (src or dst if private IP), using process start time for PID reuse protection. Uses a grace period if the cached process has terminated.
+//       or bound to the connection's local IP/port (UDP: netstat2 reports no UDP peer) in the fetched socket list.
+//       Then a TCP listener that owns one end of the connection (`try_fuzzy_match`).
+//    c. **Port Cache (`try_resolve_from_cache`)**: If exact match fails, checks the port cache for an entry learned
+//       from the same conversation, using process start time for PID reuse protection. Uses a grace period if the cached process has terminated.
 //    d. **Immediate Retry**: If all above fail, the resolver immediately refreshes process/socket tables and retries once before incrementing retry count or re-queueing.
 // 4. If a match is found and process info is extracted (`extract_l7_from_socket`), the result is stored in `l7_map`.
 // 5. If resolution fails, the connection is re-queued with an incremented retry count and exponential backoff.
@@ -59,6 +66,9 @@
 //   re-probed on every populate pass.
 
 use crate::l7_ebpf;
+use crate::l7_endpoints::{
+    evidence_end, evidence_fits_end, HostAddresses, SessionEnd, SocketEndpoints,
+};
 use crate::l7_es;
 use crate::l7_etw;
 #[cfg(target_os = "macos")]
@@ -68,7 +78,7 @@ use crate::task::TaskHandle;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use netstat2::{
-    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, SocketInfo,
+    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, SocketInfo, TcpState,
 };
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -191,6 +201,9 @@ pub struct L7Resolution {
     pub requeue_rounds: usize,
 }
 
+/// A resolution remembered under its local (port, protocol). It is one
+/// conversation's evidence: it answers only a session between the same
+/// local endpoint (`local_ip` and the key's port) and the same `remote`.
 #[derive(Debug, Clone)]
 pub struct ProcessCacheEntry {
     pub l7: SessionL7,
@@ -198,6 +211,18 @@ pub struct ProcessCacheEntry {
     pub last_seen: Instant,
     pub hit_count: usize,
     pub termination_time: Option<Instant>,
+    pub local_ip: IpAddr,
+    pub remote: (IpAddr, u16),
+}
+
+impl ProcessCacheEntry {
+    fn endpoints(&self, local_port: u16) -> SocketEndpoints {
+        SocketEndpoints {
+            local_ip: self.local_ip,
+            local_port,
+            remote: Some(self.remote),
+        }
+    }
 }
 
 pub struct FlodbaddL7 {
@@ -209,7 +234,7 @@ pub struct FlodbaddL7 {
     port_process_cache: Arc<CustomDashMap<(u16, Protocol), ProcessCacheEntry>>,
     cache_cleanup_handle: Option<TaskHandle>,
     sensitive_scan_handle: Option<TaskHandle>,
-    host_service_cache: Arc<CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>>,
+    host_service_cache: Arc<CustomDashMap<String, Vec<(SocketEndpoints, Protocol, SessionL7)>>>,
 }
 
 impl FlodbaddL7 {
@@ -383,6 +408,10 @@ impl FlodbaddL7 {
                         }
                     };
 
+                    // Where wildcard-bound sockets can own a session end
+                    // (`l7_endpoints`); listed at most every few seconds.
+                    let host_addresses = HostAddresses::current();
+
                     let system_read = system.read().await;
                     let users_read = users.read().await;
 
@@ -467,10 +496,11 @@ impl FlodbaddL7 {
                         // macOS libproc: direct socket-to-PID lookup
                         #[cfg(target_os = "macos")]
                         {
-                            if let Some(pid) = l7_macos::lookup_session_pid(
+                            if let Some((pid, owned_end)) = l7_macos::lookup_session_owner(
                                 &connection,
                                 &macos_session_map,
                                 &macos_all_entries,
+                                &host_addresses,
                             ) {
                                 let extracted = if let Some(process) = pid_to_process.get(&pid) {
                                     Self::extract_l7_from_pid(
@@ -487,6 +517,7 @@ impl FlodbaddL7 {
                                 if let Some((l7_data, start_time)) = extracted {
                                     Self::update_port_process_cache(
                                         &connection,
+                                        owned_end,
                                         &l7_data,
                                         start_time,
                                         &port_process_cache,
@@ -523,13 +554,15 @@ impl FlodbaddL7 {
 
                         // Exact match via socket index
                         // Note: pid_to_process borrows from system_read, so we need to be careful about lifetimes
-                        if let Some((l7_fast, start_time_fast)) = Self::try_exact_match_from_index(
-                            &connection,
-                            &port_index,
-                            &pid_to_process,
-                            &uid_to_username,
-                        )
-                        .await
+                        if let Some((l7_fast, start_time_fast, owned_end)) =
+                            Self::try_exact_match_from_index(
+                                &connection,
+                                &port_index,
+                                &pid_to_process,
+                                &uid_to_username,
+                                &host_addresses,
+                            )
+                            .await
                         {
                             trace!(
                                 "L7 exact match (indexed) for {:?}: {:?}",
@@ -538,6 +571,7 @@ impl FlodbaddL7 {
                             );
                             Self::update_port_process_cache(
                                 &connection,
+                                owned_end,
                                 &l7_fast,
                                 start_time_fast,
                                 &port_process_cache,
@@ -566,12 +600,13 @@ impl FlodbaddL7 {
                                 &connection,
                                 &host_service_cache,
                                 &*system_read,
+                                &host_addresses,
                             )
                             .await;
 
                             // Check process status while system_read is still available
                             if let Some(l7_data_tuple) = &from_cache {
-                                let (session_l7_data, _source_from_host_cache) = l7_data_tuple;
+                                let (session_l7_data, _source_from_host_cache, _) = l7_data_tuple;
                                 let source = if system_read
                                     .process(Pid::from_u32(session_l7_data.pid))
                                     .is_some()
@@ -581,13 +616,13 @@ impl FlodbaddL7 {
                                     L7ResolutionSource::HostCacheHitTerminated
                                 };
                                 // Return with source information
-                                from_cache.map(|(l7, _)| (l7, source))
+                                from_cache.map(|(l7, _, owned_end)| (l7, source, owned_end))
                             } else {
                                 None
                             }
                         };
 
-                        if let Some((session_l7_data, source)) = from_host_cache {
+                        if let Some((session_l7_data, source, owned_end)) = from_host_cache {
                             trace!(
                                 "Successfully L7 resolved connection {:?} from host cache: {:?}",
                                 connection,
@@ -596,6 +631,7 @@ impl FlodbaddL7 {
 
                             Self::update_port_process_cache(
                                 &connection,
+                                owned_end,
                                 &session_l7_data,
                                 0,
                                 &port_process_cache,
@@ -631,6 +667,7 @@ impl FlodbaddL7 {
                                 &socket_info,
                                 &pid_to_process,
                                 &uid_to_username,
+                                &host_addresses,
                             )
                             .await;
 
@@ -638,8 +675,9 @@ impl FlodbaddL7 {
                             let mut l7_data_and_time = None;
                             let mut cache_source = None;
                             match result {
-                                Ok((l7_data, process_start_time)) => {
-                                    l7_data_and_time = Some((l7_data, process_start_time));
+                                Ok((l7_data, process_start_time, owned_end)) => {
+                                    l7_data_and_time =
+                                        Some((l7_data, process_start_time, Some(owned_end)));
                                 }
                                 Err(_) => {
                                     // Use the existing system_read instead of acquiring a new lock
@@ -647,10 +685,13 @@ impl FlodbaddL7 {
                                         &connection,
                                         &port_process_cache,
                                         &*system_read,
+                                        &host_addresses,
                                     )
                                     .await
                                     {
-                                        l7_data_and_time = Some((l7_data, 0)); // Cache doesn't store start_time for host cache, so use 0
+                                        // No new evidence to cache: the hit
+                                        // refreshed its own entry.
+                                        l7_data_and_time = Some((l7_data, 0, None));
                                         cache_source = Some(source);
                                     } else {
                                         // No further immediate refreshes; rely on next batch refresh
@@ -660,19 +701,26 @@ impl FlodbaddL7 {
                             (l7_data_and_time, cache_source)
                         };
 
-                        if let Some((l7_data, process_start_time)) = l7_data_and_time {
+                        if let Some((l7_data, process_start_time, owned_end)) = l7_data_and_time {
                             trace!(
                                 "Successfully L7 resolved connection {:?}: {:?}",
                                 connection,
                                 l7_data
                             );
-                            Self::update_port_process_cache(
-                                &connection,
-                                &l7_data,
-                                process_start_time,
-                                &port_process_cache,
-                            )
-                            .await;
+                            // A cache hit is not re-cached: rewriting its
+                            // entry from the hit carried start time 0, which
+                            // no running process matches, so the entry went
+                            // dead after its first use.
+                            if let Some(owned_end) = owned_end {
+                                Self::update_port_process_cache(
+                                    &connection,
+                                    owned_end,
+                                    &l7_data,
+                                    process_start_time,
+                                    &port_process_cache,
+                                )
+                                .await;
+                            }
                             let mut l7_data = l7_data;
                             Self::merge_previous_sensitive(&l7_map, &connection, &mut l7_data);
                             l7_map.insert(
@@ -760,6 +808,7 @@ impl FlodbaddL7 {
                                     &fresh_socket_info,
                                     &pid_to_process,
                                     &uid_to_username,
+                                    &host_addresses,
                                 )
                                 .await;
 
@@ -769,6 +818,7 @@ impl FlodbaddL7 {
                                         &connection,
                                         &port_process_cache,
                                         &*system_read,
+                                        &host_addresses,
                                     )
                                     .await
                                 } else {
@@ -776,7 +826,9 @@ impl FlodbaddL7 {
                                 };
 
                                 // Check if immediate retry succeeded
-                                if let Ok((l7_data, process_start_time)) = immediate_retry_result {
+                                if let Ok((l7_data, process_start_time, owned_end)) =
+                                    immediate_retry_result
+                                {
                                     trace!(
                                         "Immediate retry succeeded for {:?}: {:?}",
                                         connection,
@@ -784,6 +836,7 @@ impl FlodbaddL7 {
                                     );
                                     Self::update_port_process_cache(
                                         &connection,
+                                        owned_end,
                                         &l7_data,
                                         process_start_time,
                                         &port_process_cache,
@@ -822,13 +875,7 @@ impl FlodbaddL7 {
                                         connection,
                                         l7_data
                                     );
-                                    Self::update_port_process_cache(
-                                        &connection,
-                                        &l7_data,
-                                        0,
-                                        &port_process_cache,
-                                    )
-                                    .await;
+                                    // Not re-cached: see the first attempt.
                                     let mut l7_data = l7_data;
                                     Self::merge_previous_sensitive(
                                         &l7_map,
@@ -1249,78 +1296,89 @@ impl FlodbaddL7 {
         self.sensitive_scan_handle = Some(TaskHandle { handle, stop_tx });
     }
 
+    /// Remember `l7_data` as the owner of the conversation `connection`
+    /// holds at `owned_end`, the end its evidence was a socket at.
+    ///
+    /// Keyed by that end's local port, but an entry answers only the same
+    /// conversation again (`try_resolve_from_cache`). It used to be stored
+    /// under every private-address port of the session, the remote end's
+    /// service port included, and to answer any later session on that port:
+    /// a LAN probe of 10.0.0.1:80 then attributed every other connection to
+    /// a :80 to the prober.
     async fn update_port_process_cache(
         connection: &Session,
+        owned_end: SessionEnd,
         l7_data: &SessionL7,
         process_start_time: u64,
         port_process_cache: &CustomDashMap<(u16, Protocol), ProcessCacheEntry>,
     ) {
-        let protocol = connection.protocol.clone();
-        let ports_to_cache = if is_private_ip(connection.src_ip) && is_private_ip(connection.dst_ip)
-        {
-            vec![
-                (connection.src_port, protocol.clone()),
-                (connection.dst_port, protocol.clone()),
-            ]
-        } else if is_private_ip(connection.src_ip) {
-            vec![(connection.src_port, protocol.clone())]
-        } else if is_private_ip(connection.dst_ip) {
-            vec![(connection.dst_port, protocol.clone())]
-        } else {
-            vec![]
-        };
+        let (local_ip, port) = owned_end.endpoint(connection);
+        let remote = owned_end.other().endpoint(connection);
+        let cache_key = (port, connection.protocol.clone());
 
-        for key_tuple in ports_to_cache {
-            let (port, protocol) = key_tuple;
-
-            // Always cache (even high-range ports) but rely on short-TTL cleanup for
-            // ports >= EPHEMERAL_PORT_THRESHOLD to avoid stale matches caused by
-            // rapid port reuse.
-
-            if let Some(mut entry) = port_process_cache.get_mut(&(port, protocol.clone())) {
-                // Only update if PID and start time match (PID reuse protection)
-                if entry.l7.pid == l7_data.pid && entry.process_start_time == process_start_time {
-                    entry.value_mut().last_seen = Instant::now();
-                    entry.value_mut().hit_count += 1;
-                } else {
-                    // Replace with new process info
-                    *entry.value_mut() = ProcessCacheEntry {
-                        l7: l7_data.clone(),
-                        process_start_time,
-                        last_seen: Instant::now(),
-                        hit_count: 1,
-                        termination_time: None,
-                    };
-                }
+        // Always cache (even high-range ports) but rely on short-TTL cleanup for
+        // ports >= EPHEMERAL_PORT_THRESHOLD to bound the table.
+        if let Some(mut entry) = port_process_cache.get_mut(&cache_key) {
+            // Refresh only the same process (PID reuse protection) in the
+            // same conversation; anything else replaces the entry.
+            if entry.l7.pid == l7_data.pid
+                && entry.process_start_time == process_start_time
+                && entry.local_ip == local_ip
+                && entry.remote == remote
+            {
+                entry.value_mut().last_seen = Instant::now();
+                entry.value_mut().hit_count += 1;
             } else {
-                let cache_key = (port, protocol);
-                port_process_cache.insert(
-                    cache_key.clone(),
-                    ProcessCacheEntry {
-                        l7: l7_data.clone(),
-                        process_start_time,
-                        last_seen: Instant::now(),
-                        hit_count: 1,
-                        termination_time: None,
-                    },
-                );
-                debug!("Cached L7 data for port {:?}: {:?}", cache_key, l7_data);
+                *entry.value_mut() = ProcessCacheEntry {
+                    l7: l7_data.clone(),
+                    process_start_time,
+                    last_seen: Instant::now(),
+                    hit_count: 1,
+                    termination_time: None,
+                    local_ip,
+                    remote,
+                };
             }
+        } else {
+            port_process_cache.insert(
+                cache_key.clone(),
+                ProcessCacheEntry {
+                    l7: l7_data.clone(),
+                    process_start_time,
+                    last_seen: Instant::now(),
+                    hit_count: 1,
+                    termination_time: None,
+                    local_ip,
+                    remote,
+                },
+            );
+            debug!("Cached L7 data for port {:?}: {:?}", cache_key, l7_data);
         }
     }
 
+    /// Attribute `connection` from a remembered resolution of the SAME
+    /// conversation: same local endpoint, same remote end. An entry left by
+    /// another conversation on the same port number is skipped and kept (it
+    /// still answers its own). Linux gives one ephemeral port to concurrent
+    /// connections towards different destinations, and the port number of a
+    /// remote service is the local port of every local listener for it, so
+    /// a port-only hit attributed sessions to whichever process last used
+    /// the number (test-mint, 2026-10: WALinuxAgent's and avahi-daemon's
+    /// short-lived sessions to 168.63.129.16:80 and :53 named
+    /// edamame_posture).
     async fn try_resolve_from_cache(
         connection: &Session,
         port_process_cache: &CustomDashMap<(u16, Protocol), ProcessCacheEntry>,
         system: &System,
+        host: &HostAddresses,
     ) -> Option<(SessionL7, L7ResolutionSource)> {
         let protocol = connection.protocol.clone();
         let cache_keys = [
-            (connection.src_port, protocol.clone()),
-            (connection.dst_port, protocol.clone()),
+            (SessionEnd::Src, (connection.src_port, protocol.clone())),
+            (SessionEnd::Dst, (connection.dst_port, protocol.clone())),
         ];
         let termination_grace_period = Duration::from_secs(5);
-        for key in &cache_keys {
+        for (end, key) in &cache_keys {
             let port = key.0;
             if port >= EPHEMERAL_PORT_THRESHOLD && port_process_cache.contains_key(key) {
                 let entry_option = port_process_cache.get(key);
@@ -1333,6 +1391,12 @@ impl FlodbaddL7 {
                         continue;
                     }
                 }
+            }
+            let same_conversation = port_process_cache.get(key).is_some_and(|entry| {
+                evidence_fits_end(connection, *end, &entry.value().endpoints(port), host)
+            });
+            if !same_conversation {
+                continue;
             }
             let (
                 entry_exists,
@@ -1417,17 +1481,19 @@ impl FlodbaddL7 {
         socket_info: &Vec<SocketInfo>,
         pid_to_process: &HashMap<u32, &Process>,
         uid_to_username: &HashMap<&Uid, &str>,
-        host_service_cache: &CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>,
+        host_service_cache: &CustomDashMap<String, Vec<(SocketEndpoints, Protocol, SessionL7)>>,
     ) {
-        let mut temp_cache: HashMap<String, Vec<(u16, Protocol, SessionL7)>> = HashMap::new();
+        let mut temp_cache: HashMap<String, Vec<(SocketEndpoints, Protocol, SessionL7)>> =
+            HashMap::new();
 
         for socket in socket_info {
-            let (port, protocol) = match &socket.protocol_socket_info {
-                ProtocolSocketInfo::Tcp(tcp) => (tcp.local_port, Protocol::TCP),
-                ProtocolSocketInfo::Udp(udp) => (udp.local_port, Protocol::UDP),
+            let protocol = match &socket.protocol_socket_info {
+                ProtocolSocketInfo::Tcp(_) => Protocol::TCP,
+                ProtocolSocketInfo::Udp(_) => Protocol::UDP,
             };
+            let endpoints = socket_endpoints(socket);
 
-            if port >= EPHEMERAL_PORT_THRESHOLD {
+            if endpoints.local_port >= EPHEMERAL_PORT_THRESHOLD {
                 continue;
             }
 
@@ -1438,7 +1504,7 @@ impl FlodbaddL7 {
                 temp_cache
                     .entry(hostname)
                     .or_insert_with(Vec::new)
-                    .push((port, protocol, l7_data));
+                    .push((endpoints, protocol, l7_data));
             }
         }
 
@@ -1447,11 +1513,21 @@ impl FlodbaddL7 {
         }
     }
 
+    /// Attribute a session to a local service socket (local port below the
+    /// ephemeral range). The service must own one end of the session
+    /// (`l7_endpoints::evidence_end`): its address and port together, and
+    /// its peer when it is a connection. It used to be any socket whose port
+    /// equalled either session port, so an outbound session to a LAN host's
+    /// :80 or :53 was attributed to whatever local process listened on 80 or
+    /// 53.
     async fn try_resolve_from_host_cache_custom(
         connection: &Session,
-        host_service_cache: &Arc<CustomDashMap<String, Vec<(u16, Protocol, SessionL7)>>>,
+        host_service_cache: &Arc<
+            CustomDashMap<String, Vec<(SocketEndpoints, Protocol, SessionL7)>>,
+        >,
         system: &System,
-    ) -> Option<(SessionL7, L7ResolutionSource)> {
+        host: &HostAddresses,
+    ) -> Option<(SessionL7, L7ResolutionSource, SessionEnd)> {
         // Only apply host cache for inbound/server-side flows: destination IP must be local
         let host_inbound = is_private_ip(connection.dst_ip);
         if !host_inbound {
@@ -1466,44 +1542,52 @@ impl FlodbaddL7 {
             Lazy::new(|| CustomDashMap::new("terminated_pids"));
 
         if let Some(localhost_services) = host_service_cache.get("localhost") {
-            for (service_port, service_protocol, l7_data) in localhost_services.value() {
-                if (connection.src_port == *service_port || connection.dst_port == *service_port)
-                    && connection.protocol == *service_protocol
-                {
-                    if system.process(Pid::from_u32(l7_data.pid)).is_some() {
-                        // Process still exists, remove from terminated list if present
-                        TERMINATED_PIDS.remove(&l7_data.pid);
-                        return Some((l7_data.clone(), L7ResolutionSource::HostCacheHitRunning));
-                    } else {
-                        // Process terminated - check if in grace period
-                        let now = Instant::now();
-                        let in_grace_period = TERMINATED_PIDS
-                            .entry(l7_data.pid)
-                            .or_insert_with(|| now)
-                            .value()
-                            .elapsed()
-                            < TERMINATION_GRACE_PERIOD;
+            for (endpoints, service_protocol, l7_data) in localhost_services.value() {
+                if connection.protocol != *service_protocol {
+                    continue;
+                }
+                let Some(owned_end) = evidence_end(connection, endpoints, host) else {
+                    continue;
+                };
+                let service_port = endpoints.local_port;
+                if system.process(Pid::from_u32(l7_data.pid)).is_some() {
+                    // Process still exists, remove from terminated list if present
+                    TERMINATED_PIDS.remove(&l7_data.pid);
+                    return Some((
+                        l7_data.clone(),
+                        L7ResolutionSource::HostCacheHitRunning,
+                        owned_end,
+                    ));
+                } else {
+                    // Process terminated - check if in grace period
+                    let now = Instant::now();
+                    let in_grace_period = TERMINATED_PIDS
+                        .entry(l7_data.pid)
+                        .or_insert_with(|| now)
+                        .value()
+                        .elapsed()
+                        < TERMINATION_GRACE_PERIOD;
 
-                        if in_grace_period {
-                            let elapsed = TERMINATED_PIDS
-                                .get(&l7_data.pid)
-                                .map(|e| e.value().elapsed());
-                            debug!(
-                                "Using recently terminated host cache data for port {}, protocol {:?}: PID {} terminated {:?} ago",
-                                service_port, service_protocol, l7_data.pid, elapsed
-                            );
-                            return Some((
-                                l7_data.clone(),
-                                L7ResolutionSource::HostCacheHitTerminated,
-                            ));
-                        } else {
-                            debug!(
-                                "Grace period expired for host cache entry: port {}, protocol {:?}, PID {}",
-                                service_port, service_protocol, l7_data.pid
-                            );
-                            TERMINATED_PIDS.remove(&l7_data.pid);
-                            continue;
-                        }
+                    if in_grace_period {
+                        let elapsed = TERMINATED_PIDS
+                            .get(&l7_data.pid)
+                            .map(|e| e.value().elapsed());
+                        debug!(
+                            "Using recently terminated host cache data for port {}, protocol {:?}: PID {} terminated {:?} ago",
+                            service_port, service_protocol, l7_data.pid, elapsed
+                        );
+                        return Some((
+                            l7_data.clone(),
+                            L7ResolutionSource::HostCacheHitTerminated,
+                            owned_end,
+                        ));
+                    } else {
+                        debug!(
+                            "Grace period expired for host cache entry: port {}, protocol {:?}, PID {}",
+                            service_port, service_protocol, l7_data.pid
+                        );
+                        TERMINATED_PIDS.remove(&l7_data.pid);
+                        continue;
                     }
                 }
             }
@@ -1619,8 +1703,11 @@ impl FlodbaddL7 {
             if let Some(pid) = l7_macos::quick_lookup_session_pid(connection) {
                 if let Some((mut l7_data, start_time)) = Self::extract_l7_from_pid_fresh(pid).await
                 {
+                    // The quick lookup is a 4-tuple hit either way round;
+                    // the end this host owns is the socket's.
                     Self::update_port_process_cache(
                         connection,
+                        HostAddresses::current().local_end_of(connection),
                         &l7_data,
                         start_time,
                         &self.port_process_cache,
@@ -1807,18 +1894,31 @@ impl FlodbaddL7 {
         socket_info: &Vec<SocketInfo>,
         pid_to_process: &HashMap<u32, &Process>,
         uid_to_username: &HashMap<&Uid, &str>,
-    ) -> Result<(SessionL7, u64)> {
-        if let Some((l7_data, start_time)) =
-            Self::try_exact_match(connection, socket_info, pid_to_process, uid_to_username).await
+        host: &HostAddresses,
+    ) -> Result<(SessionL7, u64, SessionEnd)> {
+        if let Some(found) = Self::try_exact_match(
+            connection,
+            socket_info,
+            pid_to_process,
+            uid_to_username,
+            host,
+        )
+        .await
         {
-            return Ok((l7_data, start_time));
+            return Ok(found);
         }
         // Fuzzy/wildcard match fallback
-        if let Some((l7_data, start_time)) =
-            Self::try_fuzzy_match(connection, socket_info, pid_to_process, uid_to_username).await
+        if let Some(found) = Self::try_fuzzy_match(
+            connection,
+            socket_info,
+            pid_to_process,
+            uid_to_username,
+            host,
+        )
+        .await
         {
             warn!("L7 fuzzy/wildcard match used for session {:?}", connection);
-            return Ok((l7_data, start_time));
+            return Ok(found);
         }
         // Log all candidate sockets for debugging
         debug!(
@@ -1828,100 +1928,87 @@ impl FlodbaddL7 {
         Err(anyhow::anyhow!("No matching process found"))
     }
 
+    /// The session end `socket` is direct evidence for: a TCP connection
+    /// whose two ends are the session's (either way round), or a UDP socket
+    /// bound to the session's local end. netstat2 reports no UDP peer, so the
+    /// bound endpoint is all a UDP row can show; it used to match on either
+    /// session port with the address taken from either end, so a local
+    /// responder on `*:53` answered for this host's queries to a remote
+    /// resolver. TCP listeners are left to `try_fuzzy_match`.
+    fn exact_socket_end(
+        connection: &Session,
+        socket: &SocketInfo,
+        host: &HostAddresses,
+    ) -> Option<SessionEnd> {
+        let endpoints = socket_endpoints(socket);
+        match (&connection.protocol, &socket.protocol_socket_info) {
+            (Protocol::TCP, ProtocolSocketInfo::Tcp(_)) if endpoints.remote.is_some() => {
+                evidence_end(connection, &endpoints, host)
+            }
+            (Protocol::UDP, ProtocolSocketInfo::Udp(_)) => {
+                evidence_end(connection, &endpoints, host)
+            }
+            _ => None,
+        }
+    }
+
     async fn try_exact_match(
         connection: &Session,
         socket_info: &Vec<SocketInfo>,
         pid_to_process: &HashMap<u32, &Process>,
         uid_to_username: &HashMap<&Uid, &str>,
-    ) -> Option<(SessionL7, u64)> {
-        let protocol = connection.protocol.clone();
+        host: &HostAddresses,
+    ) -> Option<(SessionL7, u64, SessionEnd)> {
         for socket in socket_info {
-            let proto_ok = match &protocol {
-                Protocol::TCP => matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Tcp(_)),
-                Protocol::UDP => matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Udp(_)),
-            };
-            if !proto_ok {
+            let Some(owned_end) = Self::exact_socket_end(connection, socket, host) else {
                 continue;
-            }
-            let is_match = match &socket.protocol_socket_info {
-                ProtocolSocketInfo::Tcp(tcp_socket) => {
-                    (tcp_socket.local_addr == connection.src_ip
-                        && tcp_socket.local_port == connection.src_port
-                        && tcp_socket.remote_addr == connection.dst_ip
-                        && tcp_socket.remote_port == connection.dst_port)
-                        || (tcp_socket.local_addr == connection.dst_ip
-                            && tcp_socket.local_port == connection.dst_port
-                            && tcp_socket.remote_addr == connection.src_ip
-                            && tcp_socket.remote_port == connection.src_port)
-                }
-                ProtocolSocketInfo::Udp(udp_socket) => {
-                    // Enhanced UDP matching: UDP is bidirectional and sockets may not have remote addresses
-                    // Check if local_port matches either session port, and local_addr matches or is wildcard
-                    let port_matches = udp_socket.local_port == connection.src_port
-                        || udp_socket.local_port == connection.dst_port;
-                    let addr_matches = udp_socket.local_addr.is_unspecified()
-                        || udp_socket.local_addr == connection.src_ip
-                        || udp_socket.local_addr == connection.dst_ip;
-                    port_matches && addr_matches
-                }
             };
-            if is_match {
-                if let Some((l7, start_time)) =
-                    Self::extract_l7_from_socket(socket, pid_to_process, uid_to_username, false)
-                        .await
-                {
-                    return Some((l7, start_time));
-                }
+            if let Some((l7, start_time)) =
+                Self::extract_l7_from_socket(socket, pid_to_process, uid_to_username, false).await
+            {
+                return Some((l7, start_time, owned_end));
             }
         }
         None
     }
 
+    /// A TCP listener that owns one end of the session: inbound connections
+    /// whose accepted socket is already gone (or not yet in the table). The
+    /// listener answers any peer, but only at its own address and port, a
+    /// wildcard address standing for this host's addresses
+    /// (`l7_endpoints::evidence_end`).
+    ///
+    /// This used to accept any TCP socket on either session port, connected
+    /// ones included and whatever their peer: once a short-lived connection
+    /// had closed, another process's connection that Linux had given the
+    /// same ephemeral port, or a local listener on the remote's service port,
+    /// took the session. Connected sockets are the exact match's business,
+    /// and UDP rows already went through the same test there.
     async fn try_fuzzy_match(
         connection: &Session,
         socket_info: &Vec<SocketInfo>,
         pid_to_process: &HashMap<u32, &Process>,
         uid_to_username: &HashMap<&Uid, &str>,
-    ) -> Option<(SessionL7, u64)> {
-        // Fuzzy match: match on (local_port, protocol) and wildcard IPs (0.0.0.0, ::)
+        host: &HostAddresses,
+    ) -> Option<(SessionL7, u64, SessionEnd)> {
+        if connection.protocol != Protocol::TCP {
+            return None;
+        }
         for socket in socket_info.iter() {
-            let proto_ok = match &connection.protocol {
-                Protocol::TCP => matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Tcp(_)),
-                Protocol::UDP => matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Udp(_)),
-            };
-            if !proto_ok {
+            if !matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Tcp(_)) {
                 continue;
             }
-            let is_fuzzy_match = match &socket.protocol_socket_info {
-                ProtocolSocketInfo::Tcp(tcp_socket) => {
-                    // Match if local_port matches and local_addr is wildcard or matches one of the session IPs
-                    let local_port_match = tcp_socket.local_port == connection.src_port
-                        || tcp_socket.local_port == connection.dst_port;
-                    let local_addr_wildcard = tcp_socket.local_addr.is_unspecified();
-                    let local_addr_match = tcp_socket.local_addr == connection.src_ip
-                        || tcp_socket.local_addr == connection.dst_ip;
-                    local_port_match && (local_addr_wildcard || local_addr_match)
-                }
-                ProtocolSocketInfo::Udp(udp_socket) => {
-                    // Enhanced UDP fuzzy matching: more aggressive matching for UDP
-                    // UDP sockets are bidirectional and may not have remote addresses set
-                    let local_port_match = udp_socket.local_port == connection.src_port
-                        || udp_socket.local_port == connection.dst_port;
-                    let local_addr_wildcard = udp_socket.local_addr.is_unspecified();
-                    let local_addr_match = udp_socket.local_addr == connection.src_ip
-                        || udp_socket.local_addr == connection.dst_ip;
-                    // For UDP, accept if port matches and (addr is wildcard OR addr matches)
-                    // This is more permissive than TCP since UDP is stateless
-                    local_port_match && (local_addr_wildcard || local_addr_match)
-                }
+            let endpoints = socket_endpoints(socket);
+            if endpoints.remote.is_some() {
+                continue;
+            }
+            let Some(owned_end) = evidence_end(connection, &endpoints, host) else {
+                continue;
             };
-            if is_fuzzy_match {
-                if let Some((l7, start_time)) =
-                    Self::extract_l7_from_socket(socket, pid_to_process, uid_to_username, false)
-                        .await
-                {
-                    return Some((l7, start_time));
-                }
+            if let Some((l7, start_time)) =
+                Self::extract_l7_from_socket(socket, pid_to_process, uid_to_username, false).await
+            {
+                return Some((l7, start_time, owned_end));
             }
         }
         None
@@ -2600,7 +2687,8 @@ impl FlodbaddL7 {
         port_index: &HashMap<(u16, Protocol), Vec<&SocketInfo>>,
         pid_to_process: &HashMap<u32, &Process>,
         uid_to_username: &HashMap<&Uid, &str>,
-    ) -> Option<(SessionL7, u64)> {
+        host: &HostAddresses,
+    ) -> Option<(SessionL7, u64, SessionEnd)> {
         let protocol = connection.protocol.clone();
         let cache_keys = [
             (connection.src_port, protocol.clone()),
@@ -2609,50 +2697,14 @@ impl FlodbaddL7 {
         for key in &cache_keys {
             if let Some(socket_list) = port_index.get(key) {
                 for socket in socket_list {
-                    let proto_ok = match &protocol {
-                        Protocol::TCP => {
-                            matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Tcp(_))
-                        }
-                        Protocol::UDP => {
-                            matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Udp(_))
-                        }
-                    };
-                    if !proto_ok {
+                    let Some(owned_end) = Self::exact_socket_end(connection, socket, host) else {
                         continue;
-                    }
-                    let is_match = match &socket.protocol_socket_info {
-                        ProtocolSocketInfo::Tcp(tcp_socket) => {
-                            (tcp_socket.local_addr == connection.src_ip
-                                && tcp_socket.local_port == connection.src_port
-                                && tcp_socket.remote_addr == connection.dst_ip
-                                && tcp_socket.remote_port == connection.dst_port)
-                                || (tcp_socket.local_addr == connection.dst_ip
-                                    && tcp_socket.local_port == connection.dst_port
-                                    && tcp_socket.remote_addr == connection.src_ip
-                                    && tcp_socket.remote_port == connection.src_port)
-                        }
-                        ProtocolSocketInfo::Udp(udp_socket) => {
-                            // Enhanced UDP matching: UDP is bidirectional and sockets may not have remote addresses
-                            // Check if local_port matches either session port, and local_addr matches or is wildcard
-                            let port_matches = udp_socket.local_port == connection.src_port
-                                || udp_socket.local_port == connection.dst_port;
-                            let addr_matches = udp_socket.local_addr.is_unspecified()
-                                || udp_socket.local_addr == connection.src_ip
-                                || udp_socket.local_addr == connection.dst_ip;
-                            port_matches && addr_matches
-                        }
                     };
-                    if is_match {
-                        if let Some((l7, start_time)) = Self::extract_l7_from_socket(
-                            socket,
-                            pid_to_process,
-                            uid_to_username,
-                            false,
-                        )
-                        .await
-                        {
-                            return Some((l7, start_time));
-                        }
+                    if let Some((l7, start_time)) =
+                        Self::extract_l7_from_socket(socket, pid_to_process, uid_to_username, false)
+                            .await
+                    {
+                        return Some((l7, start_time, owned_end));
                     }
                 }
             }
@@ -2699,6 +2751,29 @@ fn get_windows_username_by_uid(uid: &Uid) -> Option<String> {
             );
             return None;
         }
+    }
+}
+
+/// A socket-table row as attribution evidence.
+fn socket_endpoints(socket: &SocketInfo) -> SocketEndpoints {
+    match &socket.protocol_socket_info {
+        ProtocolSocketInfo::Tcp(tcp) => SocketEndpoints {
+            local_ip: tcp.local_addr,
+            local_port: tcp.local_port,
+            // A listener has no peer: its row carries 0.0.0.0:0 / [::]:0,
+            // and Windows leaves the port undefined in LISTEN rows.
+            remote: if tcp.state == TcpState::Listen || tcp.remote_addr.is_unspecified() {
+                None
+            } else {
+                Some((tcp.remote_addr, tcp.remote_port))
+            },
+        },
+        // netstat2 reports no peer for UDP on any platform.
+        ProtocolSocketInfo::Udp(udp) => SocketEndpoints {
+            local_ip: udp.local_addr,
+            local_port: udp.local_port,
+            remote: None,
+        },
     }
 }
 
@@ -2927,6 +3002,7 @@ mod tests {
             &socket_info,
             &pid_to_process,
             &uid_to_username,
+            &HostAddresses::default(),
         )
         .await;
 
@@ -2995,6 +3071,8 @@ mod tests {
                 last_seen: Instant::now(),
                 hit_count: 0,
                 termination_time: None,
+                local_ip: IpAddr::from_str("192.168.1.100").unwrap(),
+                remote: (IpAddr::from_str("93.184.216.34").unwrap(), 80),
             },
         );
 
@@ -3048,6 +3126,381 @@ mod tests {
         assert!(
             !found_in_cache,
             "Should not find L7 data in cache for connection2"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Endpoint consistency of the fallbacks (test-mint, 2026-10:
+    // WALinuxAgent -> 168.63.129.16:80 and avahi-daemon -> :53 were
+    // attributed to edamame_posture once their sockets had closed).
+    // Every row below belongs to this test process, so a wrong match
+    // shows up as an attribution instead of failing on a missing pid.
+    // ---------------------------------------------------------------
+
+    fn ip(s: &str) -> IpAddr {
+        IpAddr::from_str(s).unwrap()
+    }
+
+    fn session(proto: Protocol, src: (&str, u16), dst: (&str, u16)) -> Session {
+        Session {
+            protocol: proto,
+            src_ip: ip(src.0),
+            src_port: src.1,
+            dst_ip: ip(dst.0),
+            dst_port: dst.1,
+        }
+    }
+
+    /// The host the sessions are captured on: 10.0.0.4 on a 10.0.0.0/24.
+    fn host() -> HostAddresses {
+        HostAddresses::new([ip("10.0.0.4")], [ip("10.0.0.255")])
+    }
+
+    fn wireserver_http(local_port: u16) -> Session {
+        session(
+            Protocol::TCP,
+            ("10.0.0.4", local_port),
+            ("168.63.129.16", 80),
+        )
+    }
+
+    fn wireserver_dns(local_port: u16) -> Session {
+        session(
+            Protocol::UDP,
+            ("10.0.0.4", local_port),
+            ("168.63.129.16", 53),
+        )
+    }
+
+    fn tcp_row(local: (&str, u16), remote: (&str, u16), state: TcpState) -> SocketInfo {
+        SocketInfo {
+            protocol_socket_info: ProtocolSocketInfo::Tcp(netstat2::TcpSocketInfo {
+                local_addr: ip(local.0),
+                local_port: local.1,
+                remote_addr: ip(remote.0),
+                remote_port: remote.1,
+                state,
+            }),
+            associated_pids: vec![std::process::id()],
+            #[cfg(target_os = "linux")]
+            inode: 0,
+            #[cfg(target_os = "linux")]
+            uid: 0,
+        }
+    }
+
+    fn udp_row(local: (&str, u16)) -> SocketInfo {
+        SocketInfo {
+            protocol_socket_info: ProtocolSocketInfo::Udp(netstat2::UdpSocketInfo {
+                local_addr: ip(local.0),
+                local_port: local.1,
+            }),
+            associated_pids: vec![std::process::id()],
+            #[cfg(target_os = "linux")]
+            inode: 0,
+            #[cfg(target_os = "linux")]
+            uid: 0,
+        }
+    }
+
+    /// A process table holding this test process, so cached entries and
+    /// socket rows that name it resolve.
+    fn own_process_system() -> System {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(std::process::id())]),
+            false,
+            ProcessRefreshKind::everything().without_cpu(),
+        );
+        system
+    }
+
+    async fn resolve_from_rows(
+        connection: &Session,
+        rows: &Vec<SocketInfo>,
+    ) -> Option<(u32, SessionEnd)> {
+        let system = own_process_system();
+        let pid_to_process: HashMap<u32, &Process> = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| (pid.as_u32(), process))
+            .collect();
+        let uid_to_username = HashMap::new();
+        let host = host();
+        let full =
+            FlodbaddL7::resolve_l7_data(connection, rows, &pid_to_process, &uid_to_username, &host)
+                .await
+                .ok()
+                .map(|(l7, _, end)| (l7.pid, end));
+
+        // The resolver round's indexed lookup applies the same test.
+        let mut port_index: HashMap<(u16, Protocol), Vec<&SocketInfo>> = HashMap::new();
+        for row in rows {
+            let (port, proto) = match &row.protocol_socket_info {
+                ProtocolSocketInfo::Tcp(tcp) => (tcp.local_port, Protocol::TCP),
+                ProtocolSocketInfo::Udp(udp) => (udp.local_port, Protocol::UDP),
+            };
+            port_index.entry((port, proto)).or_default().push(row);
+        }
+        let indexed = FlodbaddL7::try_exact_match_from_index(
+            connection,
+            &port_index,
+            &pid_to_process,
+            &uid_to_username,
+            &host,
+        )
+        .await
+        .map(|(l7, _, end)| (l7.pid, end));
+        if let Some(indexed) = indexed {
+            assert_eq!(Some(indexed), full, "indexed and full lookups disagree");
+        }
+        full
+    }
+
+    #[tokio::test]
+    async fn socket_on_the_same_local_port_to_another_peer_does_not_take_the_session() {
+        // Linux handed 41000 to another connection, to another destination.
+        let rows = vec![tcp_row(
+            ("10.0.0.4", 41000),
+            ("52.1.2.3", 443),
+            TcpState::Established,
+        )];
+        assert_eq!(
+            resolve_from_rows(&wireserver_http(41000), &rows).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_on_the_remote_service_port_does_not_take_an_outbound_session() {
+        for listener in ["0.0.0.0", "::", "10.0.0.4"] {
+            let rows = vec![tcp_row((listener, 80), ("0.0.0.0", 0), TcpState::Listen)];
+            assert_eq!(
+                resolve_from_rows(&wireserver_http(41000), &rows).await,
+                None,
+                "listener {listener}:80"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_socket_on_the_remote_service_port_does_not_take_an_outbound_query() {
+        for responder in ["0.0.0.0", "10.0.0.4", "::"] {
+            let rows = vec![udp_row((responder, 53))];
+            assert_eq!(
+                resolve_from_rows(&wireserver_dns(50000), &rows).await,
+                None,
+                "responder {responder}:53"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_with_the_same_peer_is_attributed() {
+        let pid = std::process::id();
+        let rows = vec![tcp_row(
+            ("10.0.0.4", 41000),
+            ("168.63.129.16", 80),
+            TcpState::Established,
+        )];
+        assert_eq!(
+            resolve_from_rows(&wireserver_http(41000), &rows).await,
+            Some((pid, SessionEnd::Src))
+        );
+        // A dual-stack socket reports the same connection as v4-mapped IPv6.
+        let mapped = vec![tcp_row(
+            ("::ffff:10.0.0.4", 41000),
+            ("::ffff:168.63.129.16", 80),
+            TcpState::Established,
+        )];
+        assert_eq!(
+            resolve_from_rows(&wireserver_http(41000), &mapped).await,
+            Some((pid, SessionEnd::Src))
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_socket_on_the_local_port_is_attributed() {
+        let rows = vec![udp_row(("0.0.0.0", 53)), udp_row(("0.0.0.0", 50000))];
+        assert_eq!(
+            resolve_from_rows(&wireserver_dns(50000), &rows).await,
+            Some((std::process::id(), SessionEnd::Src))
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_session_is_attributed_to_the_listening_service() {
+        let pid = std::process::id();
+        // Inbound RDP whose accepted socket is gone: the listener owns it.
+        let rdp = session(Protocol::TCP, ("203.0.113.9", 51000), ("10.0.0.4", 3389));
+        for listener in ["0.0.0.0", "::", "10.0.0.4"] {
+            let rows = vec![tcp_row((listener, 3389), ("0.0.0.0", 0), TcpState::Listen)];
+            assert_eq!(
+                resolve_from_rows(&rdp, &rows).await,
+                Some((pid, SessionEnd::Dst)),
+                "listener {listener}:3389"
+            );
+        }
+        // A local DNS server answers queries to this host.
+        let query = session(Protocol::UDP, ("10.0.0.9", 52000), ("10.0.0.4", 53));
+        assert_eq!(
+            resolve_from_rows(&query, &vec![udp_row(("0.0.0.0", 53))]).await,
+            Some((pid, SessionEnd::Dst))
+        );
+    }
+
+    #[tokio::test]
+    async fn port_cache_answers_only_the_conversation_it_learned() {
+        let system = own_process_system();
+        let pid = std::process::id();
+        let start_time = system
+            .process(Pid::from_u32(pid))
+            .expect("test process enumerable")
+            .start_time();
+        let cache = CustomDashMap::new("test_port_process_cache");
+        let l7 = SessionL7 {
+            pid,
+            process_name: "edamame_posture".to_string(),
+            ..SessionL7::default()
+        };
+
+        // The daemon's own connection on local port 41000 to its backend.
+        let daemon = session(Protocol::TCP, ("10.0.0.4", 41000), ("52.1.2.3", 443));
+        FlodbaddL7::update_port_process_cache(&daemon, SessionEnd::Src, &l7, start_time, &cache)
+            .await;
+
+        // WALinuxAgent later gets 41000 for the WireServer: not the daemon's.
+        assert!(FlodbaddL7::try_resolve_from_cache(
+            &wireserver_http(41000),
+            &cache,
+            &system,
+            &host()
+        )
+        .await
+        .is_none());
+
+        // The entry survives the miss and still answers its own conversation.
+        let hit = FlodbaddL7::try_resolve_from_cache(&daemon, &cache, &system, &host()).await;
+        assert_eq!(
+            hit.map(|(l7, source)| (l7.pid, source)),
+            Some((pid, L7ResolutionSource::CacheHitRunning))
+        );
+    }
+
+    #[tokio::test]
+    async fn port_cache_is_not_keyed_by_the_remote_service_port() {
+        let system = own_process_system();
+        let pid = std::process::id();
+        let start_time = system
+            .process(Pid::from_u32(pid))
+            .expect("test process enumerable")
+            .start_time();
+        let cache = CustomDashMap::new("test_port_process_cache");
+        let l7 = SessionL7 {
+            pid,
+            ..SessionL7::default()
+        };
+
+        // A LAN probe of the gateway's :80 and a DNS query to a LAN
+        // resolver: both ends private, the process owns the source.
+        let probe = session(Protocol::TCP, ("10.0.0.4", 41001), ("10.0.0.1", 80));
+        let lan_dns = session(Protocol::UDP, ("10.0.0.4", 50001), ("10.0.0.1", 53));
+        for s in [&probe, &lan_dns] {
+            FlodbaddL7::update_port_process_cache(s, SessionEnd::Src, &l7, start_time, &cache)
+                .await;
+        }
+        assert!(!cache.contains_key(&(80, Protocol::TCP)));
+        assert!(!cache.contains_key(&(53, Protocol::UDP)));
+        assert!(FlodbaddL7::try_resolve_from_cache(
+            &wireserver_http(41002),
+            &cache,
+            &system,
+            &host()
+        )
+        .await
+        .is_none());
+        assert!(FlodbaddL7::try_resolve_from_cache(
+            &wireserver_dns(50002),
+            &cache,
+            &system,
+            &host()
+        )
+        .await
+        .is_none());
+
+        // A local web server's inbound conversation is keyed by :80, at this
+        // host's address; it does not answer a connection to a remote :80.
+        let inbound = session(Protocol::TCP, ("203.0.113.9", 51000), ("10.0.0.4", 80));
+        FlodbaddL7::update_port_process_cache(&inbound, SessionEnd::Dst, &l7, start_time, &cache)
+            .await;
+        assert!(FlodbaddL7::try_resolve_from_cache(
+            &wireserver_http(41002),
+            &cache,
+            &system,
+            &host()
+        )
+        .await
+        .is_none());
+        assert!(
+            FlodbaddL7::try_resolve_from_cache(&inbound, &cache, &system, &host())
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn host_cache_service_must_own_a_session_end() {
+        let system = own_process_system();
+        let pid_to_process: HashMap<u32, &Process> = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| (pid.as_u32(), process))
+            .collect();
+        let uid_to_username = HashMap::new();
+        let host_service_cache = Arc::new(CustomDashMap::new("test_host_service_cache"));
+        let rows = vec![
+            tcp_row(("0.0.0.0", 80), ("0.0.0.0", 0), TcpState::Listen),
+            udp_row(("0.0.0.0", 53)),
+        ];
+        FlodbaddL7::update_host_service_cache(
+            &rows,
+            &pid_to_process,
+            &uid_to_username,
+            &host_service_cache,
+        )
+        .await;
+
+        // Outbound to the gateway's :80 / :53 (private destination, so the
+        // host cache is consulted): the local listeners are not the client.
+        for outbound in [
+            session(Protocol::TCP, ("10.0.0.4", 41003), ("10.0.0.1", 80)),
+            session(Protocol::UDP, ("10.0.0.4", 50003), ("10.0.0.1", 53)),
+        ] {
+            assert!(
+                FlodbaddL7::try_resolve_from_host_cache_custom(
+                    &outbound,
+                    &host_service_cache,
+                    &system,
+                    &host(),
+                )
+                .await
+                .is_none(),
+                "{outbound:?}"
+            );
+        }
+
+        // Inbound from a LAN client to the local service: attributed.
+        let inbound = session(Protocol::TCP, ("10.0.0.9", 52001), ("10.0.0.4", 80));
+        let hit = FlodbaddL7::try_resolve_from_host_cache_custom(
+            &inbound,
+            &host_service_cache,
+            &system,
+            &host(),
+        )
+        .await;
+        assert_eq!(
+            hit.map(|(l7, _, end)| (l7.pid, end)),
+            Some((std::process::id(), SessionEnd::Dst))
         );
     }
 

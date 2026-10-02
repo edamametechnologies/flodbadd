@@ -10,6 +10,7 @@
 
 #![cfg(target_os = "macos")]
 
+use crate::l7_endpoints::{evidence_end, HostAddresses, SessionEnd, SocketEndpoints};
 use crate::sessions::{Protocol, Session};
 use arc_swap::ArcSwapOption;
 use std::collections::HashMap;
@@ -429,42 +430,64 @@ pub fn scan_all_process_sockets(
     (session_map, all_entries)
 }
 
+impl MacosSocketEntry {
+    /// The entry as attribution evidence. An unconnected UDP socket and a
+    /// TCP listener carry `0.0.0.0:0` / `[::]:0` as their foreign address:
+    /// no peer. A connected UDP socket carries its peer.
+    pub fn endpoints(&self) -> SocketEndpoints {
+        let remote = if self.remote_ip.is_unspecified() && self.remote_port == 0 {
+            None
+        } else {
+            Some((self.remote_ip, self.remote_port))
+        };
+        SocketEndpoints {
+            local_ip: self.local_ip,
+            local_port: self.local_port,
+            remote,
+        }
+    }
+}
+
 /// Try to find a PID for a session using the pre-built session map.
-/// Falls back to port-based matching for UDP sessions.
+/// Falls back to the UDP sockets bound to the session's local end.
 pub fn lookup_session_pid(
     session: &Session,
     session_map: &HashMap<Session, u32>,
     all_entries: &[MacosSocketEntry],
 ) -> Option<u32> {
-    if let Some(&pid) = session_map.get(session) {
-        return Some(pid);
+    lookup_session_owner(session, session_map, all_entries, &HostAddresses::current())
+        .map(|(pid, _)| pid)
+}
+
+/// The PID owning `session` and the session end its socket is bound to.
+///
+/// The map answers a connection by its 4-tuple, either way round. The UDP
+/// fallback over `all_entries` exists because UDP sockets are often
+/// unconnected; it accepts only a socket bound to the session's local end
+/// whose peer, when the socket is connected, is the session's other end
+/// (`l7_endpoints::evidence_end`). It used to accept any UDP socket whose
+/// port equalled EITHER session port: a local responder on `*:53` answered
+/// for this host's queries to a remote resolver, and a connected socket on a
+/// reused port answered for a conversation with another peer.
+pub fn lookup_session_owner(
+    session: &Session,
+    session_map: &HashMap<Session, u32>,
+    all_entries: &[MacosSocketEntry],
+    host: &HostAddresses,
+) -> Option<(u32, SessionEnd)> {
+    if let Some(pid) = lookup_exact_or_reverse(session, session_map) {
+        // TCP rows are keyed both ways round, so the map does not say which
+        // end is the socket's; the end this host owns is.
+        return Some((pid, host.local_end_of(session)));
     }
 
-    // Reverse lookup for the session
-    let reverse = Session {
-        protocol: session.protocol.clone(),
-        src_ip: session.dst_ip,
-        src_port: session.dst_port,
-        dst_ip: session.src_ip,
-        dst_port: session.src_port,
-    };
-    if let Some(&pid) = session_map.get(&reverse) {
-        return Some(pid);
-    }
-
-    // Port-based fuzzy match for UDP
     if session.protocol == Protocol::UDP {
         for entry in all_entries {
             if entry.protocol != Protocol::UDP {
                 continue;
             }
-            let port_match =
-                entry.local_port == session.src_port || entry.local_port == session.dst_port;
-            let addr_match = entry.local_ip.is_unspecified()
-                || entry.local_ip == session.src_ip
-                || entry.local_ip == session.dst_ip;
-            if port_match && addr_match {
-                return Some(entry.pid);
+            if let Some(end) = evidence_end(session, &entry.endpoints(), host) {
+                return Some((entry.pid, end));
             }
         }
     }
@@ -592,6 +615,72 @@ mod tests {
             "system scan: {} session map entries, {} raw entries",
             session_map.len(),
             all_entries.len()
+        );
+    }
+
+    fn udp_entry(pid: u32, local: (&str, u16), remote: (&str, u16)) -> MacosSocketEntry {
+        MacosSocketEntry {
+            pid,
+            protocol: Protocol::UDP,
+            local_ip: local.0.parse().unwrap(),
+            local_port: local.1,
+            remote_ip: remote.0.parse().unwrap(),
+            remote_port: remote.1,
+            tcp_state: None,
+        }
+    }
+
+    fn dns_query(src_port: u16) -> Session {
+        Session {
+            protocol: Protocol::UDP,
+            src_ip: "192.168.1.20".parse().unwrap(),
+            src_port,
+            dst_ip: "168.63.129.16".parse().unwrap(),
+            dst_port: 53,
+        }
+    }
+
+    fn host() -> HostAddresses {
+        HostAddresses::new(["192.168.1.20".parse().unwrap()], [])
+    }
+
+    #[test]
+    fn udp_fallback_ignores_a_local_responder_on_the_remote_port() {
+        // mDNSResponder-style `*:53` responder: not the client of a remote :53.
+        let entries = vec![udp_entry(77, ("0.0.0.0", 53), ("0.0.0.0", 0))];
+        assert_eq!(
+            lookup_session_owner(&dns_query(50000), &HashMap::new(), &entries, &host()),
+            None
+        );
+    }
+
+    #[test]
+    fn udp_fallback_ignores_a_connected_socket_with_another_peer() {
+        let entries = vec![udp_entry(77, ("192.168.1.20", 50000), ("1.1.1.1", 53))];
+        assert_eq!(
+            lookup_session_owner(&dns_query(50000), &HashMap::new(), &entries, &host()),
+            None
+        );
+    }
+
+    #[test]
+    fn udp_fallback_keeps_the_socket_on_the_local_end() {
+        let unconnected = vec![
+            udp_entry(77, ("0.0.0.0", 53), ("0.0.0.0", 0)),
+            udp_entry(88, ("0.0.0.0", 50000), ("0.0.0.0", 0)),
+        ];
+        assert_eq!(
+            lookup_session_owner(&dns_query(50000), &HashMap::new(), &unconnected, &host()),
+            Some((88, SessionEnd::Src))
+        );
+        let connected = vec![udp_entry(
+            99,
+            ("192.168.1.20", 50000),
+            ("168.63.129.16", 53),
+        )];
+        assert_eq!(
+            lookup_session_owner(&dns_query(50000), &HashMap::new(), &connected, &host()),
+            Some((99, SessionEnd::Src))
         );
     }
 }

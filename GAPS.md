@@ -14,9 +14,11 @@ L7 resolution maps network sessions (5-tuples) to the local process responsible.
 |----------|----------|----------|-----------|
 | 1 | eBPF kprobe | Linux | Kernel-level `tcp_set_state`, `tcp_v4_connect`, `tcp_v6_connect` kprobes via Aya; maps session 4-tuples to PID/UID/process in a BPF hashmap |
 | 2 | macOS libproc | macOS | `PROC_PIDFDSOCKETINFO` via `proc_pidfdinfo()`; iterates all process FDs for direct socket-to-PID binding |
-| 3 | Exact match (netstat) | All | `netstat2::get_sockets_info()` + `sysinfo::System::processes()`; matches full 4-tuple for TCP or local IP/port for UDP |
-| 4 | Host service cache | All | Caches known local services by (port, protocol); fallback for inbound connections |
-| 5 | Port-process cache | All | Keyed by (local_port, protocol) with PID-reuse protection via process start time and grace period for terminated processes |
+| 3 | Exact match (netstat) | All | `netstat2::get_sockets_info()` + `sysinfo::System::processes()`; matches full 4-tuple for TCP or the session's local IP/port for UDP, then a TCP listener owning one session end |
+| 4 | Host service cache | All | Caches known local services (local endpoint, peer when connected); fallback for inbound connections |
+| 5 | Port-process cache | All | Keyed by (local_port, protocol), answers only the conversation (local address, remote end) it was learned from; PID-reuse protection via process start time and grace period for terminated processes |
+
+Every fallback (3 to 5, and the macOS libproc UDP scan) applies one rule, `l7_endpoints::evidence_end`: the evidence's local address and port must be one end of the session (a wildcard address only for an address the host owns), and its peer, when known, the other end. Until 2026-10 they matched on a port number alone, including the remote end's service port: on test-mint, WALinuxAgent's and avahi-daemon's short-lived sessions to 168.63.129.16:80 and :53 were attributed to `edamame_posture`.
 
 ### Resolution Sources Tracked
 
@@ -43,7 +45,7 @@ Each resolution is tagged with its source: `Ebpf`, `MacosLibproc`, `ExactMatch`,
 |-----|----------|---------|
 | Full process scan each cycle | Medium | `scan_all_process_sockets()` calls `proc_listallpids()` then `proc_pidinfo(PROC_PIDLISTFDS)` + `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` for every process. On systems with many processes, this is expensive (100+ ms). |
 | Race with process exit | Low | A process may exit between `proc_listallpids()` and `proc_pidfdinfo()`. Handled gracefully (returns empty), but the connection may be missed. |
-| UDP fuzzy matching only | Low | For UDP, falls back to port-based matching against `all_entries` since UDP sockets are often unconnected. May attribute to the wrong process if multiple processes bind the same port. |
+| UDP fallback by local endpoint | Low | For UDP, falls back to the sockets in `all_entries` bound to the session's local end, since UDP sockets are often unconnected; a connected socket must have the session's other end as its peer. A port re-bound by another process between the packet and the scan is still attributed to the new owner. |
 | No kernel-level connection tracing | Medium | Endpoint Security delivers process events but never socket events, so macOS has no kernel-side 4-tuple to PID join. ES narrows libproc to kernel-known PIDs, which lifts the 50 ms bucket from 33% to 100%, but the floor stays at 50 ms because libproc probing is still the bottleneck. Apple's Network Extension framework could provide per-flow PID mapping and would need further entitlements. |
 | Requires root or elevated entitlements | Low | `proc_pidfdinfo` for other processes requires root or appropriate entitlements. Without them, only the current process's sockets are visible. |
 
@@ -70,7 +72,7 @@ Each resolution is tagged with its source: `Ebpf`, `MacosLibproc`, `ExactMatch`,
 | PID reuse window | Low | Port-process cache checks `process_start_time` for PID reuse protection, but there is a small race window between process exit and the next sysinfo refresh where a recycled PID could be misattributed. Grace period mitigates this. |
 | `l7_map` unbounded for active sessions | Low | `l7_map` is a `CustomDashMap<Session, L7Resolution>` cleaned up by TTL, but while a session is active its entry is never evicted. Very long-running systems with 100k+ unique sessions could grow large. Mitigated by session pruning in `capture.rs`. |
 | No command-line argument capture | Low | `SessionL7.cmd` and `SessionL7.memory` fields exist but are populated only via `sysinfo::Process`; eBPF returns empty strings for these. |
-| UDP attribution accuracy | Medium | Without kernel-level hooks, UDP process attribution is best-effort across all platforms. Multiple processes using the same UDP port (e.g., DNS stub resolvers) may be misattributed. |
+| UDP attribution accuracy | Medium | Without kernel-level hooks, UDP process attribution is best-effort across all platforms. netstat2 reports no UDP peer, so a UDP row is matched by the session's local endpoint only: a local port re-bound by another process before the resolver round is attributed to the new owner. |
 | QUIC sessions | Medium | QUIC traffic appears as UDP. Process attribution works through standard UDP resolution paths but has no QUIC-specific awareness (no connection ID tracking, no 0-RTT visibility). |
 
 ---
