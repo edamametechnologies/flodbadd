@@ -528,18 +528,28 @@ mod tests {
         None
     }
 
-    /// Root, and the table is process-wide, so this runs ALONE: it spends
-    /// the walk budget on purpose (`cargo test --features fim,ebpf --lib --
-    /// --ignored --exact fim_fanotify::tests::a_directory_created_after_the_walk_budget_is_still_attributed`).
-    /// A root whose walk fills the budget, then a directory created under it
-    /// afterwards: its writes are still attributed (the reserve), a deep new
-    /// directory does not take the reserve, and a directory deleted and
-    /// created again is marked again.
+    /// Root only. The table is process-wide: the test spends the walk budget
+    /// on purpose and gives it back when it ends (its tree removed, the marks
+    /// forgotten), so the kernel tests that follow in the same serial run
+    /// (`make` runs `--ignored fanotify --test-threads=1`) can still mark
+    /// their roots. A root whose walk fills the budget, then a directory
+    /// created under it afterwards: its writes are still attributed (the
+    /// reserve), a deep new directory does not take the reserve, and a
+    /// directory deleted and created again is marked again.
     #[test]
     #[ignore]
     fn a_directory_created_after_the_walk_budget_is_still_attributed() {
+        // Give the budget back however the test ends.
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+                forget_directory(&self.0);
+            }
+        }
         let base =
             std::env::temp_dir().join(format!("flodbadd-fanotify-budget-{}", std::process::id()));
+        let _cleanup = Cleanup(base.clone());
         let bulk = base.join("bulk");
         for i in 0..(walk_budget() + 16) {
             std::fs::create_dir_all(bulk.join(format!("d{i:05}"))).unwrap();
@@ -589,8 +599,6 @@ mod tests {
         assert!(table
             .marked
             .contains_key(&aws.to_string_lossy().to_string()));
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Same privilege as the end-to-end test below. A second `init` -- the
