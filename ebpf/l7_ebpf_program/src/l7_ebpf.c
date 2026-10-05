@@ -512,7 +512,13 @@ int trace_sched_fork(void *ctx)
         return 0;
 
     __u32 child = tp_read_u32(ctx, cfg->fork_child_pid_off);
-    __u32 parent = tp_read_u32(ctx, cfg->fork_parent_pid_off);
+    /* The parent PROCESS. The tracepoint's parent_pid (cfg->fork_parent_pid_off)
+     * is the forking thread's id: a fork from any thread but the main one (Go
+     * runtimes, thread pools, a subprocess started off the main thread) named
+     * a pid no process holds, and the lineage walk -- keyed by process --
+     * stopped there. The tracepoint fires in the forking task's context, so
+     * the current tgid is the parent process. */
+    __u32 parent = (__u32)(bpf_get_current_pid_tgid() >> 32);
     bpf_map_update_elem(&proc_parent, &child, &parent, BPF_ANY);
 
     struct proc_event *ev = bpf_ringbuf_reserve(&proc_events, sizeof(*ev), 0);
@@ -557,8 +563,15 @@ int trace_sched_exit(void *ctx)
     /* Thread exits share this tracepoint; only report group leaders so
      * the stream mirrors process lifetimes. */
     __u64 id = bpf_get_current_pid_tgid();
-    if ((__u32)id != (__u32)(id >> 32))
+    if ((__u32)id != (__u32)(id >> 32)) {
+        /* A thread: no process event, but the fork tracepoint fired for its
+         * creation too, so drop the child->parent row it wrote; otherwise
+         * proc_parent fills up with the ids of exited threads and new forks
+         * stop being recorded. */
+        __u32 tid = (__u32)id;
+        bpf_map_delete_elem(&proc_parent, &tid);
         return 0;
+    }
 
     __u32 zero = 0;
     struct proc_tp_cfg *cfg = bpf_map_lookup_elem(&proc_tp_cfg, &zero);

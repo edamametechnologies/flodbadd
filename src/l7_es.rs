@@ -24,8 +24,186 @@
 use crate::sessions::SessionL7;
 use tracing::info;
 
+/// Parent and grandparent of a process as the Endpoint Security handler
+/// records them on its FORK and EXEC rows.
+///
+/// In an Endpoint Security message, `msg.process()` is the process that
+/// INSTIGATED the event. For `NOTIFY_FORK` that is the forker, the child's
+/// parent. For `NOTIFY_EXEC` it is the exec'ing process itself, in its
+/// pre-exec image: the same pid as `exec.target()`, never its parent. The
+/// exec arm recorded it as the parent until 2.0.5, so every macOS exec named
+/// its own pid as ppid (and its own previous image, or the forker's image
+/// copy, as the parent image), the core lineage walk stopped at the first
+/// step, and agent-subtree binding never happened on macOS (`kernel_exec`
+/// ancestry empty in every macOS export of FP lab run 37312097578).
+///
+/// Pure so it can be tested without Endpoint Security: the handler reads the
+/// kernel facts from the message and hands a table lookup in.
+#[cfg(any(test, all(target_os = "macos", feature = "endpointsecurity")))]
+mod es_lineage {
+    pub(crate) fn extract_process_name(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The lineage half of a process-table row.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct KnownProcess {
+        /// The parent the row names; 0 when it names none.
+        pub ppid: u32,
+        pub path: String,
+        pub args: Vec<String>,
+        pub parent_name: String,
+        pub parent_path: String,
+        pub parent_args: Vec<String>,
+        pub grandparent_pid: Option<u32>,
+        pub grandparent_name: String,
+        pub grandparent_path: String,
+        pub grandparent_args: Vec<String>,
+    }
+
+    /// The kernel's parent facts on the process performing an exec (the
+    /// message's `es_process_t`).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct ExecKernelFacts {
+        /// The exec'ing pid (`exec.target()` has the same one).
+        pub pid: u32,
+        /// `original_ppid`: the process that created this one. Unchanged
+        /// when the process is re-parented after its creator exits.
+        pub original_ppid: u32,
+        /// `parent_audit_token()` pid (message version 4+): the parent now.
+        pub parent_token_pid: Option<u32>,
+        /// `ppid`: the parent now (launchd once re-parented).
+        pub ppid: u32,
+    }
+
+    /// Parent and grandparent recorded on a row and pushed on the event.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct Lineage {
+        /// `None` when no parent is known: never the process itself.
+        pub ppid: Option<u32>,
+        pub parent_name: String,
+        pub parent_path: String,
+        pub parent_args: Vec<String>,
+        pub grandparent_pid: Option<u32>,
+        pub grandparent_name: String,
+        pub grandparent_path: String,
+        pub grandparent_args: Vec<String>,
+    }
+
+    fn is_other_process(candidate: u32, pid: u32) -> bool {
+        candidate != 0 && candidate != pid
+    }
+
+    /// The parent of an exec'ing process.
+    ///
+    /// The kernel's `original_ppid` is the process that created it, which is
+    /// what the row the fork arm wrote for this pid records too. Where both
+    /// exist and disagree, the row belongs to an earlier occupant of the pid
+    /// whose exit (or this occupant's fork) was never seen, and the kernel
+    /// wins. Without an `original_ppid`, the row (the forker as seen at fork
+    /// time) comes before the current parent, which is launchd once the
+    /// creator has exited. Nothing that names the pid itself is a parent.
+    pub(crate) fn exec_parent_pid(facts: &ExecKernelFacts, row_ppid: Option<u32>) -> Option<u32> {
+        let pid = facts.pid;
+        if is_other_process(facts.original_ppid, pid) {
+            return Some(facts.original_ppid);
+        }
+        row_ppid
+            .into_iter()
+            .chain(facts.parent_token_pid)
+            .chain(std::iter::once(facts.ppid))
+            .find(|candidate| is_other_process(*candidate, pid))
+    }
+
+    /// Parent and grandparent of an exec'ing process. `lookup` reads the
+    /// process table (returning a copy, so no table guard is held across the
+    /// caller's insert); `live_image` asks the kernel which image a pid runs
+    /// now, for a parent the table never saw.
+    ///
+    /// The parent is named, in order, by its own row (its image now, as the
+    /// Linux and Windows sensors name it), by the row the fork arm wrote for
+    /// this pid when that row names the same parent (the forker's image at
+    /// fork time), and by the parent's live image. The image this process ran
+    /// before the exec is never used: after an exec in place it is the
+    /// process's own previous image.
+    pub(crate) fn exec_lineage(
+        facts: &ExecKernelFacts,
+        lookup: impl Fn(u32) -> Option<KnownProcess>,
+        live_image: impl Fn(u32) -> Option<String>,
+    ) -> Lineage {
+        let pid = facts.pid;
+        let own_row = lookup(pid);
+        let Some(ppid) = exec_parent_pid(facts, own_row.as_ref().map(|row| row.ppid)) else {
+            return Lineage::default();
+        };
+        let mut lineage = Lineage {
+            ppid: Some(ppid),
+            ..Lineage::default()
+        };
+        let grandparent = |candidate: Option<u32>| {
+            candidate.filter(|gp| is_other_process(*gp, pid) && *gp != ppid)
+        };
+        if let Some(parent) = lookup(ppid) {
+            lineage.parent_name = extract_process_name(&parent.path);
+            lineage.parent_path = parent.path;
+            lineage.parent_args = parent.args;
+            lineage.grandparent_pid = grandparent(Some(parent.ppid));
+            lineage.grandparent_name = parent.parent_name;
+            lineage.grandparent_path = parent.parent_path;
+            lineage.grandparent_args = parent.parent_args;
+        } else if let Some(row) =
+            own_row.filter(|row| row.ppid == ppid && !row.parent_path.is_empty())
+        {
+            lineage.parent_name = row.parent_name;
+            lineage.parent_path = row.parent_path;
+            lineage.parent_args = row.parent_args;
+            lineage.grandparent_pid = grandparent(row.grandparent_pid);
+            lineage.grandparent_name = row.grandparent_name;
+            lineage.grandparent_path = row.grandparent_path;
+            lineage.grandparent_args = row.grandparent_args;
+        } else if let Some(path) = live_image(ppid).filter(|path| !path.is_empty()) {
+            lineage.parent_name = extract_process_name(&path);
+            lineage.parent_path = path;
+        }
+        lineage
+    }
+
+    /// Parent and grandparent of a forked child: the forker (the message's
+    /// process, whose image the kernel reports) and the forker's own parent
+    /// from its row.
+    pub(crate) fn fork_lineage(
+        child_pid: u32,
+        forker_pid: u32,
+        forker_path: &str,
+        lookup: impl Fn(u32) -> Option<KnownProcess>,
+    ) -> Lineage {
+        if !is_other_process(forker_pid, child_pid) {
+            return Lineage::default();
+        }
+        let mut lineage = Lineage {
+            ppid: Some(forker_pid),
+            parent_name: extract_process_name(forker_path),
+            parent_path: forker_path.to_string(),
+            ..Lineage::default()
+        };
+        if let Some(forker) = lookup(forker_pid) {
+            lineage.parent_args = forker.args;
+            lineage.grandparent_pid = Some(forker.ppid)
+                .filter(|gp| is_other_process(*gp, child_pid) && *gp != forker_pid);
+            lineage.grandparent_name = forker.parent_name;
+            lineage.grandparent_path = forker.parent_path;
+            lineage.grandparent_args = forker.parent_args;
+        }
+        lineage
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
 mod macos {
+    use super::es_lineage::{self, extract_process_name, ExecKernelFacts, KnownProcess};
     use super::*;
     use dashmap::DashMap;
     use endpoint_sec::version;
@@ -105,6 +283,7 @@ mod macos {
     #[derive(Clone, Debug)]
     pub struct EsProcessInfo {
         pub pid: u32,
+        /// The parent pid; 0 when no parent is known (never `pid` itself).
         pub ppid: u32,
         pub uid: u32,
         pub process_name: String,
@@ -130,11 +309,26 @@ mod macos {
         pub grandparent_args: Vec<String>,
     }
 
-    fn extract_process_name(path: &str) -> String {
-        std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
+    impl EsProcessInfo {
+        fn known(&self) -> KnownProcess {
+            KnownProcess {
+                ppid: self.ppid,
+                path: self.process_path.clone(),
+                args: self.args.clone(),
+                parent_name: self.parent_process_name.clone(),
+                parent_path: self.parent_process_path.clone(),
+                parent_args: self.parent_args.clone(),
+                grandparent_pid: self.grandparent_pid,
+                grandparent_name: self.grandparent_process_name.clone(),
+                grandparent_path: self.grandparent_process_path.clone(),
+                grandparent_args: self.grandparent_args.clone(),
+            }
+        }
+
+        /// `None` for a row that names no parent (`ppid` 0).
+        fn parent_pid(&self) -> Option<u32> {
+            (self.ppid != 0 && self.ppid != self.pid).then_some(self.ppid)
+        }
     }
 
     fn resolve_username(uid: u32) -> String {
@@ -378,28 +572,22 @@ mod macos {
                         let child = fork.child();
                         let child_pid = child.audit_token().pid() as u32;
 
-                        // Drop the read guard before the insert below -- same
-                        // DashMap same-shard deadlock as the exec arm.
-                        let (gp_pid, gp_name, gp_path, gp_args) = {
-                            let parent_info = table_for_handler.get(&responsible_pid);
-                            if let Some(parent) = parent_info.as_ref() {
-                                (
-                                    Some(parent.pid),
-                                    parent.parent_process_name.clone(),
-                                    parent.parent_process_path.clone(),
-                                    parent.parent_args.clone(),
-                                )
-                            } else {
-                                (None, String::new(), String::new(), Vec::new())
-                            }
-                        };
-
-                        let parent_path = responsible
+                        // The forker (the message's process) is the parent;
+                        // its own row names the grandparent. The lookup
+                        // copies the row, so no read guard is held across
+                        // the insert below (DashMap same-shard deadlock, see
+                        // the exec arm).
+                        let forker_path = responsible
                             .executable()
                             .path()
                             .to_string_lossy()
                             .to_string();
-                        let parent_name = extract_process_name(&parent_path);
+                        let lineage = es_lineage::fork_lineage(
+                            child_pid,
+                            responsible_pid,
+                            &forker_path,
+                            |pid| table_for_handler.get(&pid).map(|row| row.known()),
+                        );
                         let child_path = child.executable().path().to_string_lossy().to_string();
                         // Fork-created entries carry the (pre-exec) child
                         // image's identity; the exec arm overwrites the row
@@ -410,7 +598,7 @@ mod macos {
 
                         let info = EsProcessInfo {
                             pid: child_pid,
-                            ppid: responsible_pid,
+                            ppid: lineage.ppid.unwrap_or(0),
                             uid: child.audit_token().euid(),
                             process_name: extract_process_name(&child_path),
                             process_path: child_path,
@@ -422,27 +610,29 @@ mod macos {
                             is_platform_binary: child.is_platform_binary(),
                             signing_id: child_signing_id,
                             team_id: child_team_id,
-                            parent_process_name: parent_name,
-                            parent_process_path: parent_path.clone(),
-                            parent_args: Vec::new(),
-                            grandparent_pid: gp_pid,
-                            grandparent_process_name: gp_name,
-                            grandparent_process_path: gp_path,
-                            grandparent_args: gp_args,
+                            parent_process_name: lineage.parent_name,
+                            parent_process_path: lineage.parent_path,
+                            parent_args: lineage.parent_args,
+                            grandparent_pid: lineage.grandparent_pid,
+                            grandparent_process_name: lineage.grandparent_name,
+                            grandparent_process_path: lineage.grandparent_path,
+                            grandparent_args: lineage.grandparent_args,
                         };
                         let child_path_for_event = info.process_path.clone();
                         let child_name_for_event = info.process_name.clone();
+                        let child_parent_path = (!info.parent_process_path.is_empty())
+                            .then(|| info.parent_process_path.clone());
                         let child_uid = info.uid;
                         table_for_handler.insert(child_pid, info);
                         crate::process_events::push(crate::process_events::ProcessEvent {
                             timestamp_ms: crate::process_events::now_ms(),
                             kind: crate::process_events::ProcessEventKind::Fork,
                             pid: child_pid,
-                            ppid: Some(responsible_pid),
+                            ppid: lineage.ppid,
                             uid: Some(child_uid),
                             process_name: child_name_for_event,
                             process_path: child_path_for_event,
-                            parent_process_path: Some(parent_path),
+                            parent_process_path: child_parent_path,
                             argv_sha256: None,
                             argv_len: None,
                             signing_id: None,
@@ -475,52 +665,41 @@ mod macos {
                         let signing_id = target.signing_id().to_string_lossy().to_string();
                         let team_id = target.team_id().to_string_lossy().to_string();
 
-                        // Extract everything needed from the parent row, then
-                        // DROP the DashMap read guard BEFORE the insert below.
-                        // Holding a `get()` Ref across `insert()` deadlocks
-                        // DashMap whenever the target PID hashes to the parent's
-                        // shard (same thread takes the shard read lock, then
-                        // waits on its write lock). Inside the ES handler that
-                        // freezes the serial dispatch queue and silently kills
-                        // the whole event stream after the first colliding exec
-                        // -- the FLODBADD2 §1b.2 bring-up freeze.
-                        let (
-                            (parent_name, parent_path, parent_args),
-                            (gp_pid, gp_name, gp_path, gp_args),
-                        ) = {
-                            let parent_info = table_for_handler.get(&responsible_pid);
-                            let parents = if let Some(p) = parent_info.as_ref() {
-                                (
-                                    p.process_name.clone(),
-                                    p.process_path.clone(),
-                                    p.args.clone(),
-                                )
-                            } else {
-                                let rpath = responsible
-                                    .executable()
-                                    .path()
-                                    .to_string_lossy()
-                                    .to_string();
-                                (extract_process_name(&rpath), rpath, Vec::new())
-                            };
-                            let grand = if let Some(p) = parent_info.as_ref() {
-                                (
-                                    Some(p.ppid),
-                                    p.parent_process_name.clone(),
-                                    p.parent_process_path.clone(),
-                                    p.parent_args.clone(),
-                                )
-                            } else {
-                                (None, String::new(), String::new(), Vec::new())
-                            };
-                            (parents, grand)
+                        // The parent: `msg.process()` is the exec'ing
+                        // process itself (pid == target pid), so it is never
+                        // the parent (see `es_lineage`). The kernel's
+                        // creator / parent facts and the rows the fork arm
+                        // wrote name it instead.
+                        //
+                        // Every table read goes through `lookup`, which
+                        // copies the row and drops the DashMap read guard
+                        // BEFORE the insert below. Holding a `get()` Ref
+                        // across `insert()` deadlocks DashMap whenever the
+                        // target PID hashes to the read row's shard (same
+                        // thread takes the shard read lock, then waits on its
+                        // write lock). Inside the ES handler that freezes the
+                        // serial dispatch queue and silently kills the whole
+                        // event stream after the first colliding exec -- the
+                        // FLODBADD2 §1b.2 bring-up freeze.
+                        let facts = ExecKernelFacts {
+                            pid: target_pid,
+                            original_ppid: u32::try_from(responsible.original_ppid()).unwrap_or(0),
+                            parent_token_pid: responsible
+                                .parent_audit_token()
+                                .and_then(|token| u32::try_from(token.pid()).ok()),
+                            ppid: u32::try_from(responsible.ppid()).unwrap_or(0),
                         };
+                        let lineage = es_lineage::exec_lineage(
+                            &facts,
+                            |pid| table_for_handler.get(&pid).map(|row| row.known()),
+                            |pid| crate::l7_macos::process_identity(pid).map(|(_, path)| path),
+                        );
 
                         let username = resolve_username(target.audit_token().euid());
 
                         let info = EsProcessInfo {
                             pid: target_pid,
-                            ppid: responsible_pid,
+                            ppid: lineage.ppid.unwrap_or(0),
                             uid: target.audit_token().euid(),
                             process_name: extract_process_name(&target_path),
                             process_path: target_path,
@@ -532,13 +711,13 @@ mod macos {
                             is_platform_binary: is_platform,
                             signing_id: signing_id.trim().to_string(),
                             team_id: team_id.trim().to_string(),
-                            parent_process_name: parent_name,
-                            parent_process_path: parent_path,
-                            parent_args,
-                            grandparent_pid: gp_pid,
-                            grandparent_process_name: gp_name,
-                            grandparent_process_path: gp_path,
-                            grandparent_args: gp_args,
+                            parent_process_name: lineage.parent_name,
+                            parent_process_path: lineage.parent_path,
+                            parent_args: lineage.parent_args,
+                            grandparent_pid: lineage.grandparent_pid,
+                            grandparent_process_name: lineage.grandparent_name,
+                            grandparent_process_path: lineage.grandparent_path,
+                            grandparent_args: lineage.grandparent_args,
                         };
                         // FLODBADD2 §1b.2 monitoring stream: exec with
                         // argv digested (I5) and the kernel-vouched
@@ -546,7 +725,8 @@ mod macos {
                         let event_path = info.process_path.clone();
                         let event_name = info.process_name.clone();
                         let event_uid = info.uid;
-                        let event_parent_path = info.parent_process_path.clone();
+                        let event_parent_path = (!info.parent_process_path.is_empty())
+                            .then(|| info.parent_process_path.clone());
                         let event_argc = info.args.len() as u32;
                         let argv_sha256 = proc_events::argv_digest(&info.args);
                         table_for_handler.insert(target_pid, info);
@@ -554,11 +734,11 @@ mod macos {
                             timestamp_ms: proc_events::now_ms(),
                             kind: proc_events::ProcessEventKind::Exec,
                             pid: target_pid,
-                            ppid: Some(responsible_pid),
+                            ppid: lineage.ppid,
                             uid: Some(event_uid),
                             process_name: event_name,
                             process_path: event_path,
-                            parent_process_path: Some(event_parent_path),
+                            parent_process_path: event_parent_path,
                             argv_sha256,
                             argv_len: (event_argc > 0).then_some(event_argc),
                             signing_id: optional_identity(target.signing_id().to_string_lossy()),
@@ -582,14 +762,17 @@ mod macos {
                             exit_team,
                             exit_platform,
                         ) = match removed {
-                            Some((_, info)) => (
-                                info.process_name,
-                                info.process_path,
-                                Some(info.ppid),
-                                (!info.signing_id.is_empty()).then_some(info.signing_id),
-                                (!info.team_id.is_empty()).then_some(info.team_id),
-                                Some(info.is_platform_binary),
-                            ),
+                            Some((_, info)) => {
+                                let ppid = info.parent_pid();
+                                (
+                                    info.process_name,
+                                    info.process_path,
+                                    ppid,
+                                    (!info.signing_id.is_empty()).then_some(info.signing_id),
+                                    (!info.team_id.is_empty()).then_some(info.team_id),
+                                    Some(info.is_platform_binary),
+                                )
+                            }
                             None => {
                                 // Untracked (predates the client): still
                                 // record the exit with what the message
@@ -1008,7 +1191,7 @@ mod macos {
                 cmd: es_info.args.clone(),
                 cwd: es_info.cwd.clone(),
                 start_time: es_info.start_time,
-                parent_pid: Some(es_info.ppid),
+                parent_pid: es_info.parent_pid(),
                 parent_process_name: es_info.parent_process_name.clone(),
                 parent_process_path: es_info.parent_process_path.clone(),
                 parent_cmd: es_info.parent_args.clone(),
@@ -1049,7 +1232,7 @@ mod macos {
                     base_l7.cwd = info.cwd.clone();
                 }
                 if base_l7.parent_process_name.is_empty() {
-                    base_l7.parent_pid = Some(info.ppid);
+                    base_l7.parent_pid = info.parent_pid();
                     base_l7.parent_process_name = info.parent_process_name.clone();
                     base_l7.parent_process_path = info.parent_process_path.clone();
                     base_l7.parent_cmd = info.parent_args.clone();
@@ -1232,6 +1415,189 @@ pub fn file_event_stats() -> (u64, u64, u64, u64, u64, u64, u64, u64, u64) {
 
 pub fn dump_file_attribution_paths(max: usize) -> Vec<(String, u32, String)> {
     macos::global().dump_file_attribution_paths(max)
+}
+
+#[cfg(test)]
+mod es_lineage_tests {
+    //! The parent selection of the Endpoint Security handler, without
+    //! Endpoint Security: a `HashMap` stands in for the process table and
+    //! `apply_fork` / `apply_exec` write the rows the handler writes.
+    use super::es_lineage::*;
+    use std::collections::HashMap;
+
+    type Table = HashMap<u32, KnownProcess>;
+
+    fn row_from(lineage: Lineage, path: &str, args: &[&str]) -> KnownProcess {
+        KnownProcess {
+            ppid: lineage.ppid.unwrap_or(0),
+            path: path.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            parent_name: lineage.parent_name,
+            parent_path: lineage.parent_path,
+            parent_args: lineage.parent_args,
+            grandparent_pid: lineage.grandparent_pid,
+            grandparent_name: lineage.grandparent_name,
+            grandparent_path: lineage.grandparent_path,
+            grandparent_args: lineage.grandparent_args,
+        }
+    }
+
+    /// The fork arm: the forker's image is the child's image until its exec.
+    fn apply_fork(table: &mut Table, forker: u32, child: u32) -> Lineage {
+        let forker_path = table
+            .get(&forker)
+            .map(|r| r.path.clone())
+            .unwrap_or_default();
+        let lineage = fork_lineage(child, forker, &forker_path, |pid| table.get(&pid).cloned());
+        table.insert(child, row_from(lineage.clone(), &forker_path, &[]));
+        lineage
+    }
+
+    /// The exec arm, with the kernel reporting `creator` as the original
+    /// parent and `current` as the parent now.
+    fn apply_exec(table: &mut Table, pid: u32, creator: u32, current: u32, image: &str) -> Lineage {
+        let facts = ExecKernelFacts {
+            pid,
+            original_ppid: creator,
+            parent_token_pid: Some(current),
+            ppid: current,
+        };
+        let lineage = exec_lineage(&facts, |p| table.get(&p).cloned(), |_| None);
+        table.insert(pid, row_from(lineage.clone(), image, &[image]));
+        lineage
+    }
+
+    fn seed(table: &mut Table, pid: u32, ppid: u32, image: &str) {
+        table.insert(
+            pid,
+            KnownProcess {
+                ppid,
+                path: image.to_string(),
+                args: vec![image.to_string()],
+                ..KnownProcess::default()
+            },
+        );
+    }
+
+    /// The lineage gate's chain: python -> edl_p (a shell) -> edl_c. Each
+    /// exec names the process that forked it, never itself, and the
+    /// grandparent is the parent's parent.
+    #[test]
+    fn an_exec_names_its_forker_never_itself() {
+        let mut t = Table::new();
+        seed(&mut t, 100, 50, "/usr/bin/python3");
+        apply_fork(&mut t, 100, 200);
+        let shell = apply_exec(&mut t, 200, 100, 100, "/work/edl_p");
+        assert_eq!(shell.ppid, Some(100));
+        assert_eq!(shell.parent_path, "/usr/bin/python3");
+        assert_eq!(shell.grandparent_pid, Some(50));
+
+        apply_fork(&mut t, 200, 300);
+        let child = apply_exec(&mut t, 300, 200, 200, "/work/edl_c");
+        assert_eq!(child.ppid, Some(200));
+        assert_eq!(child.parent_name, "edl_p");
+        assert_eq!(child.parent_path, "/work/edl_p");
+        assert_eq!(child.parent_args, vec!["/work/edl_p".to_string()]);
+        assert_eq!(child.grandparent_pid, Some(100));
+        assert_eq!(child.grandparent_path, "/usr/bin/python3");
+    }
+
+    /// The pre-2.0.5 shape: the exec'ing process is the message's process,
+    /// so every pid the message offers can be the exec'ing pid itself. None
+    /// of them is a parent.
+    #[test]
+    fn a_self_referential_parent_is_no_parent() {
+        let facts = ExecKernelFacts {
+            pid: 200,
+            original_ppid: 200,
+            parent_token_pid: Some(200),
+            ppid: 200,
+        };
+        assert_eq!(exec_parent_pid(&facts, Some(200)), None);
+        let lineage = exec_lineage(&facts, |_| None, |_| Some("/bin/zsh".into()));
+        assert_eq!(lineage, Lineage::default());
+    }
+
+    /// A shell that execs in place keeps its parent, and its previous image
+    /// is not that parent.
+    #[test]
+    fn an_exec_in_place_keeps_the_parent_and_not_the_previous_image() {
+        let mut t = Table::new();
+        seed(&mut t, 100, 1, "/usr/bin/login");
+        apply_fork(&mut t, 100, 200);
+        apply_exec(&mut t, 200, 100, 100, "/bin/bash");
+        let again = apply_exec(&mut t, 200, 100, 100, "/usr/bin/python3");
+        assert_eq!(again.ppid, Some(100));
+        assert_eq!(again.parent_path, "/usr/bin/login");
+        assert_ne!(again.parent_path, "/bin/bash");
+    }
+
+    /// The creator exited before the child exec'd: the kernel's current
+    /// parent is launchd, the creator stays the parent, named from the row
+    /// the fork arm wrote.
+    #[test]
+    fn a_reparented_child_keeps_its_creator() {
+        let mut t = Table::new();
+        seed(&mut t, 100, 1, "/opt/homebrew/bin/claude");
+        apply_fork(&mut t, 100, 200);
+        t.remove(&100);
+        let lineage = apply_exec(&mut t, 200, 100, 1, "/usr/bin/curl");
+        assert_eq!(lineage.ppid, Some(100));
+        assert_eq!(lineage.parent_path, "/opt/homebrew/bin/claude");
+
+        // Without an original ppid the fork row still beats launchd.
+        let facts = ExecKernelFacts {
+            pid: 200,
+            original_ppid: 0,
+            parent_token_pid: Some(1),
+            ppid: 1,
+        };
+        assert_eq!(exec_parent_pid(&facts, Some(100)), Some(100));
+        assert_eq!(exec_parent_pid(&facts, None), Some(1));
+    }
+
+    /// A row left by an earlier occupant of the pid (its exit was never
+    /// seen) names another parent: the kernel's creator wins and the stale
+    /// row lends nothing.
+    #[test]
+    fn a_stale_row_for_the_pid_lends_nothing() {
+        let mut t = Table::new();
+        seed(&mut t, 300, 1, "/tmp/stale/launcher");
+        apply_fork(&mut t, 300, 200);
+        let facts = ExecKernelFacts {
+            pid: 200,
+            original_ppid: 100,
+            parent_token_pid: Some(100),
+            ppid: 100,
+        };
+        let lineage = exec_lineage(
+            &facts,
+            |p| t.get(&p).cloned(),
+            |p| (p == 100).then(|| "/Applications/Cursor.app/Contents/MacOS/Cursor".into()),
+        );
+        assert_eq!(lineage.ppid, Some(100));
+        assert_eq!(
+            lineage.parent_path,
+            "/Applications/Cursor.app/Contents/MacOS/Cursor"
+        );
+        assert_eq!(lineage.grandparent_pid, None);
+        assert!(lineage.grandparent_path.is_empty());
+    }
+
+    /// The fork arm's grandparent is the forker's parent, not the forker.
+    #[test]
+    fn a_fork_names_the_forkers_parent_as_grandparent() {
+        let mut t = Table::new();
+        seed(&mut t, 50, 1, "/bin/zsh");
+        apply_fork(&mut t, 50, 100);
+        apply_exec(&mut t, 100, 50, 50, "/usr/bin/python3");
+        let lineage = apply_fork(&mut t, 100, 200);
+        assert_eq!(lineage.ppid, Some(100));
+        assert_eq!(lineage.parent_path, "/usr/bin/python3");
+        assert_eq!(lineage.grandparent_pid, Some(50));
+        assert_eq!(lineage.grandparent_path, "/bin/zsh");
+        assert_eq!(fork_lineage(7, 7, "/bin/sh", |_| None), Lineage::default());
+    }
 }
 
 #[cfg(test)]

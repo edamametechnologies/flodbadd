@@ -70,8 +70,8 @@ block or delay process execution or file I/O.
 
 | Event | Used for |
 |---|---|
-| `NOTIFY_FORK` | Insert the child into the process table with the parent and grandparent chain; push a `Fork` process event |
-| `NOTIFY_EXEC` | Overwrite the row with the exec target's identity (path, argv, cwd, signing id, team id, platform binary); push an `Exec` process event with the argv digest |
+| `NOTIFY_FORK` | Insert the child into the process table: parent = the forker (the message's process), grandparent = the forker's own parent from its row; push a `Fork` process event |
+| `NOTIFY_EXEC` | Overwrite the row with the exec target's identity (path, argv, cwd, signing id, team id, platform binary) and its parent (see below); push an `Exec` process event with the argv digest |
 | `NOTIFY_EXIT` | Remove the pid from the process table; push an `Exit` process event |
 | `NOTIFY_GET_TASK` | Push a `TaskAccess` event with `task_access_mode = 2` (control port) |
 | `NOTIFY_GET_TASK_READ` | Push a `TaskAccess` event with `task_access_mode = 1` (read-only port) |
@@ -80,6 +80,26 @@ block or delay process execution or file I/O.
 | `NOTIFY_CLOSE` | Only when `ev.modified()` is true: record attribution; emit a FIM `Modify` |
 | `NOTIFY_RENAME` | Record attribution for **both** the source and the destination; emit a FIM `Delete` for the source and a FIM `Rename` for the destination |
 | `NOTIFY_UNLINK` | Record attribution for the target; emit a FIM `Delete` |
+
+### The parent of an exec
+
+In an ES message, `msg.process()` is the process that instigated the event. For
+`NOTIFY_FORK` that is the forker. For `NOTIFY_EXEC` it is the exec'ing process itself, in
+its pre-exec image: the same pid as `exec.target()`. Until 2.0.5 the exec arm recorded it
+as the parent, so every macOS exec named its own pid as its ppid and the core lineage walk
+(`edamame_core` `process_lineage`) stopped at the first step: no ancestry and no
+agent-subtree binding on macOS.
+
+`es_lineage::exec_lineage` (pure, unit-tested without ES) picks the parent from the
+kernel's facts on the exec'ing process: `original_ppid` (the creator, unchanged when the
+process is re-parented) first; then the ppid the fork arm recorded for the pid; then
+`parent_audit_token()` / `ppid` (the current parent, launchd once re-parented). A row for
+the pid that names another parent than `original_ppid` belongs to an earlier occupant of
+the pid and lends nothing. Nothing that names the pid itself is ever a parent. The parent
+is named by its own row, else by the fork row when it names the same parent, else by its
+live image (`proc_pidpath`); never by the pre-exec image, which after an exec in place is
+the process's own previous image. The posture security gate's lineage check
+(`tests/security/run_lineage_gate.py`) asserts this end to end on every platform.
 
 `NOTIFY_GET_TASK_READ` requires the `endpoint-sec` crate's `macos_11_3_0` feature, which
 `Cargo.toml` enables unconditionally on the optional dependency.
