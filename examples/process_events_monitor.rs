@@ -171,6 +171,33 @@ fn main() {
             .filter(|e| e.kind == ProcessEventKind::TaskAccess)
             .count()
     );
+    // Parent naming: how many execs carried a parent image, and whether the
+    // children this monitor spawned (`--storm`) name it -- the parent the
+    // sensor must resolve while the child's start event is being delivered.
+    let own_pid = std::process::id();
+    let own_image = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let own_children: Vec<_> = execs.iter().filter(|e| e.ppid == Some(own_pid)).collect();
+    println!(
+        "parents: exec_with_parent_path={} own_children={} own_children_naming_this_monitor={}",
+        execs
+            .iter()
+            .filter(|e| e
+                .parent_process_path
+                .as_deref()
+                .is_some_and(|p| !p.is_empty()))
+            .count(),
+        own_children.len(),
+        own_children
+            .iter()
+            .filter(|e| {
+                e.parent_process_path
+                    .as_deref()
+                    .is_some_and(|p| p.to_lowercase() == own_image)
+            })
+            .count(),
+    );
     // `--show-requester <a,b,...>`: only task accesses whose requester name or
     // path contains one of the texts (case-insensitive), so a driven open is
     // not lost behind the first 32 of a busy host.

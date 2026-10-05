@@ -1115,6 +1115,91 @@ mod win {
         }
     }
 
+    /// Creation time of the process holding `pid` now, as a FILETIME (100 ns
+    /// since 1601), from the kernel. Query-limited access only.
+    fn process_creation_filetime(pid: u32) -> Option<u64> {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut created = FILETIME::default();
+            let mut exited = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            let ok =
+                GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).is_ok();
+            let _ = CloseHandle(handle);
+            if !ok {
+                return None;
+            }
+            let filetime =
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            (filetime > 0).then_some(filetime)
+        }
+    }
+
+    /// Image of the process holding `pid` now, provided it was created no
+    /// later than `not_after` (a FILETIME): the parent of a process created
+    /// at `not_after` is older than it, and a process that took the parent's
+    /// pid after the parent exited is younger. `None` when the occupant is
+    /// younger or its creation time cannot be read (unmeasured, never a
+    /// guess).
+    fn query_image_path_created_by(pid: u32, not_after: u64) -> Option<String> {
+        let created = process_creation_filetime(pid)?;
+        if !occupant_predates(created, not_after) {
+            return None;
+        }
+        query_image_path(pid)
+    }
+
+    /// The parent of a process exists before it does.
+    fn occupant_predates(occupant_created: u64, child_created: u64) -> bool {
+        occupant_created <= child_created
+    }
+
+    #[cfg(test)]
+    mod parent_occupant_tests {
+        use super::{occupant_predates, process_creation_filetime, query_image_path_created_by};
+
+        #[test]
+        fn a_parent_is_older_than_its_child_and_a_successor_is_not() {
+            assert!(occupant_predates(100, 200));
+            assert!(occupant_predates(200, 200));
+            assert!(!occupant_predates(201, 200));
+        }
+
+        /// Against the kernel: this test process is the parent of the child
+        /// it spawns, and is refused as the parent of anything created before
+        /// it (the shape of a successor holding a recycled parent pid).
+        #[test]
+        fn the_kernel_creation_time_tells_a_parent_from_a_successor() {
+            let own = std::process::id();
+            let own_created = process_creation_filetime(own).expect("own creation time");
+            let mut child = std::process::Command::new("cmd")
+                .args(["/c", "ping", "-n", "3", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a child");
+            let child_created = process_creation_filetime(child.id()).expect("child creation time");
+            assert!(own_created <= child_created);
+            let parent = query_image_path_created_by(own, child_created)
+                .expect("the parent existed when the child was created");
+            let own_exe = std::env::current_exe().unwrap();
+            assert!(
+                parent.eq_ignore_ascii_case(&own_exe.to_string_lossy()),
+                "{parent} vs {own_exe:?}"
+            );
+            assert!(
+                query_image_path_created_by(own, own_created - 1).is_none(),
+                "a process younger than the child is not its parent"
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     /// Subtrees of the Windows directory that a standard (non-elevated) user
     /// can write to on a default Windows 10/11 install. `%SystemRoot%` as a
     /// whole is protected, but these leaf directories are created with ACLs
@@ -1424,6 +1509,15 @@ mod win {
                     .unwrap_or(image_file_name);
                 let argv_sha256 = command_line.and_then(|cmd| proc_events::argv_digest(&[cmd]));
 
+                // When the child came to exist: its own creation time while it
+                // is alive (the same kernel clock as its parent's), else the
+                // event's (system time: the session does not ask for raw
+                // timestamps).
+                let child_created = process_creation_filetime(pid).or_else(|| {
+                    u64::try_from(event.EventHeader.TimeStamp)
+                        .ok()
+                        .filter(|t| *t > 0)
+                });
                 THREAD_PROCESS_TABLE.with(|t| {
                     if let Some(table) = t.borrow().as_ref() {
                         // The table is a pid -> image cache, and Windows
@@ -1438,14 +1532,26 @@ mod win {
                         // Ask the kernel what currently owns the pid first;
                         // the cache is the fallback for a parent that has
                         // already exited.
-                        let parent_process_path = query_image_path(ppid)
-                            .filter(|path| !path.is_empty())
-                            .or_else(|| {
-                                table
-                                    .get(&ppid)
-                                    .map(|parent| parent.process_path.clone())
-                                    .filter(|path| !path.is_empty())
-                            });
+                        //
+                        // The kernel's answer is the pid's occupant NOW, which
+                        // is the parent only if it already existed when the
+                        // child was created: a launcher that exits right after
+                        // CreateProcess frees its pid before this callback
+                        // runs (the session delivers up to a second late), and
+                        // the next process to take it is no parent (FP-WIN-29
+                        // class). A later occupant is refused and the cache
+                        // answers instead.
+                        let parent_process_path = match child_created {
+                            Some(child_created) => query_image_path_created_by(ppid, child_created),
+                            None => query_image_path(ppid),
+                        }
+                        .filter(|path| !path.is_empty())
+                        .or_else(|| {
+                            table
+                                .get(&ppid)
+                                .map(|parent| parent.process_path.clone())
+                                .filter(|path| !path.is_empty())
+                        });
                         proc_events::push(proc_events::ProcessEvent {
                             timestamp_ms: proc_events::now_ms(),
                             kind: proc_events::ProcessEventKind::Exec,
