@@ -145,6 +145,10 @@ mod win {
     const EVENT_TRACE_TYPE_START: u8 = 1; // Process/Start
     const EVENT_TRACE_TYPE_END: u8 = 2; // Process/End
 
+    // Process/DCStart: the kernel logger's rundown, one per process already
+    // running when the session starts (same payload as Process/Start).
+    const EVENT_TRACE_TYPE_DC_START: u8 = 3;
+
     // FileIo event opcodes (all delivered by EVENT_TRACE_FLAG_FILE_IO_INIT,
     // i.e. initiation events in the caller's process context)
     const FILEIO_CREATE: u8 = 64; // FileIo/Create -- file open or create with full path
@@ -1161,13 +1165,47 @@ mod win {
 
     #[cfg(test)]
     mod parent_occupant_tests {
-        use super::{occupant_predates, process_creation_filetime, query_image_path_created_by};
+        use super::{
+            occupant_predates, process_creation_filetime, query_image_path_created_by,
+            running_parent_verified,
+        };
 
         #[test]
         fn a_parent_is_older_than_its_child_and_a_successor_is_not() {
             assert!(occupant_predates(100, 200));
             assert!(occupant_predates(200, 200));
             assert!(!occupant_predates(201, 200));
+        }
+
+        /// A process found running by the rundown keeps its parent pid only
+        /// when the process holding that pid is verifiably no younger: a
+        /// younger holder took the pid after the real parent exited, and an
+        /// unreadable creation time is unmeasured, never a parent.
+        #[test]
+        fn a_running_process_names_only_a_verified_parent() {
+            assert!(running_parent_verified(Some(200), Some(100)));
+            assert!(running_parent_verified(Some(200), Some(200)));
+            assert!(!running_parent_verified(Some(200), Some(201)));
+            assert!(!running_parent_verified(None, Some(100)));
+            assert!(!running_parent_verified(Some(200), None));
+            assert!(!running_parent_verified(None, None));
+        }
+
+        /// Against the kernel: this test process is older than a child it
+        /// spawns, so the child's parent pid verifies; the reverse does not.
+        #[test]
+        fn the_kernel_creation_times_verify_a_running_parent() {
+            let own_created = process_creation_filetime(std::process::id());
+            let mut child = std::process::Command::new("cmd")
+                .args(["/c", "ping", "-n", "3", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a child");
+            let child_created = process_creation_filetime(child.id());
+            assert!(running_parent_verified(child_created, own_created));
+            assert!(!running_parent_verified(own_created, child_created));
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
         /// Against the kernel: this test process is the parent of the child
@@ -1434,6 +1472,166 @@ mod win {
         }
     }
 
+    /// What a `Process/Start` or `Process/DCStart` payload (MOF
+    /// Process_TypeGroup1, shared by both) says about a process.
+    struct DecodedProcess {
+        pid: u32,
+        ppid: u32,
+        session_id: u32,
+        process_name: String,
+        image_path: String,
+        argv_sha256: Option<String>,
+    }
+
+    unsafe fn decode_process_payload(event: &EVENT_RECORD) -> Option<DecodedProcess> {
+        let data_ptr = event.UserData;
+        let data_len = event.UserDataLength as usize;
+        if data_ptr.is_null() || data_len < std::mem::size_of::<ProcessStartEvent>() {
+            return None;
+        }
+        // Layout-aware decode (MOF Process_V3/V4, pointer size from
+        // the header); the printable-run heuristics stay as a
+        // fallback for kernels whose layout we have not seen.
+        let full = std::slice::from_raw_parts(data_ptr as *const u8, data_len);
+        let ptr_size = if (event.EventHeader.Flags as u32) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
+            4
+        } else {
+            8
+        };
+        let version = event.EventHeader.EventDescriptor.Version;
+        let parsed = crate::etw_process_payload::parse_process_start(full, version, ptr_size);
+        let ev = &*(data_ptr as *const ProcessStartEvent);
+        let (pid, ppid, session_id) = match parsed.as_ref() {
+            Some(p) => (p.pid, p.ppid, p.session_id),
+            None => (ev.pid, ev.ppid, ev.session_id),
+        };
+
+        let fixed_size = std::mem::size_of::<ProcessStartEvent>();
+        let remaining_slice = &full[fixed_size.min(full.len())..];
+        let (image_file_name, command_line) = match parsed.as_ref() {
+            Some(p) if !p.image_file_name.is_empty() => (
+                p.image_file_name.clone(),
+                (!p.command_line.is_empty()).then(|| p.command_line.clone()),
+            ),
+            _ => (
+                extract_image_path(remaining_slice),
+                extract_command_line(remaining_slice),
+            ),
+        };
+        // ImageFileName is usually a bare `image.exe`; the full path
+        // comes from the command line's executable token or, while
+        // the process is alive, from the kernel.
+        let image_path = if image_file_name.contains('\\') || image_file_name.contains('/') {
+            image_file_name.clone()
+        } else {
+            command_line
+                .as_deref()
+                .and_then(|cmd| {
+                    crate::etw_process_payload::image_path_from_command_line(&image_file_name, cmd)
+                })
+                .or_else(|| query_image_path(pid))
+                .unwrap_or_else(|| image_file_name.clone())
+        };
+        let process_name = std::path::Path::new(&image_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(image_file_name);
+        let argv_sha256 = command_line.and_then(|cmd| proc_events::argv_digest(&[cmd]));
+        Some(DecodedProcess {
+            pid,
+            ppid,
+            session_id,
+            process_name,
+            image_path,
+            argv_sha256,
+        })
+    }
+
+    /// `Process/DCStart`: the rundown of a process that was already running
+    /// when the session started. Its `Process/Start` is not in the stream, so
+    /// without this record the ancestry of everything it starts afterwards
+    /// stops one step short of it: the posture security gate's interpreter,
+    /// started a few hundred milliseconds before the daemon's capture opened
+    /// this session, never appeared above its own child (lineage gate,
+    /// windows-x64, CI run 37342427407).
+    ///
+    /// A running process's parent pid is its creator's, recorded at creation
+    /// and never updated: the creator may have exited long ago and its pid
+    /// gone to a later process. It names the parent only when the process
+    /// holding it now is no younger than this one (both creation times from
+    /// the kernel); otherwise, or when either time cannot be read, the parent
+    /// is unknown, never guessed (FP-WIN-29 class).
+    unsafe fn handle_process_rundown(event: &EVENT_RECORD) {
+        let Some(p) = decode_process_payload(event) else {
+            return;
+        };
+        if p.pid == 0 || p.pid == GetCurrentProcessId() {
+            return;
+        }
+        let parent_verified = p.ppid != 0
+            && p.ppid != p.pid
+            && running_parent_verified(
+                process_creation_filetime(p.pid),
+                process_creation_filetime(p.ppid),
+            );
+        let (ppid, parent_process_path) = if parent_verified {
+            (
+                Some(p.ppid),
+                query_image_path(p.ppid).filter(|path| !path.is_empty()),
+            )
+        } else {
+            (None, None)
+        };
+        THREAD_PROCESS_TABLE.with(|t| {
+            if let Some(table) = t.borrow().as_ref() {
+                proc_events::push(proc_events::ProcessEvent {
+                    timestamp_ms: proc_events::now_ms(),
+                    kind: proc_events::ProcessEventKind::Running,
+                    pid: p.pid,
+                    ppid,
+                    uid: None,
+                    process_name: p.process_name.clone(),
+                    process_path: p.image_path.clone(),
+                    parent_process_path,
+                    argv_sha256: p.argv_sha256,
+                    argv_len: None,
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary: None,
+                    platform_path_marked: false,
+                    target_pid: None,
+                    target_process_path: None,
+                    task_access_mode: None,
+                    task_access_mask: None,
+                    net_dst: None,
+                });
+                // The attribution table was primed from a snapshot just before
+                // the session started; it already holds this process (or a
+                // Process/Start of it won the race). Only a gap is filled.
+                table.entry(p.pid).or_insert_with(|| EtwProcessInfo {
+                    pid: p.pid,
+                    ppid: p.ppid,
+                    process_name: p.process_name,
+                    process_path: p.image_path,
+                    username: String::new(),
+                    session_id: p.session_id,
+                    exit_code: None,
+                });
+            }
+        });
+    }
+
+    /// The parent pid of a process found running names its parent only when
+    /// both creation times are known and the parent's is no later than the
+    /// child's.
+    fn running_parent_verified(child_created: Option<u64>, parent_created: Option<u64>) -> bool {
+        matches!(
+            (child_created, parent_created),
+            (Some(child), Some(parent)) if occupant_predates(parent, child)
+        )
+    }
+
     unsafe fn handle_process_event(event: &EVENT_RECORD, opcode: u8) {
         let data_ptr = event.UserData;
         let data_len = event.UserDataLength as usize;
@@ -1444,26 +1642,16 @@ mod win {
 
         match opcode {
             EVENT_TRACE_TYPE_START => {
-                if data_len < std::mem::size_of::<ProcessStartEvent>() {
+                let Some(DecodedProcess {
+                    pid,
+                    ppid,
+                    session_id,
+                    process_name,
+                    image_path,
+                    argv_sha256,
+                }) = decode_process_payload(event)
+                else {
                     return;
-                }
-                // Layout-aware decode (MOF Process_V3/V4, pointer size from
-                // the header); the printable-run heuristics stay as a
-                // fallback for kernels whose layout we have not seen.
-                let full = std::slice::from_raw_parts(data_ptr as *const u8, data_len);
-                let ptr_size =
-                    if (event.EventHeader.Flags as u32) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
-                        4
-                    } else {
-                        8
-                    };
-                let version = event.EventHeader.EventDescriptor.Version;
-                let parsed =
-                    crate::etw_process_payload::parse_process_start(full, version, ptr_size);
-                let ev = &*(data_ptr as *const ProcessStartEvent);
-                let (pid, ppid, session_id) = match parsed.as_ref() {
-                    Some(p) => (p.pid, p.ppid, p.session_id),
-                    None => (ev.pid, ev.ppid, ev.session_id),
                 };
 
                 // Skip our own process
@@ -1471,43 +1659,6 @@ mod win {
                 if pid == own_pid {
                     return;
                 }
-
-                let fixed_size = std::mem::size_of::<ProcessStartEvent>();
-                let remaining_slice = &full[fixed_size.min(full.len())..];
-                let (image_file_name, command_line) = match parsed.as_ref() {
-                    Some(p) if !p.image_file_name.is_empty() => (
-                        p.image_file_name.clone(),
-                        (!p.command_line.is_empty()).then(|| p.command_line.clone()),
-                    ),
-                    _ => (
-                        extract_image_path(remaining_slice),
-                        extract_command_line(remaining_slice),
-                    ),
-                };
-                // ImageFileName is usually a bare `image.exe`; the full path
-                // comes from the command line's executable token or, while
-                // the process is alive, from the kernel.
-                let image_path = if image_file_name.contains('\\') || image_file_name.contains('/')
-                {
-                    image_file_name.clone()
-                } else {
-                    command_line
-                        .as_deref()
-                        .and_then(|cmd| {
-                            crate::etw_process_payload::image_path_from_command_line(
-                                &image_file_name,
-                                cmd,
-                            )
-                        })
-                        .or_else(|| query_image_path(pid))
-                        .unwrap_or_else(|| image_file_name.clone())
-                };
-                let process_name = std::path::Path::new(&image_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or(image_file_name);
-                let argv_sha256 = command_line.and_then(|cmd| proc_events::argv_digest(&[cmd]));
 
                 // When the child came to exist: its own creation time while it
                 // is alive (the same kernel clock as its parent's), else the
@@ -1588,6 +1739,7 @@ mod win {
                     }
                 });
             }
+            EVENT_TRACE_TYPE_DC_START => handle_process_rundown(event),
             EVENT_TRACE_TYPE_END => {
                 if data_len < 8 {
                     return;
