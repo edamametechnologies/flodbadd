@@ -1945,9 +1945,13 @@ mod win {
                 // BS-10: reads count too (an in-process key theft never
                 // writes), so this does not depend on `writes`.
                 // Every cold credential path is under a user profile; the
-                // substring test keeps label classification off the bulk of
-                // FileIo/Create traffic (system DLLs, Program Files).
-                if path.to_ascii_lowercase().contains("\\users\\")
+                // substring test (`credential_opens.windows_profile_marker`)
+                // keeps label classification off the bulk of FileIo/Create
+                // traffic (system DLLs, Program Files).
+                let params = crate::sensitive_paths::credential_opens_params();
+                let profile_marker = params.windows_profile_marker.as_str();
+                if !profile_marker.is_empty()
+                    && path.to_ascii_lowercase().contains(profile_marker)
                     && crate::credential_opens::is_cold_credential_path(&path)
                 {
                     let process_path = THREAD_PROCESS_TABLE

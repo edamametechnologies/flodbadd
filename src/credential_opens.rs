@@ -7,7 +7,7 @@
 // does: the backends call `record_open` from their open notifications and
 // this module keeps one slot per (process, path) with the time of the last
 // open, refreshed in place, bounded, and expired after
-// `CREDENTIAL_OPEN_TTL_MS`. Nothing is written to disk.
+// `credential_open_ttl_ms()`. Nothing is written to disk.
 //
 // Cold set only. The full sensitive catalog includes browser cookie stores
 // and `.env`, which are opened continuously; those stay on the open-file
@@ -26,26 +26,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use undeadlock::{CustomMutex, CustomMutexExt};
 
-/// Labels (from the sensitive-paths catalog) whose files are opened rarely
-/// enough to take an open notification for each.
-pub const COLD_CREDENTIAL_LABELS: &[&str] =
-    &["aws", "azure", "crypto", "gcp", "gnupg", "ssh", "ssh_key"];
+// The cold set itself is published data
+// (`sensitive-paths-db.json::credential_opens`, read through
+// `crate::sensitive_paths::credential_opens_params`): the catalog labels
+// whose files are opened rarely enough to take an open notification each;
+// the sub-paths inside them that are hot (MetaMask / Phantom extension
+// stores the browser touches all day, a full node's chain database), which
+// stay on the open-file poll; how long a closed open stays attached to its
+// process; where the labels' prefixes live under a home.
 
-/// Sub-paths inside a cold label that are hot: the MetaMask / Phantom
-/// browser-extension stores live under the browser profile and are touched
-/// by the browser all day, and a full node rewrites its chain database
-/// continuously. They stay on the open-file poll.
-const HOT_SUBPATHS: &[&str] = &[
-    "/local extension settings/",
-    "/blocks/",
-    "/chainstate/",
-    "/indexes/",
-    "/chaindata/",
-    "/lmdb/",
-];
-
-/// How long a closed credential open stays attached to its process.
-pub const CREDENTIAL_OPEN_TTL_MS: u64 = 15 * 60 * 1000;
+/// How long a closed credential open stays attached to its process
+/// (`credential_opens.open_ttl_secs`).
+pub fn credential_open_ttl_ms() -> u64 {
+    crate::sensitive_paths::credential_opens_params()
+        .open_ttl_secs
+        .saturating_mul(1000)
+}
 /// Distinct credential paths remembered per process (oldest dropped).
 pub const MAX_PATHS_PER_PID: usize = 32;
 /// Processes with remembered opens (least recently active dropped).
@@ -128,10 +124,11 @@ impl OpenTable {
     }
 
     fn prune(&mut self, now_ms: u64) {
+        let ttl_ms = credential_open_ttl_ms();
         self.by_pid.retain(|_, opens| {
             opens
                 .last_open_ms_by_path
-                .retain(|_, ts| now_ms.saturating_sub(*ts) <= CREDENTIAL_OPEN_TTL_MS);
+                .retain(|_, ts| now_ms.saturating_sub(*ts) <= ttl_ms);
             !opens.last_open_ms_by_path.is_empty()
         });
     }
@@ -145,10 +142,11 @@ impl OpenTable {
                 return Vec::new();
             }
         }
+        let ttl_ms = credential_open_ttl_ms();
         let mut fresh: Vec<(&String, u64)> = opens
             .last_open_ms_by_path
             .iter()
-            .filter(|(_, ts)| now_ms.saturating_sub(**ts) <= CREDENTIAL_OPEN_TTL_MS)
+            .filter(|(_, ts)| now_ms.saturating_sub(**ts) <= ttl_ms)
             .map(|(path, ts)| (path, *ts))
             .collect();
         fresh.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
@@ -189,13 +187,21 @@ fn now_ms() -> u64 {
 
 /// True when `path` is in the cold credential set this module records.
 pub fn is_cold_credential_path(path: &str) -> bool {
+    let params = crate::sensitive_paths::credential_opens_params();
     let normalized = normalize(path);
-    if normalized.is_empty() || HOT_SUBPATHS.iter().any(|hot| normalized.contains(hot)) {
+    if normalized.is_empty() || is_hot(&params.hot_subpaths, &normalized) {
         return false;
     }
     crate::sensitive_paths::classify_sensitive_path_labels_sync(&[normalized])
         .iter()
-        .any(|label| COLD_CREDENTIAL_LABELS.contains(&label.as_str()))
+        .any(|label| params.cold_labels.iter().any(|cold| cold == label))
+}
+
+/// A (lowercase) path inside one of the hot sub-paths.
+fn is_hot(hot_subpaths: &[String], lowercase_path: &str) -> bool {
+    hot_subpaths
+        .iter()
+        .any(|hot| !hot.is_empty() && lowercase_path.contains(hot.as_str()))
 }
 
 /// Record one open (called from the kernel-event backends; cheap, never
@@ -222,7 +228,7 @@ pub fn record_open(pid: u32, uid: Option<u32>, process_path: &str, file_path: &s
     }
 }
 
-/// Cold credential files `pid` opened within `CREDENTIAL_OPEN_TTL_MS`,
+/// Cold credential files `pid` opened within `credential_open_ttl_ms()`,
 /// newest first. `process_path`, when known, must match the image that did
 /// the opens, so a reused pid never inherits them. Empty when the table is
 /// momentarily contended (fail-open, same as the process-event ring).
@@ -315,14 +321,19 @@ pub fn home_relative_cold_patterns() -> Vec<String> {
             push(pattern);
         }
     }
-    for pattern in crate::sensitive_paths::label_patterns_sync(COLD_CREDENTIAL_LABELS) {
-        if HOT_SUBPATHS.iter().any(|hot| pattern.contains(hot)) {
+    let params = crate::sensitive_paths::credential_opens_params();
+    let home_roots = crate::sensitive_paths::credential_opens_label_home_roots();
+    let cold_labels: Vec<&str> = params.cold_labels.iter().map(String::as_str).collect();
+    for pattern in crate::sensitive_paths::label_patterns_sync(&cold_labels) {
+        if is_hot(&params.hot_subpaths, &pattern) {
             continue;
         }
-        if let Some(rest) = pattern.strip_prefix("/application support/") {
-            if cfg!(target_os = "macos") {
-                push(format!("/Library/Application Support/{rest}"));
-            }
+        if let Some((root, rest)) = home_roots.iter().find_map(|root| {
+            pattern
+                .strip_prefix(root.label_prefix.as_str())
+                .map(|rest| (root, rest))
+        }) {
+            push(format!("{}{rest}", root.home_prefix));
         } else if pattern.starts_with("/.") {
             push(pattern);
         }
@@ -330,8 +341,22 @@ pub fn home_relative_cold_patterns() -> Vec<String> {
     out
 }
 
+/// A dot directory under the home, or a path under one of the platform's
+/// published home roots (the first component of each `home_prefix`:
+/// `/Library/` on macOS).
 fn is_home_relative(pattern: &str) -> bool {
-    pattern.starts_with("/.") || (cfg!(target_os = "macos") && pattern.starts_with("/Library/"))
+    pattern.starts_with("/.")
+        || crate::sensitive_paths::credential_opens_label_home_roots()
+            .iter()
+            .filter_map(|root| home_root_component(&root.home_prefix))
+            .any(|component| pattern.starts_with(component))
+}
+
+/// `/Library/` of `/Library/Application Support/`.
+fn home_root_component(home_prefix: &str) -> Option<&str> {
+    let rest = home_prefix.strip_prefix('/')?;
+    let end = rest.find('/')?;
+    Some(&home_prefix[..end + 2])
 }
 
 /// Absolute kernel watch prefixes: every cold pattern under every home,
@@ -599,6 +624,57 @@ mod tests {
         }
     }
 
+    /// The cold set is the published `credential_opens`, read through the
+    /// accessors production uses: every published hot sub-path takes a
+    /// cold-labelled path off the set, the TTL is the published one, and
+    /// each label home root maps its label prefix under the home.
+    #[test]
+    fn the_cold_set_is_the_published_params() {
+        let params = crate::sensitive_paths::credential_opens_params();
+        assert!(!params.cold_labels.is_empty(), "{params:?}");
+        assert_eq!(credential_open_ttl_ms(), params.open_ttl_secs * 1000);
+        assert!(params.open_ttl_secs > 0);
+        let cold_labels: Vec<&str> = params.cold_labels.iter().map(String::as_str).collect();
+        let cold_patterns = crate::sensitive_paths::label_patterns_sync(&cold_labels);
+        assert!(!cold_patterns.is_empty());
+        for hot in &params.hot_subpaths {
+            // A cold-labelled path that runs through the hot sub-path.
+            let path = format!("/Users/u/.ssh{hot}x");
+            assert!(!is_cold_credential_path(&path), "{path}");
+        }
+        for root in crate::sensitive_paths::credential_opens_label_home_roots() {
+            assert!(
+                root.home_prefix
+                    .to_ascii_lowercase()
+                    .ends_with(&root.label_prefix),
+                "{root:?}"
+            );
+            let component = home_root_component(&root.home_prefix).expect("a root directory");
+            assert!(is_home_relative(&format!("{component}x")), "{root:?}");
+            if cold_patterns.iter().any(|p| {
+                p.starts_with(root.label_prefix.as_str()) && !is_hot(&params.hot_subpaths, p)
+            }) {
+                assert!(
+                    home_relative_cold_patterns()
+                        .iter()
+                        .any(|p| p.starts_with(root.home_prefix.as_str())),
+                    "{root:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn home_root_component_is_the_first_directory() {
+        assert_eq!(
+            home_root_component("/Library/Application Support/"),
+            Some("/Library/")
+        );
+        assert_eq!(home_root_component("/Library/"), Some("/Library/"));
+        assert_eq!(home_root_component("Library/"), None);
+        assert_eq!(home_root_component("/x"), None);
+    }
+
     #[test]
     fn one_slot_per_path_refreshed_in_place_and_expired_after_the_ttl() {
         let mut table = OpenTable::default();
@@ -608,7 +684,7 @@ mod tests {
         assert_eq!(table.by_pid[&700].last_open_ms_by_path.len(), 1);
         assert_eq!(table.recent(700, Some(NODE), 2_000), vec![KEY]);
 
-        let expiry = 1_999 + CREDENTIAL_OPEN_TTL_MS;
+        let expiry = 1_999 + credential_open_ttl_ms();
         assert_eq!(table.recent(700, Some(NODE), expiry), vec![KEY]);
         assert!(table.recent(700, Some(NODE), expiry + 1).is_empty());
         table.prune(expiry + 1);
