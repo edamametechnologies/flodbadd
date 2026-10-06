@@ -3,7 +3,8 @@
 //
 // Kernel-event backends push here from their existing sensor threads:
 //   - macOS: Endpoint Security FORK/EXEC/EXIT + GET_TASK (l7_es.rs)
-//   - Windows: NT Kernel Logger Process/Start|End (l7_etw.rs)
+//   - Windows: NT Kernel Logger Process/Start|End, plus the Process/DCStart
+//     rundown of what was already running when the session started (l7_etw.rs)
 //   - Linux: sched_process_exec/fork/exit tracepoints (l7_ebpf.rs)
 //
 // The stream is notify-only and fail-open: a backend that cannot start
@@ -41,6 +42,13 @@ pub enum ProcessEventKind {
     /// Kernel-time egress intent (Linux cgroup-BPF `connect` / `sendmsg`
     /// observe hooks): the process opened a flow toward `net_dst`.
     NetConnect,
+    /// The process was already running when the sensor's session started
+    /// (Windows ETW `Process/DCStart` rundown): its pid, image and -- only
+    /// when the sensor verified that the process now holding it is older
+    /// than this one -- its parent. Not an exec: a process that predates the
+    /// sensor has no exec in the stream, and without this its children's
+    /// ancestry stopped one step short of it.
+    Running,
 }
 
 /// Destination of a `NetConnect` event.
@@ -125,6 +133,8 @@ pub struct ProcessEventCountersSnapshot {
     pub exit: u64,
     pub task_access: u64,
     pub net_connect: u64,
+    /// `Running` events: processes found running at sensor start (rundown).
+    pub running: u64,
     /// Events evicted because the ring was full when they were pushed
     /// (the PUSH always succeeds; the oldest entry is dropped).
     pub evicted: u64,
@@ -142,6 +152,7 @@ struct Counters {
     exit: AtomicU64,
     task_access: AtomicU64,
     net_connect: AtomicU64,
+    running: AtomicU64,
     evicted: AtomicU64,
     dropped_locked: AtomicU64,
 }
@@ -159,6 +170,7 @@ static COUNTERS: Counters = Counters {
     exit: AtomicU64::new(0),
     task_access: AtomicU64::new(0),
     net_connect: AtomicU64::new(0),
+    running: AtomicU64::new(0),
     evicted: AtomicU64::new(0),
     dropped_locked: AtomicU64::new(0),
 };
@@ -199,6 +211,7 @@ pub fn push(event: ProcessEvent) {
         ProcessEventKind::Exit => COUNTERS.exit.fetch_add(1, Ordering::Relaxed),
         ProcessEventKind::TaskAccess => COUNTERS.task_access.fetch_add(1, Ordering::Relaxed),
         ProcessEventKind::NetConnect => COUNTERS.net_connect.fetch_add(1, Ordering::Relaxed),
+        ProcessEventKind::Running => COUNTERS.running.fetch_add(1, Ordering::Relaxed),
     };
     // Throttled visibility so a hosting daemon's logs show the stream is
     // alive without per-event noise (validation on entitled hosts reads
@@ -206,12 +219,13 @@ pub fn push(event: ProcessEvent) {
     if total_before % 5000 == 0 {
         let snapshot = counters();
         tracing::info!(
-            "process_events: exec={} fork={} exit={} task_access={} net_connect={} evicted={} dropped_locked={}",
+            "process_events: exec={} fork={} exit={} task_access={} net_connect={} running={} evicted={} dropped_locked={}",
             snapshot.exec,
             snapshot.fork,
             snapshot.exit,
             snapshot.task_access,
             snapshot.net_connect,
+            snapshot.running,
             snapshot.evicted,
             snapshot.dropped_locked
         );
@@ -262,6 +276,7 @@ pub fn counters() -> ProcessEventCountersSnapshot {
         exit: COUNTERS.exit.load(Ordering::Relaxed),
         task_access: COUNTERS.task_access.load(Ordering::Relaxed),
         net_connect: COUNTERS.net_connect.load(Ordering::Relaxed),
+        running: COUNTERS.running.load(Ordering::Relaxed),
         evicted: COUNTERS.evicted.load(Ordering::Relaxed),
         dropped_locked: COUNTERS.dropped_locked.load(Ordering::Relaxed),
     }

@@ -228,6 +228,10 @@ required-features = ["examples"]
 name = "etw_file_writers"
 required-features = ["examples"]
 
+[[example]]
+name = "etw_file_deletes"
+required-features = ["examples"]
+
 [lib]
 name = "flodbadd"
 path = "src/lib.rs" 

@@ -30,9 +30,9 @@ absent. Only a failure of the `tcp_set_state` kprobe disables the L7 helper.
 | `track_connect_v4` | `tcp_v4_connect` | kprobe | Stash process info keyed by `struct sock *` |
 | `track_connect_v6` | `tcp_v6_connect` | kprobe | Same, IPv6 |
 | `minimal_probe` | `tcp_set_state` | kprobe | On `TCP_ESTABLISHED`, join the 4-tuple to the stashed process info; on `TCP_CLOSE`, retire the connection (see below) |
-| `trace_sched_fork` | `sched/sched_process_fork` | tracepoint | Fork event + child to parent row |
+| `trace_sched_fork` | `sched/sched_process_fork` | tracepoint | Fork event + child to parent row; the parent is the forking task's tgid (the tracepoint's `parent_pid` is the forking thread's id) |
 | `trace_sched_exec` | `sched/sched_process_exec` | tracepoint | Exec event with the binary path |
-| `trace_sched_exit` | `sched/sched_process_exit` | tracepoint | Exit event, group leaders only |
+| `trace_sched_exit` | `sched/sched_process_exit` | tracepoint | Exit event, group leaders only; a thread exit drops the `proc_parent` row its creation wrote |
 | `trace_ptrace_may_access` | `ptrace_may_access` | kprobe | Task-access attempt (ring kind 4) |
 | `lsm_ptrace_access_check` | `ptrace_access_check` | BPF-LSM | Fallback for the above, always returns 0 (allow) |
 | `cg_connect4` / `cg_connect6` | cgroup v2 root | `cgroup/connect{4,6}` | Egress intent at `connect(2)` |
