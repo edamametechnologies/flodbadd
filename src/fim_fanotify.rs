@@ -563,11 +563,14 @@ mod tests {
             "the walk stops at its share"
         );
 
-        // A credential directory created afterwards, one level below the root.
-        let aws = base.join(".aws");
-        std::fs::create_dir_all(&aws).unwrap();
-        remark_directory(&aws);
-        let creds = aws.join("credentials");
+        // A directory created afterwards, one level below the root. Plain
+        // names: a credential-shaped fixture (`.aws/credentials`) written
+        // under /tmp is what the CI runner's own posture gate grades as
+        // staging (flodbadd CI, 2026-10-06).
+        let late = base.join("late");
+        std::fs::create_dir_all(&late).unwrap();
+        remark_directory(&late);
+        let creds = late.join("written.txt");
         let mut child = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("echo key > {}; sleep 2", creds.display()))
@@ -589,16 +592,16 @@ mod tests {
             .contains_key(&deep.to_string_lossy().to_string()));
 
         // Deleted and created again: marked again.
-        std::fs::remove_dir_all(&aws).unwrap();
-        forget_directory(&aws);
+        std::fs::remove_dir_all(&late).unwrap();
+        forget_directory(&late);
         assert!(!table
             .marked
-            .contains_key(&aws.to_string_lossy().to_string()));
-        std::fs::create_dir_all(&aws).unwrap();
-        remark_directory(&aws);
+            .contains_key(&late.to_string_lossy().to_string()));
+        std::fs::create_dir_all(&late).unwrap();
+        remark_directory(&late);
         assert!(table
             .marked
-            .contains_key(&aws.to_string_lossy().to_string()));
+            .contains_key(&late.to_string_lossy().to_string()));
     }
 
     /// Same privilege as the end-to-end test below. A second `init` -- the
