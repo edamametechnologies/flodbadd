@@ -2446,9 +2446,26 @@ impl FlodbaddL7 {
             }
         }
 
-        if l7.process_path.is_empty() {
-            if let Ok(exe) = fs::read_link(format!("{}/exe", proc_dir)) {
-                l7.process_path = exe.to_string_lossy().to_string();
+        // The eBPF program cannot resolve an image in the kernel: it fills
+        // `process_path` with the connecting THREAD's `comm` as a placeholder
+        // (`session_l7_from_info` writes `/proc/<pid>` when that is empty),
+        // and `process_name` with the same thread name. Anything but an
+        // absolute image path is that placeholder. FP lab 2026-10-06
+        // (test-mint): every Linux session read `curl|curl`, and Codex's read
+        // `tokio-rt-worker` -- a runtime worker thread's name -- as name and
+        // path, so the agent was unrecognizable and a temp binary would not
+        // look like one. The image from `/proc/<pid>/exe` replaces both; when
+        // it cannot be read (the process is gone), the path is left empty
+        // rather than holding a thread name.
+        if is_ebpf_path_placeholder(&l7.process_path, pid) {
+            match fs::read_link(format!("{}/exe", proc_dir)) {
+                Ok(exe) if exe.is_absolute() => {
+                    if let Some(name) = exe.file_name() {
+                        l7.process_name = name.to_string_lossy().to_string();
+                    }
+                    l7.process_path = exe.to_string_lossy().to_string();
+                }
+                _ => l7.process_path.clear(),
             }
         }
 
@@ -4123,5 +4140,44 @@ mod ebpf_tests {
                 l7_ebpf::ebpf_support()
             );
         }
+    }
+}
+
+/// Whether an eBPF-produced `process_path` is still the placeholder the
+/// kernel side wrote (the thread's `comm`, or `/proc/<pid>` when that was
+/// empty) rather than an image path.
+#[cfg(any(target_os = "linux", test))]
+fn is_ebpf_path_placeholder(process_path: &str, pid: u32) -> bool {
+    !process_path.starts_with('/') || process_path == format!("/proc/{pid}")
+}
+
+#[cfg(test)]
+mod ebpf_placeholder_tests {
+    use super::is_ebpf_path_placeholder;
+
+    #[test]
+    fn a_comm_or_proc_dir_is_a_placeholder_an_image_path_is_not() {
+        assert!(is_ebpf_path_placeholder("tokio-rt-worker", 7));
+        assert!(is_ebpf_path_placeholder("curl", 7));
+        assert!(is_ebpf_path_placeholder("", 7));
+        assert!(is_ebpf_path_placeholder("/proc/7", 7));
+        assert!(!is_ebpf_path_placeholder("/home/u/.local/bin/codex", 7));
+        assert!(!is_ebpf_path_placeholder("/usr/bin/curl", 7));
+    }
+
+    /// The enrichment resolves this test process's own image.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_enrichment_replaces_a_thread_name_with_the_image() {
+        let mut l7 = crate::sessions::SessionL7 {
+            pid: std::process::id(),
+            process_name: "tokio-rt-worker".to_string(),
+            process_path: "tokio-rt-worker".to_string(),
+            ..Default::default()
+        };
+        crate::l7::FlodbaddL7::enrich_ebpf_l7_from_proc(&mut l7);
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(l7.process_path, exe.to_string_lossy());
+        assert_eq!(l7.process_name, exe.file_name().unwrap().to_string_lossy());
     }
 }
