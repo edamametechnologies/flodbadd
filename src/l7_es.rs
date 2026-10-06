@@ -231,6 +231,12 @@ mod macos {
             {
                 error!("Failed to spawn ES client thread: {}", e);
             }
+            if let Err(e) = std::thread::Builder::new()
+                .name("es-credential-open".into())
+                .spawn(Self::run_credential_open_client)
+            {
+                error!("Failed to spawn ES credential-open client thread: {}", e);
+            }
 
             // Give the ES thread a moment to start and report status
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -885,6 +891,75 @@ mod macos {
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
             // not on this thread, so parking is fine.
+            loop {
+                std::thread::park();
+            }
+        }
+
+        /// BS-10: a second client for `NOTIFY_OPEN` on the cold credential
+        /// set only (`crate::credential_opens`). Separate from the main
+        /// client because target-path muting is inverted here: only opens
+        /// under the muted prefixes are delivered, and inverting the main
+        /// client's muting would starve its CREATE/WRITE/CLOSE stream. With
+        /// no path muted the inverted client would deliver nothing, never
+        /// every open on the machine, so a failed mute fails closed.
+        fn run_credential_open_client() {
+            use endpoint_sec::sys::{
+                es_event_type_t, es_mute_inversion_type_t, es_mute_path_type_t,
+            };
+
+            let handler = |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
+                if let Some(Event::NotifyOpen(open)) = msg.event() {
+                    let process = msg.process();
+                    let file = open.file();
+                    let path = file.path().to_string_lossy();
+                    let exe = process.executable().path().to_string_lossy();
+                    crate::credential_opens::record_open(
+                        process.audit_token().pid() as u32,
+                        Some(process.audit_token().euid()),
+                        &exe,
+                        &path,
+                    );
+                }
+            };
+            let mut client = match Client::new(handler) {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("ES credential-open client creation failed: {:?}", e);
+                    return;
+                }
+            };
+            if let Err(e) =
+                client.invert_muting(es_mute_inversion_type_t::ES_MUTE_INVERSION_TYPE_TARGET_PATH)
+            {
+                warn!("ES credential-open client: invert_muting failed: {:?}", e);
+                return;
+            }
+            let prefixes = crate::credential_opens::kernel_watch_prefixes(
+                &crate::credential_opens::user_homes(),
+            );
+            let mut muted = 0usize;
+            for prefix in &prefixes {
+                match client.mute_path(
+                    OsStr::new(prefix),
+                    es_mute_path_type_t::ES_MUTE_PATH_TYPE_TARGET_PREFIX,
+                ) {
+                    Ok(()) => muted += 1,
+                    Err(e) => debug!("ES credential-open: mute_path {} failed: {:?}", prefix, e),
+                }
+            }
+            if muted == 0 {
+                warn!("ES credential-open client: no watch prefix could be set; not subscribing");
+                return;
+            }
+            if let Err(e) = client.subscribe(&[es_event_type_t::ES_EVENT_TYPE_NOTIFY_OPEN]) {
+                error!("ES credential-open subscribe failed: {:?}", e);
+                return;
+            }
+            info!(
+                "ES credential-open client subscribed to NOTIFY_OPEN on {} cold credential prefixes",
+                muted
+            );
             loop {
                 std::thread::park();
             }

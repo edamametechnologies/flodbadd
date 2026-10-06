@@ -278,6 +278,21 @@ pub fn classify_sensitive_path_labels_sync(paths: &[String]) -> Vec<String> {
     result.into_iter().collect()
 }
 
+/// Lowercase label patterns for the given labels, from the same snapshot
+/// `classify_sensitive_path_labels_sync` reads.
+pub fn label_patterns_sync(labels: &[&str]) -> Vec<String> {
+    let snapshot = LABELS_SNAPSHOT.load();
+    let mut out: Vec<String> = labels
+        .iter()
+        .filter_map(|label| snapshot.get(*label))
+        .flatten()
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     info!("Starting sensitive paths update from backend");
 

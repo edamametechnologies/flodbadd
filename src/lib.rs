@@ -13,6 +13,8 @@ pub mod broadcast;
 ))]
 pub mod capture;
 pub mod cloud_model_fallback;
+/// BS-10 recent cold credential-file opens (kernel open notifications).
+pub mod credential_opens;
 pub mod device_info;
 #[cfg(all(
     any(target_os = "macos", target_os = "linux", target_os = "windows"),

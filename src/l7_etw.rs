@@ -1631,6 +1631,28 @@ mod win {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
+                // BS-10: reads count too (an in-process key theft never
+                // writes), so this runs before the write-disposition gate.
+                // Every cold credential path is under a user profile; the
+                // substring test keeps label classification off the bulk of
+                // FileIo/Create traffic (system DLLs, Program Files).
+                if path.to_ascii_lowercase().contains("\\users\\")
+                    && crate::credential_opens::is_cold_credential_path(&path)
+                {
+                    let process_path = THREAD_PROCESS_TABLE
+                        .with(|pt| {
+                            pt.borrow()
+                                .as_ref()
+                                .and_then(|t| t.get(&pid).map(|info| info.process_path.clone()))
+                        })
+                        .unwrap_or_default();
+                    crate::credential_opens::record_open(
+                        pid,
+                        None,
+                        &process_path,
+                        &crate::win_path_normalize::nt_device_to_drive(&path),
+                    );
+                }
                 if !create_options.is_some_and(create_disposition_is_write) {
                     return;
                 }
