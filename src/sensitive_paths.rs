@@ -37,6 +37,38 @@ pub struct FimForbiddenWatchRootsJSON {
     pub windows: Vec<String>,
 }
 
+/// One lowercase catalog label prefix and its case-preserved home-relative
+/// location (`credential_opens.label_home_roots`): macOS
+/// `/application support/` lives at `~/Library/Application Support/`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct LabelHomeRootJSON {
+    pub label_prefix: String,
+    pub home_prefix: String,
+}
+
+/// `credential_opens.label_home_roots`, per platform.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct LabelHomeRootsJSON {
+    pub macos: Vec<LabelHomeRootJSON>,
+    pub linux: Vec<LabelHomeRootJSON>,
+    pub windows: Vec<LabelHomeRootJSON>,
+}
+
+/// The cold credential set of the kernel open-notification clients
+/// (`crate::credential_opens`, BS-10): the catalog labels whose files are
+/// opened rarely enough to take one notification each, the sub-paths inside
+/// them that are hot (left to the open-file poll), how long a closed open
+/// stays attached to its process, where the labels' prefixes live under a
+/// home, and the user-profile segment the ETW backend prefilters on.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CredentialOpensJSON {
+    pub cold_labels: Vec<String>,
+    pub hot_subpaths: Vec<String>,
+    pub open_ttl_secs: u64,
+    pub label_home_roots: LabelHomeRootsJSON,
+    pub windows_profile_marker: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SensitivePathsJSON {
     pub date: String,
@@ -47,6 +79,7 @@ pub struct SensitivePathsJSON {
     pub watch_roots: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
     pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
+    pub credential_opens: CredentialOpensJSON,
 }
 
 #[derive(Clone)]
@@ -59,6 +92,7 @@ pub struct SensitivePathsDB {
     pub watch_roots: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
     pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
+    pub credential_opens: CredentialOpensJSON,
 }
 
 impl CloudSignature for SensitivePathsDB {
@@ -108,6 +142,7 @@ impl SensitivePathsDB {
             watch_roots: json.watch_roots.clone(),
             fim_excluded_path_patterns: json.fim_excluded_path_patterns.clone(),
             fim_forbidden_watch_roots: json.fim_forbidden_watch_roots.clone(),
+            credential_opens: json.credential_opens.clone(),
         }
     }
 
@@ -221,6 +256,12 @@ fn build_fallback_fim_forbidden_watch_roots() -> FimForbiddenWatchRootsJSON {
         .unwrap_or_default()
 }
 
+fn build_fallback_credential_opens() -> CredentialOpensJSON {
+    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        .map(|json| json.credential_opens)
+        .unwrap_or_default()
+}
+
 fn build_fallback_fim_excluded_patterns() -> Vec<String> {
     serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
         .map(|json| {
@@ -241,6 +282,8 @@ lazy_static! {
         ArcSwap::from_pointee(build_fallback_fim_excluded_patterns());
     static ref FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT: ArcSwap<FimForbiddenWatchRootsJSON> =
         ArcSwap::from_pointee(build_fallback_fim_forbidden_watch_roots());
+    static ref CREDENTIAL_OPENS_SNAPSHOT: ArcSwap<CredentialOpensJSON> =
+        ArcSwap::from_pointee(build_fallback_credential_opens());
 }
 
 pub async fn refresh_labels_snapshot() {
@@ -254,6 +297,7 @@ pub async fn refresh_labels_snapshot() {
         .collect();
     FIM_EXCLUDED_PATTERNS_SNAPSHOT.store(Arc::new(exclusions));
     FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT.store(Arc::new(db.fim_forbidden_watch_roots.clone()));
+    CREDENTIAL_OPENS_SNAPSHOT.store(Arc::new(db.credential_opens.clone()));
 }
 
 /// Synchronous label classifier backed by the cloud model snapshot.
@@ -276,6 +320,21 @@ pub fn classify_sensitive_path_labels_sync(paths: &[String]) -> Vec<String> {
         }
     }
     result.into_iter().collect()
+}
+
+/// Lowercase label patterns for the given labels, from the same snapshot
+/// `classify_sensitive_path_labels_sync` reads.
+pub fn label_patterns_sync(labels: &[&str]) -> Vec<String> {
+    let snapshot = LABELS_SNAPSHOT.load();
+    let mut out: Vec<String> = labels
+        .iter()
+        .filter_map(|label| snapshot.get(*label))
+        .flatten()
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
@@ -392,6 +451,27 @@ pub fn fim_forbidden_watch_roots() -> Vec<String> {
         snap.windows.clone()
     } else {
         snap.unix.clone()
+    }
+}
+
+/// The cold credential set (`sensitive-paths-db.json::credential_opens`),
+/// lock-free; refreshed with the labels.
+pub fn credential_opens_params() -> Arc<CredentialOpensJSON> {
+    CREDENTIAL_OPENS_SNAPSHOT.load_full()
+}
+
+/// `credential_opens.label_home_roots` of the current platform.
+pub fn credential_opens_label_home_roots() -> Vec<LabelHomeRootJSON> {
+    let params = CREDENTIAL_OPENS_SNAPSHOT.load();
+    let roots = &params.label_home_roots;
+    if cfg!(target_os = "macos") {
+        roots.macos.clone()
+    } else if cfg!(target_os = "linux") {
+        roots.linux.clone()
+    } else if cfg!(target_os = "windows") {
+        roots.windows.clone()
+    } else {
+        Vec::new()
     }
 }
 

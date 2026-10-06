@@ -426,6 +426,7 @@ impl FlodbaddCapture {
         l7_ebpf::init_and_log_status();
         l7_es::init_and_log_status();
         l7_etw::init_and_log_status();
+        crate::credential_opens::start();
 
         // Reset fetch timestamps to ensure incremental fetching works correctly after restart
         let epoch = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
