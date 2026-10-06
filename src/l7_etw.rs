@@ -1942,6 +1942,32 @@ mod win {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
+                // BS-10: reads count too (an in-process key theft never
+                // writes), so this does not depend on `writes`.
+                // Every cold credential path is under a user profile; the
+                // substring test (`credential_opens.windows_profile_marker`)
+                // keeps label classification off the bulk of FileIo/Create
+                // traffic (system DLLs, Program Files).
+                let params = crate::sensitive_paths::credential_opens_params();
+                let profile_marker = params.windows_profile_marker.as_str();
+                if !profile_marker.is_empty()
+                    && path.to_ascii_lowercase().contains(profile_marker)
+                    && crate::credential_opens::is_cold_credential_path(&path)
+                {
+                    let process_path = THREAD_PROCESS_TABLE
+                        .with(|pt| {
+                            pt.borrow()
+                                .as_ref()
+                                .and_then(|t| t.get(&pid).map(|info| info.process_path.clone()))
+                        })
+                        .unwrap_or_default();
+                    crate::credential_opens::record_open(
+                        pid,
+                        None,
+                        &process_path,
+                        &crate::win_path_normalize::nt_device_to_drive(&path),
+                    );
+                }
                 if deletes_on_close {
                     record_file_actor(FileActorTable::Namespace, path.clone(), pid, at);
                 }
