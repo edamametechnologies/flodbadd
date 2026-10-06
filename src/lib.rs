@@ -21,6 +21,8 @@ pub mod device_info;
 pub mod dns;
 pub mod dns_ebpf;
 pub mod error;
+/// ETW kernel `FileIo` payload decoding (pure; tested on every host).
+pub mod etw_fileio_payload;
 /// ETW kernel `Process` payload decoding (pure; tested on every host).
 pub mod etw_process_payload;
 #[cfg(all(

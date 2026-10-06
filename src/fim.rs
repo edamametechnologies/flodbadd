@@ -852,27 +852,41 @@ fn process_fim_hash_work_item(store: &FimEventStore, hash_work: FimHashWorkItem)
 struct FimAttributionWorkItem {
     uid: String,
     path: String,
+    /// Which table answers: the writers, or who deleted or renamed it.
+    kind: AttributionKind,
     attempt: usize,
     ready_at: std::time::Instant,
 }
 
+/// An event without its actor yet, to look up again in the ETW tables:
+/// a temp write (sensitive writes keep their drain-time probes), or a delete
+/// or rename, sensitive or not, whose actor is in the namespace table or
+/// nowhere (no probe can stand in for it).
 #[cfg(target_os = "windows")]
 fn fim_attribution_work_item_for_event(
     event: &FimEvent,
     etw_available: bool,
 ) -> Option<FimAttributionWorkItem> {
-    if !etw_available
-        || event.is_sensitive
-        || event.event_type == FimEventType::Delete
-        || event.process_name.is_some()
-        || event.process_path.is_some()
-        || !should_attempt_process_attribution(Path::new(&event.path), false, event.event_type)
-    {
+    if !etw_available || event.process_name.is_some() || event.process_path.is_some() {
+        return None;
+    }
+    let path = Path::new(&event.path);
+    let kind = AttributionKind::of(event.event_type);
+    let queue = match kind {
+        AttributionKind::Remover => {
+            kernel_lookup_eligible(path, event.is_sensitive, event.event_type, etw_available)
+        }
+        AttributionKind::Writer => {
+            !event.is_sensitive && should_attempt_process_attribution(path, false, event.event_type)
+        }
+    };
+    if !queue {
         return None;
     }
     Some(FimAttributionWorkItem {
         uid: event.uid.clone(),
         path: event.path.clone(),
+        kind,
         attempt: 0,
         ready_at: std::time::Instant::now()
             + std::time::Duration::from_millis(FIM_ATTRIBUTION_RETRY_DELAYS_MS[0]),
@@ -902,7 +916,7 @@ fn process_fim_attribution_work_item(
     store: &FimEventStore,
     work: FimAttributionWorkItem,
 ) -> Option<FimAttributionWorkItem> {
-    if let Some((pid, name, proc_path)) = kernel_table_attribution(&work.path) {
+    if let Some((pid, name, proc_path)) = kernel_table_attribution_for(&work.path, work.kind) {
         store.update_process_attribution(&work.uid, Some(name), Some(proc_path), Some(pid));
         return None;
     }
@@ -1099,6 +1113,11 @@ fn should_attempt_process_attribution(
         return false;
     }
 
+    is_temp_attribution_path(path)
+}
+
+/// The temp staging roots whose non-sensitive events are attributed.
+fn is_temp_attribution_path(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     path_str.contains("/tmp/")
         || path_str.contains("/var/tmp/")
@@ -1123,6 +1142,75 @@ fn should_backfill_process_attribution(event: &FimEvent) -> bool {
     // Temp events still get the immediate best-effort attribution attempt
     // when the notify event arrives.
     event.is_sensitive
+}
+
+/// Which actor an event's attribution asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributionKind {
+    /// Who created or wrote the path (create, modify).
+    Writer,
+    /// Who deleted or renamed it (delete; rename, for the old name and the
+    /// new one).
+    Remover,
+}
+
+impl AttributionKind {
+    fn of(event_type: FimEventType) -> Self {
+        match event_type {
+            FimEventType::Create | FimEventType::Modify => AttributionKind::Writer,
+            FimEventType::Delete | FimEventType::Rename => AttributionKind::Remover,
+        }
+    }
+}
+
+/// Whether the kernel measures who deleted or renamed a path, apart from who
+/// wrote it: on Windows while the ETW session runs (its namespace table,
+/// `l7_etw::get_file_namespace_attribution`). `l7_etw` reports unavailable on
+/// every other platform, where a delete is not looked up at all (Endpoint
+/// Security's events carry their actor; fanotify knows writers only) and a
+/// rename is answered by the platform's file table as before.
+fn removal_actor_measured() -> bool {
+    crate::l7_etw::is_available()
+}
+
+/// Whether the kernel tables are asked for the actor of `event_type` on
+/// `path`. With the remover measured, a delete or rename is attributed on
+/// the same paths as a write (sensitive, or a temp staging root); otherwise
+/// [`should_attempt_process_attribution`] decides, as before.
+fn kernel_lookup_eligible(
+    path: &Path,
+    is_sensitive: bool,
+    event_type: FimEventType,
+    removal_measured: bool,
+) -> bool {
+    if removal_measured && AttributionKind::of(event_type) == AttributionKind::Remover {
+        return is_sensitive || is_temp_attribution_path(path);
+    }
+    should_attempt_process_attribution(path, is_sensitive, event_type)
+}
+
+/// The kernel-time actor of an event of `kind` on `path`. On Windows a
+/// delete or a rename is answered by the ETW namespace table and never by
+/// the writers: the writer table would name whoever wrote the file, a
+/// different process whenever one tool lays a tree down and another removes
+/// it (`git worktree add` / `git worktree remove`, FP lab run 37390270562),
+/// and a write looked up after its file was removed would name the remover.
+/// Elsewhere the platform's table answers both, as before: Endpoint Security
+/// records unlinks and both names of a rename with their actor; fanotify
+/// knows writers only, so a delete is never asked of it and a rename gets
+/// the path's writer (residue).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn kernel_table_attribution_for(
+    path: &str,
+    kind: AttributionKind,
+) -> Option<(u32, String, String)> {
+    #[cfg(target_os = "windows")]
+    if kind == AttributionKind::Remover {
+        return crate::l7_etw::get_file_namespace_attribution(path);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = kind;
+    kernel_table_attribution(path)
 }
 
 /// Writer of `path` from the kernel-time attribution table of this platform
@@ -1158,15 +1246,17 @@ fn kernel_table_attribution(path: &str) -> Option<(u32, String, String)> {
 /// cannot starve the credential-store candidates.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: usize) -> usize {
+    let removal_measured = removal_actor_measured();
     let candidates: Vec<FimEvent> = store
         .get_recent_events_missing_process_attribution(max_events.saturating_mul(4))
         .into_iter()
         .filter(|event| {
             !event.is_sensitive
-                && should_attempt_process_attribution(
+                && kernel_lookup_eligible(
                     Path::new(&event.path),
                     false,
                     event.event_type,
+                    removal_measured,
                 )
         })
         .take(max_events)
@@ -1174,25 +1264,46 @@ fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: us
     if candidates.is_empty() {
         return 0;
     }
-    let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
     let mut updated = 0;
-    for path in path_order {
-        let Some(uids) = uids_by_path.remove(&path) else {
-            continue;
-        };
-        if let Some((pid, name, proc_path)) = kernel_table_attribution(&path) {
-            for uid in &uids {
-                store.update_process_attribution(
-                    uid,
-                    Some(name.clone()),
-                    Some(proc_path.clone()),
-                    Some(pid),
-                );
-                updated += 1;
+    for (kind, class) in split_by_attribution_kind(&candidates) {
+        let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&class);
+        for path in path_order {
+            let Some(uids) = uids_by_path.remove(&path) else {
+                continue;
+            };
+            if let Some((pid, name, proc_path)) = kernel_table_attribution_for(&path, kind) {
+                for uid in &uids {
+                    store.update_process_attribution(
+                        uid,
+                        Some(name.clone()),
+                        Some(proc_path.clone()),
+                        Some(pid),
+                    );
+                    updated += 1;
+                }
             }
         }
     }
     updated
+}
+
+/// Candidates split by the actor their lookup asks for. One path can carry
+/// both a write and a delete or rename, and on Windows those are different
+/// facts in different tables, so they are grouped and looked up apart.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn split_by_attribution_kind(candidates: &[FimEvent]) -> Vec<(AttributionKind, Vec<FimEvent>)> {
+    [AttributionKind::Writer, AttributionKind::Remover]
+        .into_iter()
+        .map(|kind| {
+            let class: Vec<FimEvent> = candidates
+                .iter()
+                .filter(|event| AttributionKind::of(event.event_type) == kind)
+                .cloned()
+                .collect();
+            (kind, class)
+        })
+        .filter(|(_, class)| !class.is_empty())
+        .collect()
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1249,11 +1360,27 @@ fn best_effort_process_attribution(
     is_sensitive: bool,
     event_type: FimEventType,
 ) -> (Option<String>, Option<String>, Option<u32>) {
+    let path_str = path.to_string_lossy();
+
+    // A delete or a rename, while the ETW session runs: the process the
+    // kernel saw do it, or nobody. The namespace event is often delivered
+    // after this notification; the watcher then queues a deferred lookup of
+    // the same table (`FimAttributionWorkItem`). Never the writers, the
+    // cache or the path's holders: they name whoever wrote or holds the
+    // file, not whoever removed or renamed it.
+    if AttributionKind::of(event_type) == AttributionKind::Remover && removal_actor_measured() {
+        if !kernel_lookup_eligible(path, is_sensitive, event_type, true) {
+            return (None, None, None);
+        }
+        return match crate::l7_etw::get_file_namespace_attribution(&path_str) {
+            Some((pid, name, proc_path)) => (Some(name), Some(proc_path), Some(pid)),
+            None => (None, None, None),
+        };
+    }
+
     if !should_attempt_process_attribution(path, is_sensitive, event_type) {
         return (None, None, None);
     }
-
-    let path_str = path.to_string_lossy();
 
     // Tier 1: ETW file attribution table (when etw feature is enabled and running).
     // The lookup canonicalizes the path so it matches whichever shape ETW
@@ -1612,98 +1739,120 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
         return updated_temp;
     }
 
-    let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&candidates);
+    let removal_measured = removal_actor_measured();
     let mut updated = 0;
     let mut tier3_probes = 0usize;
 
-    for path in path_order {
-        let Some(uids) = uids_by_path.remove(&path) else {
-            continue;
-        };
+    for (kind, class) in split_by_attribution_kind(&candidates) {
+        let (path_order, mut uids_by_path) = group_backfill_candidates_by_path(&class);
+        for path in path_order {
+            let Some(uids) = uids_by_path.remove(&path) else {
+                continue;
+            };
 
-        // Tier 1: ETW file attribution table (canonicalizes path internally).
-        if let Some((pid, name, proc_path)) = kernel_table_attribution(&path) {
-            let name = Some(name);
-            let proc_path = Some(proc_path);
-            cache_attribution(&path, &name, &proc_path);
-            for uid in &uids {
-                store.update_process_attribution(uid, name.clone(), proc_path.clone(), Some(pid));
-                updated += 1;
-            }
-            continue;
-        }
-
-        // Tier 2: in-memory cache (positive or negative)
-        if let Some((name, proc_path)) = lookup_cache(&path) {
-            if name.is_some() || proc_path.is_some() {
-                for uid in &uids {
-                    store.update_process_attribution(uid, name.clone(), proc_path.clone(), None);
-                    updated += 1;
+            // Tier 1: ETW file attribution table (canonicalizes path internally):
+            // the writers for a write, the namespace table for a rename.
+            if let Some((pid, name, proc_path)) = kernel_table_attribution_for(&path, kind) {
+                let name = Some(name);
+                let proc_path = Some(proc_path);
+                if kind == AttributionKind::Writer {
+                    cache_attribution(&path, &name, &proc_path);
                 }
-            }
-            continue;
-        }
-
-        // Tier 3 (+ optional 3b parent walk): one budgeted probe per unique path.
-        if tier3_probes >= FIM_BACKFILL_TIER3_PROBE_LIMIT {
-            continue;
-        }
-        tier3_probes += 1;
-
-        let fs_path = Path::new(&path);
-        if let Some((pid, fallback_name)) = lookup_pid_for_path(fs_path) {
-            let (process_name, process_path) = lookup_process_details(pid, fallback_name);
-            if process_name.is_some() || process_path.is_some() {
-                cache_attribution(&path, &process_name, &process_path);
                 for uid in &uids {
                     store.update_process_attribution(
                         uid,
-                        process_name.clone(),
-                        process_path.clone(),
+                        name.clone(),
+                        proc_path.clone(),
                         Some(pid),
                     );
                     updated += 1;
                 }
                 continue;
             }
-        }
 
-        // Tier 3b: parent-directory open-handle probe for sensitive
-        // atomic-rename writers (Chrome `User Data`, etc.).
-        let mut current = fs_path.parent();
-        let mut hops = 0u32;
-        let mut found = false;
-        while let Some(parent) = current {
-            if parent.parent().is_none() {
-                break;
+            // A rename while the session runs has a measured actor or none: the
+            // cache and the open-handle probes below name a writer or a holder.
+            if kind == AttributionKind::Remover && removal_measured {
+                continue;
             }
-            if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
-                let (process_name, process_path) = lookup_process_details(pid, fallback_name);
-                if process_name.is_some() || process_path.is_some() {
-                    cache_attribution(&path, &process_name, &process_path);
+
+            // Tier 2: in-memory cache (positive or negative)
+            if let Some((name, proc_path)) = lookup_cache(&path) {
+                if name.is_some() || proc_path.is_some() {
                     for uid in &uids {
-                        // Parent-directory probe: plausible writer, not a
-                        // measured instance -- no pid.
                         store.update_process_attribution(
                             uid,
-                            process_name.clone(),
-                            process_path.clone(),
+                            name.clone(),
+                            proc_path.clone(),
                             None,
                         );
                         updated += 1;
                     }
-                    found = true;
-                    break;
+                }
+                continue;
+            }
+
+            // Tier 3 (+ optional 3b parent walk): one budgeted probe per unique path.
+            if tier3_probes >= FIM_BACKFILL_TIER3_PROBE_LIMIT {
+                continue;
+            }
+            tier3_probes += 1;
+
+            let fs_path = Path::new(&path);
+            if let Some((pid, fallback_name)) = lookup_pid_for_path(fs_path) {
+                let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+                if process_name.is_some() || process_path.is_some() {
+                    cache_attribution(&path, &process_name, &process_path);
+                    for uid in &uids {
+                        store.update_process_attribution(
+                            uid,
+                            process_name.clone(),
+                            process_path.clone(),
+                            Some(pid),
+                        );
+                        updated += 1;
+                    }
+                    continue;
                 }
             }
-            hops += 1;
-            if hops >= 2 {
-                break;
+
+            // Tier 3b: parent-directory open-handle probe for sensitive
+            // atomic-rename writers (Chrome `User Data`, etc.).
+            let mut current = fs_path.parent();
+            let mut hops = 0u32;
+            let mut found = false;
+            while let Some(parent) = current {
+                if parent.parent().is_none() {
+                    break;
+                }
+                if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
+                    let (process_name, process_path) = lookup_process_details(pid, fallback_name);
+                    if process_name.is_some() || process_path.is_some() {
+                        cache_attribution(&path, &process_name, &process_path);
+                        for uid in &uids {
+                            // Parent-directory probe: plausible writer, not a
+                            // measured instance -- no pid.
+                            store.update_process_attribution(
+                                uid,
+                                process_name.clone(),
+                                process_path.clone(),
+                                None,
+                            );
+                            updated += 1;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                hops += 1;
+                if hops >= 2 {
+                    break;
+                }
+                current = parent.parent();
             }
-            current = parent.parent();
-        }
-        if !found {
-            cache_attribution_miss(&path);
+            if !found {
+                cache_attribution_miss(&path);
+            }
         }
     }
 
@@ -2504,14 +2653,24 @@ mod tests {
         let work = fim_attribution_work_item_for_event(&event, true).expect("temp event queued");
         assert_eq!(work.uid, event.uid);
         assert_eq!(work.attempt, 0);
+        assert_eq!(work.kind, AttributionKind::Writer);
 
         // No ETW table to read: nothing to defer.
         assert!(fim_attribution_work_item_for_event(&event, false).is_none());
-        // Sensitive events keep their probes; deletes and attributed events need none.
+        // Sensitive writes keep their probes; attributed events need nothing.
         let sensitive = attribution_test_event(temp, true, FimEventType::Create);
         assert!(fim_attribution_work_item_for_event(&sensitive, true).is_none());
-        let deleted = attribution_test_event(temp, false, FimEventType::Delete);
-        assert!(fim_attribution_work_item_for_event(&deleted, true).is_none());
+        // A delete or a rename asks the namespace table again, sensitive or
+        // not: no probe can stand in for its actor.
+        for event_type in [FimEventType::Delete, FimEventType::Rename] {
+            for sensitive in [false, true] {
+                let removed = attribution_test_event(temp, sensitive, event_type);
+                let work = fim_attribution_work_item_for_event(&removed, true)
+                    .expect("delete / rename queued");
+                assert_eq!(work.kind, AttributionKind::Remover);
+                assert!(fim_attribution_work_item_for_event(&removed, false).is_none());
+            }
+        }
         let mut attributed = attribution_test_event(temp, false, FimEventType::Modify);
         attributed.process_name = Some("uv.exe".to_string());
         assert!(fim_attribution_work_item_for_event(&attributed, true).is_none());
@@ -2522,6 +2681,12 @@ mod tests {
             FimEventType::Modify,
         );
         assert!(fim_attribution_work_item_for_event(&other, true).is_none());
+        let other_delete = attribution_test_event(
+            r"C:\Users\runneradmin\Documents\notes.txt",
+            false,
+            FimEventType::Delete,
+        );
+        assert!(fim_attribution_work_item_for_event(&other_delete, true).is_none());
     }
 
     #[cfg(target_os = "windows")]
@@ -2722,6 +2887,114 @@ mod tests {
             false,
             FimEventType::Modify
         ));
+    }
+
+    /// Without a measured remover (macOS outside Endpoint Security, Linux, a
+    /// Windows host without the ETW session) a non-sensitive delete is not
+    /// looked up: every table left would name its writer. With it, a delete
+    /// or a rename is looked up on the paths a write is.
+    #[test]
+    fn test_kernel_lookup_of_a_delete_needs_a_measured_remover() {
+        let temp = Path::new("/tmp/wt/tests/test_app.py");
+        let elsewhere = Path::new("/Users/test/Documents/notes.txt");
+        let secret = Path::new("/Users/test/.ssh/id_rsa");
+        assert!(!kernel_lookup_eligible(
+            temp,
+            false,
+            FimEventType::Delete,
+            false
+        ));
+        assert!(kernel_lookup_eligible(
+            temp,
+            false,
+            FimEventType::Delete,
+            true
+        ));
+        assert!(kernel_lookup_eligible(
+            temp,
+            false,
+            FimEventType::Rename,
+            true
+        ));
+        assert!(kernel_lookup_eligible(
+            temp,
+            false,
+            FimEventType::Rename,
+            false
+        ));
+        assert!(kernel_lookup_eligible(
+            secret,
+            true,
+            FimEventType::Delete,
+            true
+        ));
+        assert!(!kernel_lookup_eligible(
+            elsewhere,
+            false,
+            FimEventType::Delete,
+            true
+        ));
+        // Writes are unchanged by the remover's measurement.
+        for measured in [false, true] {
+            assert!(kernel_lookup_eligible(
+                temp,
+                false,
+                FimEventType::Create,
+                measured
+            ));
+            assert!(!kernel_lookup_eligible(
+                elsewhere,
+                false,
+                FimEventType::Modify,
+                measured
+            ));
+        }
+    }
+
+    /// A path's writer and its remover are looked up apart: the same path
+    /// with a create and a delete pending yields two groups.
+    #[test]
+    fn test_backfill_candidates_split_by_attribution_kind() {
+        fn event(path: &str, event_type: FimEventType) -> FimEvent {
+            let ts = Utc::now();
+            FimEvent {
+                path: path.to_string(),
+                event_type,
+                timestamp: ts,
+                size: None,
+                hash: None,
+                process_name: None,
+                process_path: None,
+                process_pid: None,
+                parent_process_name: None,
+                parent_process_path: None,
+                is_sensitive: false,
+                labels: vec![],
+                uid: FimEvent::compute_uid(path, &event_type, &ts),
+                last_modified: ts,
+            }
+        }
+        let path = "/tmp/wt/tests/__init__.py";
+        let candidates = vec![
+            event(path, FimEventType::Delete),
+            event(path, FimEventType::Modify),
+            event(path, FimEventType::Create),
+            event("/tmp/ps/b.txt", FimEventType::Rename),
+        ];
+        let split = split_by_attribution_kind(&candidates);
+        assert_eq!(split.len(), 2);
+        let (writer_kind, writers) = &split[0];
+        assert_eq!(*writer_kind, AttributionKind::Writer);
+        assert_eq!(writers.len(), 2);
+        let (remover_kind, removers) = &split[1];
+        assert_eq!(*remover_kind, AttributionKind::Remover);
+        assert_eq!(
+            removers.iter().map(|e| e.event_type).collect::<Vec<_>>(),
+            vec![FimEventType::Delete, FimEventType::Rename]
+        );
+        assert!(split_by_attribution_kind(&candidates[1..3])
+            .iter()
+            .all(|(kind, _)| *kind == AttributionKind::Writer));
     }
 
     #[test]

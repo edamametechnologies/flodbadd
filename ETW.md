@@ -32,7 +32,7 @@ without taking the other down.
 | Session name | `NT Kernel Logger` | `EDAMAME-KernelAuditApiCalls` |
 | Scope | System-wide, exclusive (one per machine) | Private real-time session |
 | Providers | Kernel providers selected by `EnableFlags` | `Microsoft-Windows-Kernel-Audit-API-Calls` (manifest provider, GUID `e02a841c-75a3-4fa7-afc8-ae09cf9b7f23`) |
-| Feeds | Connection table, process table, file attribution table, `Exec` / `Exit` ring events | `TaskAccess` ring events |
+| Feeds | Connection table, process table, file attribution and namespace tables, `Exec` / `Exit` ring events | `TaskAccess` ring events |
 | Sets `is_available()` | Yes | No |
 
 Both call `ControlTraceW(..., EVENT_TRACE_CONTROL_STOP)` on their session name
@@ -52,7 +52,7 @@ A manifest provider cannot ride the NT Kernel Logger, which is why
 |---|---|---|
 | `EVENT_TRACE_FLAG_NETWORK_TCPIP` | TcpIp Connect (12), Accept (15), Reconnect (16) | 4-tuple -> PID connection table |
 | `EVENT_TRACE_FLAG_PROCESS` | Process Start (1), End (2) | Live process table, plus `Exec` / `Exit` ring events |
-| `EVENT_TRACE_FLAG_FILE_IO_INIT` | FileIo initiation events (TypeGroup2) in the caller's context: Create (64), Cleanup (65), Close (66), Write (68) | File attribution table |
+| `EVENT_TRACE_FLAG_FILE_IO_INIT` | FileIo initiation events (TypeGroup2) in the caller's context: Create (64), Cleanup (65), Close (66), Write (68), Delete (70), Rename (71), DeletePath (79), RenamePath (80) | File attribution table (writes), namespace table (deletes, renames) |
 
 On a kernel-logger session the `EnableFlags` bitmask is what selects the
 providers. The module additionally calls `EnableTraceEx2` for the TCP/IP and
@@ -130,13 +130,24 @@ back-enriched from the ETW process table.
 `FileIo` events run in the calling process's context, so the event header pid is
 the actor. `record_file_attribution` writes `(pid, process_name, process_path,
 recorded_at)` into the file attribution table keyed by the canonical path.
+Deletes and renames go to a second table of the same shape, the namespace
+table (`get_file_namespace_attribution`), so a delete never takes the file's
+writer and a write looked up after its file is gone never takes the remover
+(see "2026-10-06 -- deletes and renames carry their actor" below). The payloads
+are decoded by `src/etw_fileio_payload.rs`, which is pure and unit-tested on
+every host.
+
+The image recorded with a pid comes from the process table, unless the process
+holding the pid there started after the FileIo event (`started_at`, the
+Process/Start timestamp or the kernel creation time): then the pid was still its
+predecessor's, and only `pid-N` is recorded (FP-WIN-29 class).
 
 | Property | Value |
 |---|---|
 | Max entries | 50,000 |
 | TTL | 30 s (enforced on prune and again on read) |
 | Prune cadence | every 1,000 inserts |
-| Reader | `fim::kernel_table_attribution`, Tier 1 of the Windows attribution ladder |
+| Reader | `fim::kernel_table_attribution_for`, Tier 1 of the Windows attribution ladder (writes: file attribution table; deletes and renames: namespace table) |
 
 The Windows tiers in `fim.rs`:
 
@@ -310,6 +321,65 @@ the long form, and asserts that both lookups name the same pid and
 ```
 cargo build --example etw_file_writers --features etw,examples
 target\debug\examples\etw_file_writers.exe
+```
+
+### 2026-10-06 -- deletes and renames carry their actor
+
+Before: `handle_fileio_event` read Create, Write, Cleanup and Close and dropped
+every other opcode, and `fim` never looked a non-sensitive delete up (the only
+table it had named writers). Every Windows delete reached the detectors with a
+null process. FP lab run 37390270562 (windows-x64): a Claude Code session ran
+`git worktree add` into a `mktemp -d` directory and `git worktree remove` 180 ms
+later; the creates carried `git.exe`, the deletes of `tests\__init__.py`,
+`tests\test_app.py` and `.github\workflows\ci.yml` carried nothing, and the
+divergence engine's evaluator-integrity policy read an unknown actor deleting
+test and CI files during the session as CRITICAL. macOS (Endpoint Security
+UNLINK / RENAME carry their actor) passed the same case.
+
+What the kernel sends, measured on the Azure runner (Windows Server 2022): a
+delete (`DeleteFileW`, `RemoveDirectoryW`, git's `unlink` / `rmdir`,
+PowerShell `Remove-Item`) is one `FileIo/Delete` (70, `FileIo_Info`, the
+`FileObject` of the open that asked for it, `InfoClass` 64
+`FileDispositionInformationEx`) plus one `FileIo/DeletePath` (79,
+`FileIo_PathOperation`, the same request with the NT path). A rename is
+`FileIo/Rename` (71, the object, i.e. the old name, `InfoClass` 10) plus
+`FileIo/RenamePath` (80) whose `FileName` is the new name. An open with
+`FILE_DELETE_ON_CLOSE` deletes with neither: the file goes when the opener's
+last handle closes.
+
+Now:
+
+| Event | Action |
+|---|---|
+| `FileIo/Delete`, `FileIo/Rename` | Record the remembered `FileObject`'s path in the namespace table |
+| `FileIo/DeletePath` | Record its path in the namespace table |
+| `FileIo/RenamePath` | Record the old name (the object) and the new name; the object now names the new path |
+| `FileIo/Create` with `FILE_DELETE_ON_CLOSE` | Record the path in the namespace table (and as a write when the disposition writes) |
+
+`fim` asks the namespace table, and only it, for a delete or a rename while the
+session runs: at event time, again through the deferred worker (2 s and 8 s,
+sensitive events included), and in the drain-time backfills, which group a
+path's writes and its deletes or renames apart. Never the writer table, the
+attribution cache or the open-handle probes: those name whoever wrote or holds
+the file. Without the session the previous behaviour stands (non-sensitive
+deletes are not looked up).
+
+`examples/etw_file_deletes.rs` checks it end to end with a `FimWatcher`: a
+`git worktree add` / `git worktree remove --force` of a scratch repository in
+`%TEMP%`, then PowerShell creating a tree, `Rename-Item`, `File.Replace`, a
+`DeleteOnClose` file and `Remove-Item -Recurse`. It asserts every delete and
+rename is attributed, to the pid of the process that ran the command (the
+remover, not git's checkout child that wrote the files), and that no write is
+given to the remover. Same scenario on the runner:
+
+| | Delete | Rename | Create | Modify |
+|---|---|---|---|---|
+| Before | 0/17 attributed | 5/6 (from the writer table, the new name unattributed) | 17/17 | 40/40 |
+| After | 17/17, all to the remover's pid | 6/6 | 17/17 | 37/37 |
+
+```
+cargo build --example etw_file_deletes --features etw,fim,examples
+target\debug\examples\etw_file_deletes.exe
 ```
 
 ### 0f42307 (2026-09-10) -- attribution confined to the FIM watch roots

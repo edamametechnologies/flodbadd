@@ -4,13 +4,20 @@
 // TCP/IP, and FileIo) to maintain:
 //   1. A live process table populated by kernel Process Start/End events.
 //   2. A connection-to-PID map from TCP/IP Connect/Accept events.
-//   3. A file attribution table populated by FileIo Create events, mapping
-//      recently-opened file paths to the responsible process.
+//   3. A file attribution table populated by FileIo Create / Write events,
+//      mapping recently-written file paths to the process that wrote them.
+//   4. A namespace table populated by FileIo Delete / Rename events (and
+//      their DeletePath / RenamePath twins, and opens with
+//      FILE_DELETE_ON_CLOSE), mapping recently deleted or renamed paths --
+//      a rename's old and new name -- to the process that deleted or
+//      renamed them. Kept apart from the writes so a delete never takes the
+//      writer's identity, and a write looked up after the file was removed
+//      never takes the remover's.
 //
-// The file attribution table is the Windows counterpart of the ES file
-// attribution table on macOS (l7_es.rs).  It is consumed by the FIM
-// subsystem in fim.rs to attribute file events to processes at kernel-
-// delivered time, avoiding the race conditions inherent in polling.
+// The two tables are the Windows counterpart of the ES file attribution
+// table on macOS (l7_es.rs).  They are consumed by the FIM subsystem in
+// fim.rs to attribute file events to processes at kernel-delivered time,
+// avoiding the race conditions inherent in polling.
 //
 // On non-Windows platforms or when the `etw` feature is not enabled,
 // all public functions gracefully fall back to no-op stubs so the rest of
@@ -105,6 +112,21 @@ pub fn task_access_mode_for_desired_access(desired_access: u32) -> Option<u32> {
     None
 }
 
+/// Whether a file event at `event_at` happened before the process now holding
+/// its pid in the process table started (`process_started_at`); both are
+/// FILETIMEs. Then the pid belonged to an earlier process at the time, and
+/// the table's occupant is not the actor. `false` when either time is
+/// unknown: the event is recorded as before, the occupant being the pid's
+/// only candidate.
+///
+/// Pure and platform-neutral so it is unit-tested on every host.
+pub fn file_event_predates_process(event_at: Option<i64>, process_started_at: Option<i64>) -> bool {
+    matches!(
+        (event_at, process_started_at),
+        (Some(event_at), Some(started_at)) if event_at < started_at
+    )
+}
+
 #[cfg(all(target_os = "windows", feature = "etw"))]
 mod win {
     use super::*;
@@ -149,20 +171,10 @@ mod win {
     // running when the session starts (same payload as Process/Start).
     const EVENT_TRACE_TYPE_DC_START: u8 = 3;
 
-    // FileIo event opcodes (all delivered by EVENT_TRACE_FLAG_FILE_IO_INIT,
-    // i.e. initiation events in the caller's process context)
-    const FILEIO_CREATE: u8 = 64; // FileIo/Create -- file open or create with full path
-    const FILEIO_CLEANUP: u8 = 65; // FileIo/Cleanup -- last handle closed
-    const FILEIO_CLOSE: u8 = 66; // FileIo/Close -- file object released
-    const FILEIO_WRITE: u8 = 68; // FileIo/Write -- write initiation on an open file object
-
-    // FileIo/Create `CreateOptions` carries the NT create disposition in its
-    // top byte; these dispositions create or truncate the file, so the open
-    // itself is a write even when no FileIo/Write follows.
-    const FILE_SUPERSEDE: u32 = 0;
-    const FILE_CREATE: u32 = 2;
-    const FILE_OVERWRITE: u32 = 4;
-    const FILE_OVERWRITE_IF: u32 = 5;
+    // FileIo event opcodes and payload layouts (all delivered by
+    // EVENT_TRACE_FLAG_FILE_IO_INIT, i.e. initiation events in the caller's
+    // process context) live in `crate::etw_fileio_payload`, which decodes
+    // them on every host for the unit tests.
 
     // Open file objects seen at FileIo/Create by a foreign process, keyed by
     // the kernel `FileObject` pointer, so a later FileIo/Write on that
@@ -194,20 +206,8 @@ mod win {
     const FILE_ATTR_TTL_SECS: u64 = 30;
     const FILE_ATTR_PRUNE_INTERVAL: u64 = 1_000;
 
-    // Fixed-size prefix of the FileIo_Create payload (64-bit Windows):
-    //   IrpPtr(8) + FileObject(8) + TTID(4) + CreateOptions(4) +
-    //   FileAttributes(4) + ShareAccess(4) = 32 bytes
-    // OpenPath (variable-length UTF-16) follows immediately.
-    const FILEIO_CREATE_FIXED_PREFIX: usize = 32;
-    const FILEIO_CREATE_FILE_OBJECT_OFFSET: usize = 8;
-    const FILEIO_CREATE_OPTIONS_OFFSET: usize = 20;
-    // FileIo_ReadWrite (64-bit): Offset(8) + IrpPtr(8) + FileObject(8) +
-    // FileKey(8) + TTID(4) + IoSize(4) + IoFlags(4)
-    const FILEIO_READWRITE_FILE_OBJECT_OFFSET: usize = 16;
-    const FILEIO_READWRITE_MIN_LEN: usize = 24;
-    // FileIo_SimpleOp (64-bit): IrpPtr(8) + FileObject(8) + FileKey(8) + TTID(4)
-    const FILEIO_SIMPLEOP_FILE_OBJECT_OFFSET: usize = 8;
-    const FILEIO_SIMPLEOP_MIN_LEN: usize = 16;
+    /// FILETIME of the UNIX epoch (100 ns intervals since 1601-01-01).
+    const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
 
     #[derive(Clone, Debug)]
     pub struct FimEtwAttribution {
@@ -238,6 +238,12 @@ mod win {
         pub username: String,
         pub session_id: u32,
         pub exit_code: Option<u32>,
+        /// When this process came to exist, as a FILETIME (the clock of the
+        /// event header timestamps): its Process/Start event's timestamp, or
+        /// the kernel's creation time for a process found running. `None`
+        /// when unknown. A file event older than this was not this
+        /// process's: the pid was its predecessor's then.
+        pub started_at: Option<i64>,
     }
 
     // 4-tuple key for TCP connection tracking
@@ -253,6 +259,8 @@ mod win {
         process_table: Arc<DashMap<u32, EtwProcessInfo>>,
         connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
         file_attribution_table: Arc<DashMap<String, FimEtwAttribution>>,
+        /// Who deleted or renamed a path (see the module header, table 4).
+        file_namespace_table: Arc<DashMap<String, FimEtwAttribution>>,
         // Diagnostics counter; the read path lives on the trace-thread
         // clone, so the struct's own handle is retention-only.
         #[allow(dead_code)]
@@ -303,6 +311,7 @@ mod win {
             let process_table = Arc::new(DashMap::new());
             let connection_table = Arc::new(DashMap::new());
             let file_attribution_table = Arc::new(DashMap::new());
+            let file_namespace_table = Arc::new(DashMap::new());
             let file_insert_counter = Arc::new(AtomicU64::new(0));
             let file_event_counters = Arc::new(FileEventCounters::default());
             let available = Arc::new(AtomicBool::new(false));
@@ -310,6 +319,7 @@ mod win {
             let pt = Arc::clone(&process_table);
             let ct = Arc::clone(&connection_table);
             let ft = Arc::clone(&file_attribution_table);
+            let nt = Arc::clone(&file_namespace_table);
             let fc = Arc::clone(&file_insert_counter);
             let av = Arc::clone(&available);
 
@@ -326,7 +336,7 @@ mod win {
             if let Err(e) = std::thread::Builder::new()
                 .name("etw-client".into())
                 .spawn(move || {
-                    Self::run_etw_session(pt, ct, ft, fc, av);
+                    Self::run_etw_session(pt, ct, ft, nt, fc, av);
                 })
             {
                 error!("Failed to spawn ETW client thread: {}", e);
@@ -365,6 +375,7 @@ mod win {
                 process_table,
                 connection_table,
                 file_attribution_table,
+                file_namespace_table,
                 file_insert_counter,
                 file_event_counters,
                 available,
@@ -416,6 +427,13 @@ mod win {
                     .map(|u| u.name().to_string())
                     .unwrap_or_default();
                 let session_id = proc_.session_id().map(Pid::as_u32).unwrap_or(0);
+                // Whole seconds, rounded down: never later than the real
+                // start, and every primed process predates the session.
+                let started_at = i64::try_from(proc_.start_time())
+                    .ok()
+                    .filter(|secs| *secs > 0)
+                    .and_then(|secs| secs.checked_mul(10_000_000))
+                    .and_then(|ticks| ticks.checked_add(FILETIME_UNIX_EPOCH));
 
                 process_table.insert(
                     pid_u32,
@@ -427,6 +445,7 @@ mod win {
                         username,
                         session_id,
                         exit_code: None,
+                        started_at,
                     },
                 );
                 primed += 1;
@@ -567,6 +586,7 @@ mod win {
             process_table: Arc<DashMap<u32, EtwProcessInfo>>,
             connection_table: Arc<DashMap<TcpConnectionKey, u32>>,
             file_table: Arc<DashMap<String, FimEtwAttribution>>,
+            namespace_table: Arc<DashMap<String, FimEtwAttribution>>,
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
         ) {
@@ -586,6 +606,9 @@ mod win {
             });
             THREAD_FILE_COUNTER.with(|t| {
                 *t.borrow_mut() = Some(Arc::clone(&file_counter));
+            });
+            THREAD_NAMESPACE_TABLE.with(|t| {
+                *t.borrow_mut() = Some(Arc::clone(&namespace_table));
             });
 
             unsafe {
@@ -621,9 +644,10 @@ mod win {
                 props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
                 // EVENT_TRACE_FLAG_FILE_IO_INIT alone is sufficient: it delivers
                 // the FileIo initiation events (Create=64, Cleanup=65, Close=66,
-                // Write=68, ...) in the caller's context; `handle_fileio_event`
-                // consumes Create/Write/Cleanup/Close and drops the rest at the
-                // opcode check.
+                // Write=68, Delete=70, Rename=71, DeletePath=79, RenamePath=80,
+                // ...) in the caller's context; `handle_fileio_event` consumes
+                // those and drops the rest at the decoder
+                // (`etw_fileio_payload::decode`).
                 //
                 // EVENT_TRACE_FLAG_FILE_IO (TypeGroup1: Read/Write completion / OpEnd)
                 // was previously also enabled, which made the NT Kernel Logger emit
@@ -823,6 +847,19 @@ mod win {
         }
 
         pub fn get_file_attribution(&self, path: &str) -> Option<(u32, String, String)> {
+            Self::lookup_file_actor(&self.file_attribution_table, path)
+        }
+
+        /// The process that deleted or renamed `path` (a rename's old or new
+        /// name), never its writer: `(pid, process_name, process_path)`.
+        pub fn get_file_namespace_attribution(&self, path: &str) -> Option<(u32, String, String)> {
+            Self::lookup_file_actor(&self.file_namespace_table, path)
+        }
+
+        fn lookup_file_actor(
+            table: &DashMap<String, FimEtwAttribution>,
+            path: &str,
+        ) -> Option<(u32, String, String)> {
             // The lookup key is the canonical form. Callers from the
             // `notify` side typically supply Win32-shaped paths
             // (`C:\Users\...`), while ETW recorded NT-object paths
@@ -830,7 +867,7 @@ mod win {
             // normalized through `normalize_win_path` so they collide
             // on a single key.
             let key = normalize_win_path(path);
-            let entry = self.file_attribution_table.get(&key)?;
+            let entry = table.get(&key)?;
             let attr = entry.value();
             if attr.recorded_at.elapsed().as_secs() > FILE_ATTR_TTL_SECS {
                 return None;
@@ -852,17 +889,28 @@ mod win {
                 .load(Ordering::Relaxed)
         }
 
+        /// `at`: the FileIo event's header timestamp. The pid is the
+        /// kernel's (the event runs in the actor's context); the image is
+        /// the process table's, unless the process holding the pid there
+        /// started after the event: the pid was then still its
+        /// predecessor's, and the successor must not lend its identity
+        /// (FP-WIN-29 class; the session delivers per-CPU buffers out of
+        /// order, so a successor's Process/Start can be processed before its
+        /// predecessor's last file operation). Then, as for a pid the table
+        /// does not know, only the pid is recorded.
         fn record_file_attribution(
             file_table: &DashMap<String, FimEtwAttribution>,
             file_counter: &AtomicU64,
             process_table: &DashMap<u32, EtwProcessInfo>,
             path: String,
             pid: u32,
+            at: Option<i64>,
         ) {
-            let (process_name, process_path) = if let Some(info) = process_table.get(&pid) {
-                (info.process_name.clone(), info.process_path.clone())
-            } else {
-                (format!("pid-{}", pid), String::new())
+            let (process_name, process_path) = match process_table.get(&pid) {
+                Some(info) if !super::file_event_predates_process(at, info.started_at) => {
+                    (info.process_name.clone(), info.process_path.clone())
+                }
+                _ => (format!("pid-{}", pid), String::new()),
             };
 
             // Store the canonical form so lookups from any path shape
@@ -910,6 +958,10 @@ mod win {
         }
     }
 
+    /// Inserts into the namespace table, for its prune cadence (the write
+    /// table's count is `file_insert_counter`).
+    static NAMESPACE_INSERTS: AtomicU64 = AtomicU64::new(0);
+
     // Thread-local storage for the ETW callback to access the shared tables.
     // ETW callbacks are invoked on the ProcessTrace thread, so we set these
     // before calling ProcessTrace.
@@ -921,6 +973,8 @@ mod win {
         static THREAD_FILE_TABLE: std::cell::RefCell<Option<Arc<DashMap<String, FimEtwAttribution>>>> =
             const { std::cell::RefCell::new(None) };
         static THREAD_FILE_COUNTER: std::cell::RefCell<Option<Arc<AtomicU64>>> =
+            const { std::cell::RefCell::new(None) };
+        static THREAD_NAMESPACE_TABLE: std::cell::RefCell<Option<Arc<DashMap<String, FimEtwAttribution>>>> =
             const { std::cell::RefCell::new(None) };
         // Only the ProcessTrace thread touches it: no lock needed.
         static THREAD_FILE_OBJECTS: std::cell::RefCell<std::collections::HashMap<u64, (String, Instant)>> =
@@ -1569,12 +1623,10 @@ mod win {
         if p.pid == 0 || p.pid == GetCurrentProcessId() {
             return;
         }
+        let created = process_creation_filetime(p.pid);
         let parent_verified = p.ppid != 0
             && p.ppid != p.pid
-            && running_parent_verified(
-                process_creation_filetime(p.pid),
-                process_creation_filetime(p.ppid),
-            );
+            && running_parent_verified(created, process_creation_filetime(p.ppid));
         let (ppid, parent_process_path) = if parent_verified {
             (
                 Some(p.ppid),
@@ -1617,6 +1669,7 @@ mod win {
                     username: String::new(),
                     session_id: p.session_id,
                     exit_code: None,
+                    started_at: created.and_then(|t| i64::try_from(t).ok()),
                 });
             }
         });
@@ -1734,6 +1787,10 @@ mod win {
                                 username: String::new(),
                                 session_id,
                                 exit_code: None,
+                                // The Start event's own timestamp: the same
+                                // clock as the FileIo events it is compared
+                                // with, and earlier than any of them.
+                                started_at: Some(event.EventHeader.TimeStamp).filter(|t| *t > 0),
                             },
                         );
                     }
@@ -1787,25 +1844,6 @@ mod win {
         }
     }
 
-    fn read_u64_at(data: &[u8], off: usize) -> Option<u64> {
-        data.get(off..off + 8)
-            .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-    }
-
-    fn read_u32_at(data: &[u8], off: usize) -> Option<u32> {
-        data.get(off..off + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// Whether a FileIo/Create with this `CreateOptions` value creates or
-    /// truncates the target (a write in itself).
-    pub(crate) fn create_disposition_is_write(create_options: u32) -> bool {
-        matches!(
-            create_options >> 24,
-            FILE_SUPERSEDE | FILE_CREATE | FILE_OVERWRITE | FILE_OVERWRITE_IF
-        )
-    }
-
     fn remember_file_object(file_object: u64, path: String) {
         THREAD_FILE_OBJECTS.with(|objects| {
             let mut objects = objects.borrow_mut();
@@ -1836,6 +1874,15 @@ mod win {
         })
     }
 
+    /// The attribution table a FileIo event feeds.
+    #[derive(Clone, Copy)]
+    enum FileActorTable {
+        /// Who created, truncated or wrote a path.
+        Write,
+        /// Who deleted or renamed it.
+        Namespace,
+    }
+
     /// FileIo initiation events run in the calling process's context, so the
     /// header pid is the actor. Before 2026-09-08 every FileIo/Create -- a
     /// read-only open included -- overwrote the attribution table, so the
@@ -1843,13 +1890,19 @@ mod win {
     /// scanner replacing the real dropper). Now: a creating / truncating
     /// open records at once; a plain open is remembered by `FileObject` and
     /// recorded only when a FileIo/Write follows on that object.
+    ///
+    /// Deletes and renames go to the namespace table: FileIo/Delete and
+    /// FileIo/Rename through the remembered object, FileIo/DeletePath and
+    /// FileIo/RenamePath by name, and an open with `FILE_DELETE_ON_CLOSE`.
+    /// Until 2026-10-06 they were dropped here, so the file monitor reported
+    /// every Windows delete without a process: `git worktree remove` of a
+    /// worktree in `%TEMP%` read as an unknown actor deleting its test and CI
+    /// files during an agent session, which the divergence engine's
+    /// evaluator-integrity policy raised as CRITICAL (FP lab run
+    /// 37390270562, windows-x64), while the same scenario carried the
+    /// remover on macOS (Endpoint Security UNLINK).
     unsafe fn handle_fileio_event(event: &EVENT_RECORD, opcode: u8) {
-        if !matches!(
-            opcode,
-            FILEIO_CREATE | FILEIO_WRITE | FILEIO_CLEANUP | FILEIO_CLOSE
-        ) {
-            return;
-        }
+        use crate::etw_fileio_payload::{decode, FileIoAction};
 
         let data_ptr = event.UserData;
         let data_len = event.UserDataLength as usize;
@@ -1869,90 +1922,112 @@ mod win {
         }
 
         let data = std::slice::from_raw_parts(data_ptr as *const u8, data_len);
+        let ptr_size = if (event.EventHeader.Flags as u32) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
+            4
+        } else {
+            8
+        };
+        let Some(action) = decode(opcode, data, ptr_size) else {
+            return;
+        };
+        let at = Some(event.EventHeader.TimeStamp).filter(|t| *t > 0);
 
-        let path = match opcode {
-            FILEIO_CREATE => {
-                if data_len <= FILEIO_CREATE_FIXED_PREFIX {
-                    return;
-                }
-                // OpenPath starts after the fixed prefix as a null-terminated UTF-16 string
-                let path_ptr =
-                    (data_ptr as *const u8).add(FILEIO_CREATE_FIXED_PREFIX) as *const u16;
-                let path_max_u16 = (data_len - FILEIO_CREATE_FIXED_PREFIX) / 2;
-                let path_slice = std::slice::from_raw_parts(path_ptr, path_max_u16);
-                let path = extract_utf16_path(path_slice);
-                if path.is_empty() {
-                    return;
-                }
-                let file_object = read_u64_at(data, FILEIO_CREATE_FILE_OBJECT_OFFSET);
-                let create_options = read_u32_at(data, FILEIO_CREATE_OPTIONS_OFFSET);
+        match action {
+            FileIoAction::Open {
+                file_object,
+                path,
+                writes,
+                deletes_on_close,
+            } => {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
-                if !create_options.is_some_and(create_disposition_is_write) {
-                    return;
+                if deletes_on_close {
+                    record_file_actor(FileActorTable::Namespace, path.clone(), pid, at);
                 }
-                path
-            }
-            FILEIO_WRITE => {
-                if data_len < FILEIO_READWRITE_MIN_LEN {
-                    return;
+                if writes {
+                    record_file_actor(FileActorTable::Write, path, pid, at);
                 }
-                let Some(file_object) = read_u64_at(data, FILEIO_READWRITE_FILE_OBJECT_OFFSET)
-                else {
-                    return;
-                };
-                let Some(path) = file_object_path(file_object) else {
-                    return;
-                };
-                path
             }
-            _ => {
-                if data_len >= FILEIO_SIMPLEOP_MIN_LEN {
-                    if let Some(file_object) = read_u64_at(data, FILEIO_SIMPLEOP_FILE_OBJECT_OFFSET)
-                    {
-                        let _ = take_file_object(file_object);
+            FileIoAction::Write { file_object } => {
+                if let Some(path) = file_object_path(file_object) {
+                    record_file_actor(FileActorTable::Write, path, pid, at);
+                }
+            }
+            FileIoAction::Release { file_object } => {
+                let _ = take_file_object(file_object);
+            }
+            FileIoAction::Delete { file_object } | FileIoAction::Rename { file_object } => {
+                if let Some(path) = file_object_path(file_object) {
+                    record_file_actor(FileActorTable::Namespace, path, pid, at);
+                }
+            }
+            FileIoAction::DeletePath { path, .. } => {
+                record_file_actor(FileActorTable::Namespace, path, pid, at);
+            }
+            FileIoAction::RenamePath {
+                file_object,
+                new_path,
+            } => {
+                // The object still names the old path (FileIo/Rename records
+                // it as well); from here on it names the new one, for a write
+                // or a delete through it.
+                if let Some(file_object) = file_object {
+                    if let Some(old_path) = file_object_path(file_object) {
+                        record_file_actor(FileActorTable::Namespace, old_path, pid, at);
                     }
+                    remember_file_object(file_object, new_path.clone());
                 }
-                return;
+                record_file_actor(FileActorTable::Namespace, new_path, pid, at);
             }
-        };
+        }
+    }
 
+    fn record_file_actor(table: FileActorTable, path: String, pid: u32, at: Option<i64>) {
         // Same confinement as the macOS Endpoint Security path: the FileIo
-        // session sees every file event on the machine, and the only reader of
-        // this table is `fim::kernel_table_attribution`, which is only ever
-        // asked about paths under a FIM watch root.
+        // session sees every file event on the machine, and the only readers
+        // of these tables are `fim`'s kernel-table lookups, which are only
+        // ever asked about paths under a FIM watch root.
         if !crate::fim_attribution::is_attributable(&path) {
             return;
         }
 
-        THREAD_FILE_TABLE.with(|ft| {
-            THREAD_FILE_COUNTER.with(|fc| {
-                THREAD_PROCESS_TABLE.with(|pt| {
-                    if let (Some(file_table), Some(file_counter), Some(proc_table)) = (
-                        ft.borrow().as_ref(),
-                        fc.borrow().as_ref(),
-                        pt.borrow().as_ref(),
-                    ) {
+        THREAD_PROCESS_TABLE.with(|pt| {
+            let pt = pt.borrow();
+            let Some(proc_table) = pt.as_ref() else {
+                return;
+            };
+            match table {
+                FileActorTable::Write => THREAD_FILE_TABLE.with(|ft| {
+                    THREAD_FILE_COUNTER.with(|fc| {
+                        if let (Some(file_table), Some(file_counter)) =
+                            (ft.borrow().as_ref(), fc.borrow().as_ref())
+                        {
+                            FlodbaddL7Etw::record_file_attribution(
+                                file_table,
+                                file_counter,
+                                proc_table,
+                                path,
+                                pid,
+                                at,
+                            );
+                        }
+                    })
+                }),
+                FileActorTable::Namespace => THREAD_NAMESPACE_TABLE.with(|nt| {
+                    if let Some(namespace_table) = nt.borrow().as_ref() {
                         FlodbaddL7Etw::record_file_attribution(
-                            file_table,
-                            file_counter,
+                            namespace_table,
+                            &NAMESPACE_INSERTS,
                             proc_table,
                             path,
                             pid,
+                            at,
                         );
                     }
-                });
-            });
+                }),
+            }
         });
-    }
-
-    fn extract_utf16_path(data: &[u16]) -> String {
-        let len = data.iter().position(|&c| c == 0).unwrap_or(data.len());
-        if len == 0 {
-            return String::new();
-        }
-        String::from_utf16_lossy(&data[..len])
     }
 
     fn extract_image_path(data: &[u8]) -> String {
@@ -2189,6 +2264,10 @@ mod win {
             None
         }
 
+        pub fn get_file_namespace_attribution(&self, _path: &str) -> Option<(u32, String, String)> {
+            None
+        }
+
         pub fn file_attribution_count(&self) -> usize {
             0
         }
@@ -2286,8 +2365,20 @@ pub fn connection_count() -> usize {
     win::global().connection_count()
 }
 
+/// Who last created, truncated or wrote `path`, seen by the FileIo session
+/// within the table's TTL: `(pid, process_name, process_path)`.
 pub fn get_file_attribution(path: &str) -> Option<(u32, String, String)> {
     win::global().get_file_attribution(path)
+}
+
+/// Who last deleted or renamed `path` -- for a rename, the old name and the
+/// new one both answer -- seen by the FileIo session within the table's TTL:
+/// `(pid, process_name, process_path)`. Never the path's writer: a delete
+/// looked up in the write table would name whoever wrote the file, a
+/// different process whenever one tool lays a tree down and another removes
+/// it (`git worktree add` / `git worktree remove`).
+pub fn get_file_namespace_attribution(path: &str) -> Option<(u32, String, String)> {
+    win::global().get_file_namespace_attribution(path)
 }
 
 pub fn file_attribution_count() -> usize {
@@ -2388,6 +2479,18 @@ mod tests {
         );
         // `GENERIC_WRITE` alone is not expanded.
         assert_eq!(grade(0x4000_0000), None);
+    }
+
+    /// A successor on a recycled pid must not lend its identity to its
+    /// predecessor's file operation; an unknown time keeps the occupant.
+    #[test]
+    fn a_file_event_older_than_the_pid_occupant_is_not_the_occupants() {
+        assert!(file_event_predates_process(Some(100), Some(101)));
+        assert!(!file_event_predates_process(Some(101), Some(101)));
+        assert!(!file_event_predates_process(Some(102), Some(101)));
+        assert!(!file_event_predates_process(None, Some(101)));
+        assert!(!file_event_predates_process(Some(100), None));
+        assert!(!file_event_predates_process(None, None));
     }
 
     #[test]
