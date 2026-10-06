@@ -663,6 +663,9 @@ mod tests {
         assert!(recent_for_pid(4_242_001, None).is_empty());
     }
 
+    // Kernel watch prefixes feed Endpoint Security and fanotify only; Windows
+    // records cold opens through ETW and never builds them.
+    #[cfg(unix)]
     #[test]
     fn watch_prefixes_cover_the_cold_directories_under_each_home() {
         let homes = vec![PathBuf::from("/nonexistent-home-a")];
