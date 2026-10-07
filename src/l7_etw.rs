@@ -145,9 +145,10 @@ mod win {
         CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
         CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS, EVENT_HEADER_FLAG_32_BIT_HEADER,
         EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FLAG_FILE_IO_INIT,
-        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW,
-        EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
-        PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+        EVENT_TRACE_FLAG_IMAGE_LOAD, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROCESS,
+        EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
+        PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION,
+        WNODE_FLAG_TRACED_GUID,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -200,6 +201,31 @@ mod win {
     /// `TargetProcessId: u32, DesiredAccess: u32, ReturnCode: u32`. The mask
     /// is graded by `super::task_access_mode_for_desired_access`.
     const AUDIT_EVENT_PS_OPEN_PROCESS: u16 = 5;
+
+    // Image loads ride the NT Kernel Logger (EVENT_TRACE_FLAG_IMAGE_LOAD).
+    // Its `Process/Start` names an image by the bare `ImageFileName`: a
+    // short-lived process started by bare name (`wmic process ...`) that is
+    // gone before its Start event is consumed keeps only that name, and an
+    // OS-shipped requester then reads as an unknown one (edamame_cli Windows
+    // gate: `WMIC.exe` reading `Runner.Worker.exe`, CRITICAL, every run since
+    // 2026-09-30). The program image mapped into a new process carries the
+    // full NT path, logged as the process is created. (The Kernel-Process
+    // manifest provider's ProcessStart would carry it too, but Windows 11
+    // build 26200 delivers no ProcessStart to a user session.)
+    const IMAGE_LOAD_GUID: GUID = GUID::from_u128(0x2cb15d1d_5fc1_11d2_abe1_00a0c911f518);
+    const EVENT_TRACE_TYPE_LOAD: u8 = 10; // Image/Load
+    /// Program-image paths kept for the process table and the audit thread,
+    /// and for how long. A record only ever serves the process it describes
+    /// (same pid, logged at its creation), so the bound is memory, not
+    /// correctness.
+    const PROGRAM_IMAGE_MAX_ENTRIES: usize = 8_192;
+    const PROGRAM_IMAGE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+    /// How long an open by a requester known only by a bare image name waits
+    /// for that process's program-image record. The two sessions deliver
+    /// per-CPU buffers about once a second each, so the record of a process's
+    /// creation can arrive after its first open.
+    const PENDING_TASK_ACCESS_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+    const PENDING_TASK_ACCESS_MAX: usize = 512;
 
     // File attribution table limits -- same as ES on macOS (l7_es.rs)
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
@@ -657,9 +683,17 @@ mod win {
                 // pegging the helper at ~120% of one core with kernel-time dominant.
                 // Drop the flag -- correctness is unchanged because we never read
                 // those opcodes anyway.
+                //
+                // EVENT_TRACE_FLAG_IMAGE_LOAD: one event per image mapped
+                // (`handle_image_load` keeps program images only), plus a
+                // rundown of every loaded module when the session starts,
+                // dropped at the opcode check. Measured on the Azure runner:
+                // no buffer lost, the extra buffers mostly that start-up
+                // rundown.
                 props.EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP
                     | EVENT_TRACE_FLAG_PROCESS
-                    | EVENT_TRACE_FLAG_FILE_IO_INIT;
+                    | EVENT_TRACE_FLAG_FILE_IO_INIT
+                    | EVENT_TRACE_FLAG_IMAGE_LOAD;
                 props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
                 props.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
 
@@ -979,6 +1013,337 @@ mod win {
         // Only the ProcessTrace thread touches it: no lock needed.
         static THREAD_FILE_OBJECTS: std::cell::RefCell<std::collections::HashMap<u64, (String, Instant)>> =
             std::cell::RefCell::new(std::collections::HashMap::new());
+        // Audit session thread only: the opens waiting for a program image.
+        static PENDING_TASK_ACCESS: std::cell::RefCell<std::collections::VecDeque<PendingTaskAccess>> =
+            const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    }
+
+    /// The program image the kernel mapped into a new process.
+    struct ProgramImage {
+        /// Win32 form of the image's path (the NT device path when no drive
+        /// maps).
+        path: String,
+        /// When it was mapped (the event's FILETIME): at the process's
+        /// creation, so it identifies which process of the pid it was.
+        loaded: Option<u64>,
+        seen: Instant,
+    }
+
+    /// Program images by pid: written by the kernel session thread, read by
+    /// it (Process/Start) and by the audit session thread (bare-name
+    /// requesters).
+    static PROGRAM_IMAGES: once_cell::sync::Lazy<DashMap<u32, ProgramImage>> =
+        once_cell::sync::Lazy::new(DashMap::new);
+
+    /// The process that made a `PsOpenProcess` call, as the audit thread
+    /// names it.
+    #[derive(Clone, Default)]
+    struct TaskAccessRequester {
+        name: String,
+        path: String,
+        ppid: Option<u32>,
+        /// Creation time (FILETIME) of the process-table entry it came from.
+        started_at: Option<u64>,
+    }
+
+    impl TaskAccessRequester {
+        /// Known by an image name but not a path: its program-image record
+        /// may still be on its way.
+        fn awaits_image(&self) -> bool {
+            let has_path = self.path.contains('\\') || self.path.contains('/');
+            !has_path && !(self.name.is_empty() && self.path.is_empty())
+        }
+
+        fn bare_name(&self) -> &str {
+            if self.path.is_empty() {
+                &self.name
+            } else {
+                &self.path
+            }
+        }
+
+        fn take_path(&mut self, path: String) {
+            self.name = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            self.path = path;
+        }
+    }
+
+    /// One graded `PsOpenProcess`, ready to forward.
+    struct TaskAccessRecord {
+        timestamp_ms: u64,
+        requester_pid: u32,
+        target_pid: u32,
+        desired_access: u32,
+        task_access_mode: u32,
+    }
+
+    struct PendingTaskAccess {
+        queued: Instant,
+        record: TaskAccessRecord,
+        requester: TaskAccessRequester,
+    }
+
+    /// `Image/Load`: keep the path of a program image mapped into a process,
+    /// and give it to the process table's entry for the same process when
+    /// that entry has only a bare name.
+    unsafe fn handle_image_load(event: &EVENT_RECORD) {
+        let data_ptr = event.UserData as *const u8;
+        let data_len = event.UserDataLength as usize;
+        if data_ptr.is_null() || data_len == 0 {
+            return;
+        }
+        let ptr_size = if (event.EventHeader.Flags as u32) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
+            4
+        } else {
+            8
+        };
+        let data = std::slice::from_raw_parts(data_ptr, data_len);
+        let Some((pid, image)) = crate::etw_process_payload::parse_image_load(data, ptr_size)
+        else {
+            return;
+        };
+        if !crate::etw_process_payload::is_program_image(&image) {
+            return;
+        }
+        let loaded = u64::try_from(event.EventHeader.TimeStamp)
+            .ok()
+            .filter(|t| *t > 0);
+        // The first program image of a process is its own; a later one in
+        // the same process (an image loaded as a library) does not replace
+        // it. A record of an earlier process under a reused pid does.
+        if let Some(existing) = PROGRAM_IMAGES.get(&pid) {
+            if crate::etw_process_payload::same_process_creation(existing.loaded, loaded) {
+                return;
+            }
+        }
+        let path = crate::win_path_normalize::nt_device_to_drive(&image);
+        if PROGRAM_IMAGES.len() >= PROGRAM_IMAGE_MAX_ENTRIES {
+            PROGRAM_IMAGES.retain(|_, image| image.seen.elapsed() < PROGRAM_IMAGE_TTL);
+            if PROGRAM_IMAGES.len() >= PROGRAM_IMAGE_MAX_ENTRIES {
+                PROGRAM_IMAGES.clear();
+            }
+        }
+        PROGRAM_IMAGES.insert(
+            pid,
+            ProgramImage {
+                path: path.clone(),
+                loaded,
+                seen: Instant::now(),
+            },
+        );
+        THREAD_PROCESS_TABLE.with(|t| {
+            if let Some(table) = t.borrow().as_ref() {
+                if let Some(mut entry) = table.get_mut(&pid) {
+                    let entry_created = entry.started_at.and_then(|s| u64::try_from(s).ok());
+                    if crate::etw_process_payload::same_process_creation(entry_created, loaded)
+                        && crate::etw_process_payload::kernel_image_path_upgrades(
+                            &entry.process_path,
+                            &path,
+                        )
+                    {
+                        entry.process_name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        entry.process_path = path;
+                    }
+                }
+            }
+        });
+    }
+
+    /// The program image path of the process `pid` names, when that record
+    /// is provably the same process (created when the image was mapped) of
+    /// the same image.
+    fn program_image_for(pid: u32, started_at: Option<u64>, bare: &str) -> Option<String> {
+        PROGRAM_IMAGES.get(&pid).and_then(|image| {
+            (crate::etw_process_payload::same_process_creation(started_at, image.loaded)
+                && crate::etw_process_payload::kernel_image_path_upgrades(bare, &image.path))
+            .then(|| image.path.clone())
+        })
+    }
+
+    /// The requester of an open: the process table's entry (a live kernel
+    /// query when the entry has no image), upgraded to the program image
+    /// path of the same process when the entry has only a bare name.
+    fn resolve_task_access_requester(
+        table: &DashMap<u32, EtwProcessInfo>,
+        pid: u32,
+    ) -> TaskAccessRequester {
+        let mut requester = table
+            .get(&pid)
+            .map(|p| TaskAccessRequester {
+                name: p.process_name.clone(),
+                path: p.process_path.clone(),
+                ppid: Some(p.ppid),
+                started_at: p.started_at.and_then(|s| u64::try_from(s).ok()),
+            })
+            .unwrap_or_default();
+        if requester.path.is_empty() {
+            // The opener is alive right now: ask the kernel.
+            if let Some(path) = query_image_path(pid) {
+                requester.take_path(path);
+            }
+        }
+        if requester.awaits_image() {
+            if let Some(path) = program_image_for(pid, requester.started_at, requester.bare_name())
+            {
+                requester.take_path(path);
+            }
+        }
+        requester
+    }
+
+    /// The requester's parent, named only when the process holding the
+    /// parent pid already existed when the requester was created: a pid
+    /// freed by an exited parent and taken by a later process names no
+    /// parent (FP-WIN-29 class; a `WMIC.exe` read was attributed to
+    /// `cargo.exe` on one gate run and to `edamame_posture.exe` on another).
+    /// The kernel's current occupant first, the table's entry when the
+    /// parent has exited; an unknown creation time names nobody.
+    fn verified_parent_path(
+        table: &DashMap<u32, EtwProcessInfo>,
+        ppid: u32,
+        child_created: Option<u64>,
+    ) -> Option<String> {
+        let child_created = child_created?;
+        if ppid == 0 {
+            return None;
+        }
+        query_image_path_created_by(ppid, child_created)
+            .filter(|path| !path.is_empty())
+            .or_else(|| {
+                table
+                    .get(&ppid)
+                    .filter(|parent| {
+                        parent
+                            .started_at
+                            .and_then(|s| u64::try_from(s).ok())
+                            .is_some_and(|created| occupant_predates(created, child_created))
+                    })
+                    .map(|parent| parent.process_path.clone())
+                    .filter(|path| !path.is_empty())
+            })
+    }
+
+    /// Ring-level pre-filter and push of one graded open (FLODBADD2 §1b.5).
+    ///
+    /// csrss, lsass, svchost and Defender's MsMpEng open every process with
+    /// VM_READ, and Windows has no in-message signing fact like ES. A
+    /// path-under-%SystemRoot% / Defender-root check keeps that background
+    /// out of the ring; the grader in core does not trust it -- it attaches
+    /// the requester's measured publisher verdict (in-process WinVerifyTrust
+    /// + catalog, edamame_foundation::publisher_attestation) and drops an
+    /// edge only for a Microsoft-signed binary at a canonical path. The mark
+    /// deliberately excludes the user-writable subtrees of %SystemRoot%
+    /// (Temp, Tasks, ...): a standard user can drop a binary there without
+    /// elevation, so its path vouches for nothing (see
+    /// is_os_shipped_windows_image).
+    fn forward_task_access(
+        table: &DashMap<u32, EtwProcessInfo>,
+        record: TaskAccessRecord,
+        requester: TaskAccessRequester,
+    ) {
+        let path_marked = is_os_shipped_windows_image(&requester.path);
+        // Read-grade opens by OS-shipped requesters (csrss, lsass, svchost,
+        // MsMpEng, ...) are the constant background the detector drops
+        // anyway; keep them out of the ring. The mark rides the event as
+        // `platform_path_marked`, never as `is_platform_binary`: a path is
+        // not a kernel fact. Since the blanket asks grade READ, an OS-shipped
+        // binary making one also stays out of the ring -- the same
+        // background, and the detector drops a kernel-vouched platform
+        // requester at a canonical path regardless of grade. A binary in a
+        // user-writable %SystemRoot% subtree is not marked, so its opens
+        // always reach the detector.
+        if record.task_access_mode == TASK_ACCESS_READ && path_marked {
+            return;
+        }
+        let target_path = table
+            .get(&record.target_pid)
+            .map(|p| p.process_path.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| query_image_path(record.target_pid));
+        let parent_path = requester
+            .ppid
+            .and_then(|ppid| verified_parent_path(table, ppid, requester.started_at));
+        proc_events::push(proc_events::ProcessEvent {
+            timestamp_ms: record.timestamp_ms,
+            kind: proc_events::ProcessEventKind::TaskAccess,
+            pid: record.requester_pid,
+            ppid: requester.ppid,
+            uid: None,
+            process_name: requester.name,
+            process_path: requester.path,
+            parent_process_path: parent_path,
+            argv_sha256: None,
+            argv_len: None,
+            signing_id: None,
+            team_id: None,
+            is_platform_binary: None,
+            platform_path_marked: path_marked,
+            target_pid: Some(record.target_pid),
+            target_process_path: target_path,
+            task_access_mode: Some(record.task_access_mode),
+            task_access_mask: Some(record.desired_access),
+            net_dst: None,
+        });
+    }
+
+    /// Forward the waiting opens whose requester now has its program image
+    /// path, and those that waited long enough (as they are: a bare name
+    /// still reaches the detector, which grades it as before).
+    fn flush_pending_task_access(table: &DashMap<u32, EtwProcessInfo>) {
+        let ready: Vec<PendingTaskAccess> = PENDING_TASK_ACCESS.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            if pending.is_empty() {
+                return Vec::new();
+            }
+            let mut ready = Vec::new();
+            let mut waiting = std::collections::VecDeque::with_capacity(pending.len());
+            while let Some(mut item) = pending.pop_front() {
+                if let Some(path) = program_image_for(
+                    item.record.requester_pid,
+                    item.requester.started_at,
+                    item.requester.bare_name(),
+                ) {
+                    item.requester.take_path(path);
+                    ready.push(item);
+                } else if item.queued.elapsed() >= PENDING_TASK_ACCESS_WAIT {
+                    ready.push(item);
+                } else {
+                    waiting.push_back(item);
+                }
+            }
+            *pending = waiting;
+            ready
+        });
+        for item in ready {
+            forward_task_access(table, item.record, item.requester);
+        }
+    }
+
+    fn defer_task_access(
+        table: &DashMap<u32, EtwProcessInfo>,
+        record: TaskAccessRecord,
+        requester: TaskAccessRequester,
+    ) {
+        let overflow = PENDING_TASK_ACCESS.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            pending.push_back(PendingTaskAccess {
+                queued: Instant::now(),
+                record,
+                requester,
+            });
+            (pending.len() > PENDING_TASK_ACCESS_MAX)
+                .then(|| pending.pop_front())
+                .flatten()
+        });
+        if let Some(oldest) = overflow {
+            forward_task_access(table, oldest.record, oldest.requester);
+        }
     }
 
     /// `Microsoft-Windows-Kernel-Audit-API-Calls` callback (audit session
@@ -999,6 +1364,11 @@ mod win {
         if header.ProviderId != KERNEL_AUDIT_API_CALLS_GUID {
             return;
         }
+        THREAD_PROCESS_TABLE.with(|t| {
+            if let Some(table) = t.borrow().as_ref() {
+                flush_pending_task_access(table);
+            }
+        });
         let data_ptr = event.UserData as *const u8;
         let data_len = event.UserDataLength as usize;
         // Bounded diagnostic of the provider's raw shape (event id, version,
@@ -1058,87 +1428,23 @@ mod win {
         let Some(task_access_mode) = task_access_mode_for_desired_access(desired_access) else {
             return;
         };
+        let record = TaskAccessRecord {
+            timestamp_ms: proc_events::now_ms(),
+            requester_pid,
+            target_pid,
+            desired_access,
+            task_access_mode,
+        };
         THREAD_PROCESS_TABLE.with(|t| {
             if let Some(table) = t.borrow().as_ref() {
-                let (mut requester_name, mut requester_path, requester_ppid, parent_path) = table
-                    .get(&requester_pid)
-                    .map(|p| {
-                        let parent = table
-                            .get(&p.ppid)
-                            .map(|pp| pp.process_path.clone())
-                            .filter(|s| !s.is_empty());
-                        (
-                            p.process_name.clone(),
-                            p.process_path.clone(),
-                            Some(p.ppid),
-                            parent,
-                        )
-                    })
-                    .unwrap_or_default();
-                if requester_path.is_empty() {
-                    // The opener is alive right now: ask the kernel.
-                    if let Some(path) = query_image_path(requester_pid) {
-                        requester_name = std::path::Path::new(&path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        requester_path = path;
-                    }
+                let requester = resolve_task_access_requester(table, requester_pid);
+                if requester.awaits_image() {
+                    // Only a bare name so far: hold the open until the
+                    // process's program-image record names its path.
+                    defer_task_access(table, record, requester);
+                } else {
+                    forward_task_access(table, record, requester);
                 }
-                let target_path = table
-                    .get(&target_pid)
-                    .map(|p| p.process_path.clone())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| query_image_path(target_pid));
-                // Ring-level pre-filter (FLODBADD2 §1b.5): csrss, lsass,
-                // svchost and Defender's MsMpEng open every process with
-                // VM_READ, and Windows has no in-message signing fact like
-                // ES. A path-under-%SystemRoot% / Defender-root check keeps
-                // that background out of the ring; the grader in core does
-                // not trust it -- it attaches the requester's measured
-                // publisher verdict (in-process WinVerifyTrust + catalog,
-                // edamame_foundation::publisher_attestation) and drops an
-                // edge only for a Microsoft-signed binary at a canonical path.
-                // The mark deliberately excludes the user-writable subtrees
-                // of %SystemRoot% (Temp, Tasks, ...): a standard user can
-                // drop a binary there without elevation, so its path vouches
-                // for nothing (see is_os_shipped_windows_image).
-                let path_marked = is_os_shipped_windows_image(&requester_path);
-                // Read-grade opens by OS-shipped requesters (csrss, lsass,
-                // svchost, MsMpEng, ...) are the constant background the
-                // detector drops anyway; keep them out of the ring. The mark
-                // rides the event as `platform_path_marked`, never as
-                // `is_platform_binary`: a path is not a kernel fact. Since
-                // the blanket asks grade READ, an OS-shipped binary making
-                // one also stays out of the ring -- the same background, and
-                // the detector drops a kernel-vouched platform requester at a
-                // canonical path regardless of grade. A binary in a
-                // user-writable %SystemRoot% subtree is not marked, so its
-                // opens always reach the detector.
-                if task_access_mode == TASK_ACCESS_READ && path_marked {
-                    return;
-                }
-                proc_events::push(proc_events::ProcessEvent {
-                    timestamp_ms: proc_events::now_ms(),
-                    kind: proc_events::ProcessEventKind::TaskAccess,
-                    pid: requester_pid,
-                    ppid: requester_ppid,
-                    uid: None,
-                    process_name: requester_name,
-                    process_path: requester_path,
-                    parent_process_path: parent_path,
-                    argv_sha256: None,
-                    argv_len: None,
-                    signing_id: None,
-                    team_id: None,
-                    is_platform_binary: None,
-                    platform_path_marked: path_marked,
-                    target_pid: Some(target_pid),
-                    target_process_path: target_path,
-                    task_access_mode: Some(task_access_mode),
-                    task_access_mask: Some(desired_access),
-                    net_dst: None,
-                });
             }
         });
     }
@@ -1458,6 +1764,8 @@ mod win {
             handle_process_event(event, opcode);
         } else if provider == FILEIO_GUID {
             handle_fileio_event(event, opcode);
+        } else if provider == IMAGE_LOAD_GUID && opcode == EVENT_TRACE_TYPE_LOAD {
+            handle_image_load(event);
         }
     }
 
@@ -1712,6 +2020,25 @@ mod win {
                 if pid == own_pid {
                     return;
                 }
+                // A bare image name (the process is gone and its command line
+                // named no path) takes the program image the kernel mapped
+                // into this same process, when that record is already in.
+                let (process_name, image_path) = match program_image_for(
+                    pid,
+                    u64::try_from(event.EventHeader.TimeStamp)
+                        .ok()
+                        .filter(|t| *t > 0),
+                    &image_path,
+                ) {
+                    Some(path) => (
+                        std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or(process_name),
+                        path,
+                    ),
+                    None => (process_name, image_path),
+                };
 
                 // When the child came to exist: its own creation time while it
                 // is alive (the same kernel clock as its parent's), else the

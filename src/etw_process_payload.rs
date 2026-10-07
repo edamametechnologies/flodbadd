@@ -186,9 +186,215 @@ fn strip_namespace_prefix(path: &str) -> &str {
     path
 }
 
+/// Decode an NT Kernel Logger `Image/Load` payload (MOF `Image_Load`, V2 and
+/// V3: V3 only splits `Reserved0` into signature fields of the same size)
+/// into the process the image was mapped into and the image's NT path.
+/// `ptr` is the header's pointer size (4 or 8). `None` when the payload is
+/// too short or `FileName` is not a rooted path.
+///
+/// ```text
+/// ImageBase       P
+/// ImageSize       P
+/// ProcessId       u32
+/// ImageCheckSum   u32
+/// TimeDateStamp   u32
+/// Reserved0       u32
+/// DefaultBase     P
+/// Reserved1..4    4 x u32
+/// FileName        UTF-16LE, NUL-terminated
+/// ```
+pub fn parse_image_load(data: &[u8], ptr: usize) -> Option<(u32, String)> {
+    let ptr = if ptr == 4 { 4 } else { 8 };
+    let pid = read_u32(data, 2 * ptr)?;
+    let file_name_at = 3 * ptr + 8 * 4;
+    let rest = data.get(file_name_at..)?;
+    let wide: Vec<u16> = rest
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&ch| ch != 0)
+        .collect();
+    let file_name = String::from_utf16_lossy(&wide);
+    let rooted = file_name.starts_with('\\')
+        || (file_name.len() >= 3
+            && file_name.as_bytes()[0].is_ascii_alphabetic()
+            && file_name.as_bytes()[1] == b':');
+    (pid != 0 && rooted).then_some((pid, file_name))
+}
+
+/// Whether an image path names a program image (`.exe`) rather than a
+/// library. Only those are kept from the image-load stream: the first one
+/// mapped into a new process is its own image. A program started from a
+/// file with another extension keeps the name its Start event gave it.
+pub fn is_program_image(path: &str) -> bool {
+    path.len() >= 4 && path[path.len() - 4..].eq_ignore_ascii_case(".exe")
+}
+
+/// How many characters of an image's file name the kernel keeps in a
+/// process's `ImageFileName` (EPROCESS: 15 bytes with the terminator). A
+/// name of this length may be the head of a longer one.
+const KERNEL_IMAGE_FILE_NAME_CHARS: usize = 14;
+
+/// Whether `kernel_path`, the full image path the kernel reported for a
+/// process, should replace `current`, the image a process-table entry
+/// carries for that process: only an entry without a path (nothing, or the
+/// bare `image.exe` the NT Kernel Logger's `ImageFileName` delivers) naming
+/// the same image. An entry that already has a path keeps it, and a bare
+/// name of another image is another process.
+pub fn kernel_image_path_upgrades(current: &str, kernel_path: &str) -> bool {
+    fn is_path(s: &str) -> bool {
+        s.contains('\\') || s.contains('/')
+    }
+    let current = current.trim();
+    let kernel_path = kernel_path.trim();
+    if !is_path(kernel_path) {
+        return false;
+    }
+    if current.is_empty() {
+        return true;
+    }
+    if is_path(current) {
+        return false;
+    }
+    let kernel_name = kernel_path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let current = current.to_ascii_lowercase();
+    kernel_name == current
+        || (current.chars().count() >= KERNEL_IMAGE_FILE_NAME_CHARS
+            && kernel_name.starts_with(&current))
+}
+
+/// FILETIME units (100 ns) within which two creation stamps of one pid are
+/// the same process: the NT Kernel Logger stamps its `Process/Start` as the
+/// process is created, the Kernel-Process provider carries the creation
+/// time itself. A pid reused by a later process is created well after.
+const SAME_PROCESS_CREATION_TOLERANCE: u64 = 10_000_000;
+
+/// Whether two records of a pid describe the same process, judged on their
+/// creation times (FILETIME). An unknown time on either side is not the
+/// same process: Windows recycles pids quickly, and an image is only ever
+/// carried over from a record that is provably the same one.
+pub fn same_process_creation(a: Option<u64>, b: Option<u64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) if a > 0 && b > 0 => a.abs_diff(b) <= SAME_PROCESS_CREATION_TOLERANCE,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_load_payload(ptr: usize, pid: u32, file_name: &str) -> Vec<u8> {
+        let mut v = Vec::new();
+        let push_ptr = |v: &mut Vec<u8>, val: u64| {
+            if ptr == 8 {
+                v.extend_from_slice(&val.to_le_bytes());
+            } else {
+                v.extend_from_slice(&(val as u32).to_le_bytes());
+            }
+        };
+        push_ptr(&mut v, 0x7ff6_1234_0000); // ImageBase
+        push_ptr(&mut v, 0x5_6000); // ImageSize
+        v.extend_from_slice(&pid.to_le_bytes());
+        v.extend_from_slice(&0xabcdu32.to_le_bytes()); // ImageCheckSum
+        v.extend_from_slice(&0x6500_0000u32.to_le_bytes()); // TimeDateStamp
+        v.extend_from_slice(&[0x0c, 0x01, 0, 0]); // SignatureLevel / Type / reserved
+        push_ptr(&mut v, 0x1_4000_0000); // DefaultBase
+        v.extend_from_slice(&[0u8; 16]); // Reserved1..4
+        for c in file_name.encode_utf16() {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        v.extend_from_slice(&[0, 0]);
+        v
+    }
+
+    #[test]
+    fn an_image_load_names_its_process_and_nt_path() {
+        let path = r"\Device\HarddiskVolume3\Windows\System32\wbem\WMIC.exe";
+        assert_eq!(
+            parse_image_load(&image_load_payload(8, 628, path), 8),
+            Some((628, path.to_string()))
+        );
+        assert_eq!(
+            parse_image_load(&image_load_payload(4, 4242, path), 4),
+            Some((4242, path.to_string()))
+        );
+        // Too short, a zero pid, or a name that is no rooted path: nothing.
+        assert_eq!(
+            parse_image_load(&image_load_payload(8, 628, path)[..40], 8),
+            None
+        );
+        assert_eq!(parse_image_load(&image_load_payload(8, 0, path), 8), None);
+        assert_eq!(
+            parse_image_load(&image_load_payload(8, 628, "WMIC.exe"), 8),
+            None
+        );
+    }
+
+    #[test]
+    fn only_program_images_are_kept() {
+        assert!(is_program_image(
+            r"\Device\HarddiskVolume3\Windows\System32\wbem\WMIC.exe"
+        ));
+        assert!(is_program_image(r"C:\x\SETUP.EXE"));
+        assert!(!is_program_image(
+            r"\Device\HarddiskVolume3\Windows\System32\ntdll.dll"
+        ));
+        assert!(!is_program_image(r"C:\x\payload.exe.dat"));
+        assert!(!is_program_image("exe"));
+    }
+
+    /// The WMIC case: a process started by bare name exited before its
+    /// NT Kernel Logger Start event was consumed, so the table only knew
+    /// `WMIC.exe`; the Kernel-Process provider's path for the same image
+    /// replaces it.
+    #[test]
+    fn a_bare_image_name_takes_the_kernel_path_of_the_same_image() {
+        let kernel = r"C:\Windows\System32\wbem\WMIC.exe";
+        assert!(kernel_image_path_upgrades("WMIC.exe", kernel));
+        assert!(kernel_image_path_upgrades("wmic.EXE", kernel));
+        assert!(kernel_image_path_upgrades("", kernel));
+        // ImageFileName keeps 14 characters of a longer name.
+        assert!(kernel_image_path_upgrades(
+            "build-script-b",
+            r"C:\w\target\release\build\core-0123456789abcdef\build-script-build.exe"
+        ));
+    }
+
+    #[test]
+    fn a_path_or_another_image_is_never_replaced() {
+        let kernel = r"C:\Windows\System32\wbem\WMIC.exe";
+        // Already a path: kept, even a different one.
+        assert!(!kernel_image_path_upgrades(r"C:\Users\x\WMIC.exe", kernel));
+        assert!(!kernel_image_path_upgrades(
+            r"C:\Windows\System32\wbem\WMIC.exe",
+            kernel
+        ));
+        // Another image under the same pid is another process.
+        assert!(!kernel_image_path_upgrades("node.exe", kernel));
+        // A short name is not a prefix match: `wmi.exe` is not `wmic.exe`.
+        assert!(!kernel_image_path_upgrades("WMI", kernel));
+        // The kernel side must be a path.
+        assert!(!kernel_image_path_upgrades("WMIC.exe", "WMIC.exe"));
+        assert!(!kernel_image_path_upgrades("WMIC.exe", ""));
+    }
+
+    #[test]
+    fn only_provably_the_same_creation_is_the_same_process() {
+        let t = 134_000_000_000_000_000u64;
+        assert!(same_process_creation(Some(t), Some(t)));
+        assert!(same_process_creation(Some(t), Some(t + 5_000_000)));
+        assert!(same_process_creation(Some(t + 5_000_000), Some(t)));
+        // A pid reused two seconds later is another process.
+        assert!(!same_process_creation(Some(t), Some(t + 20_000_000)));
+        // Unknown is not the same.
+        assert!(!same_process_creation(None, Some(t)));
+        assert!(!same_process_creation(Some(t), None));
+        assert!(!same_process_creation(Some(0), Some(0)));
+    }
 
     fn payload(version: u8, ptr: usize, with_sid: bool) -> Vec<u8> {
         let mut v = Vec::new();
