@@ -46,13 +46,14 @@ A manifest provider cannot ride the NT Kernel Logger, which is why
 
 ### Session A: kernel flags
 
-`props.EnableFlags` is exactly three flags:
+`props.EnableFlags` is exactly four flags:
 
 | Flag | Delivers | Consumed as |
 |---|---|---|
 | `EVENT_TRACE_FLAG_NETWORK_TCPIP` | TcpIp Connect (12), Accept (15), Reconnect (16) | 4-tuple -> PID connection table |
 | `EVENT_TRACE_FLAG_PROCESS` | Process Start (1), End (2) | Live process table, plus `Exec` / `Exit` ring events |
 | `EVENT_TRACE_FLAG_FILE_IO_INIT` | FileIo initiation events (TypeGroup2) in the caller's context: Create (64), Cleanup (65), Close (66), Write (68), Delete (70), Rename (71), DeletePath (79), RenamePath (80) | File attribution table (writes), namespace table (deletes, renames) |
+| `EVENT_TRACE_FLAG_IMAGE_LOAD` | Image Load (10); the DCStart rundown and Unload are ignored | The program image (`.exe`) of each new process, by pid: the full path of a process its Start event names by a bare image name (see 2026-10-07 below) |
 
 On a kernel-logger session the `EnableFlags` bitmask is what selects the
 providers. The module additionally calls `EnableTraceEx2` for the TCP/IP and
@@ -462,6 +463,47 @@ Measured on the runner with `process_events_monitor`: returning from `main`
 left no EDAMAME session behind (`logman query -ets`); `--hard-exit`
 (`std::process::exit`) left both running; `--shutdown --hard-exit` left none.
 
+### 2026-10-07 -- a bare image name takes its program image path
+
+`Process/Start` names an image by its bare `ImageFileName`. The full path came
+from the command line's first token or from a live kernel query, so a process
+started by bare name (`wmic ...`) and gone before its Start event was handled
+kept `WMIC.exe`. That is not path-marked as OS-shipped, so its READ opens
+reached the detector: the `edamame_cli` Windows gate graded `WMIC.exe` reading
+`Runner.Worker.exe` CRITICAL on every run since 2026-09-30 (FP-CI-20 in
+`edamame_core/FALSEPOSITIVES.md`).
+
+Session A now takes `EVENT_TRACE_FLAG_IMAGE_LOAD`. The first program image
+(`.exe`) mapped into a process is its own, logged as the process is created,
+with the full NT path:
+
+- `handle_image_load` keeps it per pid (`PROGRAM_IMAGES`, at most 8192
+  entries, pruned past 120 s).
+- A process-table entry of the same process that has only a bare name takes
+  it, and so does Process/Start when its own name is bare.
+- The audit thread resolves a bare-name requester the same way. While the
+  record is not in yet (the two sessions deliver out of order), the open
+  waits up to 2 s for it, then goes as it is.
+- "The same process" means the same pid and a creation within 1 s; an unknown
+  time never matches, and a bare name of another image is never replaced
+  (`etw_process_payload::{same_process_creation, kernel_image_path_upgrades}`).
+- The audit path's parent is now verified like the Exec path's: only a
+  process created before the requester names it.
+
+The Kernel-Process manifest provider's ProcessStart would carry `ImageName`
+and `CreateTime` directly, but Windows 11 build 26200 delivers none to a user
+session (logman with every keyword: event ids 3-8, 10 and 21 only).
+
+Measured on the Azure runner against HEAD:
+
+- A ~2 ms native opener launched 25 times by bare name: HEAD forwarded 3 opens
+  as bare `tinyopen.exe`; the fix forwarded 2 with the full path and none bare.
+- `tasklist /M` launched by bare name: HEAD forwarded 2 of 30 opens as bare,
+  unmarked `tasklist.exe`; the fix forwarded none bare (the resolved ones are
+  OS-shipped and dropped as background).
+- The kernel session lost no buffers. It wrote 104 buffers in its first 8 s
+  against 52, the extra mostly the image rundown at session start.
+
 ## Privilege, deployment and failure modes
 
 Both sessions need Administrator or LocalSystem. `edamame_helper` runs as a
@@ -518,7 +560,7 @@ has to re-derive that from `EnableFlags`, not as a roadmap.
 
 | Capability | Flag / provider | State |
 |---|---|---|
-| Image and DLL load tracking | `EVENT_TRACE_FLAG_IMAGE_LOAD` | Not enabled. Injected-DLL detection would need it. |
+| DLL load tracking | `EVENT_TRACE_FLAG_IMAGE_LOAD` | The flag is on (program images, 2026-10-07); library loads are dropped as they arrive. Injected-DLL detection would need them. |
 | Registry access tracing | `EVENT_TRACE_FLAG_REGISTRY` | Not enabled. |
 | Thread lifecycle and cross-process thread creation | `EVENT_TRACE_FLAG_THREAD` | Not enabled. `PROCESS_CREATE_THREAD` in a `PsOpenProcess` mask is the only thread-injection-adjacent signal collected, and it is graded as ATTACH intent, not as an observed injection. |
 | File read/write completion | `EVENT_TRACE_FLAG_FILE_IO` | Removed on purpose, see the section above. |
@@ -544,12 +586,10 @@ has to re-derive that from `EnableFlags`, not as a roadmap.
   before its open is handled, and the kernel query fails as well: the edge
   carries an empty image, and the detector drops edges with no requester
   (measured 2026-09-29 on the Azure runner: every open by a .NET probe that
-  exits at once, and a pwsh one-liner). A requester whose Start was handled
-  after it exited keeps a bare image name, which is not path-marked as
-  OS-shipped: the shape of the `WMIC.exe` -> `Runner.Worker.exe` CRITICAL on
-  the released-2.0.2 cli gate (run 36508482670: `access:read`, process path
-  `WMIC.exe`, no parent). Its mask graded READ, so the all-access fix above
-  does not change it.
+  exits at once, and a pwsh one-liner; 22 of 25 opens by a ~2 ms native
+  probe on 2026-10-07). A requester whose Start was handled after it exited
+  used to keep a bare image name; it now takes its program image path (see
+  2026-10-07 above).
 - **The remembered `FileObject` map is thread-local.** That is correct today
   because one trace thread delivers all FileIo events, and it is not safe to
   assume if a second consumer thread is ever added.
