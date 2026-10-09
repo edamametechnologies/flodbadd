@@ -24,6 +24,7 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use undeadlock::{CustomMutex, CustomMutexExt};
 
 // The cold set itself is published data
@@ -49,6 +50,15 @@ pub const MAX_PIDS: usize = 4_096;
 /// Kernel watch prefixes per host, across all homes.
 const MAX_WATCH_PREFIXES: usize = 1_024;
 const MAX_HOMES: usize = 64;
+/// How long a reader retries a contended table before it reads nothing.
+/// Readers are detector ticks, not kernel callbacks: a holder preempted
+/// inside its few-microsecond critical section must not cost a tick a read
+/// that is in the table.
+const READ_RETRY_BUDGET: Duration = Duration::from_millis(25);
+/// The test helpers wait for the table instead of dropping their record:
+/// a dropped record made a unit test see no read at all (alpine x86_64 CI,
+/// 2026-10-09).
+const TEST_RETRY_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 struct PidOpens {
@@ -185,6 +195,23 @@ fn now_ms() -> u64 {
     crate::process_events::now_ms()
 }
 
+/// Run `f` under the table lock, retrying while it is contended until
+/// `budget` runs out. For readers and the test helpers only: `record_open`
+/// keeps its single attempt, because the backends call it from
+/// kernel-callback threads that never wait.
+fn with_table_retrying<R>(budget: Duration, mut f: impl FnMut(&mut OpenTable) -> R) -> Option<R> {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(result) = TABLE.try_with(&mut f) {
+            return Some(result);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// True when `path` is in the cold credential set this module records.
 pub fn is_cold_credential_path(path: &str) -> bool {
     let params = crate::sensitive_paths::credential_opens_params();
@@ -230,16 +257,16 @@ pub fn record_open(pid: u32, uid: Option<u32>, process_path: &str, file_path: &s
 
 /// Cold credential files `pid` opened within `credential_open_ttl_ms()`,
 /// newest first. `process_path`, when known, must match the image that did
-/// the opens, so a reused pid never inherits them. Empty when the table is
-/// momentarily contended (fail-open, same as the process-event ring).
+/// the opens, so a reused pid never inherits them. A contended table is
+/// retried for `READ_RETRY_BUDGET`, then reads empty (fail-open, same as the
+/// process-event ring).
 pub fn recent_for_pid(pid: u32, process_path: Option<&str>) -> Vec<String> {
     let now = now_ms();
-    TABLE
-        .try_with(|table| {
-            table.prune(now);
-            table.recent(pid, process_path, now)
-        })
-        .unwrap_or_default()
+    with_table_retrying(READ_RETRY_BUDGET, |table| {
+        table.prune(now);
+        table.recent(pid, process_path, now)
+    })
+    .unwrap_or_default()
 }
 
 /// `(recorded, dropped_locked)` since start.
@@ -252,15 +279,20 @@ pub fn counters() -> (u64, u64) {
 
 /// Test-only: forget every recorded open.
 pub fn clear_for_tests() {
-    TABLE.try_with(|table| table.by_pid.clear());
+    with_table_retrying(TEST_RETRY_BUDGET, |table| table.by_pid.clear())
+        .expect("credential-open table held past the test budget");
 }
 
 /// Test-only: record without the own-process filter, so a unit test can
-/// stand in for another process.
+/// stand in for another process. Waits for a contended table: a record a
+/// test made must be there.
 pub fn record_open_for_tests(pid: u32, process_path: &str, file_path: &str) {
     if is_cold_credential_path(file_path) {
         let now = now_ms();
-        TABLE.try_with(|table| table.record(pid, None, process_path, file_path, now));
+        with_table_retrying(TEST_RETRY_BUDGET, |table| {
+            table.record(pid, None, process_path, file_path, now)
+        })
+        .expect("credential-open table held past the test budget");
     }
 }
 
@@ -726,7 +758,48 @@ mod tests {
         );
     }
 
+    /// A holder that keeps the table (as a preempted holder does on a loaded
+    /// host) delays the test recorder and the retrying readers; neither
+    /// loses the read. `record_open`, called from kernel callbacks, still
+    /// takes a single attempt.
     #[test]
+    #[serial_test::serial(credential_opens_table)]
+    fn a_contended_table_delays_readers_and_test_records_instead_of_dropping_them() {
+        let pid = 4_242_101;
+        let hold = |duration: Duration| {
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                with_table_retrying(TEST_RETRY_BUDGET, |_| {
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(duration);
+                })
+                .unwrap();
+            });
+            held_rx.recv().unwrap();
+            holder
+        };
+
+        let holder = hold(Duration::from_millis(50));
+        record_open_for_tests(pid, NODE, KEY);
+        holder.join().unwrap();
+
+        let holder = hold(Duration::from_millis(50));
+        let read = with_table_retrying(TEST_RETRY_BUDGET, |table| {
+            table.recent(pid, Some(NODE), now_ms())
+        });
+        holder.join().unwrap();
+        assert_eq!(read, Some(vec![KEY.to_string()]));
+
+        let holder = hold(Duration::from_millis(50));
+        let dropped_before = counters().1;
+        record_open(pid, None, NODE, "/Users/u/.ssh/id_ed25519");
+        holder.join().unwrap();
+        assert!(counters().1 > dropped_before, "kernel records never wait");
+        assert_eq!(recent_for_pid(pid, Some(NODE)), vec![KEY]);
+    }
+
+    #[test]
+    #[serial_test::serial(credential_opens_table)]
     fn the_observer_never_records_its_own_opens() {
         clear_for_tests();
         record_open(std::process::id(), None, NODE, KEY);
