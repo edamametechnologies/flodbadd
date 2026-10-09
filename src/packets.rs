@@ -8,6 +8,7 @@ use crate::sessions::*;
 use crate::sni;
 use chrono::{DateTime, Utc};
 use dashmap::mapref::entry::Entry;
+use lazy_static::lazy_static;
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv4::Ipv4Packet;
@@ -19,6 +20,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio;
 use tracing::{trace, warn};
 use undeadlock::*;
@@ -55,6 +57,140 @@ fn mirrored(session: &Session) -> Session {
         src_port: session.dst_port,
         dst_ip: session.src_ip,
         dst_port: session.src_port,
+    }
+}
+
+/// TLS record content type for application data. A port-443 egress segment
+/// that begins one is past the handshake, so it is never part of a
+/// ClientHello and its payload is not carried for SNI reassembly.
+const TLS_APPLICATION_DATA: u8 = 0x17;
+
+/// A ClientHello lives in one TLS record, whose body is at most 2^14 bytes
+/// (`5` is the record header). A node / Chromium ClientHello that carries a
+/// post-quantum key share is ~1.6 KB and spans two TCP segments but stays
+/// well under this; a would-be record larger than this is not reassembled.
+const MAX_CLIENT_HELLO_BYTES: usize = 5 + (1 << 14);
+
+/// A split ClientHello completes within the client's first couple of egress
+/// segments. Give up after this many continuations so a flow that merely
+/// looks like a truncated handshake cannot pin a buffer.
+const MAX_CLIENT_HELLO_SEGMENTS: u8 = 4;
+
+/// Reassembly buffers age out defensively; a real ClientHello finishes in
+/// far less than this.
+const CLIENT_HELLO_REASSEMBLY_TTL: Duration = Duration::from_secs(5);
+
+/// Upper bound on concurrently reassembling flows. Over it (after aging),
+/// partials are dropped wholesale -- a dropped partial just falls back to
+/// DNS-based naming, never to a wrong name.
+const MAX_CLIENT_HELLO_REASSEMBLIES: usize = 1024;
+
+/// Partial ClientHello bytes for one flow whose client split the record
+/// across TCP segments.
+struct ClientHelloReassembly {
+    /// Bytes gathered so far, starting at the TLS record header.
+    buf: Vec<u8>,
+    /// Total bytes the complete record occupies (`5` + record length).
+    needed: usize,
+    /// Continuation segments appended after the first.
+    segments: u8,
+    /// When the first fragment arrived, for age-based eviction.
+    inserted: Instant,
+}
+
+lazy_static! {
+    /// Per-flow partial ClientHello bytes, keyed by the oriented session.
+    /// A client that splits its ClientHello across TCP segments -- common
+    /// once the record carries a post-quantum key share, which pushes it
+    /// past one segment -- would otherwise lose its SNI, because any single
+    /// segment holds only a truncated TLS record. Entries are short lived:
+    /// dropped on SNI extraction, when the peer replies, on a segment/byte
+    /// cap, or by age.
+    static ref CLIENT_HELLO_REASSEMBLY: CustomDashMap<Session, ClientHelloReassembly> =
+        CustomDashMap::new("client_hello_reassembly");
+}
+
+/// Carry an egress port-443 TCP payload so the SNI can be recovered even when
+/// the ClientHello spans several TCP segments. The first segment starts a
+/// handshake record (`0x16`); later segments carry the record's tail with no
+/// header of their own, so a continuation is kept too, bounded to a
+/// ClientHello's worth of bytes. Application-data records (`0x17`) are past
+/// the handshake and are never carried, which keeps the steady-state upload
+/// path from copying payloads.
+fn carry_tls_egress_payload(dst_port: u16, payload: &[u8]) -> Option<Vec<u8>> {
+    if dst_port != 443 {
+        return None;
+    }
+    match payload.first() {
+        None | Some(&TLS_APPLICATION_DATA) => None,
+        Some(_) => Some(payload[..payload.len().min(MAX_CLIENT_HELLO_BYTES)].to_vec()),
+    }
+}
+
+/// Feed one carried egress port-443 payload (see [`carry_tls_egress_payload`])
+/// into the per-flow ClientHello reassembler and return the SNI hostname once
+/// the whole record is in hand. A ClientHello that fits in one segment is
+/// handled inline with no buffering, matching the previous behavior.
+fn reassemble_client_hello_sni(key: &Session, payload: &[u8]) -> Option<String> {
+    // Continuation of a ClientHello already started for this flow.
+    if let Some(mut state) = CLIENT_HELLO_REASSEMBLY.get_mut(key) {
+        state.segments = state.segments.saturating_add(1);
+        let room = state.needed.min(MAX_CLIENT_HELLO_BYTES);
+        if state.buf.len() < room {
+            let take = (room - state.buf.len()).min(payload.len());
+            state.buf.extend_from_slice(&payload[..take]);
+        }
+        let have = state.buf.len();
+        let done = have >= state.needed || state.segments >= MAX_CLIENT_HELLO_SEGMENTS;
+        drop(state);
+        if done {
+            if let Some((_, state)) = CLIENT_HELLO_REASSEMBLY.remove(key) {
+                return sni::extract_sni(&state.buf).map(|info| info.hostname);
+            }
+        }
+        return None;
+    }
+
+    // Not tracking this flow yet: only the start of a handshake record opens
+    // one. Anything else (app data, a continuation we never saw begin) is
+    // ignored cheaply.
+    let needed = sni::client_hello_record_len(payload)?;
+    if payload.len() >= needed {
+        // Whole ClientHello in a single segment -- no state needed.
+        return sni::extract_sni(payload).map(|info| info.hostname);
+    }
+    if needed <= MAX_CLIENT_HELLO_BYTES {
+        prune_client_hello_reassembly();
+        CLIENT_HELLO_REASSEMBLY.insert(
+            key.clone(),
+            ClientHelloReassembly {
+                buf: payload.to_vec(),
+                needed,
+                segments: 0,
+                inserted: Instant::now(),
+            },
+        );
+    }
+    None
+}
+
+/// Drop a flow's partial ClientHello: the handshake is done being sent (the
+/// peer replied) or the connection closed. Called while holding no reassembly
+/// guard.
+fn forget_client_hello_reassembly(key: &Session) {
+    if !CLIENT_HELLO_REASSEMBLY.is_empty() {
+        CLIENT_HELLO_REASSEMBLY.remove(key);
+    }
+}
+
+/// Evict aged partials, and if still at the cap, drop them all. Called only
+/// when about to insert a new partial, so the common path never scans.
+fn prune_client_hello_reassembly() {
+    let now = Instant::now();
+    CLIENT_HELLO_REASSEMBLY
+        .retain(|_, state| now.duration_since(state.inserted) < CLIENT_HELLO_REASSEMBLY_TTL);
+    if CLIENT_HELLO_REASSEMBLY.len() >= MAX_CLIENT_HELLO_REASSEMBLIES {
+        CLIENT_HELLO_REASSEMBLY.clear();
     }
 }
 
@@ -366,21 +502,30 @@ pub async fn process_parsed_packet(
         // The ClientHello follows the handshake, so for a connection seen from
         // its SYN it reaches this path, not the new-session one: take the SNI
         // here too. The name the client asked for is this session's own; the
-        // resolver's names are per address, which CDN tenants share.
+        // resolver's names are per address, which CDN tenants share. A client
+        // that split the ClientHello across TCP segments is reassembled across
+        // these updates (`reassemble_client_hello_sni`).
         if entry.dst_domain_type != DomainResolutionType::SNI {
-            if let Some(sni_info) = parsed_packet
-                .tls_client_hello
-                .as_ref()
-                .filter(|_| is_originator)
-                .and_then(|payload| sni::extract_sni(payload))
-            {
-                trace!(
-                    "Extracted SNI hostname '{}' for session {:?}",
-                    sni_info.hostname,
-                    key
-                );
-                entry.dst_domain = Some(sni_info.hostname);
-                entry.dst_domain_type = DomainResolutionType::SNI;
+            if is_originator {
+                if let Some(hostname) = parsed_packet
+                    .tls_client_hello
+                    .as_ref()
+                    .and_then(|payload| reassemble_client_hello_sni(&key, payload))
+                {
+                    trace!(
+                        "Extracted SNI hostname '{}' for session {:?}",
+                        hostname,
+                        key
+                    );
+                    entry.dst_domain = Some(hostname);
+                    entry.dst_domain_type = DomainResolutionType::SNI;
+                }
+            } else if parsed_packet.packet_length > 0 {
+                // The peer sent data, so it already has the full ClientHello
+                // (a server cannot answer before then): drop any partial still
+                // held for this flow. A bare ACK carries no such signal and
+                // must not discard a ClientHello still in flight.
+                forget_client_hello_reassembly(&key);
             }
         }
         entry.last_modified = now;
@@ -525,17 +670,18 @@ pub async fn process_parsed_packet(
         deactivated: false,
     };
 
-    let (dst_domain, dst_domain_type) = if let Some(ref payload) = parsed_packet.tls_client_hello {
-        if let Some(sni_info) = sni::extract_sni(payload) {
-            trace!(
-                "Extracted SNI hostname '{}' for session {:?}",
-                sni_info.hostname,
-                key
-            );
-            (Some(sni_info.hostname), DomainResolutionType::SNI)
-        } else {
-            (None, DomainResolutionType::None)
-        }
+    let (dst_domain, dst_domain_type) = if let Some(hostname) = parsed_packet
+        .tls_client_hello
+        .as_ref()
+        .filter(|_| is_originator)
+        .and_then(|payload| reassemble_client_hello_sni(&key, payload))
+    {
+        trace!(
+            "Extracted SNI hostname '{}' for session {:?}",
+            hostname,
+            key
+        );
+        (Some(hostname), DomainResolutionType::SNI)
     } else {
         (None, DomainResolutionType::None)
     };
@@ -730,14 +876,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
-                    let tls_client_hello = if dst_port == 443
-                        && packet_length >= 43
-                        && tcp.payload().first() == Some(&0x16)
-                    {
-                        Some(tcp.payload().to_vec())
-                    } else {
-                        None
-                    };
+                    let tls_client_hello = carry_tls_egress_payload(dst_port, tcp.payload());
 
                     Some(ParsedPacket::SessionPacket(SessionPacketData {
                         session,
@@ -870,14 +1009,7 @@ pub fn parse_packet_pcap(packet_data: &[u8], timestamp: DateTime<Utc>) -> Option
                         dst_port,
                     };
 
-                    let tls_client_hello = if dst_port == 443
-                        && packet_length >= 43
-                        && tcp.payload().first() == Some(&0x16)
-                    {
-                        Some(tcp.payload().to_vec())
-                    } else {
-                        None
-                    };
+                    let tls_client_hello = carry_tls_egress_payload(dst_port, tcp.payload());
 
                     Some(ParsedPacket::SessionPacket(SessionPacketData {
                         session,
@@ -1241,6 +1373,160 @@ mod tests {
             Some("gist.githubusercontent.com")
         );
         assert_eq!(info.dst_domain_type, DomainResolutionType::SNI);
+    }
+
+    /// A padded ClientHello that does not fit in one TCP segment -- the shape
+    /// a modern client produces once the record carries a post-quantum key
+    /// share -- is reassembled across its segments and still names the
+    /// session. Without reassembly each segment holds only a truncated TLS
+    /// record and the SNI is lost (the in-process-key-theft blind spot).
+    #[tokio::test]
+    #[serial]
+    async fn test_split_client_hello_reassembles_sni() {
+        let host = Ipv4Addr::new(10, 2, 0, 7);
+        let server = Ipv4Addr::new(104, 21, 48, 1);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+
+        // ~1.7 KB record: larger than one Ethernet segment, so a real client
+        // would split it. Split past the first MSS, so the first segment
+        // carries a truncated record and the second carries the tail with no
+        // header of its own.
+        let hello = padded_client_hello("api.mainnet-beta.solana.com", 1400);
+        assert!(hello.len() > 1460, "hello must exceed one segment");
+        let split = 1460;
+        let seg1 = hello[..split].to_vec();
+        let seg2 = hello[split..].to_vec();
+        assert_eq!(seg1.first(), Some(&0x16), "first segment starts the record");
+
+        for packet in [
+            tcp_packet((host, 51000), (server, 443), TcpFlags::SYN, 0, None),
+            tcp_packet(
+                (server, 443),
+                (host, 51000),
+                TcpFlags::SYN | TcpFlags::ACK,
+                0,
+                None,
+            ),
+            tcp_packet((host, 51000), (server, 443), TcpFlags::ACK, 0, None),
+            tcp_packet(
+                (host, 51000),
+                (server, 443),
+                TcpFlags::ACK | TcpFlags::PSH,
+                seg1.len(),
+                Some(seg1),
+            ),
+            // The server bare-ACKs the first segment before the second
+            // arrives: this must not discard the partial ClientHello.
+            tcp_packet((server, 443), (host, 51000), TcpFlags::ACK, 0, None),
+            tcp_packet(
+                (host, 51000),
+                (server, 443),
+                TcpFlags::ACK | TcpFlags::PSH,
+                seg2.len(),
+                Some(seg2),
+            ),
+        ] {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+
+        assert_eq!(sessions.len(), 1);
+        let info = sessions.iter().next().unwrap();
+        assert_eq!(
+            info.dst_domain.as_deref(),
+            Some("api.mainnet-beta.solana.com")
+        );
+        assert_eq!(info.dst_domain_type, DomainResolutionType::SNI);
+    }
+
+    /// The parser carries egress port-443 payloads for reassembly, but not
+    /// application-data records (past the handshake) or non-443 traffic, and
+    /// it bounds the copy to a ClientHello's worth of bytes.
+    #[test]
+    fn test_carry_tls_egress_payload_gate() {
+        // Handshake record start on 443: carried.
+        assert_eq!(
+            carry_tls_egress_payload(443, &[0x16, 0x03, 0x01, 0x00, 0x05]),
+            Some(vec![0x16, 0x03, 0x01, 0x00, 0x05])
+        );
+        // Continuation (no header): carried, so reassembly can append it.
+        assert_eq!(
+            carry_tls_egress_payload(443, &[0xAB, 0xCD]),
+            Some(vec![0xAB, 0xCD])
+        );
+        // Application data record: never carried.
+        assert_eq!(carry_tls_egress_payload(443, &[0x17, 0x03, 0x03]), None);
+        // Empty payload (bare ACK): nothing to carry.
+        assert_eq!(carry_tls_egress_payload(443, &[]), None);
+        // Not egress 443: not carried.
+        assert_eq!(carry_tls_egress_payload(80, &[0x16, 0x03, 0x01]), None);
+        // Copy is bounded.
+        let big = vec![0x16u8; MAX_CLIENT_HELLO_BYTES + 4096];
+        assert_eq!(
+            carry_tls_egress_payload(443, &big).map(|v| v.len()),
+            Some(MAX_CLIENT_HELLO_BYTES)
+        );
+    }
+
+    /// A ClientHello that fits in one segment is extracted inline, with no
+    /// lingering reassembly state for the flow.
+    #[test]
+    fn test_single_segment_client_hello_needs_no_state() {
+        let key = Session {
+            protocol: Protocol::TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 3, 0, 1)),
+            src_port: 52000,
+            dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+            dst_port: 443,
+        };
+        let hello = client_hello("single.example.com");
+        assert_eq!(
+            reassemble_client_hello_sni(&key, &hello).as_deref(),
+            Some("single.example.com")
+        );
+        assert!(CLIENT_HELLO_REASSEMBLY.get(&key).is_none());
+    }
+
+    /// A padded ClientHello with a dummy extension so the record exceeds one
+    /// TCP segment, as a modern (post-quantum) client's does.
+    fn padded_client_hello(hostname: &str, pad_len: usize) -> Vec<u8> {
+        let name = hostname.as_bytes();
+        let mut sni = vec![0x00, 0x00];
+        sni.extend_from_slice(&((name.len() + 5) as u16).to_be_bytes());
+        sni.extend_from_slice(&((name.len() + 3) as u16).to_be_bytes());
+        sni.push(0x00);
+        sni.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        sni.extend_from_slice(name);
+
+        // Padding extension (type 0x0015), skipped by the extension parser.
+        let mut padding = vec![0x00, 0x15];
+        padding.extend_from_slice(&(pad_len as u16).to_be_bytes());
+        padding.extend(std::iter::repeat(0u8).take(pad_len));
+
+        let mut extensions = sni;
+        extensions.extend_from_slice(&padding);
+
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f, 0x01, 0x00]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = vec![
+            0x01,
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
+        handshake.extend_from_slice(&body);
+
+        let mut record = vec![0x16, 0x03, 0x01];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     #[tokio::test]

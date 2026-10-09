@@ -109,6 +109,31 @@ pub fn extract_sni(payload: &[u8]) -> Option<SniInfo> {
     parse_client_hello(client_hello)
 }
 
+/// If `payload` begins a TLS handshake record, return the total number of
+/// bytes the complete record occupies (`5` header + record length). A client
+/// that splits its ClientHello across TCP segments leaves the first segment
+/// holding a truncated record; a caller can buffer that many bytes across the
+/// following segments and then call [`extract_sni`] on the joined record.
+///
+/// Returns `None` when the input is too short to hold a record header or is
+/// not a handshake record of a TLS version this module accepts, so a caller
+/// can use it as the "is this the start of a ClientHello?" test on a flow it
+/// is not yet tracking.
+pub fn client_hello_record_len(payload: &[u8]) -> Option<usize> {
+    if payload.len() < 5 {
+        return None;
+    }
+    if payload[0] != TLS_CONTENT_TYPE_HANDSHAKE {
+        return None;
+    }
+    // Record-layer version: TLS 1.0 - 1.3, matching extract_sni.
+    if payload[1] != 0x03 || payload[2] > 0x04 {
+        return None;
+    }
+    let record_length = u16::from_be_bytes([payload[3], payload[4]]) as usize;
+    Some(5 + record_length)
+}
+
 /// Parse ClientHello body to extract SNI
 fn parse_client_hello(data: &[u8]) -> Option<SniInfo> {
     let mut offset = 0;
