@@ -55,6 +55,8 @@ const FIM_ATTRIBUTION_RETRY_DELAYS_MS: [u64; 2] = [2_000, 8_000];
 struct CachedAttribution {
     process_name: Option<String>,
     process_path: Option<String>,
+    /// The writer was inferred (a holder of a directory), not measured.
+    inferred: bool,
     recorded_at: Instant,
 }
 
@@ -106,12 +108,18 @@ fn prune_attribution_cache() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &Option<String>) {
+fn cache_attribution(
+    path: &str,
+    process_name: &Option<String>,
+    process_path: &Option<String>,
+    inferred: bool,
+) {
     FIM_ATTRIBUTION_CACHE.insert(
         path.to_string(),
         CachedAttribution {
             process_name: process_name.clone(),
             process_path: process_path.clone(),
+            inferred,
             recorded_at: Instant::now(),
         },
     );
@@ -126,16 +134,30 @@ fn cache_attribution(path: &str, process_name: &Option<String>, process_path: &O
 /// drain(s) skip Tier-3 for this path until the negative TTL expires.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn cache_attribution_miss(path: &str) {
-    cache_attribution(path, &None, &None);
+    cache_attribution(path, &None, &None, false);
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn lookup_cache(path: &str) -> Option<(Option<String>, Option<String>)> {
+fn lookup_cache(path: &str) -> Option<(Option<String>, Option<String>, bool)> {
     let entry = FIM_ATTRIBUTION_CACHE.get(path)?;
     if entry.recorded_at.elapsed().as_secs() > entry.ttl_secs() {
         return None;
     }
-    Some((entry.process_name.clone(), entry.process_path.clone()))
+    Some((
+        entry.process_name.clone(),
+        entry.process_path.clone(),
+        entry.inferred,
+    ))
+}
+
+/// Whether a process holding `path` open is only a guess at its writer:
+/// holding a directory open (an enumeration, a change watcher, a current
+/// directory) writes nothing, so the holders of a directory event's own
+/// path are no more measured than those of its parents (FP-WIN-35). The
+/// metadata query opens nothing exclusively.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn holder_is_inferred(path: &Path) -> bool {
+    path.is_dir()
 }
 
 /// Group backfill candidates by path, preserving first-seen (most recent)
@@ -706,17 +728,14 @@ fn translate_notify_event_with_attribution(
         let labels = classify_sensitive_path_labels_sync(&[path_str.clone()]);
         // Attribution is expensive and platform-dependent, so only attempt it for
         // sensitive or temp-ish paths that are likely to matter for vuln correlation.
-        let (process_name, process_path, process_pid) = match attribution {
+        let (process_name, process_path, process_pid, writer_inferred) = match attribution {
             Some((pid, name, proc_path)) if !name.is_empty() || !proc_path.is_empty() => (
                 Some(name.to_string()).filter(|n| !n.is_empty()),
                 Some(proc_path.to_string()).filter(|p| !p.is_empty()),
                 Some(pid).filter(|pid| *pid > 0),
+                false,
             ),
-            _ => {
-                let (name, proc_path, pid) =
-                    best_effort_process_attribution(path, sensitive, event_type);
-                (name, proc_path, pid)
-            }
+            _ => best_effort_process_attribution(path, sensitive, event_type),
         };
 
         let ts = Utc::now();
@@ -731,6 +750,7 @@ fn translate_notify_event_with_attribution(
             process_name,
             process_path,
             process_pid: process_pid,
+            writer_inferred,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: sensitive,
@@ -919,7 +939,7 @@ fn process_fim_attribution_work_item(
     work: FimAttributionWorkItem,
 ) -> Option<FimAttributionWorkItem> {
     if let Some((pid, name, proc_path)) = kernel_table_attribution_for(&work.path, work.kind) {
-        store.update_process_attribution(&work.uid, Some(name), Some(proc_path), Some(pid));
+        store.update_process_attribution(&work.uid, Some(name), Some(proc_path), Some(pid), false);
         return None;
     }
     let (attempt, delay_ms) = next_attribution_retry(work.attempt)?;
@@ -1280,6 +1300,7 @@ fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: us
                         Some(name.clone()),
                         Some(proc_path.clone()),
                         Some(pid),
+                        false,
                     );
                     updated += 1;
                 }
@@ -1313,29 +1334,29 @@ fn best_effort_process_attribution(
     path: &Path,
     is_sensitive: bool,
     event_type: FimEventType,
-) -> (Option<String>, Option<String>, Option<u32>) {
+) -> (Option<String>, Option<String>, Option<u32>, bool) {
     if !should_attempt_process_attribution(path, is_sensitive, event_type) {
-        return (None, None, None);
+        return (None, None, None, false);
     }
 
     let path_str = path.to_string_lossy();
 
     // Tier 1: ES file attribution table (macOS only, zero-cost on other platforms)
     if let Some((pid, name, proc_path)) = crate::l7_es::get_file_attribution(&path_str) {
-        return (Some(name), Some(proc_path), Some(pid));
+        return (Some(name), Some(proc_path), Some(pid), false);
     }
 
     // Tier 1 (Linux): kernel-time writer from the fanotify table -- no race
     // with the writer closing the file, unlike the lsof poll of tier 3.
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     if let Some((pid, name, proc_path)) = crate::fim_fanotify::get_file_attribution(&path_str) {
-        return (Some(name), Some(proc_path), Some(pid));
+        return (Some(name), Some(proc_path), Some(pid), false);
     }
 
     // Tier 2: in-memory lsof result cache (positive or negative). The cache
     // keys on path and remembers the binary, not the instance: no pid.
-    if let Some((name, proc_path)) = lookup_cache(&path_str) {
-        return (name, proc_path, None);
+    if let Some((name, proc_path, inferred)) = lookup_cache(&path_str) {
+        return (name, proc_path, None, inferred);
     }
 
     // Tier 3: live lsof + sysinfo
@@ -1343,17 +1364,18 @@ fn best_effort_process_attribution(
         Some(details) => details,
         None => {
             cache_attribution_miss(&path_str);
-            return (None, None, None);
+            return (None, None, None, false);
         }
     };
 
+    let inferred = holder_is_inferred(path);
     let result = lookup_process_details(pid, fallback_name);
     if result.0.is_some() || result.1.is_some() {
-        cache_attribution(&path_str, &result.0, &result.1);
+        cache_attribution(&path_str, &result.0, &result.1, inferred);
     } else {
         cache_attribution_miss(&path_str);
     }
-    (result.0, result.1, Some(pid))
+    (result.0, result.1, Some(pid), inferred)
 }
 
 #[cfg(target_os = "windows")]
@@ -1361,7 +1383,7 @@ fn best_effort_process_attribution(
     path: &Path,
     is_sensitive: bool,
     event_type: FimEventType,
-) -> (Option<String>, Option<String>, Option<u32>) {
+) -> (Option<String>, Option<String>, Option<u32>, bool) {
     let path_str = path.to_string_lossy();
 
     // A delete or a rename, while the ETW session runs: the process the
@@ -1372,16 +1394,16 @@ fn best_effort_process_attribution(
     // file, not whoever removed or renamed it.
     if AttributionKind::of(event_type) == AttributionKind::Remover && removal_actor_measured() {
         if !kernel_lookup_eligible(path, is_sensitive, event_type, true) {
-            return (None, None, None);
+            return (None, None, None, false);
         }
         return match crate::l7_etw::get_file_namespace_attribution(&path_str) {
-            Some((pid, name, proc_path)) => (Some(name), Some(proc_path), Some(pid)),
-            None => (None, None, None),
+            Some((pid, name, proc_path)) => (Some(name), Some(proc_path), Some(pid), false),
+            None => (None, None, None, false),
         };
     }
 
     if !should_attempt_process_attribution(path, is_sensitive, event_type) {
-        return (None, None, None);
+        return (None, None, None, false);
     }
 
     // Tier 1: ETW file attribution table (when etw feature is enabled and running).
@@ -1389,13 +1411,13 @@ fn best_effort_process_attribution(
     // recorded (NT object manager `\Device\HarddiskVolumeN\...` or
     // long-path-prefixed Win32).
     if let Some((pid, name, proc_path)) = crate::l7_etw::get_file_attribution(&path_str) {
-        return (Some(name), Some(proc_path), Some(pid));
+        return (Some(name), Some(proc_path), Some(pid), false);
     }
 
     // Tier 2: in-memory cache (positive or negative). Path-keyed: it
     // remembers the binary, not the instance, so no pid.
-    if let Some((name, proc_path)) = lookup_cache(&path_str) {
-        return (name, proc_path, None);
+    if let Some((name, proc_path, inferred)) = lookup_cache(&path_str) {
+        return (name, proc_path, None, inferred);
     }
 
     // A temp event (not sensitive) while the ETW session runs gets no probe:
@@ -1404,7 +1426,7 @@ fn best_effort_process_attribution(
     // notification, so the watcher queues a deferred table lookup
     // (`FimAttributionWorkItem`) instead; it never touches the file.
     if !is_sensitive && crate::l7_etw::is_available() {
-        return (None, None, None);
+        return (None, None, None, false);
     }
 
     // Tier 3: open-handle holders + sysinfo, on the artifact path itself.
@@ -1414,10 +1436,11 @@ fn best_effort_process_attribution(
     // pattern, where Chrome writes to `<file>.tmp`, then renames over the
     // real file and immediately closes the handle).
     if let Some((pid, fallback_name)) = lookup_pid_for_path(path) {
+        let inferred = holder_is_inferred(path);
         let result = lookup_process_details(pid, fallback_name);
         if result.0.is_some() || result.1.is_some() {
-            cache_attribution(&path_str, &result.0, &result.1);
-            return (result.0, result.1, Some(pid));
+            cache_attribution(&path_str, &result.0, &result.1, inferred);
+            return (result.0, result.1, Some(pid), inferred);
         }
     }
 
@@ -1455,10 +1478,12 @@ fn best_effort_process_attribution(
             if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
                 let result = lookup_process_details(pid, fallback_name);
                 if result.0.is_some() || result.1.is_some() {
-                    cache_attribution(&path_str, &result.0, &result.1);
                     // Parent-directory probe: a plausible writer, not a
-                    // measured one -- the pid is deliberately not attached.
-                    return (result.0, result.1, None);
+                    // measured one -- the pid is deliberately not attached,
+                    // and the event says so (FP-WIN-35: the detector keeps
+                    // it only where it explains the event as self-access).
+                    cache_attribution(&path_str, &result.0, &result.1, true);
+                    return (result.0, result.1, None, true);
                 }
             }
             hops += 1;
@@ -1470,7 +1495,7 @@ fn best_effort_process_attribution(
     }
 
     cache_attribution_miss(&path_str);
-    (None, None, None)
+    (None, None, None, false)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1478,8 +1503,8 @@ fn best_effort_process_attribution(
     _path: &Path,
     _is_sensitive: bool,
     _event_type: FimEventType,
-) -> (Option<String>, Option<String>, Option<u32>) {
-    (None, None, None)
+) -> (Option<String>, Option<String>, Option<u32>, bool) {
+    (None, None, None, false)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1679,19 +1704,31 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
         if let Some((pid, name, proc_path)) = kernel_table_attribution(&path) {
             let name = Some(name);
             let proc_path = Some(proc_path);
-            cache_attribution(&path, &name, &proc_path);
+            cache_attribution(&path, &name, &proc_path, false);
             for uid in &uids {
-                store.update_process_attribution(uid, name.clone(), proc_path.clone(), Some(pid));
+                store.update_process_attribution(
+                    uid,
+                    name.clone(),
+                    proc_path.clone(),
+                    Some(pid),
+                    false,
+                );
                 updated += 1;
             }
             continue;
         }
 
         // Tier 2: in-memory cache (positive or negative)
-        if let Some((name, proc_path)) = lookup_cache(&path) {
+        if let Some((name, proc_path, inferred)) = lookup_cache(&path) {
             if name.is_some() || proc_path.is_some() {
                 for uid in &uids {
-                    store.update_process_attribution(uid, name.clone(), proc_path.clone(), None);
+                    store.update_process_attribution(
+                        uid,
+                        name.clone(),
+                        proc_path.clone(),
+                        None,
+                        inferred,
+                    );
                     updated += 1;
                 }
             }
@@ -1719,9 +1756,16 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             continue;
         }
 
-        cache_attribution(&path, &process_name, &process_path);
+        let inferred = holder_is_inferred(fs_path);
+        cache_attribution(&path, &process_name, &process_path, inferred);
         for uid in &uids {
-            store.update_process_attribution(uid, process_name.clone(), process_path.clone(), None);
+            store.update_process_attribution(
+                uid,
+                process_name.clone(),
+                process_path.clone(),
+                None,
+                inferred,
+            );
             updated += 1;
         }
     }
@@ -1758,7 +1802,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
                 let name = Some(name);
                 let proc_path = Some(proc_path);
                 if kind == AttributionKind::Writer {
-                    cache_attribution(&path, &name, &proc_path);
+                    cache_attribution(&path, &name, &proc_path, false);
                 }
                 for uid in &uids {
                     store.update_process_attribution(
@@ -1766,6 +1810,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
                         name.clone(),
                         proc_path.clone(),
                         Some(pid),
+                        false,
                     );
                     updated += 1;
                 }
@@ -1779,7 +1824,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             }
 
             // Tier 2: in-memory cache (positive or negative)
-            if let Some((name, proc_path)) = lookup_cache(&path) {
+            if let Some((name, proc_path, inferred)) = lookup_cache(&path) {
                 if name.is_some() || proc_path.is_some() {
                     for uid in &uids {
                         store.update_process_attribution(
@@ -1787,6 +1832,7 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
                             name.clone(),
                             proc_path.clone(),
                             None,
+                            inferred,
                         );
                         updated += 1;
                     }
@@ -1804,13 +1850,15 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
             if let Some((pid, fallback_name)) = lookup_pid_for_path(fs_path) {
                 let (process_name, process_path) = lookup_process_details(pid, fallback_name);
                 if process_name.is_some() || process_path.is_some() {
-                    cache_attribution(&path, &process_name, &process_path);
+                    let inferred = holder_is_inferred(fs_path);
+                    cache_attribution(&path, &process_name, &process_path, inferred);
                     for uid in &uids {
                         store.update_process_attribution(
                             uid,
                             process_name.clone(),
                             process_path.clone(),
                             Some(pid),
+                            inferred,
                         );
                         updated += 1;
                     }
@@ -1830,15 +1878,16 @@ pub fn backfill_missing_process_attribution(store: &FimEventStore, max_events: u
                 if let Some((pid, fallback_name)) = lookup_pid_for_path(parent) {
                     let (process_name, process_path) = lookup_process_details(pid, fallback_name);
                     if process_name.is_some() || process_path.is_some() {
-                        cache_attribution(&path, &process_name, &process_path);
+                        cache_attribution(&path, &process_name, &process_path, true);
                         for uid in &uids {
                             // Parent-directory probe: plausible writer, not a
-                            // measured instance -- no pid.
+                            // measured instance -- no pid, inferred.
                             store.update_process_attribution(
                                 uid,
                                 process_name.clone(),
                                 process_path.clone(),
                                 None,
+                                true,
                             );
                             updated += 1;
                         }
@@ -2527,6 +2576,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -2594,6 +2644,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -2626,7 +2677,7 @@ mod tests {
         assert!(events[0].hash.is_none());
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn attribution_test_event(path: &str, sensitive: bool, event_type: FimEventType) -> FimEvent {
         let ts = Utc::now();
         FimEvent {
@@ -2638,6 +2689,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: sensitive,
@@ -2968,6 +3020,7 @@ mod tests {
                 process_name: None,
                 process_path: None,
                 process_pid: None,
+                writer_inferred: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
@@ -3012,6 +3065,7 @@ mod tests {
                 process_name: None,
                 process_path: None,
                 process_pid: None,
+                writer_inferred: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive,
@@ -3052,16 +3106,63 @@ mod tests {
         let path = "/Users/test/Library/Keychains/login.keychain-db";
 
         cache_attribution_miss(path);
-        assert_eq!(lookup_cache(path), Some((None, None)));
+        assert_eq!(lookup_cache(path), Some((None, None, false)));
 
         cache_attribution(
             path,
             &Some("securityd".to_string()),
             &Some("/usr/sbin/securityd".to_string()),
+            false,
         );
         let hit = lookup_cache(path).expect("positive cache hit");
         assert_eq!(hit.0.as_deref(), Some("securityd"));
         assert_eq!(hit.1.as_deref(), Some("/usr/sbin/securityd"));
+        assert!(!hit.2);
+        clear_attribution_cache();
+    }
+
+    /// A holder found by a directory probe stays inferred through the cache
+    /// and onto the event it fills (FP-WIN-35), and a measured writer
+    /// already on an event keeps its provenance.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn inferred_writer_survives_the_cache_and_the_backfill() {
+        clear_attribution_cache();
+        let dir = r"C:\Users\u\AppData\Local\Google\Chrome\User Data\Profile 1\Sync Data";
+        cache_attribution(
+            dir,
+            &Some("powershell.exe".to_string()),
+            &Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string()),
+            true,
+        );
+        let (name, path, inferred) = lookup_cache(dir).expect("cached");
+        assert!(inferred);
+
+        let store = FimEventStore::new();
+        let event_by_uid = |uid: &str| {
+            store
+                .get_all_events()
+                .into_iter()
+                .find(|event| event.uid == uid)
+        };
+        let unattributed = attribution_test_event(dir, true, FimEventType::Modify);
+        let uid = unattributed.uid.clone();
+        store.insert(unattributed);
+        store.update_process_attribution(&uid, name.clone(), path.clone(), None, inferred);
+        let filled = event_by_uid(&uid).expect("event");
+        assert!(filled.writer_inferred);
+        assert_eq!(filled.process_name.as_deref(), Some("powershell.exe"));
+
+        let mut measured = attribution_test_event(dir, true, FimEventType::Modify);
+        measured.uid = "measured".to_string();
+        measured.process_name = Some("chrome.exe".to_string());
+        measured.process_path =
+            Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string());
+        store.insert(measured);
+        store.update_process_attribution("measured", name, path, None, true);
+        let kept = event_by_uid("measured").expect("event");
+        assert!(!kept.writer_inferred);
+        assert_eq!(kept.process_name.as_deref(), Some("chrome.exe"));
         clear_attribution_cache();
     }
 
@@ -3079,6 +3180,7 @@ mod tests {
                 process_name: None,
                 process_path: None,
                 process_pid: None,
+                writer_inferred: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: true,

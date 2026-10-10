@@ -47,6 +47,17 @@ pub struct FimEvent {
     /// a missing pid reads as unmeasured, never as a fabricated value.
     #[serde(default)]
     pub process_pid: Option<u32>,
+    /// The writer was inferred, not measured: a process holding a directory
+    /// open (the event's own path when it is a directory, or a parent the
+    /// Windows tier-3b probe walked up to) may only have been enumerating
+    /// it. The attack-pattern detector keeps such a writer only where it
+    /// explains the event as the application's own access (FP-WIN-16) and
+    /// otherwise grades the event as unattributed (FP-WIN-35).
+    /// `#[serde(default)]`: same upgrade precedent as `process_pid`; an
+    /// event from a helper one release behind reads as measured, which is
+    /// what every event claimed before.
+    #[serde(default)]
+    pub writer_inferred: bool,
     /// Parent process name when attribution is available (ES, lsof).
     pub parent_process_name: Option<String>,
     /// Parent process path when attribution is available (ES, lsof).
@@ -228,6 +239,7 @@ impl FimEventStore {
         process_name: Option<String>,
         process_path: Option<String>,
         process_pid: Option<u32>,
+        inferred: bool,
     ) {
         if process_name.is_none() && process_path.is_none() && process_pid.is_none() {
             return;
@@ -235,6 +247,9 @@ impl FimEventStore {
 
         if let Some(mut event) = self.events.get_mut(uid) {
             let mut changed = false;
+            let had_writer = [&event.process_name, &event.process_path]
+                .iter()
+                .any(|value| value.as_deref().is_some_and(|v| !v.trim().is_empty()));
             if event.process_pid.is_none() && process_pid.is_some() {
                 event.process_pid = process_pid;
                 changed = true;
@@ -261,6 +276,12 @@ impl FimEventStore {
                     changed = true;
                 }
                 event.process_path = process_path;
+            }
+
+            // The writer this call filled in is as measured as its source; a
+            // writer already on the event keeps its own provenance.
+            if !had_writer && (event.process_name.is_some() || event.process_path.is_some()) {
+                event.writer_inferred = inferred;
             }
 
             if changed {
@@ -405,6 +426,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -433,6 +455,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -450,6 +473,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -484,6 +508,7 @@ mod tests {
             process_name: Some("cursor".to_string()),
             process_path: Some("/Applications/Cursor.app".to_string()),
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -500,6 +525,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -518,6 +544,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -547,6 +574,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -565,6 +593,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -587,6 +616,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -617,6 +647,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -630,6 +661,7 @@ mod tests {
             Some("cursor".to_string()),
             Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
             None,
+            false,
         );
 
         let events = store.get_all_events();
@@ -655,6 +687,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -684,6 +717,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -712,6 +746,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -740,6 +775,7 @@ mod tests {
                 process_name: None,
                 process_path: None,
                 process_pid: None,
+                writer_inferred: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
@@ -763,6 +799,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -845,6 +882,7 @@ mod tests {
                         process_name: None,
                         process_path: None,
                         process_pid: None,
+                        writer_inferred: false,
                         parent_process_name: None,
                         parent_process_path: None,
                         is_sensitive: false,
@@ -874,6 +912,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -915,6 +954,7 @@ mod tests {
             process_name: Some("node".to_string()),
             process_path: Some("/usr/bin/node".to_string()),
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -945,6 +985,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -961,6 +1002,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -994,6 +1036,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1010,6 +1053,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1043,6 +1087,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1062,6 +1107,7 @@ mod tests {
             Some("cursor".to_string()),
             Some("/Applications/Cursor.app/Contents/MacOS/Cursor".to_string()),
             None,
+            false,
         );
 
         let delta = store.get_events_modified_since(cursor);
@@ -1094,6 +1140,7 @@ mod tests {
             process_name: None,
             process_path: None,
             process_pid: None,
+            writer_inferred: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1138,6 +1185,7 @@ mod tests {
                 process_name: None,
                 process_path: None,
                 process_pid: None,
+                writer_inferred: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
