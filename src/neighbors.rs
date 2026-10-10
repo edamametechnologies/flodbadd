@@ -57,6 +57,30 @@ fn unify_neighbors(neighbors: Vec<(IpAddr, MacAddr6)>) -> Vec<ConsolidatedNeighb
         .collect()
 }
 
+/// Parse one row of `/proc/net/arp`, the Linux kernel's IPv4 neighbor table,
+/// optionally keeping only `interface_name`:
+///
+/// ```text
+/// IP address       HW type     Flags       HW address            Mask     Device
+/// 192.168.1.5      0x1         0x2         00:11:22:33:44:55     *        eth0
+/// ```
+///
+/// An incomplete entry carries a zero MAC, which `unify_neighbors` drops.
+/// Compiled for tests on every platform so the parser is checked anywhere.
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_net_arp_row(line: &str, interface_name: Option<&str>) -> Option<(IpAddr, MacAddr6)> {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 6 {
+        return None;
+    }
+    if interface_name.is_some_and(|iface| cols[5] != iface) {
+        return None;
+    }
+    let ip: Ipv4Addr = cols[0].parse().ok()?;
+    let mac: MacAddr6 = cols[3].parse().ok()?;
+    Some((IpAddr::V4(ip), mac))
+}
+
 #[cfg(target_os = "windows")]
 mod platform_impl {
     use super::*;
@@ -176,7 +200,25 @@ mod platform_impl {
 #[cfg(target_os = "linux")]
 mod platform_impl {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::process::Command;
+    use tracing::warn;
+
+    /// `ip` is absent on minimal images (containers, some appliances): said
+    /// once per process, not on every LAN scan.
+    static IP_BINARY_MISSING_REPORTED: AtomicBool = AtomicBool::new(false);
+
+    /// The IPv4 neighbors from `/proc/net/arp`, the fallback when `ip` is not
+    /// installed. IPv6 neighbors are only reachable through netlink (`ip`), so
+    /// they are missing on that path.
+    fn read_proc_net_arp(interface_name: Option<&str>) -> io::Result<Vec<(IpAddr, MacAddr6)>> {
+        let table = std::fs::read_to_string("/proc/net/arp")?;
+        Ok(table
+            .lines()
+            .skip(1)
+            .filter_map(|line| super::parse_proc_net_arp_row(line, interface_name))
+            .collect())
+    }
 
     /// Parse a single line of `ip neigh` (Linux).
     fn parse(line: &str) -> Option<(IpAddr, MacAddr6)> {
@@ -204,22 +246,43 @@ mod platform_impl {
         // discovery (and therefore the whole lanscan) indefinitely. kill_on_drop
         // reaps the child when the timeout fires.
         cmd.kill_on_drop(true);
-        let output =
-            match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await {
-                Ok(result) => result.map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to execute 'ip neigh': {e}"),
-                    )
-                })?,
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "'ip neigh' timed out after 10s",
-                    )
-                    .into())
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
+            .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) if e.kind() == io::ErrorKind::NotFound => {
+                if !IP_BINARY_MISSING_REPORTED.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "'ip' is not installed: reading IPv4 neighbors from /proc/net/arp (no IPv6 neighbors)"
+                    );
                 }
-            };
+                return match read_proc_net_arp(interface_name) {
+                    Ok(raw_neighbors) => Ok(super::unify_neighbors(raw_neighbors)),
+                    // The kind stays NotFound so the caller can tell a
+                    // host without the tools from a failed scan.
+                    Err(arp_error) => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "'ip' is not installed and /proc/net/arp is unreadable: {arp_error}"
+                        ),
+                    )
+                    .into()),
+                };
+            }
+            // Keep the kind (permission denied, ...) for the caller.
+            Ok(Err(e)) => {
+                return Err(
+                    io::Error::new(e.kind(), format!("Failed to execute 'ip neigh': {e}")).into(),
+                )
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "'ip neigh' timed out after 10s",
+                )
+                .into())
+            }
+        };
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         let raw_neighbors = stdout_str.lines().filter_map(parse).collect();
@@ -253,10 +316,9 @@ mod platform_impl {
         .await
         {
             Ok(result) => result.map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to execute {cmd}: {e}"),
-                )
+                // Keep the kind (NotFound, permission denied, ...) for the
+                // caller.
+                io::Error::new(e.kind(), format!("Failed to execute {cmd}: {e}"))
             })?,
             Err(_) => {
                 return Err(io::Error::new(
@@ -374,6 +436,35 @@ mod platform_impl {
 mod tests {
     use super::*;
     use crate::interface::get_default_interface;
+
+    #[test]
+    fn proc_net_arp_rows_parse_and_filter_by_interface() {
+        let table = "IP address       HW type     Flags       HW address            Mask     Device
+192.168.1.5      0x1         0x2         00:11:22:33:44:55     *        eth0
+192.168.1.9      0x1         0x0         00:00:00:00:00:00     *        eth0
+10.0.0.7         0x1         0x2         aa:bb:cc:dd:ee:ff     *        wlan0";
+        let rows: Vec<_> = table
+            .lines()
+            .skip(1)
+            .filter_map(|line| parse_proc_net_arp_row(line, Some("eth0")))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)));
+        assert_eq!(rows[0].1, "00:11:22:33:44:55".parse::<MacAddr6>().unwrap());
+
+        // The incomplete entry's zero MAC is dropped when unified.
+        let unified = unify_neighbors(rows);
+        assert_eq!(unified.len(), 1);
+        assert_eq!(unified[0].1, vec![Ipv4Addr::new(192, 168, 1, 5)]);
+
+        let all: Vec<_> = table
+            .lines()
+            .skip(1)
+            .filter_map(|line| parse_proc_net_arp_row(line, None))
+            .collect();
+        assert_eq!(all.len(), 3);
+        assert!(parse_proc_net_arp_row("garbage", None).is_none());
+    }
 
     // Converted test to async. Requires you to run with a test runtime (e.g. cargo test -- --test-threads=1 under tokio).
     #[tokio::test]
