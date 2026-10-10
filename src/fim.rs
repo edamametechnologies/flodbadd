@@ -355,7 +355,9 @@ impl FimWatcher {
         let mut actual_paths = Vec::new();
         for path in &paths {
             if config.recursive && is_forbidden_recursive_root(path) {
-                error!(
+                // A configured path the guard refuses (operator
+                // configuration, or a CI workspace fallback): warn.
+                warn!(
                     "FIM: refusing to watch {} recursively (filesystem root or system tree)",
                     path.display()
                 );

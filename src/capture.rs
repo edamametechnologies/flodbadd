@@ -373,7 +373,9 @@ impl FlodbaddCapture {
 
         if unknown {
             let known = whitelists::whitelist_names().await.join(", ");
-            error!(
+            // Operator configuration, not a product fault: warn, and the
+            // caller gets the error.
+            warn!(
                 "Unknown whitelist '{}' (defined: {}): every egress session is non-conforming",
                 whitelist_name, known
             );
