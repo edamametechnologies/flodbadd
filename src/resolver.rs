@@ -1,4 +1,5 @@
 use crate::task::TaskHandle;
+use futures::StreamExt;
 use hickory_resolver::config::{
     NameServerConfig, ResolverConfig, ResolverOpts, ServerGroup, CLOUDFLARE, GOOGLE, QUAD9,
 };
@@ -24,6 +25,14 @@ const REVERSE_DNS_CACHE_MAX_ENTRIES: usize = 50_000;
 const REVERSE_DNS_CACHE_EVICT_COUNT: usize = 5_000;
 const RESOLVER_QUEUE_MAX_SIZE: usize = 10_000;
 
+/// Reverse lookups in flight at once. Each one holds a UDP socket (and a TCP
+/// one after an I/O failure) for up to its timeout, retries included, and the
+/// queue drained after a network change can be hundreds of addresses long.
+/// Run all at once, they compete with everything else in the process for its
+/// descriptors: fmba-3's helper hit EMFILE ("Too many open files") on
+/// 2026-10-12 while a batch of 154 lookups was in flight.
+const MAX_CONCURRENT_REVERSE_LOOKUPS: usize = 16;
+
 // hickory resolver options. These are the hickory-resolver 0.25 values the
 // resolvers ran with; they are pinned so a hickory default cannot move them.
 /// Per-query timeout.
@@ -33,6 +42,17 @@ const RESOLVER_ATTEMPTS: usize = 2;
 /// Responses hickory caches per resolver. 0.26 raised its default from 32 to
 /// 8,192; FlodbaddResolver keeps its own reverse DNS cache, so this stays small.
 const RESOLVER_CACHE_SIZE: u64 = 32;
+
+/// Run `task` for every item, at most `limit` at a time.
+async fn for_each_bounded<T, F, Fut>(items: Vec<T>, limit: usize, task: F)
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    futures::stream::iter(items)
+        .for_each_concurrent(limit, task)
+        .await;
+}
 
 /// Reverse DNS cache entry with timestamp for LRU eviction
 #[derive(Debug, Clone)]
@@ -238,6 +258,23 @@ impl FlodbaddResolver {
         );
     }
 
+    /// Reverse-resolve `ips` into `reverse_dns`, at most
+    /// [`MAX_CONCURRENT_REVERSE_LOOKUPS`] at a time. Each address gets the
+    /// same `perform_reverse_dns_lookup` as before; only how many run at
+    /// once is bounded.
+    async fn resolve_batch(
+        ips: Vec<IpAddr>,
+        reverse_dns: &Arc<CustomDashMap<IpAddr, ReverseDnsEntry>>,
+        resolvers: &[ProviderResolver],
+    ) {
+        for_each_bounded(ips, MAX_CONCURRENT_REVERSE_LOOKUPS, |ip| {
+            let reverse_dns = reverse_dns.clone();
+            let resolvers = resolvers.to_vec();
+            async move { Self::perform_reverse_dns_lookup(ip, reverse_dns, resolvers).await }
+        })
+        .await;
+    }
+
     pub async fn start(&self) {
         if self.resolver_handle.read().await.is_some() {
             warn!("Resolver task is already running");
@@ -267,15 +304,7 @@ impl FlodbaddResolver {
                     if to_resolve_len > 0 {
                         trace!("Resolving {} IPs", to_resolve_len);
 
-                        // Resolve the IPs in parallel
-                        let _ = futures::future::join_all(to_resolve.into_iter().map(|ip| {
-                            let resolvers = resolvers_clone.clone();
-                            let reverse_dns = reverse_dns.clone();
-                            async move {
-                                Self::perform_reverse_dns_lookup(ip, reverse_dns, resolvers).await
-                            }
-                        }))
-                        .await;
+                        Self::resolve_batch(to_resolve, &reverse_dns, &resolvers_clone).await;
 
                         info!("Resolved {} IPs", to_resolve_len);
                     }
@@ -739,6 +768,64 @@ mod tests {
 
         assert_eq!(name.as_deref(), Some("host.example"));
         assert!(tcp_queries.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// A UDP DNS server on 127.0.0.1 that answers every query after `delay`
+    /// and records the most queries it held unanswered at once.
+    async fn slow_udp_dns_server(delay: Duration, peak_in_flight: Arc<AtomicUsize>) -> u16 {
+        let socket = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let port = socket.local_addr().unwrap().port();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok((len, peer)) = socket.recv_from(&mut buf).await {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak_in_flight.fetch_max(now, Ordering::SeqCst);
+                let answer = ptr_answer(&buf[..len]);
+                let socket = socket.clone();
+                let in_flight = in_flight.clone();
+                tokio::spawn(async move {
+                    sleep(delay).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    let _ = socket.send_to(&answer, peer).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// A queue drained after a network change is resolved at most
+    /// MAX_CONCURRENT_REVERSE_LOOKUPS addresses at a time (it was every
+    /// address at once), and every address still gets its answer.
+    #[tokio::test]
+    async fn a_batch_of_reverse_lookups_runs_a_bounded_number_at_once() {
+        let peak_in_flight = Arc::new(AtomicUsize::new(0));
+        let port = slow_udp_dns_server(Duration::from_millis(200), peak_in_flight.clone()).await;
+        let resolver = ProviderResolver::from_name_servers(
+            "local",
+            vec![localhost(vec![udp_on(port)])],
+            vec![localhost(vec![tcp_on(port)])],
+        )
+        .unwrap();
+        let ips: Vec<IpAddr> = (1..=64u8)
+            .map(|i| IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)))
+            .collect();
+        let reverse_dns = Arc::new(CustomDashMap::new("test_reverse_dns"));
+
+        FlodbaddResolver::resolve_batch(ips.clone(), &reverse_dns, &[resolver]).await;
+
+        for ip in &ips {
+            let domain = reverse_dns
+                .get(ip)
+                .map(|entry| entry.value().domain.clone());
+            assert_eq!(domain.as_deref(), Some("host.example"), "{ip}");
+        }
+        let peak = peak_in_flight.load(Ordering::SeqCst);
+        assert!(
+            peak <= MAX_CONCURRENT_REVERSE_LOOKUPS,
+            "{peak} lookups in flight at once"
+        );
+        assert!(peak > 1, "lookups still run concurrently (peak {peak})");
     }
 
     // ---- Public resolvers (network) ------------------------------------------
