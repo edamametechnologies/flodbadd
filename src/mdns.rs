@@ -504,11 +504,7 @@ async fn fetch_mdns_info_task() {
                     let hosts = match responses.recv().await {
                         Ok(hosts) => hosts,
                         Err(e) => {
-                            // Only warn to prevent multiple sentry errors
-                            warn!(
-                                "Error receiving mDNS query response for hostname {}: {:?}",
-                                hostname, e
-                            );
+                            log_host_response_error(&hostname, &e);
                             continue;
                         }
                     };
@@ -522,6 +518,17 @@ async fn fetch_mdns_info_task() {
         // Wait for 5 seconds before scanning again
         tokio::time::sleep(pause_duration).await;
     }
+}
+
+/// A host lookup that got no answer (the response channel closed: the device
+/// is asleep or gone, a phone on battery) is the normal outcome for part of
+/// every scan, not a fault: debug, like the service-instance query's. As a
+/// warning it was 435 lines in four days on fmba-3's helper (2026-10-09..13).
+fn log_host_response_error(hostname: &str, error: &dyn std::fmt::Debug) {
+    debug!(
+        "Error receiving mDNS query response for hostname {}: {:?}",
+        hostname, error
+    );
 }
 
 /// Batch-resolve a list of IPs via mDNS, returning (ip, hostname, primary_mac, services).
@@ -712,6 +719,15 @@ mod tests {
         assert!(!is_resolvable_dns_name(&format!("{}.local", label_64)));
         let too_long = format!("{}.local", "a".repeat(250));
         assert!(!is_resolvable_dns_name(&too_long));
+    }
+
+    #[test]
+    fn unanswered_host_lookup_is_not_a_warning() {
+        let (_guard, logged) =
+            crate::test_logs::capture("Error receiving mDNS query response for hostname");
+        log_host_response_error("iPhone-de-Frank.local", &"RecvError");
+        assert_eq!(logged.warn_or_error(), 0);
+        assert_eq!(logged.debug_or_trace(), 1);
     }
 
     #[test]

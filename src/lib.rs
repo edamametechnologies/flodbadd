@@ -105,6 +105,8 @@ pub mod sni;
 pub mod task;
 /// Temp-directory predicate shared with the core detector (always compiled).
 pub mod temp_paths;
+#[cfg(test)]
+mod test_logs;
 pub mod vendor_vulns;
 pub mod vendor_vulns_db;
 pub mod vulnerability_info;

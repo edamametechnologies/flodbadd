@@ -1917,7 +1917,10 @@ impl FlodbaddL7 {
         )
         .await
         {
-            warn!("L7 fuzzy/wildcard match used for session {:?}", connection);
+            // The designed fallback (a TCP listener owning one end of the
+            // session: an inbound connection whose accepted socket is gone),
+            // not a fault: debug, not a warning on every such session.
+            debug!("L7 fuzzy/wildcard match used for session {:?}", connection);
             return Ok(found);
         }
         // Log all candidate sockets for debugging
@@ -3343,6 +3346,22 @@ mod tests {
             resolve_from_rows(&wireserver_dns(50000), &rows).await,
             Some((std::process::id(), SessionEnd::Src))
         );
+    }
+
+    /// The listener fallback is the designed path for an inbound session
+    /// whose accepted socket is gone: it is logged at debug, never as a
+    /// warning (fmba-3 helper, 2026-10-09..13: 96 such WARN lines).
+    #[tokio::test]
+    async fn listener_fallback_match_is_not_a_warning() {
+        let rdp = session(Protocol::TCP, ("203.0.113.9", 51000), ("10.0.0.4", 3389));
+        let rows = vec![tcp_row(("0.0.0.0", 3389), ("0.0.0.0", 0), TcpState::Listen)];
+        let (_guard, logged) = crate::test_logs::capture("L7 fuzzy/wildcard match used");
+        assert_eq!(
+            resolve_from_rows(&rdp, &rows).await,
+            Some((std::process::id(), SessionEnd::Dst))
+        );
+        assert_eq!(logged.warn_or_error(), 0, "the fallback is not a warning");
+        assert!(logged.debug_or_trace() >= 1, "the fallback is still logged");
     }
 
     #[tokio::test]
