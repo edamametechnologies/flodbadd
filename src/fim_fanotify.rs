@@ -385,16 +385,10 @@ fn resolve_writer(pid: u32) -> (String, String) {
             return (comm, String::new());
         }
     }
-    // Exited: the eBPF exec stream recorded the image at exec time.
-    let ring = crate::process_events::recent(crate::process_events::PROCESS_EVENT_RING_MAX);
-    if let Some(exec) = ring
-        .iter()
-        .rev()
-        .find(|e| e.pid == pid && e.kind == crate::process_events::ProcessEventKind::Exec)
-    {
-        return (exec.process_name.clone(), exec.process_path.clone());
-    }
-    (String::new(), String::new())
+    // Exited: the eBPF exec stream recorded the image at exec time. Searched
+    // in the ring, not copied out of it: a copy per event held the ring lock
+    // long enough to drop the sensor's pushes.
+    crate::process_events::latest_exec_image(pid).unwrap_or_default()
 }
 
 fn reader_loop(table: Arc<FanotifyTable>) {
@@ -450,6 +444,49 @@ fn reader_loop(table: Arc<FanotifyTable>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A writer gone before the reader thread woke up is named from the exec
+    /// the process-event ring kept for its pid. No fanotify needed.
+    #[test]
+    #[serial_test::serial]
+    fn exited_writer_is_resolved_from_the_exec_ring() {
+        use crate::process_events::{now_ms, push, ProcessEvent, ProcessEventKind};
+        // Above the kernel's pid_max: no /proc entry, as for an exited writer.
+        let pid = 4_000_000_123;
+        let exec = ProcessEvent {
+            timestamp_ms: now_ms(),
+            kind: ProcessEventKind::Exec,
+            pid,
+            ppid: Some(1),
+            uid: Some(0),
+            process_name: "sh".to_string(),
+            process_path: "/usr/bin/sh".to_string(),
+            parent_process_path: None,
+            argv_sha256: None,
+            argv_len: None,
+            signing_id: None,
+            team_id: None,
+            is_platform_binary: None,
+            platform_path_marked: false,
+            target_pid: None,
+            target_process_path: None,
+            task_access_mode: None,
+            task_access_mask: None,
+            net_dst: None,
+        };
+        // The push and the lookup take a try-lock that can lose to a
+        // concurrent reader: retry.
+        let mut resolved = (String::new(), String::new());
+        for _ in 0..100 {
+            push(exec.clone());
+            resolved = resolve_writer(pid);
+            if !resolved.0.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(resolved, ("sh".to_string(), "/usr/bin/sh".to_string()));
+        assert_eq!(resolve_writer(pid + 1), (String::new(), String::new()));
+    }
 
     #[test]
     fn roots_to_mark_skips_the_roots_the_table_already_covers() {

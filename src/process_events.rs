@@ -247,6 +247,20 @@ pub fn recent(limit: usize) -> Vec<ProcessEvent> {
         .unwrap_or_default()
 }
 
+/// Image (name, path) of the most recent `Exec` the ring holds for `pid`.
+///
+/// Searched in place, newest first, so the lock is held for a scan and one
+/// record's two strings are copied, not the ring. The fanotify writer
+/// resolution asks this for every event whose writer already exited; it
+/// used to copy the whole ring ([`recent`] of 8,192 events) each time, and
+/// every sensor push that met the lock held by that copy was dropped
+/// (`dropped_locked` 633 on test-mint, 2026-10-13, where 0 is expected).
+/// Non-blocking like [`recent`]: `None` when the lock is contended.
+pub fn latest_exec_image(pid: u32) -> Option<(String, String)> {
+    RING.try_with(|ring| ring_latest_exec_image(ring, pid))
+        .flatten()
+}
+
 /// Bounded append: evicts the oldest entry when the ring is full. Returns
 /// `true` when an eviction happened. Pure over the ring so the policy can be
 /// tested without the global lock (whose `try_with` legitimately fails
@@ -267,6 +281,14 @@ fn ring_push(ring: &mut VecDeque<ProcessEvent>, event: ProcessEvent) -> bool {
 fn ring_recent(ring: &VecDeque<ProcessEvent>, limit: usize) -> Vec<ProcessEvent> {
     let skip = ring.len().saturating_sub(limit);
     ring.iter().skip(skip).cloned().collect()
+}
+
+/// The newest `Exec` of `pid` in `ring`: its image name and path.
+fn ring_latest_exec_image(ring: &VecDeque<ProcessEvent>, pid: u32) -> Option<(String, String)> {
+    ring.iter()
+        .rev()
+        .find(|event| event.pid == pid && event.kind == ProcessEventKind::Exec)
+        .map(|event| (event.process_name.clone(), event.process_path.clone()))
 }
 
 pub fn counters() -> ProcessEventCountersSnapshot {
@@ -351,6 +373,74 @@ mod tests {
         let tail = ring_recent(&ring, 3);
         assert_eq!(tail.len(), 3);
         assert_eq!(tail.last().unwrap().pid, PROCESS_EVENT_RING_MAX as u32 + 9);
+    }
+
+    /// The in-place lookup answers what the copy-then-search it replaces
+    /// answered (the fanotify writer resolution's
+    /// `recent(MAX).iter().rev().find(..)`): the newest exec of the pid,
+    /// never its fork / exit / other events nor another pid's exec.
+    #[test]
+    fn latest_exec_lookup_answers_like_the_ring_copy() {
+        let mut ring: VecDeque<ProcessEvent> = VecDeque::new();
+        let named = |kind, pid, name: &str| {
+            let mut event = ev(kind, pid);
+            event.process_name = name.to_string();
+            event.process_path = format!("/usr/bin/{name}");
+            event
+        };
+        for event in [
+            named(ProcessEventKind::Fork, 100, "zsh"),
+            named(ProcessEventKind::Exec, 100, "sh"),
+            named(ProcessEventKind::Exec, 200, "node"),
+            // An exec chain: the pid's newest image is the one that wrote.
+            named(ProcessEventKind::Exec, 100, "python3"),
+            named(ProcessEventKind::NetConnect, 100, "python3"),
+            named(ProcessEventKind::Exit, 100, "python3"),
+            named(ProcessEventKind::Fork, 300, "make"),
+        ] {
+            ring_push(&mut ring, event);
+        }
+        // Fill to the bound, so the search covers a full ring.
+        for pid in 1_000..(1_000 + PROCESS_EVENT_RING_MAX as u32 - ring.len() as u32) {
+            ring_push(&mut ring, ev(ProcessEventKind::Fork, pid));
+        }
+        assert_eq!(ring.len(), PROCESS_EVENT_RING_MAX);
+        for pid in [100, 200, 300, 999_999] {
+            let copied = ring_recent(&ring, PROCESS_EVENT_RING_MAX)
+                .iter()
+                .rev()
+                .find(|e| e.pid == pid && e.kind == ProcessEventKind::Exec)
+                .map(|e| (e.process_name.clone(), e.process_path.clone()));
+            assert_eq!(ring_latest_exec_image(&ring, pid), copied, "pid {pid}");
+        }
+        assert_eq!(
+            ring_latest_exec_image(&ring, 100),
+            Some(("python3".to_string(), "/usr/bin/python3".to_string()))
+        );
+        assert_eq!(ring_latest_exec_image(&ring, 300), None, "a fork only");
+    }
+
+    #[test]
+    #[serial]
+    fn global_latest_exec_lookup_finds_a_pushed_exec() {
+        clear_ring_for_tests();
+        // A pid no live process holds; the push takes a try-lock that can
+        // lose to a concurrent reader, so it is retried.
+        let pid = 3_999_999_001;
+        let mut exec = ev(ProcessEventKind::Exec, pid);
+        exec.process_name = "sh".to_string();
+        exec.process_path = "/bin/sh".to_string();
+        let mut found = None;
+        for _ in 0..100 {
+            push(exec.clone());
+            found = latest_exec_image(pid);
+            if found.is_some() {
+                break;
+            }
+        }
+        assert_eq!(found, Some(("sh".to_string(), "/bin/sh".to_string())));
+        assert_eq!(latest_exec_image(pid + 1), None);
+        clear_ring_for_tests();
     }
 
     #[test]
