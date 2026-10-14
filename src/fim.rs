@@ -201,6 +201,77 @@ impl Default for FimConfig {
     }
 }
 
+/// The roots a [`FimWatcher`] watches, by who chose them.
+///
+/// Every event under an `operator` root is kept (the build-output
+/// exclusions aside): an operator who names a directory (the
+/// `start_file_monitor` paths, posture's `--paths`, the action's
+/// `file_monitoring_paths`) wants all of it. The `defaults` are the roots
+/// the software picked (the catalog's watch roots, the temp roots, the CI
+/// defaults): their events get the same early drop as any path outside an
+/// operator root, kept only when sensitive, temp or catalog-labelled
+/// ([`should_keep_fim_event`]). AppData\Roaming, AppData\Local, ~/.config
+/// and ~/.local/share are defaults watched for the credential stores inside
+/// them, not for the churn around those.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FimWatchRoots {
+    pub operator: Vec<PathBuf>,
+    pub defaults: Vec<PathBuf>,
+}
+
+impl FimWatchRoots {
+    /// Roots an operator chose.
+    pub fn operator(paths: Vec<PathBuf>) -> Self {
+        Self {
+            operator: paths,
+            defaults: Vec::new(),
+        }
+    }
+
+    /// Roots the software chose.
+    pub fn defaults(paths: Vec<PathBuf>) -> Self {
+        Self {
+            operator: Vec::new(),
+            defaults: paths,
+        }
+    }
+
+    /// Every root to watch, operator roots first, each once.
+    pub fn all(&self) -> Vec<PathBuf> {
+        let mut all: Vec<PathBuf> = Vec::with_capacity(self.operator.len() + self.defaults.len());
+        for path in self.operator.iter().chain(self.defaults.iter()) {
+            if !all.contains(path) {
+                all.push(path.clone());
+            }
+        }
+        all
+    }
+}
+
+/// The spellings an event path is matched against to tell it is under one of
+/// the `operator` roots: each root as given and canonicalized, `\` folded to
+/// `/`. macOS FSEvents reports events under the realpath
+/// (`/private/var/folders/...`) while `tempfile` and most callers pass the
+/// symlink-relative form (`/var/folders/...`); on Linux /tmp may also be a
+/// symlink in some distros. Storing both shapes makes the prefix match work
+/// under either reporting convention.
+fn operator_keep_roots(operator: &[PathBuf]) -> Vec<String> {
+    let mut spellings: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in operator {
+        let raw = p.to_string_lossy().replace('\\', "/");
+        if !raw.is_empty() {
+            spellings.insert(raw);
+        }
+        if let Ok(canon) = std::fs::canonicalize(p) {
+            let canon_str = canon.to_string_lossy().replace('\\', "/");
+            if !canon_str.is_empty() {
+                spellings.insert(canon_str);
+            }
+        }
+    }
+    spellings.into_iter().collect()
+}
+
 pub struct FimWatcher {
     _watcher: RecommendedWatcher,
     store: Arc<FimEventStore>,
@@ -221,9 +292,19 @@ pub struct FimWatcher {
 pub const FIM_PROCESS_ATTRIBUTION_BACKFILL_LIMIT: usize = 128;
 
 impl FimWatcher {
+    /// Watch `paths`, every one of them an operator's choice: every event
+    /// under them is kept (see [`FimWatchRoots`]). A caller that watches the
+    /// default roots passes them as such through [`FimWatcher::start_with_roots`].
     pub fn start(paths: Vec<PathBuf>, config: FimConfig) -> Result<Self> {
+        Self::start_with_roots(FimWatchRoots::operator(paths), config)
+    }
+
+    /// Watch `roots`: every event under an operator root is kept, the default
+    /// roots' events get the early drop of [`should_keep_fim_event`].
+    pub fn start_with_roots(roots: FimWatchRoots, config: FimConfig) -> Result<Self> {
         crate::l7_es::init_and_log_status();
 
+        let paths = roots.all();
         let store = Arc::new(FimEventStore::new());
         let running = Arc::new(AtomicBool::new(true));
 
@@ -247,33 +328,13 @@ impl FimWatcher {
         check_inotify_limits(paths.len());
 
         // The watcher closure needs a forward-slash-normalized snapshot of
-        // the explicit watch roots so the early-drop gate
+        // the operator's roots so the early-drop gate
         // (`should_keep_fim_event`) can accept any event under an operator-
         // requested path even when that path is non-sensitive AND non-temp
-        // (e.g. a custom audit directory). Built once at start time so the
-        // closure does not need to re-walk `paths` on every event.
-        //
-        // We store BOTH the original path and the `canonicalize()` result
-        // for each input. macOS FSEvents reports events under the realpath
-        // (`/private/var/folders/...`) while `tempfile` and most callers
-        // pass the symlink-relative form (`/var/folders/...`); on Linux
-        // /tmp may also be a symlink in some distros. Storing both shapes
-        // makes the prefix match work under either reporting convention.
-        let mut explicit_set: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for p in &paths {
-            let raw = p.to_string_lossy().replace('\\', "/");
-            if !raw.is_empty() {
-                explicit_set.insert(raw);
-            }
-            if let Ok(canon) = std::fs::canonicalize(p) {
-                let canon_str = canon.to_string_lossy().replace('\\', "/");
-                if !canon_str.is_empty() {
-                    explicit_set.insert(canon_str);
-                }
-            }
-        }
-        let explicit_watch_roots: Arc<Vec<String>> = Arc::new(explicit_set.into_iter().collect());
+        // (e.g. a custom audit directory). The default roots are not in it:
+        // their events take the early drop. Built once at start time so the
+        // closure does not need to re-walk the roots on every event.
+        let explicit_watch_roots: Arc<Vec<String>> = Arc::new(operator_keep_roots(&roots.operator));
 
         let store_clone = store.clone();
         let hash_threshold = config.hash_size_threshold;
@@ -600,7 +661,15 @@ fn spawn_fim_es_consumer(
 /// 3. The path is under one of the operator-requested explicit watch
 ///    roots (`explicit_watch_roots`). Operators that hand a custom
 ///    audit dir to `FimWatcher::start` deliberately want everything
-///    under it tracked.
+///    under it tracked. The default roots are not explicit
+///    ([`FimWatchRoots`]), OR
+/// 4. The sensitive-paths catalog labels the path
+///    (`classify_sensitive_path_labels_sync`). The detector reads labelled
+///    paths as sensitive material (`/.kube/`, `/.docker/` beyond the files
+///    `is_sensitive_path` names, lower-case spellings of Windows patterns)
+///    or as agent surfaces (`/.claude/`), and the label table is in force
+///    from start while the pattern snapshot is the smaller compiled-in set
+///    until the first catalog update.
 ///
 /// Reject rule (overrides ALL accept rules):
 /// - The path matches one of the build-output / browser-cache patterns
@@ -634,6 +703,10 @@ fn should_keep_fim_event(path_str: &str, explicit_watch_roots: &[String]) -> (bo
     });
 
     if under_explicit {
+        return (true, false);
+    }
+
+    if !classify_sensitive_path_labels_sync(&[path_str.to_string()]).is_empty() {
         return (true, false);
     }
 
@@ -2917,6 +2990,268 @@ mod tests {
 
         let (keep, _) = should_keep_fim_event("/Users/me/sshlogsplus/foo", &explicit);
         assert!(!keep, "Sibling path with shared prefix must not match");
+    }
+
+    /// A scratch directory that is neither a temp root nor sensitive on any
+    /// platform: under the crate's own (git-ignored) `target/`.
+    fn plain_scratch_dir(tag: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("fim-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn poll_for_path(store: &FimEventStore, suffix: &str, timeout_ms: u64) -> Option<FimEvent> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            if let Some(event) = store
+                .get_all_events()
+                .into_iter()
+                .find(|e| e.path.ends_with(suffix))
+            {
+                return Some(event);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// A default root's events get the early drop any path outside an
+    /// operator root gets; an operator root keeps everything. Every watched
+    /// path used to count as explicit, so a default root such as
+    /// AppData\Local kept every write under it (shiawase's helper: about
+    /// 33,000 FIM events an hour, 2026-10-13).
+    #[test]
+    fn test_default_roots_get_the_early_drop_operator_roots_keep_everything() {
+        let dir = plain_scratch_dir("default-roots");
+        let plain = dir.join("state.json");
+        let sentinel = dir.join(".env"); // sensitive (`/.env`): kept under any root
+        assert!(
+            !is_temp_directory_path(&plain.to_string_lossy())
+                && !is_sensitive_path(&plain.to_string_lossy())
+                && classify_sensitive_path_labels_sync(&[plain.to_string_lossy().to_string()])
+                    .is_empty(),
+            "precondition: {} is a plain path",
+            plain.display()
+        );
+        let config = FimConfig {
+            recursive: true,
+            ..Default::default()
+        };
+
+        let watcher = FimWatcher::start_with_roots(
+            FimWatchRoots::defaults(vec![dir.clone()]),
+            config.clone(),
+        )
+        .expect("start watcher on a default root");
+        fs::write(&plain, "{}").expect("write plain file");
+        fs::write(&sentinel, "TOKEN=demo").expect("write sensitive file");
+        assert!(
+            poll_for_path(watcher.store(), ".env", 5000).is_some(),
+            "the watcher saw the sensitive write"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let kept: Vec<String> = watcher
+            .store()
+            .get_all_events()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        assert!(
+            !kept.iter().any(|p| p.ends_with("state.json")),
+            "a default root drops a plain write: {kept:?}"
+        );
+        watcher.stop();
+
+        let watcher = FimWatcher::start(vec![dir.clone()], config).expect("start watcher");
+        fs::write(&plain, "{\"round\":2}").expect("rewrite plain file");
+        assert!(
+            poll_for_path(watcher.store(), "state.json", 5000).is_some(),
+            "an operator root keeps a plain write"
+        );
+        watcher.stop();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same decision on the event shapes the default roots kept on the
+    /// dogfood hosts, with the operator spellings built the way
+    /// `start_with_roots` builds them.
+    #[test]
+    fn test_default_root_churn_is_dropped_unless_its_root_is_an_operators() {
+        for (path, root) in [
+            (
+                r"C:\Users\frank\AppData\Local\Microsoft\Edge\User Data\Default\Preferences",
+                r"C:\Users\frank\AppData\Local",
+            ),
+            (
+                r"C:\Users\frank\AppData\Roaming\Code\User\globalStorage\state.vscdb",
+                r"C:\Users\frank\AppData\Roaming",
+            ),
+            (
+                "/home/frank/.config/Code/User/globalStorage/state.vscdb",
+                "/home/frank/.config",
+            ),
+            (
+                "/home/frank/.local/share/gnome-shell/application_state",
+                "/home/frank/.local/share",
+            ),
+            (
+                "/Users/frank/.cursor/extensions/extensions.json",
+                "/Users/frank/.cursor",
+            ),
+        ] {
+            let event = Event {
+                kind: EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                paths: vec![PathBuf::from(path)],
+                attrs: Default::default(),
+            };
+            let defaults_only =
+                operator_keep_roots(&FimWatchRoots::defaults(vec![PathBuf::from(root)]).operator);
+            assert!(
+                translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &defaults_only).is_none(),
+                "{path} under the default root {root} is dropped"
+            );
+            let operator =
+                operator_keep_roots(&FimWatchRoots::operator(vec![PathBuf::from(root)]).operator);
+            assert!(
+                translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &operator).is_some(),
+                "{path} under the operator root {root} is kept"
+            );
+        }
+    }
+
+    /// Paths the catalog labels are kept with no operator root: the detector
+    /// reads them as sensitive material (`file_system_tampering`) or as agent
+    /// surfaces, although no pattern of `is_sensitive_path` names them.
+    #[test]
+    fn test_catalog_labelled_paths_are_kept_without_an_operator_root() {
+        for path in [
+            "/home/u/.kube/prod-cluster.yaml", // kube; the pattern is /.kube/config
+            "/home/u/.docker/contexts/meta/abc/meta.json", // docker; the pattern is /.docker/config.json
+            "/home/u/.config/gcloud/legacy_credentials/u@x/adc.json", // gcp
+            "/Users/u/.claude/settings.json",              // claude: agent control config
+            r"C:\Users\u\appdata\roaming\microsoft\credentials\0A1B", // os_credential_store, lower-case spelling
+        ] {
+            assert!(
+                !classify_sensitive_path_labels_sync(&[path.to_string()]).is_empty(),
+                "{path} carries a catalog label"
+            );
+            let (keep, _) = should_keep_fim_event(path, &[]);
+            assert!(keep, "{path} is kept without an operator root");
+        }
+    }
+
+    fn assert_kept_as_sensitive_or_temp(path: &str) {
+        let (keep, sensitive) = should_keep_fim_event(path, &[]);
+        assert!(keep, "{path} must be kept with no operator root");
+        assert_eq!(sensitive, is_sensitive_path(path), "{path}");
+        assert!(
+            is_sensitive_path(path) || is_temp_directory_path(path),
+            "{path} must be kept because it is sensitive or temp"
+        );
+    }
+
+    /// The security gate's file-event scenarios (edamame_posture
+    /// tests/security/triggers: file_events, temp_modify, agent_config_tamper,
+    /// agent_rules_backdoor, package_install_lifecycle) write these paths, on
+    /// every platform's path shape. With no operator root, as under the
+    /// default roots, every one is kept because it is sensitive or temp, so
+    /// the early drop of the default roots costs these detections no event.
+    /// (The gate itself starts the monitor with explicit paths.)
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_gate_scenario_file_paths_are_kept_under_default_roots() {
+        // The catalog's patterns, as after the first model update.
+        crate::open_files::refresh_patterns_snapshot().await;
+        let homes = ["/Users/runner", "/home/runner", r"C:\Users\runneradmin"];
+        let temps = [
+            "/tmp",
+            "/private/tmp",
+            "/var/folders/6x/abc123/T",
+            "/private/var/folders/6x/abc123/T",
+            r"C:\Users\runneradmin\AppData\Local\Temp",
+            r"C:\Users\RUNNER~1\AppData\Local\Temp",
+            r"C:\Windows\TEMP",
+        ];
+        for agent in ["openclaw", "claude_code", "cursor"] {
+            let pfx = format!("demo_{agent}");
+            for home in homes {
+                let sep = if home.contains('\\') { "\\" } else { "/" };
+                for rel in [
+                    // agent_config_tamper
+                    format!(".cursor/rules/{pfx}_cfgtamper_hook.mdc"),
+                    format!(".cursor/rules/{pfx}_cfgtamper_mcp.mdc"),
+                    format!(".cursor/rules/{pfx}_cfgtamper_memory.mdc"),
+                    format!("{pfx}_cfgtamper/.cursorrules"),
+                    ".cursor/mcp.json".to_string(),
+                    // agent_rules_backdoor
+                    format!(".cursor/rules/{pfx}_rules_backdoor.mdc"),
+                    format!("{pfx}_rules_backdoor/.cursorrules"),
+                    format!("{pfx}_rules_backdoor/CLAUDE.md"),
+                    // file_events
+                    format!(".ssh/{pfx}_fim_test_key"),
+                    format!(".aws/{pfx}_fim_test_credentials"),
+                    format!(".env_{pfx}_fim_test"),
+                    // package_install_lifecycle: the staging file, then the rename target
+                    ".cursor/rules/demo_openclaw_pil_persist.mdc.tmp".to_string(),
+                    ".cursor/rules/demo_openclaw_pil_persist.mdc".to_string(),
+                ] {
+                    let path = format!("{home}{sep}{}", rel.replace('/', sep));
+                    assert_kept_as_sensitive_or_temp(&path);
+                    // Until the first catalog update the pattern snapshot is
+                    // the compiled-in set (no `/.aws/` directory pattern);
+                    // the catalog labels keep these meanwhile.
+                    assert!(
+                        !classify_sensitive_path_labels_sync(&[path.clone()]).is_empty(),
+                        "{path} carries a catalog label"
+                    );
+                }
+            }
+            for temp in temps {
+                let sep = if temp.contains('\\') { "\\" } else { "/" };
+                // file_events, temp_modify
+                for name in [
+                    format!("{pfx}_fim_suspicious_binary"),
+                    format!("{pfx}_temp_staged_binary"),
+                ] {
+                    let path = format!("{temp}{sep}{name}");
+                    assert_kept_as_sensitive_or_temp(&path);
+                    assert!(is_temp_directory_path(&path), "{path} is temp");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_watch_roots_list_operator_roots_first_each_once() {
+        let roots = FimWatchRoots {
+            operator: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            defaults: vec![PathBuf::from("/b"), PathBuf::from("/c")],
+        };
+        assert_eq!(
+            roots.all(),
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c")
+            ]
+        );
+        // Only the operator's roots are matched as explicit.
+        let keep = operator_keep_roots(&roots.operator);
+        assert!(keep.contains(&"/a".to_string()) && keep.contains(&"/b".to_string()));
+        assert!(!keep.contains(&"/c".to_string()));
+        assert!(FimWatchRoots::operator(vec![PathBuf::from("/a")])
+            .defaults
+            .is_empty());
+        assert!(FimWatchRoots::defaults(vec![PathBuf::from("/a")])
+            .operator
+            .is_empty());
     }
 
     #[test]
