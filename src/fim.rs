@@ -2211,6 +2211,34 @@ fn ci_watch_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// The default roots for `home`, by who chose what they keep
+/// ([`FimWatchRoots`]): the generic application-data roots of
+/// `sensitive-paths-db.json::watch_roots_early_drop` are defaults, whose
+/// events take the early drop of [`should_keep_fim_event`]; every other
+/// sensitive root and the temp roots keep every event, like an operator's.
+pub fn default_watch_roots_for_home(home: &Path) -> FimWatchRoots {
+    let (mut operator, defaults) =
+        crate::sensitive_paths::default_sensitive_watch_roots_for_home(home);
+    for p in default_temp_watch_paths() {
+        if !operator.contains(&p) && !defaults.contains(&p) {
+            operator.push(p);
+        }
+    }
+    FimWatchRoots { operator, defaults }
+}
+
+/// [`default_watch_paths`] by who chose what they keep: CI roots keep every
+/// event; the desktop roots are split as in [`default_watch_roots_for_home`].
+pub fn default_watch_roots(mode: FimMode) -> FimWatchRoots {
+    match mode {
+        FimMode::CI => FimWatchRoots::operator(ci_watch_paths()),
+        FimMode::Desktop => match home_dir() {
+            Some(home) => default_watch_roots_for_home(Path::new(&home)),
+            None => FimWatchRoots::operator(default_temp_watch_paths()),
+        },
+    }
+}
+
 fn desktop_watch_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -3226,6 +3254,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The default roots keep the temp roots as operator roots (every temp
+    /// event kept, as before) and put only the catalog's early-drop roots in
+    /// the defaults.
+    #[test]
+    fn test_default_watch_roots_for_home_keep_temp_roots_whole() {
+        let home = std::env::temp_dir().join(format!("flodbadd-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let roots = default_watch_roots_for_home(&home);
+        for temp in default_temp_watch_paths() {
+            assert!(roots.operator.contains(&temp), "{temp:?}");
+            assert!(!roots.defaults.contains(&temp), "{temp:?}");
+        }
+        assert!(roots.operator.contains(&home.join(".ssh")));
+        let (_, early) = crate::sensitive_paths::default_sensitive_watch_roots_for_home(&home);
+        assert_eq!(roots.defaults, early);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

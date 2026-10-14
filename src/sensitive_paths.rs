@@ -77,6 +77,10 @@ pub struct SensitivePathsJSON {
     pub platform_patterns: HashMap<String, Vec<String>>,
     pub labels: HashMap<String, Vec<String>>,
     pub watch_roots: WatchRootsJSON,
+    /// The watch roots whose FIM events are kept only when sensitive, temp or
+    /// catalog-labelled (the generic per-user application-data trees, 2.0.8);
+    /// every other watch root keeps all its events.
+    pub watch_roots_early_drop: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
     pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
     pub credential_opens: CredentialOpensJSON,
@@ -90,6 +94,10 @@ pub struct SensitivePathsDB {
     pub platform_patterns: HashMap<String, Vec<String>>,
     pub labels: HashMap<String, Vec<String>>,
     pub watch_roots: WatchRootsJSON,
+    /// The watch roots whose FIM events are kept only when sensitive, temp or
+    /// catalog-labelled (the generic per-user application-data trees, 2.0.8);
+    /// every other watch root keeps all its events.
+    pub watch_roots_early_drop: WatchRootsJSON,
     pub fim_excluded_path_patterns: Vec<String>,
     pub fim_forbidden_watch_roots: FimForbiddenWatchRootsJSON,
     pub credential_opens: CredentialOpensJSON,
@@ -140,6 +148,7 @@ impl SensitivePathsDB {
             platform_patterns: json.platform_patterns.clone(),
             labels: json.labels.clone(),
             watch_roots: json.watch_roots.clone(),
+            watch_roots_early_drop: json.watch_roots_early_drop.clone(),
             fim_excluded_path_patterns: json.fim_excluded_path_patterns.clone(),
             fim_forbidden_watch_roots: json.fim_forbidden_watch_roots.clone(),
             credential_opens: json.credential_opens.clone(),
@@ -250,6 +259,12 @@ fn build_fallback_watch_roots() -> WatchRootsJSON {
         .unwrap_or_default()
 }
 
+fn build_fallback_watch_roots_early_drop() -> WatchRootsJSON {
+    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        .map(|json| json.watch_roots_early_drop)
+        .unwrap_or_default()
+}
+
 fn build_fallback_fim_forbidden_watch_roots() -> FimForbiddenWatchRootsJSON {
     serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
         .map(|json| json.fim_forbidden_watch_roots)
@@ -278,6 +293,8 @@ lazy_static! {
         ArcSwap::from_pointee(build_fallback_labels());
     static ref WATCH_ROOTS_SNAPSHOT: ArcSwap<WatchRootsJSON> =
         ArcSwap::from_pointee(build_fallback_watch_roots());
+    static ref WATCH_ROOTS_EARLY_DROP_SNAPSHOT: ArcSwap<WatchRootsJSON> =
+        ArcSwap::from_pointee(build_fallback_watch_roots_early_drop());
     static ref FIM_EXCLUDED_PATTERNS_SNAPSHOT: ArcSwap<Vec<String>> =
         ArcSwap::from_pointee(build_fallback_fim_excluded_patterns());
     static ref FIM_FORBIDDEN_WATCH_ROOTS_SNAPSHOT: ArcSwap<FimForbiddenWatchRootsJSON> =
@@ -290,6 +307,7 @@ pub async fn refresh_labels_snapshot() {
     let db = SENSITIVE_PATHS.data.read().await;
     LABELS_SNAPSHOT.store(Arc::new(db.labels.clone()));
     WATCH_ROOTS_SNAPSHOT.store(Arc::new(db.watch_roots.clone()));
+    WATCH_ROOTS_EARLY_DROP_SNAPSHOT.store(Arc::new(db.watch_roots_early_drop.clone()));
     let exclusions: Vec<String> = db
         .fim_excluded_path_patterns
         .iter()
@@ -400,28 +418,44 @@ pub async fn classify_sensitive_path_labels(paths: &[String]) -> Vec<String> {
 /// with the embedded fallback as last-resort default.
 pub fn default_sensitive_watch_paths_for_home(home: &Path) -> Vec<PathBuf> {
     let snap = WATCH_ROOTS_SNAPSHOT.load();
-    let platform_specific: &[String] = if cfg!(target_os = "macos") {
-        &snap.macos_home_relative
-    } else if cfg!(target_os = "linux") {
-        &snap.linux_home_relative
-    } else if cfg!(target_os = "windows") {
-        &snap.windows_home_relative
-    } else {
-        &[]
-    };
-
     let mut paths = Vec::new();
-    for entry in snap
-        .common_home_relative
-        .iter()
-        .chain(platform_specific.iter())
-    {
+    for entry in home_relative_entries(&snap) {
         let p = home.join(entry);
         if p.exists() && !paths.contains(&p) {
             paths.push(p);
         }
     }
     paths
+}
+
+/// [`default_sensitive_watch_paths_for_home`] split by
+/// `sensitive-paths-db.json::watch_roots_early_drop`: the roots that keep
+/// every event, then the roots whose events the FIM watcher keeps only when
+/// sensitive, temp or catalog-labelled.
+pub fn default_sensitive_watch_roots_for_home(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let early_drop: Vec<PathBuf> = home_relative_entries(&WATCH_ROOTS_EARLY_DROP_SNAPSHOT.load())
+        .map(|entry| home.join(entry))
+        .collect();
+    default_sensitive_watch_paths_for_home(home)
+        .into_iter()
+        .partition(|path| !early_drop.contains(path))
+}
+
+/// The common entries of `roots`, then the current platform's.
+fn home_relative_entries(roots: &WatchRootsJSON) -> impl Iterator<Item = &String> {
+    let platform_specific: &[String] = if cfg!(target_os = "macos") {
+        &roots.macos_home_relative
+    } else if cfg!(target_os = "linux") {
+        &roots.linux_home_relative
+    } else if cfg!(target_os = "windows") {
+        &roots.windows_home_relative
+    } else {
+        &[]
+    };
+    roots
+        .common_home_relative
+        .iter()
+        .chain(platform_specific.iter())
 }
 
 /// Returns true if `path` matches one of the FIM exclusion substrings
@@ -489,6 +523,63 @@ mod tests {
     fn test_embedded_sensitive_paths_snapshot_parses() {
         serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
             .expect("embedded sensitive paths snapshot must parse as SensitivePathsJSON");
+    }
+
+    /// The early-drop roots are watch roots, cover the generic per-user
+    /// application-data trees on Linux and Windows, and leave the credential,
+    /// agent and persistence roots keeping every event (FIM watch roots,
+    /// 2.0.8).
+    #[test]
+    fn test_embedded_early_drop_roots_are_the_generic_app_data_roots() {
+        let json = serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB).unwrap();
+        let early = &json.watch_roots_early_drop;
+        let roots = &json.watch_roots;
+        for (early, roots) in [
+            (&early.common_home_relative, &roots.common_home_relative),
+            (&early.linux_home_relative, &roots.linux_home_relative),
+            (&early.macos_home_relative, &roots.macos_home_relative),
+            (&early.windows_home_relative, &roots.windows_home_relative),
+        ] {
+            for entry in early {
+                assert!(roots.contains(entry), "{entry} is not a watch root");
+            }
+        }
+        for generic in [".config", ".local/share"] {
+            assert!(early.linux_home_relative.iter().any(|e| e == generic));
+        }
+        for generic in ["AppData/Roaming", "AppData/Local"] {
+            assert!(early.windows_home_relative.iter().any(|e| e == generic));
+        }
+        for kept in [".ssh", ".aws", ".cursor", ".claude"] {
+            assert!(!early.common_home_relative.iter().any(|e| e == kept));
+        }
+        for kept in [".config/systemd/user", ".config/autostart", ".local/bin"] {
+            assert!(!early.linux_home_relative.iter().any(|e| e == kept));
+        }
+        assert!(early.macos_home_relative.is_empty());
+    }
+
+    /// Every default root of this platform is in exactly one half of the
+    /// split, in the early-drop half exactly when the catalog lists it.
+    #[test]
+    fn test_default_watch_roots_split_by_the_early_drop_list() {
+        let home = std::env::temp_dir().join(format!("flodbadd-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let json = serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB).unwrap();
+        for entry in home_relative_entries(&json.watch_roots) {
+            std::fs::create_dir_all(home.join(entry)).unwrap();
+        }
+        let early: Vec<PathBuf> = home_relative_entries(&json.watch_roots_early_drop)
+            .map(|entry| home.join(entry))
+            .collect();
+        let all = default_sensitive_watch_paths_for_home(&home);
+        let (keep, drop) = default_sensitive_watch_roots_for_home(&home);
+        assert_eq!(keep.len() + drop.len(), all.len());
+        for path in &all {
+            assert_ne!(keep.contains(path), drop.contains(path), "{path:?}");
+            assert_eq!(drop.contains(path), early.contains(path), "{path:?}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]
