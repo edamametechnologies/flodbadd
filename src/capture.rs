@@ -14,6 +14,7 @@ use crate::sessions::*;
 use crate::task::TaskHandle;
 use crate::whitelists::{self, is_valid_whitelist, Whitelists, WhitelistsJSON};
 use anyhow::{anyhow, Context, Result};
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 #[cfg(all(
@@ -71,9 +72,49 @@ use undeadlock::*; // Add this import // Add Duration import
 
 // Keep 4 hours of history
 
+/// What [`FlodbaddCapture::restart`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRestart {
+    /// The capture tasks were stopped and started on the new interfaces.
+    Restarted,
+    /// Nothing to restart: the capture is not running.
+    NotCapturing,
+    /// Not restarted: the new interface list is empty, a transient state
+    /// (roaming, a link going down and up).
+    NoInterfaces,
+    /// Not restarted: the same interfaces. `addresses_refreshed` when their
+    /// addresses changed and the running tasks took the new ones.
+    SameInterfaces { addresses_refreshed: bool },
+}
+
+impl CaptureRestart {
+    /// Whether the capture was restarted.
+    pub fn restarted(&self) -> bool {
+        matches!(self, CaptureRestart::Restarted)
+    }
+}
+
+/// The addresses `interface` holds: its IPv4 address and every IPv6 one.
+fn own_ips_of(interface: &FlodbaddInterface) -> HashSet<IpAddr> {
+    let mut ips = HashSet::new();
+    if let Some(ipv4_info) = &interface.ipv4 {
+        ips.insert(IpAddr::V4(ipv4_info.ip));
+    }
+    for ipv6_addr_type in &interface.ipv6 {
+        ips.insert(IpAddr::V6(ipv6_addr_type.ip()));
+    }
+    ips
+}
+
 pub struct FlodbaddCapture {
     interfaces: Arc<CustomRwLock<FlodbaddInterfaces>>,
     capture_task_handles: Arc<CustomDashMap<String, TaskHandle>>,
+    /// This host's addresses on each captured interface, which its capture
+    /// task orients sessions by when the ports do not decide
+    /// (`packet_source_serves`). Swapped whole when the interface keeps its
+    /// name but changes address (DHCP renewal, roaming, IPv6 rotation):
+    /// that does not restart the capture.
+    own_ips: Arc<CustomDashMap<String, Arc<ArcSwap<HashSet<IpAddr>>>>>,
     // Public for tests
     pub sessions: Arc<CustomDashMap<Session, SessionInfo>>,
     current_sessions: Arc<CustomRwLock<Vec<Session>>>,
@@ -271,6 +312,7 @@ impl FlodbaddCapture {
         Self {
             interfaces: Arc::new(CustomRwLock::new(FlodbaddInterfaces::new())),
             capture_task_handles: Arc::new(CustomDashMap::new("capture_task_handles")),
+            own_ips: Arc::new(CustomDashMap::new("capture_own_ips")),
             sessions: Arc::new(CustomDashMap::new("sessions")),
             current_sessions: Arc::new(CustomRwLock::new(Vec::new())),
             resolver: Arc::new(CustomRwLock::new(None)),
@@ -651,22 +693,26 @@ impl FlodbaddCapture {
         debug!("All fetch timestamps reset to epoch");
     }
 
-    // This won't clear the sessions map, so it's not a full restart
-    pub async fn restart(&self, interfaces: &FlodbaddInterfaces) -> Result<()> {
+    /// Restart the capture on `interfaces` when the set of interfaces
+    /// changed. The outcome says whether it did: a caller logs success only
+    /// for [`CaptureRestart::Restarted`].
+    ///
+    /// This won't clear the sessions map, so it's not a full restart.
+    pub async fn restart(&self, interfaces: &FlodbaddInterfaces) -> Result<CaptureRestart> {
         // Proceed only if we are currently capturing or interfaces have changed,
         // otherwise there is nothing to do.
         let is_capturing = self.is_capturing().await;
 
         // Ignore restart if not capturing
         if !is_capturing {
-            warn!("Restart skipped – not capturing");
-            return Ok(());
+            debug!("Restart skipped – not capturing");
+            return Ok(CaptureRestart::NotCapturing);
         }
 
         // Ignore restart if the interfaces list is empty (indicative of a transient situation like network roaming)
         if interfaces.interfaces.is_empty() {
-            warn!("Restart skipped – interfaces list is empty");
-            return Ok(());
+            info!("Restart skipped – interfaces list is empty");
+            return Ok(CaptureRestart::NoInterfaces);
         }
 
         // Ignore restart if both current and new interface name lists are non-empty and identical
@@ -683,8 +729,20 @@ impl FlodbaddCapture {
                 .all(|(a, b)| a.name == b.name);
 
         if names_equal_and_non_empty {
-            warn!("Restart skipped – interface names are the same");
-            return Ok(());
+            // Same interfaces: the capture keeps running. Their addresses can
+            // still have changed, and the tasks orient sessions by them.
+            let addresses_refreshed = self.refresh_own_ips(interfaces);
+            if addresses_refreshed {
+                *self.interfaces.write().await = interfaces.clone();
+                info!(
+                    "Restart skipped – interface names are the same; their addresses changed and were refreshed"
+                );
+            } else {
+                debug!("Restart skipped – interface names are the same");
+            }
+            return Ok(CaptureRestart::SameInterfaces {
+                addresses_refreshed,
+            });
         }
 
         info!("Restarting capture with new interfaces: {:?}", interfaces);
@@ -704,7 +762,7 @@ impl FlodbaddCapture {
         // Verify the capture task status.
         if self.is_capturing().await {
             info!("Capture task(s) restarted successfully.");
-            Ok(())
+            Ok(CaptureRestart::Restarted)
         } else {
             let error_message = "Capture task(s) failed to restart.".to_string();
             error!("{}", error_message);
@@ -714,6 +772,31 @@ impl FlodbaddCapture {
 
     pub async fn is_capturing(&self) -> bool {
         !self.capture_task_handles.is_empty()
+    }
+
+    /// The own-address snapshot the capture task of `interface` reads,
+    /// created (or replaced) with the interface's current addresses.
+    fn register_own_ips(&self, interface: &FlodbaddInterface) -> Arc<ArcSwap<HashSet<IpAddr>>> {
+        let own_ips = Arc::new(ArcSwap::from_pointee(own_ips_of(interface)));
+        self.own_ips.insert(interface.name.clone(), own_ips.clone());
+        own_ips
+    }
+
+    /// Hand the running capture tasks the current addresses of their
+    /// interfaces. Returns whether any of them changed.
+    fn refresh_own_ips(&self, interfaces: &FlodbaddInterfaces) -> bool {
+        let mut changed = false;
+        for interface in &interfaces.interfaces {
+            let Some(own_ips) = self.own_ips.get(&interface.name) else {
+                continue;
+            };
+            let current = own_ips_of(interface);
+            if **own_ips.value().load() != current {
+                own_ips.value().store(Arc::new(current));
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub async fn get_whitelist(&self) -> String {
@@ -1358,14 +1441,9 @@ impl FlodbaddCapture {
         // Clone the interface name for the async move block
         let interface_name_clone = interface.name.clone();
 
-        // Create HashSet of IPs for this specific interface
-        let mut interface_ips = HashSet::new();
-        if let Some(ipv4_info) = &interface.ipv4 {
-            interface_ips.insert(IpAddr::V4(ipv4_info.ip));
-        }
-        for ipv6_addr_type in &interface.ipv6 {
-            interface_ips.insert(IpAddr::V6(ipv6_addr_type.ip())); // Wrap in IpAddr::V6
-        }
+        // This interface's addresses, read per packet: `restart` swaps them
+        // in place when they change under the same interface name.
+        let interface_ips = self.register_own_ips(interface);
 
         // Clone the device for the async move block
         let device_clone = device.clone();
@@ -1519,7 +1597,7 @@ impl FlodbaddCapture {
                                                     cp,
                                                     &sessions_clone,
                                                     &current_sessions_clone,
-                                                    &own_ips_clone,
+                                                    &own_ips_clone.load_full(),
                                                     &filter_clone,
                                                     l7_opt.as_ref(),
                                                 )
@@ -1540,7 +1618,7 @@ impl FlodbaddCapture {
                                                     cp,
                                                     &sessions_clone,
                                                     &current_sessions_clone,
-                                                    &own_ips_clone,
+                                                    &own_ips_clone.load_full(),
                                                     &filter_clone,
                                                     l7_opt.as_ref(),
                                                 )
@@ -1750,7 +1828,7 @@ impl FlodbaddCapture {
                                                 cp,
                                                 &sessions,
                                                 &current_sessions,
-                                                &own_ips,
+                                                &own_ips.load_full(),
                                                 &filter,
                                                 l7_opt.as_ref(),
                                             )
@@ -1771,7 +1849,7 @@ impl FlodbaddCapture {
                                                 cp,
                                                 &sessions,
                                                 &current_sessions,
-                                                &own_ips,
+                                                &own_ips.load_full(),
                                                 &filter,
                                                 l7_opt.as_ref(),
                                             )
@@ -1832,6 +1910,7 @@ impl FlodbaddCapture {
         let mut handles_to_await = Vec::new();
 
         for key in keys {
+            self.own_ips.remove(&key);
             if let Some((_, task_handle)) = self.capture_task_handles.remove(&key) {
                 debug!("Signalling stop for task {}", key);
                 let _ = task_handle.stop_tx.send(true);
@@ -7369,5 +7448,168 @@ mod tests {
         println!("   - Session criticality maintained correctly");
         println!("   - New sessions can be added after restarts");
         println!("   - All session retrieval methods work consistently");
+    }
+
+    fn interface_with_ipv4(name: &str, ip: Ipv4Addr) -> FlodbaddInterface {
+        FlodbaddInterface {
+            name: name.to_string(),
+            ipv4: Some(FlodbaddInterfaceAddrV4 { ip, prefix: 24 }),
+            ipv6: Vec::new(),
+        }
+    }
+
+    /// A named port below 3389, used as a client's source port.
+    async fn named_port_below_3389() -> u16 {
+        for port in [1433u16, 3306, 1723, 2049, 1521, 2083] {
+            if !crate::port_vulns::get_name_from_port(port).await.is_empty() {
+                return port;
+            }
+        }
+        panic!("no named port below 3389 in the port database");
+    }
+
+    /// An interface that keeps its name and changes address (DHCP renewal,
+    /// roaming, IPv6 privacy rotation) does not restart the capture, says so,
+    /// and the running task orients the next flows by the new address: a
+    /// mid-stream inbound flow to the host's listening port is keyed to the
+    /// host, where the addresses the task started with key it as egress.
+    #[tokio::test]
+    #[serial]
+    async fn test_address_change_under_the_same_name_refreshes_own_ips_without_restart() {
+        assert!(
+            !crate::port_vulns::get_name_from_port(3389).await.is_empty(),
+            "3389 must be a named service port for this case"
+        );
+        let capture = FlodbaddCapture::new();
+        let old_host = Ipv4Addr::new(192, 0, 2, 11);
+        let new_host = Ipv4Addr::new(192, 0, 2, 77);
+        let before = FlodbaddInterfaces {
+            interfaces: vec![interface_with_ipv4("en0", old_host)],
+        };
+        let after = FlodbaddInterfaces {
+            interfaces: vec![interface_with_ipv4("en0", new_host)],
+        };
+        *capture.interfaces.write().await = before.clone();
+        // What start_capture_task_for_device sets up for a task on en0.
+        let own_ips = capture.register_own_ips(&before.interfaces[0]);
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        capture.capture_task_handles.insert(
+            "en0".to_string(),
+            TaskHandle {
+                handle: tokio::spawn(async {}),
+                stop_tx: Arc::new(stop_tx),
+            },
+        );
+
+        assert_eq!(
+            capture.restart(&before).await.unwrap(),
+            CaptureRestart::SameInterfaces {
+                addresses_refreshed: false
+            }
+        );
+        let outcome = capture.restart(&after).await.unwrap();
+        assert_eq!(
+            outcome,
+            CaptureRestart::SameInterfaces {
+                addresses_refreshed: true
+            }
+        );
+        assert!(!outcome.restarted(), "no success to report");
+        assert!(
+            capture.capture_task_handles.contains_key("en0"),
+            "the capture was not restarted"
+        );
+        assert_eq!(**own_ips.load(), HashSet::from([IpAddr::V4(new_host)]));
+        assert_eq!(
+            capture.interfaces.read().await.interfaces[0]
+                .ipv4
+                .as_ref()
+                .map(|v4| v4.ip),
+            Some(new_host)
+        );
+
+        // host:3389 -> client:<lower named port>, mid-stream: neither port
+        // decides, the host's own address does.
+        let client = Ipv4Addr::new(198, 51, 100, 23);
+        let packet = SessionPacketData {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(new_host),
+                src_port: 3389,
+                dst_ip: IpAddr::V4(client),
+                dst_port: named_port_below_3389().await,
+            },
+            packet_length: 40,
+            ip_packet_length: 80,
+            flags: Some(TcpFlags::ACK | TcpFlags::PSH),
+            timestamp: Utc::now(),
+            tls_client_hello: None,
+        };
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+
+        let stale_sessions = Arc::new(CustomDashMap::new("stale_sessions"));
+        process_parsed_packet(
+            packet.clone(),
+            &stale_sessions,
+            &Arc::new(CustomRwLock::new(Vec::new())),
+            &HashSet::from([IpAddr::V4(old_host)]),
+            &filter,
+            None,
+        )
+        .await;
+        assert_eq!(
+            stale_sessions.iter().next().unwrap().key().src_ip,
+            IpAddr::V4(new_host),
+            "with the start-time addresses the host is keyed as the client"
+        );
+
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        process_parsed_packet(
+            packet,
+            &sessions,
+            &Arc::new(CustomRwLock::new(Vec::new())),
+            &own_ips.load_full(),
+            &filter,
+            None,
+        )
+        .await;
+        let entry = sessions.iter().next().unwrap();
+        assert_eq!(entry.key().dst_ip, IpAddr::V4(new_host));
+        assert_eq!(entry.key().dst_port, 3389);
+        assert!(entry.value().is_self_dst && !entry.value().is_self_src);
+    }
+
+    /// A skipped restart reports what it skipped, so a caller logs no
+    /// success for it ("Capture restarted successfully" after "Restart
+    /// skipped", shiawase and fmba-3 helpers, 2026-10-10..13).
+    #[tokio::test]
+    #[serial]
+    async fn test_skipped_restarts_are_not_reported_as_restarts() {
+        let capture = FlodbaddCapture::new();
+        let en0 = FlodbaddInterfaces {
+            interfaces: vec![interface_with_ipv4("en0", Ipv4Addr::new(192, 0, 2, 11))],
+        };
+        let outcome = capture.restart(&en0).await.unwrap();
+        assert_eq!(outcome, CaptureRestart::NotCapturing);
+        assert!(!outcome.restarted());
+
+        *capture.interfaces.write().await = en0.clone();
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        capture.capture_task_handles.insert(
+            "en0".to_string(),
+            TaskHandle {
+                handle: tokio::spawn(async {}),
+                stop_tx: Arc::new(stop_tx),
+            },
+        );
+        let outcome = capture
+            .restart(&FlodbaddInterfaces {
+                interfaces: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, CaptureRestart::NoInterfaces);
+        assert!(!outcome.restarted());
+        assert!(capture.capture_task_handles.contains_key("en0"));
     }
 }
