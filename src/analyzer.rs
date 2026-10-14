@@ -2815,6 +2815,17 @@ impl SessionAnalyzer {
         );
     }
 
+    /// Drop the session caches (all, anomalous, blacklisted) and the
+    /// per-session analysis times, keeping the model, its warm-up state and
+    /// the running loop: the operator's Clear of the detections empties the
+    /// sessions the detectors read without restarting anomaly detection.
+    pub fn clear_session_caches(&self) {
+        self.anomalous_sessions.clear();
+        self.blacklisted_sessions.clear();
+        self.all_sessions.clear();
+        self.last_analysis_times.clear();
+    }
+
     /// Fully reset the analyzer state: stop, clear caches and model, and reset counters.
     /// After this call, `start()` will create a fresh model and warm-up from scratch.
     pub async fn reset(&self) {

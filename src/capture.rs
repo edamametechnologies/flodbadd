@@ -656,6 +656,18 @@ impl FlodbaddCapture {
         info!("FlodbaddCapture stopped - clean slate for restart");
     }
 
+    /// Drop every captured session (the session map, the current list, the
+    /// whitelist exceptions and the blacklisted list) without stopping the
+    /// capture: traffic seen afterwards makes new sessions. The operator's
+    /// Clear of the detections (`clear_detections` in edamame_core) uses it
+    /// so cleared findings come back only on new activity. Attribution
+    /// state (L7) and the capture's configuration are kept.
+    pub async fn clear_sessions(&self) {
+        self.clear_all_sessions().await;
+        self.reset_fetch_timestamps().await;
+        self.invalidate_update_cooldown().await;
+    }
+
     /// Clear all session data structures for a clean restart
     async fn clear_all_sessions(&self) {
         info!("Clearing all session data for clean restart");
@@ -4185,6 +4197,51 @@ mod tests {
 
         // Cleanup
         let _ = capture.set_custom_blacklists("").await;
+    }
+
+    /// Clearing the sessions empties every session list the readers use
+    /// and keeps the capture's configuration (the session filter here).
+    #[tokio::test]
+    #[serial]
+    async fn test_clear_sessions_empties_the_lists_and_keeps_the_configuration() {
+        let capture = FlodbaddCapture::new();
+        capture.set_filter(SessionFilter::All).await;
+        let now = Utc::now();
+        let info = SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                src_port: 40001,
+                dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                dst_port: 443,
+            },
+            stats: SessionStats::new(now),
+            status: SessionStatus::default(),
+            is_whitelisted: WhitelistState::NonConforming,
+            criticality: String::new(),
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: true,
+            is_self_dst: false,
+            ..Default::default()
+        };
+        capture.sessions.insert(info.session.clone(), info.clone());
+        capture
+            .current_sessions
+            .write()
+            .await
+            .push(info.session.clone());
+        *capture.whitelist_exceptions.write().await = vec![info.session.clone()];
+
+        capture.clear_sessions().await;
+
+        assert!(capture.sessions.is_empty());
+        assert!(capture.current_sessions.read().await.is_empty());
+        assert!(capture.whitelist_exceptions.read().await.is_empty());
+        assert!(capture.blacklisted_sessions.read().await.is_empty());
+        assert!(matches!(capture.get_filter().await, SessionFilter::All));
     }
 
     /// A session the exception list still names but whose own state conforms
