@@ -251,10 +251,9 @@ pub fn recent(limit: usize) -> Vec<ProcessEvent> {
 ///
 /// Searched in place, newest first, so the lock is held for a scan and one
 /// record's two strings are copied, not the ring. The fanotify writer
-/// resolution asks this for every event whose writer already exited; it
-/// used to copy the whole ring ([`recent`] of 8,192 events) each time, and
-/// every sensor push that met the lock held by that copy was dropped
-/// (`dropped_locked` 633 on test-mint, 2026-10-13, where 0 is expected).
+/// resolution asks this for every event whose writer already exited, so it
+/// runs often; the ring lock is shared with the sensor threads that push
+/// into the ring, and a short hold keeps it free for them.
 /// Non-blocking like [`recent`]: `None` when the lock is contended.
 pub fn latest_exec_image(pid: u32) -> Option<(String, String)> {
     RING.try_with(|ring| ring_latest_exec_image(ring, pid))

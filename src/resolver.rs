@@ -33,6 +33,13 @@ const RESOLVER_QUEUE_MAX_SIZE: usize = 10_000;
 /// 2026-10-12 while a batch of 154 lookups was in flight.
 const MAX_CONCURRENT_REVERSE_LOOKUPS: usize = 16;
 
+/// Addresses one pass of the resolver loop takes from the queue. With
+/// lookups bounded to [`MAX_CONCURRENT_REVERSE_LOOKUPS`], taking the whole
+/// queue (up to [`RESOLVER_QUEUE_MAX_SIZE`]) on a network that drops DNS to
+/// the public resolvers made one pass last until every address had timed
+/// out; a bounded pass keeps the cache cleanup running between passes.
+const MAX_REVERSE_LOOKUPS_PER_PASS: usize = 256;
+
 // hickory resolver options. These are the hickory-resolver 0.25 values the
 // resolvers ran with; they are pinned so a hickory default cannot move them.
 /// Per-query timeout.
@@ -275,38 +282,92 @@ impl FlodbaddResolver {
         .await;
     }
 
+    /// Completes once the resolver task is asked to stop, or once nobody can
+    /// ask any more (its handle was dropped).
+    async fn stop_requested(stop_rx: &mut watch::Receiver<bool>) {
+        let _ = stop_rx.wait_for(|stop| *stop).await;
+    }
+
+    /// Marks the addresses of `ips` still waiting for their lookup "Unknown",
+    /// as when no resolver answered: a stopped resolver does not look them
+    /// up, and a "Resolving" entry would stay so for good, since
+    /// `add_ip_to_resolver` skips an address that has an entry. A forward
+    /// DNS answer from the capture still replaces "Unknown". Returns how many
+    /// it marked.
+    fn mark_unresolved(
+        reverse_dns: &CustomDashMap<IpAddr, ReverseDnsEntry>,
+        ips: impl IntoIterator<Item = IpAddr>,
+    ) -> usize {
+        let mut marked = 0;
+        for ip in ips {
+            if let Some(mut entry) = reverse_dns.get_mut(&ip) {
+                if entry.domain == "Resolving" {
+                    entry.domain = "Unknown".to_string();
+                    entry.inserted_at = Instant::now();
+                    marked += 1;
+                }
+            }
+        }
+        marked
+    }
+
     pub async fn start(&self) {
+        self.start_with_resolvers(Self::create_resolvers()).await;
+    }
+
+    /// [`Self::start`] with the given resolvers instead of the public ones.
+    async fn start_with_resolvers(&self, resolvers: Vec<ProviderResolver>) {
         if self.resolver_handle.read().await.is_some() {
             warn!("Resolver task is already running");
             return;
         }
 
-        // Create resolvers
-        let resolvers = Self::create_resolvers();
         *self.resolvers.write().await = resolvers.clone();
 
         // Spawn resolver task
         if !resolvers.is_empty() {
             let resolver_queue = self.resolver_queue.clone();
             let reverse_dns = self.reverse_dns.clone();
-            let (stop_tx, stop_rx) = watch::channel(false);
+            let (stop_tx, mut stop_rx) = watch::channel(false);
             let stop_tx = Arc::new(stop_tx);
             let resolvers_clone = resolvers.clone();
 
             let resolver_handle = tokio::spawn(async move {
                 info!("Starting resolver task");
                 let mut cleanup_counter = 0u32;
+                let mut unresolved = 0usize;
 
-                while !*stop_rx.borrow() || !resolver_queue.read().await.is_empty() {
-                    // Get the IPs to resolve from the queue
-                    let to_resolve: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
+                // Runs until asked to stop. A stop does not wait for the
+                // queue: the capture's stop waits for `stop()`, and on a
+                // network that drops DNS to the public resolvers every lookup
+                // runs through all its timeouts and retries. Lookups in
+                // flight are abandoned and the rest of the queue is left
+                // unresolved.
+                loop {
+                    // Take at most one pass of the queue, oldest first
+                    let to_resolve: Vec<IpAddr> = {
+                        let mut queue = resolver_queue.write().await;
+                        let take = queue.len().min(MAX_REVERSE_LOOKUPS_PER_PASS);
+                        queue.drain(..take).collect()
+                    };
                     let to_resolve_len = to_resolve.len();
                     if to_resolve_len > 0 {
                         trace!("Resolving {} IPs", to_resolve_len);
 
-                        Self::resolve_batch(to_resolve, &reverse_dns, &resolvers_clone).await;
-
-                        info!("Resolved {} IPs", to_resolve_len);
+                        tokio::select! {
+                            biased;
+                            _ = Self::stop_requested(&mut stop_rx) => {
+                                unresolved += Self::mark_unresolved(&reverse_dns, to_resolve);
+                                break;
+                            }
+                            _ = Self::resolve_batch(
+                                to_resolve.clone(),
+                                &reverse_dns,
+                                &resolvers_clone,
+                            ) => {
+                                info!("Resolved {} IPs", to_resolve_len);
+                            }
+                        }
                     }
 
                     // Periodic cache cleanup (every ~30 iterations = ~60 seconds)
@@ -337,7 +398,21 @@ impl FlodbaddResolver {
                     }
 
                     // Sleep briefly before checking queue again
-                    sleep(Duration::from_secs(2)).await;
+                    tokio::select! {
+                        biased;
+                        _ = Self::stop_requested(&mut stop_rx) => break,
+                        _ = sleep(Duration::from_secs(2)) => {}
+                    }
+                }
+
+                // The rest of the queue is not looked up
+                let left: Vec<IpAddr> = resolver_queue.write().await.drain(..).collect();
+                unresolved += Self::mark_unresolved(&reverse_dns, left);
+                if unresolved > 0 {
+                    info!(
+                        "Resolver stopped before resolving {} IPs, marked Unknown",
+                        unresolved
+                    );
                 }
 
                 info!("Resolver task completed");
@@ -826,6 +901,81 @@ mod tests {
             "{peak} lookups in flight at once"
         );
         assert!(peak > 1, "lookups still run concurrently (peak {peak})");
+    }
+
+    /// A UDP DNS server on 127.0.0.1 that counts the queries it gets and
+    /// answers none, like a network that drops DNS: each lookup runs through
+    /// all its timeouts and retries.
+    async fn silent_udp_dns_server(queries: Arc<AtomicUsize>) -> u16 {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while socket.recv_from(&mut buf).await.is_ok() {
+                queries.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        port
+    }
+
+    /// Stopping does not wait for the queue: with lookups in flight that no
+    /// server answers and more queued behind them, `stop()` returns at once
+    /// (it used to look every queued address up first, 16 at a time), and
+    /// every address it did not look up reads "Unknown", not "Resolving".
+    /// One pass takes at most MAX_REVERSE_LOOKUPS_PER_PASS addresses from
+    /// the queue.
+    #[tokio::test]
+    async fn stop_abandons_unanswered_lookups_and_the_queue() {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let port = silent_udp_dns_server(queries.clone()).await;
+        let silent = ProviderResolver::from_name_servers(
+            "silent",
+            vec![localhost(vec![udp_on(port)])],
+            vec![localhost(vec![tcp_on(port)])],
+        )
+        .unwrap();
+        let resolver = FlodbaddResolver::new();
+        // TEST-NET-2 then TEST-NET-3: 300 documentation addresses.
+        let ips: Vec<IpAddr> = (0..=255u8)
+            .map(|i| IpAddr::V4(Ipv4Addr::new(198, 51, 100, i)))
+            .chain((0..44u8).map(|i| IpAddr::V4(Ipv4Addr::new(203, 0, 113, i))))
+            .collect();
+        for ip in &ips {
+            resolver.add_ip_to_resolver(ip).await;
+        }
+        assert_eq!(resolver.resolver_queue_size().await, ips.len());
+
+        resolver.start_with_resolvers(vec![silent]).await;
+        // The first pass has taken its share of the queue and its lookups
+        // are in flight.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while queries.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first pass sends its lookups");
+        assert_eq!(
+            resolver.resolver_queue_size().await,
+            ips.len() - MAX_REVERSE_LOOKUPS_PER_PASS
+        );
+
+        let stopping = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), resolver.stop())
+            .await
+            .expect("stop() returns without resolving the queue");
+        let took = stopping.elapsed();
+        assert!(took < Duration::from_secs(2), "stop() took {took:?}");
+
+        assert!(resolver.resolver_handle.read().await.is_none());
+        assert_eq!(resolver.resolver_queue_size().await, 0);
+        for ip in &ips {
+            assert_eq!(
+                resolver.get_resolved_ip(ip).await.as_deref(),
+                Some("Unknown"),
+                "{ip}"
+            );
+        }
     }
 
     // ---- Public resolvers (network) ------------------------------------------

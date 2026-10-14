@@ -725,7 +725,7 @@ mod tests {
     fn unanswered_host_lookup_is_not_a_warning() {
         let (_guard, logged) =
             crate::test_logs::capture("Error receiving mDNS query response for hostname");
-        log_host_response_error("iPhone-de-Frank.local", &"RecvError");
+        log_host_response_error("iPhone-de-Alex.local", &"RecvError");
         assert_eq!(logged.warn_or_error(), 0);
         assert_eq!(logged.debug_or_trace(), 1);
     }
