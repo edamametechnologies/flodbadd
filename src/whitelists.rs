@@ -1896,8 +1896,13 @@ pub async fn recompute_whitelist_for_sessions(
         if let Some(snapshot) = session_snapshots.get(session_key) {
             // Egress-only whitelist policy: only evaluate sessions where traffic originates from us/local
             if !is_egress_session(snapshot) {
-                // Mark as conforming for whitelist purposes and continue
+                // Mark as conforming for whitelist purposes and continue. A
+                // session can stop being egress once more packets settle its
+                // orientation, or when the host's own addresses change: it
+                // then leaves the exceptions as well, or the list reports a
+                // session its state says conforms.
                 evaluation_results.push((session_key.clone(), true, None));
+                new_exceptions.retain(|s| s != session_key);
                 continue;
             }
             // Perform the whitelist check - this is done WITHOUT any locks held
@@ -4219,6 +4224,57 @@ mod tests {
         );
         assert!(!conformance.load(Ordering::Relaxed));
         assert_eq!(exceptions.read().await.len(), 1);
+    }
+
+    /// A session that stops being egress conforms as non-egress and leaves
+    /// the exceptions too: get_whitelist_exceptions used to keep returning it
+    /// (a whitelist violation for a session whose state conforms).
+    #[tokio::test]
+    #[serial]
+    async fn test_a_session_that_stops_being_egress_leaves_the_exceptions() {
+        overwrite_with_test_data(model(vec![wl(
+            "github_ubuntu",
+            None,
+            vec![WhitelistEndpoint {
+                domain: Some("api.github.com".into()),
+                ..ep()
+            }],
+        )]))
+        .await;
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let mut session = learner_session(
+            [140, 82, 112, 5],
+            443,
+            Some("api.github.com"),
+            Some((36459, "GITHUB")),
+        );
+        sessions.insert(session.session.clone(), session.clone());
+        // An undefined name conforms nothing: the egress session is an exception.
+        let name = Arc::new(CustomRwLock::new("github_Linux".to_string()));
+        let exceptions = Arc::new(CustomRwLock::new(Vec::new()));
+        let conformance = Arc::new(AtomicBool::new(true));
+        let last = Arc::new(CustomRwLock::new(Utc::now()));
+        recompute_whitelist_for_sessions(&name, &sessions, &exceptions, &conformance, &last).await;
+        assert_eq!(exceptions.read().await.len(), 1);
+        assert!(!conformance.load(Ordering::Relaxed));
+
+        // The same session, read as inbound once its orientation settled.
+        session.is_self_src = false;
+        session.is_local_src = false;
+        session.is_self_dst = true;
+        session.is_local_dst = true;
+        session.last_modified = Utc::now();
+        sessions.insert(session.session.clone(), session.clone());
+        recompute_whitelist_for_sessions(&name, &sessions, &exceptions, &conformance, &last).await;
+        assert_eq!(
+            sessions.get(&session.session).unwrap().is_whitelisted,
+            WhitelistState::Conforming
+        );
+        assert!(
+            exceptions.read().await.is_empty(),
+            "a conforming session is not an exception"
+        );
+        assert!(conformance.load(Ordering::Relaxed));
     }
 
     #[test]
