@@ -2584,6 +2584,13 @@ impl FlodbaddCapture {
             if let Some(entry) = self.sessions.get(&session_key) {
                 let session_info = entry.value();
 
+                // The whitelist pass writes the session states, then the
+                // list: a session it has just found conforming is no
+                // exception, whatever the list still says.
+                if session_info.is_whitelisted == WhitelistState::Conforming {
+                    continue;
+                }
+
                 // Apply incremental filter
                 if incremental && session_info.last_modified <= last_fetch_ts {
                     continue; // Skip if not modified since last fetch
@@ -4178,6 +4185,48 @@ mod tests {
 
         // Cleanup
         let _ = capture.set_custom_blacklists("").await;
+    }
+
+    /// A session the exception list still names but whose own state conforms
+    /// is not returned: the whitelist pass writes the states before the list.
+    #[tokio::test]
+    #[serial]
+    async fn test_a_conforming_session_is_never_returned_as_an_exception() {
+        let capture = FlodbaddCapture::new();
+        let now = Utc::now();
+        let session_info = |dst: [u8; 4], state: WhitelistState| SessionInfo {
+            session: Session {
+                protocol: Protocol::TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                src_port: 40000 + u16::from(dst[3]),
+                dst_ip: IpAddr::V4(Ipv4Addr::from(dst)),
+                dst_port: 443,
+            },
+            stats: SessionStats::new(now),
+            status: SessionStatus::default(),
+            is_whitelisted: state,
+            criticality: String::new(),
+            uid: Uuid::new_v4().to_string(),
+            last_modified: now,
+            is_local_src: true,
+            is_local_dst: false,
+            is_self_src: true,
+            is_self_dst: false,
+            ..Default::default()
+        };
+        let conforming = session_info([140, 82, 121, 4], WhitelistState::Conforming);
+        let violating = session_info([8, 8, 8, 8], WhitelistState::NonConforming);
+        for info in [&conforming, &violating] {
+            capture.sessions.insert(info.session.clone(), info.clone());
+        }
+        *capture.whitelist_exceptions.write().await =
+            vec![conforming.session.clone(), violating.session.clone()];
+        // No update pass during the read: the states stay as written.
+        *capture.last_update_completed.write().await = Instant::now();
+
+        let exceptions = capture.get_whitelist_exceptions(false).await;
+        assert_eq!(exceptions.len(), 1, "{:?}", exceptions);
+        assert_eq!(exceptions[0].session, violating.session);
     }
 
     #[tokio::test]
