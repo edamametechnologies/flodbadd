@@ -162,9 +162,18 @@ mod tests {
     fn short_or_argumentless_buffers_do_not_panic() {
         assert_eq!(parse_procargs2(&[]), None);
         assert_eq!(parse_procargs2(&[1, 0, 0]), None);
-        assert_eq!(parse_procargs2(&procargs(0, "/bin/x", 2, b"", &[])).unwrap(), Vec::<String>::new());
-        assert_eq!(parse_procargs2(&procargs(5, "/bin/x", 0, b"x\0", &[])).unwrap(), vec!["x"]);
-        assert_eq!(parse_procargs2(&procargs(-1, "/bin/x", 0, b"x\0", &[])).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_procargs2(&procargs(0, "/bin/x", 2, b"", &[])).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_procargs2(&procargs(5, "/bin/x", 0, b"x\0", &[])).unwrap(),
+            vec!["x"]
+        );
+        assert_eq!(
+            parse_procargs2(&procargs(-1, "/bin/x", 0, b"x\0", &[])).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     /// A live Node process that sets its title: the reader returns the title,
@@ -180,7 +189,12 @@ mod tests {
             return;
         };
         let mut child = std::process::Command::new(node)
-            .args(["-e", "process.title = 'flodbadd-retitled'; setTimeout(() => {}, 5000)", "a", "b"])
+            .args([
+                "-e",
+                "process.title = 'flodbadd-retitled'; setTimeout(() => {}, 5000)",
+                "a",
+                "b",
+            ])
             .env("FLODBADD_PROCARGS_TEST", "not-a-real-secret")
             .spawn()
             .expect("spawn node");
@@ -193,6 +207,10 @@ mod tests {
             args.iter().all(|a| !a.contains("FLODBADD_PROCARGS_TEST")),
             "environment read as arguments: {args:?}"
         );
-        assert_eq!(args.first().map(String::as_str), Some("flodbadd-retitled"), "{args:?}");
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some("flodbadd-retitled"),
+            "{args:?}"
+        );
     }
 }
