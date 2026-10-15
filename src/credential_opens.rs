@@ -216,12 +216,39 @@ fn with_table_retrying<R>(budget: Duration, mut f: impl FnMut(&mut OpenTable) ->
 pub fn is_cold_credential_path(path: &str) -> bool {
     let params = crate::sensitive_paths::credential_opens_params();
     let normalized = normalize(path);
-    if normalized.is_empty() || is_hot(&params.hot_subpaths, &normalized) {
+    if normalized.is_empty() {
+        return false;
+    }
+    // Exact token files first: cheap, and the Linux backend's home-directory
+    // mark (a token file directly in the home) sends every dotfile open here.
+    if is_cold_file(&params.cold_files, &normalized) {
+        return true;
+    }
+    if is_hot(&params.hot_subpaths, &normalized) {
         return false;
     }
     crate::sensitive_paths::classify_sensitive_path_labels_sync(&[normalized])
         .iter()
         .any(|label| params.cold_labels.iter().any(|cold| cold == label))
+}
+
+/// True when `path` is one of the published token files
+/// (`credential_opens.cold_files`): recorded like the cold set, but a read of
+/// one counts toward breadth only, never as egress material by itself.
+pub fn is_cold_token_file(path: &str) -> bool {
+    let normalized = normalize(path);
+    !normalized.is_empty()
+        && is_cold_file(
+            &crate::sensitive_paths::credential_opens_params().cold_files,
+            &normalized,
+        )
+}
+
+/// A (lowercase) path that is one of the published token files.
+fn is_cold_file(cold_files: &[String], lowercase_path: &str) -> bool {
+    cold_files
+        .iter()
+        .any(|file| !file.is_empty() && lowercase_path.ends_with(file.as_str()))
 }
 
 /// A (lowercase) path inside one of the hot sub-paths.
@@ -354,6 +381,9 @@ pub fn home_relative_cold_patterns() -> Vec<String> {
         }
     }
     let params = crate::sensitive_paths::credential_opens_params();
+    for file in &params.cold_files {
+        push(file.clone());
+    }
     let home_roots = crate::sensitive_paths::credential_opens_label_home_roots();
     let cold_labels: Vec<&str> = params.cold_labels.iter().map(String::as_str).collect();
     for pattern in crate::sensitive_paths::label_patterns_sync(&cold_labels) {
@@ -649,11 +679,49 @@ mod tests {
             "/Users/u/project/.env",
             "/Users/u/Library/Application Support/Google/Chrome/Default/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/000003.log",
             "/Users/u/Library/Application Support/Bitcoin/blocks/blk00001.dat",
-            "/Users/u/.npmrc",
+            "/Users/u/.kube/cache/discovery/servergroups.json",
+            "/Users/u/.claude/projects/x/session.jsonl",
+            "/Users/u/.npmrc.bak",
             "/usr/lib/libssl.dylib",
         ] {
             assert!(!is_cold_credential_path(hot), "{hot} should not be cold");
         }
+    }
+
+    /// The published token files are recorded, file-exact, wherever the
+    /// platform keeps the home (`~/.kube/config`, `%USERPROFILE%\.npmrc`), and
+    /// each is a kernel watch prefix of its own, never its whole directory.
+    #[test]
+    fn the_published_token_files_are_cold_and_watched_file_exact() {
+        let params = crate::sensitive_paths::credential_opens_params();
+        assert!(!params.cold_files.is_empty(), "{params:?}");
+        for file in &params.cold_files {
+            assert!(
+                is_cold_credential_path(&format!("/Users/u{file}")),
+                "{file}"
+            );
+            assert!(is_cold_credential_path(&format!("/home/u{file}")), "{file}");
+            let windows = format!(r"C:\Users\u{}", file.replace('/', "\\"));
+            assert!(is_cold_credential_path(&windows), "{windows}");
+        }
+        assert!(is_cold_credential_path("/Users/u/.kube/config"));
+        assert!(is_cold_credential_path("/Users/u/.npmrc"));
+        assert!(is_cold_token_file("/Users/u/.kube/config"));
+        assert!(
+            !is_cold_token_file("/Users/u/.ssh/id_ed25519"),
+            "a cold label, not a token file"
+        );
+        let patterns = home_relative_cold_patterns();
+        for file in &params.cold_files {
+            assert!(
+                patterns.iter().any(|p| p == file),
+                "{file} not watched: {patterns:?}"
+            );
+        }
+        assert!(
+            !patterns.iter().any(|p| p == "/.kube/" || p == "/.claude/"),
+            "{patterns:?}"
+        );
     }
 
     /// The cold set is the published `credential_opens`, read through the

@@ -63,6 +63,12 @@ pub struct LabelHomeRootsJSON {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct CredentialOpensJSON {
     pub cold_labels: Vec<String>,
+    /// Single token files of labels that are not cold (their directories are
+    /// too busy to watch whole), home-relative and lowercase: recorded like
+    /// the cold set. A read of one counts toward the breadth of a
+    /// multi-credential read; it is never egress material by itself (the
+    /// detector tells them apart by `cold_labels`).
+    pub cold_files: Vec<String>,
     pub hot_subpaths: Vec<String>,
     pub open_ttl_secs: u64,
     pub label_home_roots: LabelHomeRootsJSON,
