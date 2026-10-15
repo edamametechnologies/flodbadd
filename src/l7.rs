@@ -2071,11 +2071,7 @@ impl FlodbaddL7 {
                     String::new()
                 };
                 let process_start_time = process.start_time();
-                let cmd = process
-                    .cmd()
-                    .iter()
-                    .map(|entry| entry.to_string_lossy().to_string())
-                    .collect::<Vec<_>>();
+                let cmd = process_cmd(process);
                 let cwd = process
                     .cwd()
                     .map(|p| p.to_string_lossy().to_string())
@@ -2113,11 +2109,7 @@ impl FlodbaddL7 {
                                     .exe()
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default(),
-                                parent_proc
-                                    .cmd()
-                                    .iter()
-                                    .map(|e| e.to_string_lossy().to_string())
-                                    .collect(),
+                                process_cmd(parent_proc),
                             )
                         } else {
                             (Some(ppid), String::new(), String::new(), Vec::new())
@@ -2212,11 +2204,7 @@ impl FlodbaddL7 {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         let process_start_time = process.start_time();
-        let cmd: Vec<String> = process
-            .cmd()
-            .iter()
-            .map(|e| e.to_string_lossy().to_string())
-            .collect();
+        let cmd: Vec<String> = process_cmd(process);
         let cwd = process
             .cwd()
             .map(|p| p.to_string_lossy().to_string())
@@ -2250,11 +2238,7 @@ impl FlodbaddL7 {
                             .exe()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_default(),
-                        parent_proc
-                            .cmd()
-                            .iter()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .collect(),
+                        process_cmd(parent_proc),
                     )
                 } else {
                     (Some(ppid), String::new(), String::new(), Vec::new())
@@ -2542,11 +2526,7 @@ impl FlodbaddL7 {
                     .exe()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default(),
-                gp_proc
-                    .cmd()
-                    .iter()
-                    .map(|e| e.to_string_lossy().to_string())
-                    .collect(),
+                process_cmd(gp_proc),
             )
         } else {
             (Some(gppid), String::new(), String::new(), Vec::new())
@@ -2775,6 +2755,25 @@ fn get_windows_username_by_uid(uid: &Uid) -> Option<String> {
 }
 
 /// A socket-table row as attribution evidence.
+/// A process's arguments. macOS reads them with the exact `KERN_PROCARGS2`
+/// parse in `crate::process_args` (sysinfo's reads the environment of a
+/// process that rewrote its title as more arguments); an unreadable process
+/// has none. Linux and Windows expose only the argument area.
+fn process_cmd(process: &Process) -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::process_args::macos_command_line(process.pid().as_u32()).unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        process
+            .cmd()
+            .iter()
+            .map(|e| e.to_string_lossy().to_string())
+            .collect()
+    }
+}
+
 fn socket_endpoints(socket: &SocketInfo) -> SocketEndpoints {
     match &socket.protocol_socket_info {
         ProtocolSocketInfo::Tcp(tcp) => SocketEndpoints {
