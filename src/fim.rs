@@ -339,12 +339,17 @@ impl FimWatcher {
         let store_clone = store.clone();
         let hash_threshold = config.hash_size_threshold;
         let explicit_clone = explicit_watch_roots.clone();
+        // Set once Endpoint Security took over as the event source after
+        // this watcher started (macOS): FSEvents events are dropped then.
+        let fsevents_retired = Arc::new(AtomicBool::new(false));
+        let fsevents_retired_clone = fsevents_retired.clone();
         #[cfg(target_os = "windows")]
         let hash_tx_clone = hash_tx.clone();
         #[cfg(target_os = "windows")]
         let attribution_tx_clone = attribution_tx.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: std::result::Result<Event, notify::Error>| match result {
+                Ok(_) if fsevents_retired_clone.load(Ordering::Acquire) => {}
                 Ok(event) => {
                     // Keep the fanotify writer table covering directories
                     // created after start (its marks are per directory).
@@ -506,6 +511,26 @@ impl FimWatcher {
             }
         }
 
+        // macOS: the Endpoint Security client was not subscribed within the
+        // 3 s above (its Full Disk Access check can take minutes after an
+        // install: 35 min on fmba-3, 2026-10-16). FSEvents carries the roots
+        // meanwhile, with no writer on its events; once the client is up it
+        // becomes the event source, as if it had been there at start.
+        #[cfg(target_os = "macos")]
+        if !es_source && !actual_paths.is_empty() && crate::l7_es::es_expected() {
+            spawn_fim_es_late_takeover(
+                actual_paths.clone(),
+                config.recursive,
+                store.clone(),
+                running.clone(),
+                hash_threshold,
+                explicit_watch_roots.clone(),
+                fsevents_retired.clone(),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = &fsevents_retired;
+
         // Linux: kernel-time writer attribution for the same roots. On a
         // restart (paths changed) this extends the running table's marks
         // to the roots it does not cover yet.
@@ -592,6 +617,50 @@ impl FimWatcher {
         *writer = now;
 
         events
+    }
+}
+
+/// Wait for the Endpoint Security client, then make it the event source of a
+/// watcher that started on FSEvents. The sink is installed before FSEvents is
+/// retired, so the switch can duplicate an event, never lose one.
+#[cfg(target_os = "macos")]
+fn spawn_fim_es_late_takeover(
+    paths: Vec<PathBuf>,
+    recursive: bool,
+    store: Arc<FimEventStore>,
+    running: Arc<AtomicBool>,
+    hash_threshold: u64,
+    explicit_watch_roots: Arc<Vec<String>>,
+    fsevents_retired: Arc<AtomicBool>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("fim-es-late".into())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            while running.load(Ordering::SeqCst) && !crate::l7_es::is_available() {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            if !running.load(Ordering::SeqCst) {
+                return;
+            }
+            match crate::fim_es::install(&paths, recursive) {
+                Some(rx) => {
+                    spawn_fim_es_consumer(rx, store, running, hash_threshold, explicit_watch_roots);
+                    fsevents_retired.store(true, Ordering::Release);
+                    info!(
+                        "FIM: Endpoint Security came up {} s after the file monitor; it is now the event source for {} root(s) ({} spellings); FSEvents watcher idle",
+                        started.elapsed().as_secs(),
+                        paths.len(),
+                        crate::fim_es::root_count()
+                    );
+                }
+                None => warn!(
+                    "FIM: Endpoint Security came up, but its sink is already installed; FSEvents stays the event source"
+                ),
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("FIM: could not start the Endpoint Security takeover: {}", e);
     }
 }
 
@@ -810,6 +879,8 @@ fn translate_notify_event_with_attribution(
             ),
             _ => best_effort_process_attribution(path, sensitive, event_type),
         };
+        let writer_unmeasured =
+            process_name.is_none() && process_path.is_none() && writer_source_pending();
 
         let ts = Utc::now();
         let uid = FimEvent::compute_uid(&path_str, &event_type, &ts);
@@ -824,6 +895,7 @@ fn translate_notify_event_with_attribution(
             process_path,
             process_pid: process_pid,
             writer_inferred,
+            writer_unmeasured,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: sensitive,
@@ -1193,6 +1265,24 @@ fn open_file_for_fim_hash(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(not(target_os = "windows"))]
 fn read_file_for_fim_hash(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
+}
+
+/// Whether the kernel source that names a file's writer is expected but not
+/// running yet, so an event without a writer is unmeasured rather than
+/// unattributed. macOS only: the Endpoint Security client can take minutes to
+/// subscribe after an install (its Full Disk Access check, fmba-3
+/// 2026-10-16), and FSEvents events in that span carry no writer. Linux
+/// (fanotify) and Windows (ETW) start their sources synchronously at FIM
+/// start, so an event there with no writer stays graded as before.
+fn writer_source_pending() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::l7_es::es_expected() && !crate::l7_es::is_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 fn should_attempt_process_attribution(
@@ -1580,22 +1670,69 @@ fn best_effort_process_attribution(
     (None, None, None, false)
 }
 
+/// Until when (UNIX seconds) `lsof` is not run, after one overran its
+/// deadline.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static LSOF_SUSPENDED_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long one `lsof` may run, and how long it is not run again after one
+/// overran.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const LSOF_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const LSOF_SUSPEND_SECS: u64 = 600;
+
+/// Tier 3: who holds `path` open, by `lsof`, bounded.
+///
+/// `lsof` stats every mount: a dead network mount (fmba-3, 2026-10-16: a
+/// stale SMB Time Machine volume) leaves it in uninterruptible wait for good.
+/// Waited on with `output()`, each one parked the attribution caller forever
+/// (five after one lab window, plus the lab's own port check). Now the child
+/// gets a deadline; past it the caller gives up (no writer, which the event
+/// reports as such) and `lsof` is suspended for ten minutes, so a host with a
+/// dead mount leaks at most one stuck child per period.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn lookup_pid_for_path(path: &Path) -> Option<(u32, Option<String>)> {
-    let output = Command::new("lsof")
+    use std::io::Read;
+    let now = Utc::now().timestamp().max(0) as u64;
+    if now < LSOF_SUSPENDED_UNTIL.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut child = Command::new("lsof")
         .arg("-n")
         .arg("-w")
         .arg("-Fpc")
         .arg("--")
         .arg(path)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-
-    if !output.status.success() {
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < LSOF_DEADLINE => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                LSOF_SUSPENDED_UNTIL.store(now + LSOF_SUSPEND_SECS, Ordering::Relaxed);
+                warn!(
+                    "FIM: lsof did not answer within {:?} (a dead network mount?); not run for {} s",
+                    LSOF_DEADLINE, LSOF_SUSPEND_SECS
+                );
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
-
-    parse_lsof_pid_and_command(&String::from_utf8_lossy(&output.stdout))
+    let mut stdout = String::new();
+    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    parse_lsof_pid_and_command(&stdout)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2678,6 +2815,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -2746,6 +2884,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -2791,6 +2930,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: sensitive,
@@ -3403,6 +3543,7 @@ mod tests {
                 process_path: None,
                 process_pid: None,
                 writer_inferred: false,
+                writer_unmeasured: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
@@ -3448,6 +3589,7 @@ mod tests {
                 process_path: None,
                 process_pid: None,
                 writer_inferred: false,
+                writer_unmeasured: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive,
@@ -3475,6 +3617,25 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    /// After an `lsof` overran its deadline, none runs until the suspension
+    /// ends: the caller gets no writer at once instead of parking.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn test_lsof_is_not_run_while_suspended() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("held");
+        std::fs::write(&file, b"x").expect("write");
+        let _held = std::fs::File::open(&file).expect("open");
+        let until = Utc::now().timestamp() as u64 + 3600;
+        LSOF_SUSPENDED_UNTIL.store(until, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let found = lookup_pid_for_path(&file);
+        LSOF_SUSPENDED_UNTIL.store(0, Ordering::Relaxed);
+        assert!(found.is_none(), "{found:?}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
     #[test]
     fn test_parse_lsof_pid_and_command_extracts_first_process() {
         let parsed = parse_lsof_pid_and_command("p4242\nccursor\nf4\n");
@@ -3563,6 +3724,7 @@ mod tests {
                 process_path: None,
                 process_pid: None,
                 writer_inferred: false,
+                writer_unmeasured: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: true,

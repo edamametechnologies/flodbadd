@@ -343,7 +343,17 @@ mod macos {
         #[allow(dead_code)]
         file_insert_counter: Arc<AtomicU64>,
         available: Arc<AtomicBool>,
-        init_status: String,
+        /// macOS version for the status line ("unknown" when not read).
+        version_str: String,
+        /// Set when macOS refused the version (< 13): ES never starts.
+        unsupported: Option<String>,
+        /// The last error creating or subscribing the main client, cleared
+        /// once it subscribes. `None` with `available == false` means the
+        /// client is still being created: `es_new_client` can block for
+        /// minutes in its Full Disk Access preflight (fmba-3, 2026-10-16:
+        /// 35 min behind Gatekeeper's assessment of a freshly installed
+        /// binary), so "not yet" is not "failed".
+        last_error: Arc<arc_swap::ArcSwapOption<String>>,
         file_event_counters: Arc<FileEventCounters>,
     }
 
@@ -391,7 +401,9 @@ mod macos {
                         file_attribution_table: Arc::new(DashMap::new()),
                         file_insert_counter: Arc::new(AtomicU64::new(0)),
                         available: Arc::new(AtomicBool::new(false)),
-                        init_status: msg,
+                        version_str: format!("{}.{}", major, minor),
+                        unsupported: Some(msg),
+                        last_error: Arc::new(arc_swap::ArcSwapOption::empty()),
                         file_event_counters: Arc::new(FileEventCounters::default()),
                     };
                 }
@@ -410,6 +422,9 @@ mod macos {
             let file_counter_for_thread = Arc::clone(&file_insert_counter);
             let available_for_thread = Arc::clone(&available);
             let counters_for_thread = Arc::clone(&file_event_counters);
+            let last_error: Arc<arc_swap::ArcSwapOption<String>> =
+                Arc::new(arc_swap::ArcSwapOption::empty());
+            let last_error_for_thread = Arc::clone(&last_error);
 
             if let Err(e) = std::thread::Builder::new()
                 .name("es-client".into())
@@ -420,6 +435,7 @@ mod macos {
                         file_counter_for_thread,
                         available_for_thread,
                         counters_for_thread,
+                        last_error_for_thread,
                     );
                 })
             {
@@ -440,32 +456,28 @@ mod macos {
                 .map(|(maj, min)| format!("{}.{}", maj, min))
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let init_status = if is_available {
-                format!(
-                    "Enabled: macOS {} with ES process + file + task-port tracking (FORK/EXEC/EXIT + GET_TASK/GET_TASK_READ + CREATE/WRITE/CLOSE/RENAME/UNLINK)",
-                    version_str
-                )
-            } else {
-                format!(
-                    "Disabled: ES client failed to initialize on macOS {} (check entitlement and root)",
-                    version_str
-                )
-            };
-
-            if is_available {
-                info!("ES helper initialized: {}", init_status);
-            } else {
-                warn!("ES helper: {}", init_status);
-            }
-
-            Self {
+            let this = Self {
                 process_table,
                 file_attribution_table,
                 file_insert_counter,
                 available,
-                init_status,
+                version_str,
+                unsupported: None,
+                last_error,
                 file_event_counters,
+            };
+            // The client may still be in `es_new_client` (its Full Disk
+            // Access preflight can take minutes): report what is known now,
+            // and let the client thread log the outcome when it has one.
+            let status = this.init_status();
+            if is_available {
+                info!("ES helper initialized: {}", status);
+            } else if this.last_error.load().is_some() {
+                warn!("ES helper: {}", status);
+            } else {
+                info!("ES helper: {}", status);
             }
+            this
         }
 
         fn record_file_attribution(
@@ -563,358 +575,339 @@ mod macos {
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
             event_counters: Arc<FileEventCounters>,
+            last_error: Arc<arc_swap::ArcSwapOption<String>>,
         ) {
-            let table_for_handler = AssertUnwindSafe(Arc::clone(&table));
-            let file_table_for_handler = AssertUnwindSafe(Arc::clone(&file_table));
-            let file_counter_for_handler = AssertUnwindSafe(Arc::clone(&file_counter));
-            let counters = AssertUnwindSafe(Arc::clone(&event_counters));
+            let started = Instant::now();
+            let mut backoff = std::time::Duration::from_secs(10);
+            // A refused client (no Full Disk Access yet, say) is retried:
+            // the operator may grant it while the daemon runs.
+            let mut client = loop {
+                let table_for_handler = AssertUnwindSafe(Arc::clone(&table));
+                let file_table_for_handler = AssertUnwindSafe(Arc::clone(&file_table));
+                let file_counter_for_handler = AssertUnwindSafe(Arc::clone(&file_counter));
+                let counters = AssertUnwindSafe(Arc::clone(&event_counters));
 
-            let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
-                let responsible = msg.process();
-                let responsible_pid = responsible.audit_token().pid() as u32;
+                let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
+                    let responsible = msg.process();
+                    let responsible_pid = responsible.audit_token().pid() as u32;
 
-                match msg.event() {
-                    Some(Event::NotifyFork(fork)) => {
-                        let child = fork.child();
-                        let child_pid = child.audit_token().pid() as u32;
+                    match msg.event() {
+                        Some(Event::NotifyFork(fork)) => {
+                            let child = fork.child();
+                            let child_pid = child.audit_token().pid() as u32;
 
-                        // The forker (the message's process) is the parent;
-                        // its own row names the grandparent. The lookup
-                        // copies the row, so no read guard is held across
-                        // the insert below (DashMap same-shard deadlock, see
-                        // the exec arm).
-                        let forker_path = responsible
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
-                        let lineage = es_lineage::fork_lineage(
-                            child_pid,
-                            responsible_pid,
-                            &forker_path,
-                            |pid| table_for_handler.get(&pid).map(|row| row.known()),
-                        );
-                        let child_path = child.executable().path().to_string_lossy().to_string();
-                        // Fork-created entries carry the (pre-exec) child
-                        // image's identity; the exec arm overwrites the row
-                        // with the real target identity moments later.
-                        let child_signing_id =
-                            child.signing_id().to_string_lossy().trim().to_string();
-                        let child_team_id = child.team_id().to_string_lossy().trim().to_string();
-
-                        let info = EsProcessInfo {
-                            pid: child_pid,
-                            ppid: lineage.ppid.unwrap_or(0),
-                            uid: child.audit_token().euid(),
-                            process_name: extract_process_name(&child_path),
-                            process_path: child_path,
-                            cwd: None,
-                            args: Vec::new(),
-                            username: String::new(),
-                            start_time: 0,
-                            code_signing_flags: child.codesigning_flags(),
-                            is_platform_binary: child.is_platform_binary(),
-                            signing_id: child_signing_id,
-                            team_id: child_team_id,
-                            parent_process_name: lineage.parent_name,
-                            parent_process_path: lineage.parent_path,
-                            parent_args: lineage.parent_args,
-                            grandparent_pid: lineage.grandparent_pid,
-                            grandparent_process_name: lineage.grandparent_name,
-                            grandparent_process_path: lineage.grandparent_path,
-                            grandparent_args: lineage.grandparent_args,
-                        };
-                        let child_path_for_event = info.process_path.clone();
-                        let child_name_for_event = info.process_name.clone();
-                        let child_parent_path = (!info.parent_process_path.is_empty())
-                            .then(|| info.parent_process_path.clone());
-                        let child_uid = info.uid;
-                        table_for_handler.insert(child_pid, info);
-                        crate::process_events::push(crate::process_events::ProcessEvent {
-                            timestamp_ms: crate::process_events::now_ms(),
-                            kind: crate::process_events::ProcessEventKind::Fork,
-                            pid: child_pid,
-                            ppid: lineage.ppid,
-                            uid: Some(child_uid),
-                            process_name: child_name_for_event,
-                            process_path: child_path_for_event,
-                            parent_process_path: child_parent_path,
-                            argv_sha256: None,
-                            argv_len: None,
-                            signing_id: None,
-                            team_id: None,
-                            is_platform_binary: None,
-                            platform_path_marked: false,
-                            target_pid: None,
-                            target_process_path: None,
-                            task_access_mode: None,
-                            task_access_mask: None,
-                            net_dst: None,
-                        });
-                    }
-                    Some(Event::NotifyExec(exec)) => {
-                        let target = exec.target();
-                        let target_pid = target.audit_token().pid() as u32;
-                        let target_path = target.executable().path().to_string_lossy().to_string();
-
-                        let args: Vec<String> = exec
-                            .args()
-                            .map(|a| {
-                                OsStr::from_bytes(a.as_bytes())
-                                    .to_string_lossy()
-                                    .to_string()
-                            })
-                            .collect();
-
-                        let cs_flags = target.codesigning_flags();
-                        let is_platform = target.is_platform_binary();
-                        let signing_id = target.signing_id().to_string_lossy().to_string();
-                        let team_id = target.team_id().to_string_lossy().to_string();
-
-                        // The parent: `msg.process()` is the exec'ing
-                        // process itself (pid == target pid), so it is never
-                        // the parent (see `es_lineage`). The kernel's
-                        // creator / parent facts and the rows the fork arm
-                        // wrote name it instead.
-                        //
-                        // Every table read goes through `lookup`, which
-                        // copies the row and drops the DashMap read guard
-                        // BEFORE the insert below. Holding a `get()` Ref
-                        // across `insert()` deadlocks DashMap whenever the
-                        // target PID hashes to the read row's shard (same
-                        // thread takes the shard read lock, then waits on its
-                        // write lock). Inside the ES handler that freezes the
-                        // serial dispatch queue and silently kills the whole
-                        // event stream after the first colliding exec -- the
-                        // FLODBADD2 §1b.2 bring-up freeze.
-                        let facts = ExecKernelFacts {
-                            pid: target_pid,
-                            original_ppid: u32::try_from(responsible.original_ppid()).unwrap_or(0),
-                            parent_token_pid: responsible
-                                .parent_audit_token()
-                                .and_then(|token| u32::try_from(token.pid()).ok()),
-                            ppid: u32::try_from(responsible.ppid()).unwrap_or(0),
-                        };
-                        let lineage = es_lineage::exec_lineage(
-                            &facts,
-                            |pid| table_for_handler.get(&pid).map(|row| row.known()),
-                            |pid| crate::l7_macos::process_identity(pid).map(|(_, path)| path),
-                        );
-
-                        let username = resolve_username(target.audit_token().euid());
-
-                        let info = EsProcessInfo {
-                            pid: target_pid,
-                            ppid: lineage.ppid.unwrap_or(0),
-                            uid: target.audit_token().euid(),
-                            process_name: extract_process_name(&target_path),
-                            process_path: target_path,
-                            cwd: None,
-                            args,
-                            username,
-                            start_time: 0,
-                            code_signing_flags: cs_flags,
-                            is_platform_binary: is_platform,
-                            signing_id: signing_id.trim().to_string(),
-                            team_id: team_id.trim().to_string(),
-                            parent_process_name: lineage.parent_name,
-                            parent_process_path: lineage.parent_path,
-                            parent_args: lineage.parent_args,
-                            grandparent_pid: lineage.grandparent_pid,
-                            grandparent_process_name: lineage.grandparent_name,
-                            grandparent_process_path: lineage.grandparent_path,
-                            grandparent_args: lineage.grandparent_args,
-                        };
-                        // FLODBADD2 §1b.2 monitoring stream: exec with
-                        // argv digested (I5) and the kernel-vouched
-                        // signing identity from the message itself.
-                        let event_path = info.process_path.clone();
-                        let event_name = info.process_name.clone();
-                        let event_uid = info.uid;
-                        let event_parent_path = (!info.parent_process_path.is_empty())
-                            .then(|| info.parent_process_path.clone());
-                        let event_argc = info.args.len() as u32;
-                        let argv_sha256 = proc_events::argv_digest(&info.args);
-                        table_for_handler.insert(target_pid, info);
-                        proc_events::push(proc_events::ProcessEvent {
-                            timestamp_ms: proc_events::now_ms(),
-                            kind: proc_events::ProcessEventKind::Exec,
-                            pid: target_pid,
-                            ppid: lineage.ppid,
-                            uid: Some(event_uid),
-                            process_name: event_name,
-                            process_path: event_path,
-                            parent_process_path: event_parent_path,
-                            argv_sha256,
-                            argv_len: (event_argc > 0).then_some(event_argc),
-                            signing_id: optional_identity(target.signing_id().to_string_lossy()),
-                            team_id: optional_identity(target.team_id().to_string_lossy()),
-                            is_platform_binary: Some(is_platform),
-                            platform_path_marked: false,
-                            target_pid: None,
-                            target_process_path: None,
-                            task_access_mode: None,
-                            task_access_mask: None,
-                            net_dst: None,
-                        });
-                    }
-                    Some(Event::NotifyExit(_)) => {
-                        let removed = table_for_handler.remove(&responsible_pid);
-                        let (
-                            exit_name,
-                            exit_path,
-                            exit_ppid,
-                            exit_signing,
-                            exit_team,
-                            exit_platform,
-                        ) = match removed {
-                            Some((_, info)) => {
-                                let ppid = info.parent_pid();
-                                (
-                                    info.process_name,
-                                    info.process_path,
-                                    ppid,
-                                    (!info.signing_id.is_empty()).then_some(info.signing_id),
-                                    (!info.team_id.is_empty()).then_some(info.team_id),
-                                    Some(info.is_platform_binary),
-                                )
-                            }
-                            None => {
-                                // Untracked (predates the client): still
-                                // record the exit with what the message
-                                // itself vouches for.
-                                let path = responsible
-                                    .executable()
-                                    .path()
-                                    .to_string_lossy()
-                                    .to_string();
-                                (
-                                    extract_process_name(&path),
-                                    path,
-                                    None,
-                                    optional_identity(responsible.signing_id().to_string_lossy()),
-                                    optional_identity(responsible.team_id().to_string_lossy()),
-                                    Some(responsible.is_platform_binary()),
-                                )
-                            }
-                        };
-                        proc_events::push(proc_events::ProcessEvent {
-                            timestamp_ms: proc_events::now_ms(),
-                            kind: proc_events::ProcessEventKind::Exit,
-                            pid: responsible_pid,
-                            ppid: exit_ppid,
-                            uid: Some(responsible.audit_token().euid()),
-                            process_name: exit_name,
-                            process_path: exit_path,
-                            parent_process_path: None,
-                            argv_sha256: None,
-                            argv_len: None,
-                            signing_id: exit_signing,
-                            team_id: exit_team,
-                            is_platform_binary: exit_platform,
-                            platform_path_marked: false,
-                            target_pid: None,
-                            target_process_path: None,
-                            task_access_mode: None,
-                            task_access_mask: None,
-                            net_dst: None,
-                        });
-                    }
-                    Some(Event::NotifyGetTask(get_task)) => {
-                        push_task_access(&responsible, responsible_pid, &get_task.target(), 2);
-                    }
-                    Some(Event::NotifyGetTaskRead(get_task_read)) => {
-                        push_task_access(&responsible, responsible_pid, &get_task_read.target(), 1);
-                    }
-                    Some(Event::NotifyCreate(ev)) => {
-                        counters.create_received.fetch_add(1, Ordering::Relaxed);
-                        if let Some(dest) = ev.destination() {
-                            counters.create_dest_some.fetch_add(1, Ordering::Relaxed);
-                            use endpoint_sec::EventCreateDestinationFile;
-                            let path = match dest {
-                                EventCreateDestinationFile::ExistingFile(f) => {
-                                    f.path().to_string_lossy().to_string()
-                                }
-                                EventCreateDestinationFile::NewPath {
-                                    directory,
-                                    filename,
-                                    ..
-                                } => {
-                                    let dir = directory.path().to_string_lossy();
-                                    let name = filename.to_string_lossy();
-                                    format!("{}/{}", dir.trim_end_matches('/'), name)
-                                }
-                            };
-                            let exe = responsible
+                            // The forker (the message's process) is the parent;
+                            // its own row names the grandparent. The lookup
+                            // copies the row, so no read guard is held across
+                            // the insert below (DashMap same-shard deadlock, see
+                            // the exec arm).
+                            let forker_path = responsible
                                 .executable()
                                 .path()
                                 .to_string_lossy()
                                 .to_string();
-                            FlodbaddL7Es::record_file_attribution(
-                                &file_table_for_handler,
-                                &file_counter_for_handler,
-                                &table_for_handler,
-                                path.clone(),
+                            let lineage = es_lineage::fork_lineage(
+                                child_pid,
                                 responsible_pid,
-                                &exe,
+                                &forker_path,
+                                |pid| table_for_handler.get(&pid).map(|row| row.known()),
                             );
-                            #[cfg(feature = "fim")]
-                            FlodbaddL7Es::fim_source_push(
-                                crate::fim_es::FimSourceKind::Create,
-                                &path,
+                            let child_path =
+                                child.executable().path().to_string_lossy().to_string();
+                            // Fork-created entries carry the (pre-exec) child
+                            // image's identity; the exec arm overwrites the row
+                            // with the real target identity moments later.
+                            let child_signing_id =
+                                child.signing_id().to_string_lossy().trim().to_string();
+                            let child_team_id =
+                                child.team_id().to_string_lossy().trim().to_string();
+
+                            let info = EsProcessInfo {
+                                pid: child_pid,
+                                ppid: lineage.ppid.unwrap_or(0),
+                                uid: child.audit_token().euid(),
+                                process_name: extract_process_name(&child_path),
+                                process_path: child_path,
+                                cwd: None,
+                                args: Vec::new(),
+                                username: String::new(),
+                                start_time: 0,
+                                code_signing_flags: child.codesigning_flags(),
+                                is_platform_binary: child.is_platform_binary(),
+                                signing_id: child_signing_id,
+                                team_id: child_team_id,
+                                parent_process_name: lineage.parent_name,
+                                parent_process_path: lineage.parent_path,
+                                parent_args: lineage.parent_args,
+                                grandparent_pid: lineage.grandparent_pid,
+                                grandparent_process_name: lineage.grandparent_name,
+                                grandparent_process_path: lineage.grandparent_path,
+                                grandparent_args: lineage.grandparent_args,
+                            };
+                            let child_path_for_event = info.process_path.clone();
+                            let child_name_for_event = info.process_name.clone();
+                            let child_parent_path = (!info.parent_process_path.is_empty())
+                                .then(|| info.parent_process_path.clone());
+                            let child_uid = info.uid;
+                            table_for_handler.insert(child_pid, info);
+                            crate::process_events::push(crate::process_events::ProcessEvent {
+                                timestamp_ms: crate::process_events::now_ms(),
+                                kind: crate::process_events::ProcessEventKind::Fork,
+                                pid: child_pid,
+                                ppid: lineage.ppid,
+                                uid: Some(child_uid),
+                                process_name: child_name_for_event,
+                                process_path: child_path_for_event,
+                                parent_process_path: child_parent_path,
+                                argv_sha256: None,
+                                argv_len: None,
+                                signing_id: None,
+                                team_id: None,
+                                is_platform_binary: None,
+                                platform_path_marked: false,
+                                target_pid: None,
+                                target_process_path: None,
+                                task_access_mode: None,
+                                task_access_mask: None,
+                                net_dst: None,
+                            });
+                        }
+                        Some(Event::NotifyExec(exec)) => {
+                            let target = exec.target();
+                            let target_pid = target.audit_token().pid() as u32;
+                            let target_path =
+                                target.executable().path().to_string_lossy().to_string();
+
+                            let args: Vec<String> = exec
+                                .args()
+                                .map(|a| {
+                                    OsStr::from_bytes(a.as_bytes())
+                                        .to_string_lossy()
+                                        .to_string()
+                                })
+                                .collect();
+
+                            let cs_flags = target.codesigning_flags();
+                            let is_platform = target.is_platform_binary();
+                            let signing_id = target.signing_id().to_string_lossy().to_string();
+                            let team_id = target.team_id().to_string_lossy().to_string();
+
+                            // The parent: `msg.process()` is the exec'ing
+                            // process itself (pid == target pid), so it is never
+                            // the parent (see `es_lineage`). The kernel's
+                            // creator / parent facts and the rows the fork arm
+                            // wrote name it instead.
+                            //
+                            // Every table read goes through `lookup`, which
+                            // copies the row and drops the DashMap read guard
+                            // BEFORE the insert below. Holding a `get()` Ref
+                            // across `insert()` deadlocks DashMap whenever the
+                            // target PID hashes to the read row's shard (same
+                            // thread takes the shard read lock, then waits on its
+                            // write lock). Inside the ES handler that freezes the
+                            // serial dispatch queue and silently kills the whole
+                            // event stream after the first colliding exec -- the
+                            // FLODBADD2 §1b.2 bring-up freeze.
+                            let facts = ExecKernelFacts {
+                                pid: target_pid,
+                                original_ppid: u32::try_from(responsible.original_ppid())
+                                    .unwrap_or(0),
+                                parent_token_pid: responsible
+                                    .parent_audit_token()
+                                    .and_then(|token| u32::try_from(token.pid()).ok()),
+                                ppid: u32::try_from(responsible.ppid()).unwrap_or(0),
+                            };
+                            let lineage = es_lineage::exec_lineage(
+                                &facts,
+                                |pid| table_for_handler.get(&pid).map(|row| row.known()),
+                                |pid| crate::l7_macos::process_identity(pid).map(|(_, path)| path),
+                            );
+
+                            let username = resolve_username(target.audit_token().euid());
+
+                            let info = EsProcessInfo {
+                                pid: target_pid,
+                                ppid: lineage.ppid.unwrap_or(0),
+                                uid: target.audit_token().euid(),
+                                process_name: extract_process_name(&target_path),
+                                process_path: target_path,
+                                cwd: None,
+                                args,
+                                username,
+                                start_time: 0,
+                                code_signing_flags: cs_flags,
+                                is_platform_binary: is_platform,
+                                signing_id: signing_id.trim().to_string(),
+                                team_id: team_id.trim().to_string(),
+                                parent_process_name: lineage.parent_name,
+                                parent_process_path: lineage.parent_path,
+                                parent_args: lineage.parent_args,
+                                grandparent_pid: lineage.grandparent_pid,
+                                grandparent_process_name: lineage.grandparent_name,
+                                grandparent_process_path: lineage.grandparent_path,
+                                grandparent_args: lineage.grandparent_args,
+                            };
+                            // FLODBADD2 §1b.2 monitoring stream: exec with
+                            // argv digested (I5) and the kernel-vouched
+                            // signing identity from the message itself.
+                            let event_path = info.process_path.clone();
+                            let event_name = info.process_name.clone();
+                            let event_uid = info.uid;
+                            let event_parent_path = (!info.parent_process_path.is_empty())
+                                .then(|| info.parent_process_path.clone());
+                            let event_argc = info.args.len() as u32;
+                            let argv_sha256 = proc_events::argv_digest(&info.args);
+                            table_for_handler.insert(target_pid, info);
+                            proc_events::push(proc_events::ProcessEvent {
+                                timestamp_ms: proc_events::now_ms(),
+                                kind: proc_events::ProcessEventKind::Exec,
+                                pid: target_pid,
+                                ppid: lineage.ppid,
+                                uid: Some(event_uid),
+                                process_name: event_name,
+                                process_path: event_path,
+                                parent_process_path: event_parent_path,
+                                argv_sha256,
+                                argv_len: (event_argc > 0).then_some(event_argc),
+                                signing_id: optional_identity(
+                                    target.signing_id().to_string_lossy(),
+                                ),
+                                team_id: optional_identity(target.team_id().to_string_lossy()),
+                                is_platform_binary: Some(is_platform),
+                                platform_path_marked: false,
+                                target_pid: None,
+                                target_process_path: None,
+                                task_access_mode: None,
+                                task_access_mask: None,
+                                net_dst: None,
+                            });
+                        }
+                        Some(Event::NotifyExit(_)) => {
+                            let removed = table_for_handler.remove(&responsible_pid);
+                            let (
+                                exit_name,
+                                exit_path,
+                                exit_ppid,
+                                exit_signing,
+                                exit_team,
+                                exit_platform,
+                            ) = match removed {
+                                Some((_, info)) => {
+                                    let ppid = info.parent_pid();
+                                    (
+                                        info.process_name,
+                                        info.process_path,
+                                        ppid,
+                                        (!info.signing_id.is_empty()).then_some(info.signing_id),
+                                        (!info.team_id.is_empty()).then_some(info.team_id),
+                                        Some(info.is_platform_binary),
+                                    )
+                                }
+                                None => {
+                                    // Untracked (predates the client): still
+                                    // record the exit with what the message
+                                    // itself vouches for.
+                                    let path = responsible
+                                        .executable()
+                                        .path()
+                                        .to_string_lossy()
+                                        .to_string();
+                                    (
+                                        extract_process_name(&path),
+                                        path,
+                                        None,
+                                        optional_identity(
+                                            responsible.signing_id().to_string_lossy(),
+                                        ),
+                                        optional_identity(responsible.team_id().to_string_lossy()),
+                                        Some(responsible.is_platform_binary()),
+                                    )
+                                }
+                            };
+                            proc_events::push(proc_events::ProcessEvent {
+                                timestamp_ms: proc_events::now_ms(),
+                                kind: proc_events::ProcessEventKind::Exit,
+                                pid: responsible_pid,
+                                ppid: exit_ppid,
+                                uid: Some(responsible.audit_token().euid()),
+                                process_name: exit_name,
+                                process_path: exit_path,
+                                parent_process_path: None,
+                                argv_sha256: None,
+                                argv_len: None,
+                                signing_id: exit_signing,
+                                team_id: exit_team,
+                                is_platform_binary: exit_platform,
+                                platform_path_marked: false,
+                                target_pid: None,
+                                target_process_path: None,
+                                task_access_mode: None,
+                                task_access_mask: None,
+                                net_dst: None,
+                            });
+                        }
+                        Some(Event::NotifyGetTask(get_task)) => {
+                            push_task_access(&responsible, responsible_pid, &get_task.target(), 2);
+                        }
+                        Some(Event::NotifyGetTaskRead(get_task_read)) => {
+                            push_task_access(
+                                &responsible,
                                 responsible_pid,
-                                &exe,
-                                &table_for_handler,
+                                &get_task_read.target(),
+                                1,
                             );
-                        } else {
-                            counters.create_dest_none.fetch_add(1, Ordering::Relaxed);
                         }
-                    }
-                    Some(Event::NotifyWrite(ev)) => {
-                        counters.write_received.fetch_add(1, Ordering::Relaxed);
-                        // NOTIFY_WRITE is the highest-volume event ES emits:
-                        // every write syscall by every process on the machine.
-                        // Nothing downstream is ever asked about a path outside
-                        // a FIM watch root, so answer that on the borrowed path
-                        // before allocating anything.
-                        let target = ev.target().path().to_string_lossy();
-                        if !crate::fim_attribution::is_attributable(&target) {
-                            return;
+                        Some(Event::NotifyCreate(ev)) => {
+                            counters.create_received.fetch_add(1, Ordering::Relaxed);
+                            if let Some(dest) = ev.destination() {
+                                counters.create_dest_some.fetch_add(1, Ordering::Relaxed);
+                                use endpoint_sec::EventCreateDestinationFile;
+                                let path = match dest {
+                                    EventCreateDestinationFile::ExistingFile(f) => {
+                                        f.path().to_string_lossy().to_string()
+                                    }
+                                    EventCreateDestinationFile::NewPath {
+                                        directory,
+                                        filename,
+                                        ..
+                                    } => {
+                                        let dir = directory.path().to_string_lossy();
+                                        let name = filename.to_string_lossy();
+                                        format!("{}/{}", dir.trim_end_matches('/'), name)
+                                    }
+                                };
+                                let exe = responsible
+                                    .executable()
+                                    .path()
+                                    .to_string_lossy()
+                                    .to_string();
+                                FlodbaddL7Es::record_file_attribution(
+                                    &file_table_for_handler,
+                                    &file_counter_for_handler,
+                                    &table_for_handler,
+                                    path.clone(),
+                                    responsible_pid,
+                                    &exe,
+                                );
+                                #[cfg(feature = "fim")]
+                                FlodbaddL7Es::fim_source_push(
+                                    crate::fim_es::FimSourceKind::Create,
+                                    &path,
+                                    responsible_pid,
+                                    &exe,
+                                    &table_for_handler,
+                                );
+                            } else {
+                                counters.create_dest_none.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                        let path = target.into_owned();
-                        let exe = responsible
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
-                        FlodbaddL7Es::record_file_attribution(
-                            &file_table_for_handler,
-                            &file_counter_for_handler,
-                            &table_for_handler,
-                            path.clone(),
-                            responsible_pid,
-                            &exe,
-                        );
-                        #[cfg(feature = "fim")]
-                        FlodbaddL7Es::fim_source_push(
-                            crate::fim_es::FimSourceKind::Modify,
-                            &path,
-                            responsible_pid,
-                            &exe,
-                            &table_for_handler,
-                        );
-                    }
-                    Some(Event::NotifyClose(ev)) => {
-                        counters.close_received.fetch_add(1, Ordering::Relaxed);
-                        // Only a modified close is a write. Recording every
-                        // close made the last *reader* the writer: the FIM
-                        // hash worker's own read of a freshly dropped
-                        // `~/.env*` replaced the Python writer with
-                        // `edamame_posture` (security gate `file_events`,
-                        // macOS, 2026-09-08). New files are covered by
-                        // CREATE and their first write by WRITE.
-                        if ev.modified() {
-                            counters.close_modified.fetch_add(1, Ordering::Relaxed);
+                        Some(Event::NotifyWrite(ev)) => {
+                            counters.write_received.fetch_add(1, Ordering::Relaxed);
+                            // NOTIFY_WRITE is the highest-volume event ES emits:
+                            // every write syscall by every process on the machine.
+                            // Nothing downstream is ever asked about a path outside
+                            // a FIM watch root, so answer that on the borrowed path
+                            // before allocating anything.
                             let target = ev.target().path().to_string_lossy();
                             if !crate::fim_attribution::is_attributable(&target) {
                                 return;
@@ -942,104 +935,151 @@ mod macos {
                                 &table_for_handler,
                             );
                         }
-                    }
-                    Some(Event::NotifyRename(ev)) => {
-                        counters.rename_received.fetch_add(1, Ordering::Relaxed);
-                        let source = ev.source().path().to_string_lossy().to_string();
-                        let exe = responsible
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
-                        // The destination is the path FIM reports for an
-                        // atomic replace (`write tmp; rename tmp -> file`);
-                        // recording only the source left such writers
-                        // unattributed.
-                        let destination = ev.destination().map(|dest| {
-                            use endpoint_sec::EventRenameDestinationFile;
-                            match dest {
-                                EventRenameDestinationFile::ExistingFile(f) => {
-                                    f.path().to_string_lossy().to_string()
+                        Some(Event::NotifyClose(ev)) => {
+                            counters.close_received.fetch_add(1, Ordering::Relaxed);
+                            // Only a modified close is a write. Recording every
+                            // close made the last *reader* the writer: the FIM
+                            // hash worker's own read of a freshly dropped
+                            // `~/.env*` replaced the Python writer with
+                            // `edamame_posture` (security gate `file_events`,
+                            // macOS, 2026-09-08). New files are covered by
+                            // CREATE and their first write by WRITE.
+                            if ev.modified() {
+                                counters.close_modified.fetch_add(1, Ordering::Relaxed);
+                                let target = ev.target().path().to_string_lossy();
+                                if !crate::fim_attribution::is_attributable(&target) {
+                                    return;
                                 }
-                                EventRenameDestinationFile::NewPath {
-                                    directory,
-                                    filename,
-                                    ..
-                                } => {
-                                    let dir = directory.path().to_string_lossy();
-                                    let name = filename.to_string_lossy();
-                                    format!("{}/{}", dir.trim_end_matches('/'), name)
-                                }
+                                let path = target.into_owned();
+                                let exe = responsible
+                                    .executable()
+                                    .path()
+                                    .to_string_lossy()
+                                    .to_string();
+                                FlodbaddL7Es::record_file_attribution(
+                                    &file_table_for_handler,
+                                    &file_counter_for_handler,
+                                    &table_for_handler,
+                                    path.clone(),
+                                    responsible_pid,
+                                    &exe,
+                                );
+                                #[cfg(feature = "fim")]
+                                FlodbaddL7Es::fim_source_push(
+                                    crate::fim_es::FimSourceKind::Modify,
+                                    &path,
+                                    responsible_pid,
+                                    &exe,
+                                    &table_for_handler,
+                                );
                             }
-                        });
-                        #[cfg(feature = "fim")]
-                        FlodbaddL7Es::fim_source_push(
-                            crate::fim_es::FimSourceKind::Delete,
-                            &source,
-                            responsible_pid,
-                            &exe,
-                            &table_for_handler,
-                        );
-                        #[cfg(feature = "fim")]
-                        if let Some(dest) = destination.as_deref() {
+                        }
+                        Some(Event::NotifyRename(ev)) => {
+                            counters.rename_received.fetch_add(1, Ordering::Relaxed);
+                            let source = ev.source().path().to_string_lossy().to_string();
+                            let exe = responsible
+                                .executable()
+                                .path()
+                                .to_string_lossy()
+                                .to_string();
+                            // The destination is the path FIM reports for an
+                            // atomic replace (`write tmp; rename tmp -> file`);
+                            // recording only the source left such writers
+                            // unattributed.
+                            let destination = ev.destination().map(|dest| {
+                                use endpoint_sec::EventRenameDestinationFile;
+                                match dest {
+                                    EventRenameDestinationFile::ExistingFile(f) => {
+                                        f.path().to_string_lossy().to_string()
+                                    }
+                                    EventRenameDestinationFile::NewPath {
+                                        directory,
+                                        filename,
+                                        ..
+                                    } => {
+                                        let dir = directory.path().to_string_lossy();
+                                        let name = filename.to_string_lossy();
+                                        format!("{}/{}", dir.trim_end_matches('/'), name)
+                                    }
+                                }
+                            });
+                            #[cfg(feature = "fim")]
                             FlodbaddL7Es::fim_source_push(
-                                crate::fim_es::FimSourceKind::Rename,
-                                dest,
+                                crate::fim_es::FimSourceKind::Delete,
+                                &source,
                                 responsible_pid,
                                 &exe,
                                 &table_for_handler,
                             );
+                            #[cfg(feature = "fim")]
+                            if let Some(dest) = destination.as_deref() {
+                                FlodbaddL7Es::fim_source_push(
+                                    crate::fim_es::FimSourceKind::Rename,
+                                    dest,
+                                    responsible_pid,
+                                    &exe,
+                                    &table_for_handler,
+                                );
+                            }
+                            for path in std::iter::once(source).chain(destination) {
+                                FlodbaddL7Es::record_file_attribution(
+                                    &file_table_for_handler,
+                                    &file_counter_for_handler,
+                                    &table_for_handler,
+                                    path,
+                                    responsible_pid,
+                                    &exe,
+                                );
+                            }
                         }
-                        for path in std::iter::once(source).chain(destination) {
+                        Some(Event::NotifyUnlink(ev)) => {
+                            counters.unlink_received.fetch_add(1, Ordering::Relaxed);
+                            let path = ev.target().path().to_string_lossy().to_string();
+                            let exe = responsible
+                                .executable()
+                                .path()
+                                .to_string_lossy()
+                                .to_string();
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
                                 &file_counter_for_handler,
                                 &table_for_handler,
-                                path,
+                                path.clone(),
                                 responsible_pid,
                                 &exe,
                             );
+                            #[cfg(feature = "fim")]
+                            FlodbaddL7Es::fim_source_push(
+                                crate::fim_es::FimSourceKind::Delete,
+                                &path,
+                                responsible_pid,
+                                &exe,
+                                &table_for_handler,
+                            );
+                        }
+                        _ => {
+                            counters.other_event.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Some(Event::NotifyUnlink(ev)) => {
-                        counters.unlink_received.fetch_add(1, Ordering::Relaxed);
-                        let path = ev.target().path().to_string_lossy().to_string();
-                        let exe = responsible
-                            .executable()
-                            .path()
-                            .to_string_lossy()
-                            .to_string();
-                        FlodbaddL7Es::record_file_attribution(
-                            &file_table_for_handler,
-                            &file_counter_for_handler,
-                            &table_for_handler,
-                            path.clone(),
-                            responsible_pid,
-                            &exe,
-                        );
-                        #[cfg(feature = "fim")]
-                        FlodbaddL7Es::fim_source_push(
-                            crate::fim_es::FimSourceKind::Delete,
-                            &path,
-                            responsible_pid,
-                            &exe,
-                            &table_for_handler,
-                        );
-                    }
-                    _ => {
-                        counters.other_event.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            };
+                };
 
-            let mut client = match Client::new(handler) {
-                Ok(client) => client,
-                Err(e) => {
-                    warn!(
-                        "ES client creation failed: {:?} (need entitlement + root)",
-                        e
-                    );
-                    return;
+                match Client::new(handler) {
+                    Ok(client) => break client,
+                    Err(e) => {
+                        let first = last_error.load().is_none();
+                        last_error.store(Some(Arc::new(format!("{:?}", e))));
+                        if first {
+                            warn!(
+                            "ES client creation failed: {:?} (needs the entitlement, root and Full Disk Access); retrying every {}s up to 5 min",
+                            e,
+                            backoff.as_secs()
+                        );
+                        } else {
+                            debug!("ES client creation failed again: {:?}", e);
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+                    }
                 }
             };
 
@@ -1064,12 +1104,21 @@ mod macos {
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_UNLINK,
             ];
             if let Err(e) = client.subscribe(&events) {
+                last_error.store(Some(Arc::new(format!("subscribe: {:?}", e))));
                 error!("ES subscribe failed: {:?}", e);
                 return;
             }
 
+            last_error.store(None);
             available.store(true, Ordering::Release);
             info!("ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK");
+            let waited = started.elapsed().as_secs();
+            if waited >= 2 {
+                info!(
+                    "ES helper: Enabled after {}s (process and file attribution from Endpoint Security from now on)",
+                    waited
+                );
+            }
 
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
@@ -1091,25 +1140,33 @@ mod macos {
                 es_event_type_t, es_mute_inversion_type_t, es_mute_path_type_t,
             };
 
-            let handler = |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
-                if let Some(Event::NotifyOpen(open)) = msg.event() {
-                    let process = msg.process();
-                    let file = open.file();
-                    let path = file.path().to_string_lossy();
-                    let exe = process.executable().path().to_string_lossy();
-                    crate::credential_opens::record_open(
-                        process.audit_token().pid() as u32,
-                        Some(process.audit_token().euid()),
-                        &exe,
-                        &path,
-                    );
-                }
-            };
-            let mut client = match Client::new(handler) {
-                Ok(client) => client,
-                Err(e) => {
-                    warn!("ES credential-open client creation failed: {:?}", e);
-                    return;
+            let mut backoff = std::time::Duration::from_secs(10);
+            let mut client = loop {
+                let handler = |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
+                    if let Some(Event::NotifyOpen(open)) = msg.event() {
+                        let process = msg.process();
+                        let file = open.file();
+                        let path = file.path().to_string_lossy();
+                        let exe = process.executable().path().to_string_lossy();
+                        crate::credential_opens::record_open(
+                            process.audit_token().pid() as u32,
+                            Some(process.audit_token().euid()),
+                            &exe,
+                            &path,
+                        );
+                    }
+                };
+                match Client::new(handler) {
+                    Ok(client) => break client,
+                    Err(e) => {
+                        warn!(
+                            "ES credential-open client creation failed: {:?}; retrying in {}s",
+                            e,
+                            backoff.as_secs()
+                        );
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+                    }
                 }
             };
             if let Err(e) =
@@ -1171,8 +1228,35 @@ mod macos {
             self.available.load(Ordering::Acquire)
         }
 
-        pub fn init_status(&self) -> &str {
-            &self.init_status
+        /// The client is meant to come up (supported macOS): until it does,
+        /// what it would measure is missing, not absent.
+        pub fn expected(&self) -> bool {
+            self.unsupported.is_none()
+        }
+
+        /// The client's state now: Enabled once it subscribed, Disabled with
+        /// the error while creation or subscription fails (retried), Pending
+        /// while `es_new_client` has not returned yet.
+        pub fn init_status(&self) -> String {
+            if let Some(msg) = &self.unsupported {
+                return msg.clone();
+            }
+            if self.available.load(Ordering::Acquire) {
+                return format!(
+                    "Enabled: macOS {} with ES process + file + task-port tracking (FORK/EXEC/EXIT + GET_TASK/GET_TASK_READ + CREATE/WRITE/CLOSE/RENAME/UNLINK)",
+                    self.version_str
+                );
+            }
+            match self.last_error.load_full() {
+                Some(err) => format!(
+                    "Disabled: ES client failed on macOS {}: {} (retrying; needs the entitlement, root and Full Disk Access)",
+                    self.version_str, err
+                ),
+                None => format!(
+                    "Pending: ES client not subscribed yet on macOS {} (its Full Disk Access check can take minutes after an install)",
+                    self.version_str
+                ),
+            }
         }
 
         pub fn process_count(&self) -> usize {
@@ -1333,7 +1417,7 @@ mod macos {
         INSTANCE.get_or_init(FlodbaddL7Es::init)
     }
 
-    pub fn get_init_status() -> &'static str {
+    pub fn get_init_status() -> String {
         global().init_status()
     }
 }
@@ -1432,6 +1516,23 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Whether this build's Endpoint Security client is meant to run here (macOS
+/// 13+, built with `endpointsecurity`), whether or not it has subscribed yet.
+/// `false` elsewhere: no client is expected, so nothing it would measure is
+/// missing (the conservative answer for [`crate::fim`]'s unmeasured-writer
+/// flag, which only ever lowers confidence in an absent writer).
+pub fn es_expected() -> bool {
+    #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
+    {
+        macos::global().expected()
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]
+    {
+        false
+    }
+}
+
 pub fn init_and_log_status() {
     let available = is_available();
     if available {
@@ -1442,7 +1543,8 @@ pub fn init_and_log_status() {
         #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
         {
             tracing::warn!(
-                "ES process + file tracking DISABLED - falling back to sysinfo/lsof-based resolution"
+                "ES process + file tracking not available yet ({}) - attribution uses the sysinfo/lsof fallback until it is",
+                es_support()
             );
         }
         #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]

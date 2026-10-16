@@ -58,6 +58,15 @@ pub struct FimEvent {
     /// what every event claimed before.
     #[serde(default)]
     pub writer_inferred: bool,
+    /// No writer was attributed because the kernel source that names writers
+    /// was not running yet (macOS: the Endpoint Security client still in
+    /// its Full Disk Access check after an install, fmba-3 2026-10-16). Not
+    /// "nobody wrote it": the measurement was missing. The detector reads it
+    /// as degraded evidence, never as an absent writer.
+    /// `#[serde(default)]`: same upgrade precedent as `process_pid`; an
+    /// older helper's events read as measured, as they were graded before.
+    #[serde(default)]
+    pub writer_unmeasured: bool,
     /// Parent process name when attribution is available (ES, lsof).
     pub parent_process_name: Option<String>,
     /// Parent process path when attribution is available (ES, lsof).
@@ -427,6 +436,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -456,6 +466,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -474,6 +485,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -509,6 +521,7 @@ mod tests {
             process_path: Some("/Applications/Cursor.app".to_string()),
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -526,6 +539,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -545,6 +559,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -575,6 +590,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -594,6 +610,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -617,6 +634,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -648,6 +666,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -688,6 +707,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -718,6 +738,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -747,6 +768,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -776,6 +798,7 @@ mod tests {
                 process_path: None,
                 process_pid: None,
                 writer_inferred: false,
+                writer_unmeasured: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
@@ -800,6 +823,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -883,6 +907,7 @@ mod tests {
                         process_path: None,
                         process_pid: None,
                         writer_inferred: false,
+                        writer_unmeasured: false,
                         parent_process_name: None,
                         parent_process_path: None,
                         is_sensitive: false,
@@ -913,6 +938,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: true,
@@ -955,6 +981,7 @@ mod tests {
             process_path: Some("/usr/bin/node".to_string()),
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -967,6 +994,38 @@ mod tests {
         assert_eq!(deserialized.path, event.path);
         assert_eq!(deserialized.uid, event.uid);
         assert_eq!(deserialized.labels, event.labels);
+    }
+
+    /// An event from a helper that predates `writer_unmeasured` reads as
+    /// measured: graded exactly as before.
+    #[test]
+    fn test_fim_event_without_writer_unmeasured_reads_as_measured() {
+        let ts = Utc::now();
+        let mut value = serde_json::to_value(FimEvent {
+            path: "/tmp/x".to_string(),
+            event_type: FimEventType::Create,
+            timestamp: ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            process_pid: None,
+            writer_inferred: false,
+            writer_unmeasured: true,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid("/tmp/x", &FimEventType::Create, &ts),
+            last_modified: ts,
+        })
+        .expect("serialize");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("writer_unmeasured");
+        let older: FimEvent = serde_json::from_value(value).expect("deserialize");
+        assert!(!older.writer_unmeasured);
     }
 
     #[test]
@@ -986,6 +1045,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1003,6 +1063,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1037,6 +1098,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1054,6 +1116,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1088,6 +1151,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1141,6 +1205,7 @@ mod tests {
             process_path: None,
             process_pid: None,
             writer_inferred: false,
+            writer_unmeasured: false,
             parent_process_name: None,
             parent_process_path: None,
             is_sensitive: false,
@@ -1186,6 +1251,7 @@ mod tests {
                 process_path: None,
                 process_pid: None,
                 writer_inferred: false,
+                writer_unmeasured: false,
                 parent_process_name: None,
                 parent_process_path: None,
                 is_sensitive: false,
