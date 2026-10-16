@@ -3616,8 +3616,6 @@ mod tests {
         )));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
     /// After an `lsof` overran its deadline, none runs until the suspension
     /// ends: the caller gets no writer at once instead of parking.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -3636,6 +3634,7 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn test_parse_lsof_pid_and_command_extracts_first_process() {
         let parsed = parse_lsof_pid_and_command("p4242\nccursor\nf4\n");
