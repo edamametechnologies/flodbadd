@@ -832,7 +832,11 @@ fn ensure_local_npcap_sdk_lib_dir() -> Result<PathBuf, String> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("failed to read SDK zip entry {}: {}", i, e))?;
-        let outpath = sdk_root.join(entry.mangled_name());
+        let outpath = sdk_root.join(
+            entry
+                .mangled_name()
+                .map_err(|e| format!("failed to read SDK zip entry {} name: {}", i, e))?,
+        );
         if entry.is_dir() {
             fs::create_dir_all(&outpath)
                 .map_err(|e| format!("failed to create dir {}: {}", outpath.display(), e))?;

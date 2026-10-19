@@ -181,7 +181,7 @@ windows = { version = "0.62.0", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_NetManagement"
 ] }
-zip = { version = "7.1.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serial_test = "3.2.0"
@@ -193,7 +193,7 @@ mockall = "0.14.0"
 # Npcap
 # Use rustls with ring via reqwest 0.12
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
-zip = { version = "7.1.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 # Verifies the downloaded SDK against NPCAP_SDK_SHA256 in src/windows_npcap.rs,
 # which build.rs includes as a module.
 sha2 = "0.10.9"

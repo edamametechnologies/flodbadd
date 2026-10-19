@@ -361,9 +361,12 @@ fn download_npcap_sdk(npcap_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let outpath = npcap_dir.join(file.name());
+        // zip 9: the entry name accessors return a result; `mangled_name`
+        // is the sanitized path (no absolute or parent components), like the
+        // runtime extraction in src/windows_npcap.rs.
+        let outpath = npcap_dir.join(file.mangled_name()?);
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             std::fs::create_dir_all(&outpath)?;
         } else {
             if let Some(p) = outpath.parent() {
