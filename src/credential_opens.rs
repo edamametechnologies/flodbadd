@@ -595,7 +595,9 @@ mod linux {
                 let identity = (metadata.dev(), metadata.ino());
                 let fresh = watcher
                     .marked
-                    .try_with(|marked| needs_mark(marked.get(&dir).copied(), identity, marked.len()))
+                    .try_with(|marked| {
+                        needs_mark(marked.get(&dir).copied(), identity, marked.len())
+                    })
                     .unwrap_or(false);
                 if !fresh {
                     continue;
@@ -681,7 +683,11 @@ mod tests {
     fn a_recreated_credential_directory_is_marked_again() {
         // Deleted and created again under the same path: a new inode, marked
         // again even with the budget spent (it takes over its own entry).
-        assert!(needs_mark(Some((1, 100)), (1, 200), LINUX_MAX_CREDENTIAL_MARKS));
+        assert!(needs_mark(
+            Some((1, 100)),
+            (1, 200),
+            LINUX_MAX_CREDENTIAL_MARKS
+        ));
         assert!(needs_mark(Some((1, 100)), (2, 100), 0));
         // The same directory: already marked.
         assert!(!needs_mark(Some((1, 100)), (1, 100), 0));
