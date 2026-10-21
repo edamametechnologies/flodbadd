@@ -463,6 +463,23 @@ fn resolve_case(base: &Path, rel: &str) -> PathBuf {
     cur
 }
 
+/// Whether the Linux backend marks `dir` on a re-mark pass, given the
+/// (device, inode) it recorded when it last marked that path (`known`), the
+/// directory's identity now (`current`) and how many directories it holds
+/// marks for (`held`). A directory deleted and created again under the same
+/// path is a new inode, and a fanotify mark lives on its inode: the new one
+/// is marked again (it takes over its own entry, whatever the budget).
+pub fn needs_mark(known: Option<(u64, u64)>, current: (u64, u64), held: usize) -> bool {
+    match known {
+        Some(previous) => previous != current,
+        None => held < LINUX_MAX_CREDENTIAL_MARKS,
+    }
+}
+
+/// Directory marks for the cold set on Linux (well under the kernel's default
+/// `max_user_marks`, which `fim_fanotify` also draws from).
+const LINUX_MAX_CREDENTIAL_MARKS: usize = 512;
+
 // ---------------------------------------------------------------------------
 // Linux backend: fanotify FAN_OPEN on the cold directories only
 // ---------------------------------------------------------------------------
@@ -472,22 +489,21 @@ mod linux {
     use super::*;
     use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MarkFlags, MaskFlags};
     use once_cell::sync::OnceCell;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::Arc;
     use std::time::Duration;
     use tracing::{debug, info, warn};
 
-    /// Directory marks for the cold set (well under the kernel's default
-    /// `max_user_marks`, which `fim_fanotify` also draws from).
-    const MAX_MARKS: usize = 512;
     /// Wallet / cloud CLI directories are often created after the daemon
     /// starts; re-mark on this cadence.
     const REMARK_INTERVAL: Duration = Duration::from_secs(300);
 
     struct Watcher {
         fan: Fanotify,
-        marked: CustomMutex<HashSet<PathBuf>>,
+        /// Each marked directory with the (device, inode) it had when marked.
+        marked: CustomMutex<HashMap<PathBuf, (u64, u64)>>,
     }
 
     static WATCHER: OnceCell<Arc<Watcher>> = OnceCell::new();
@@ -508,7 +524,7 @@ mod linux {
         };
         let watcher = Arc::new(Watcher {
             fan,
-            marked: CustomMutex::new(HashSet::new()),
+            marked: CustomMutex::new(HashMap::new()),
         });
         if WATCHER.set(Arc::clone(&watcher)).is_err() {
             return;
@@ -573,9 +589,13 @@ mod linux {
         let mut added = 0usize;
         for prefix in prefixes {
             for dir in directories_for(&prefix) {
+                let Ok(metadata) = std::fs::metadata(&dir) else {
+                    continue;
+                };
+                let identity = (metadata.dev(), metadata.ino());
                 let fresh = watcher
                     .marked
-                    .try_with(|marked| marked.len() < MAX_MARKS && !marked.contains(&dir))
+                    .try_with(|marked| needs_mark(marked.get(&dir).copied(), identity, marked.len()))
                     .unwrap_or(false);
                 if !fresh {
                     continue;
@@ -590,7 +610,9 @@ mod linux {
                     None,
                 ) {
                     Ok(()) => {
-                        watcher.marked.try_with(|marked| marked.insert(dir.clone()));
+                        watcher
+                            .marked
+                            .try_with(|marked| marked.insert(dir.clone(), identity));
                         added += 1;
                     }
                     Err(e) => debug!(
@@ -655,6 +677,19 @@ pub fn start() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_recreated_credential_directory_is_marked_again() {
+        // Deleted and created again under the same path: a new inode, marked
+        // again even with the budget spent (it takes over its own entry).
+        assert!(needs_mark(Some((1, 100)), (1, 200), LINUX_MAX_CREDENTIAL_MARKS));
+        assert!(needs_mark(Some((1, 100)), (2, 100), 0));
+        // The same directory: already marked.
+        assert!(!needs_mark(Some((1, 100)), (1, 100), 0));
+        // A new directory: marked while the budget lasts.
+        assert!(needs_mark(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS - 1));
+        assert!(!needs_mark(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS));
+    }
+
     use super::*;
 
     const NODE: &str = "/opt/homebrew/bin/node";
