@@ -441,29 +441,40 @@ impl FimWatcher {
         let es_source = false;
 
         let mut actual_paths = Vec::new();
-        for path in &paths {
-            if config.recursive && is_forbidden_recursive_root(path) {
-                // A configured path the guard refuses (operator
-                // configuration, or a CI workspace fallback): warn.
-                warn!(
-                    "FIM: refusing to watch {} recursively (filesystem root or system tree)",
-                    path.display()
-                );
-                continue;
+        {
+            // Every root in one batch. On macOS each `watch` restarts the
+            // FSEvents stream, one fseventsd registration per root (eleven
+            // for the default roots), and a registration can block for many
+            // seconds on a loaded host; the batch starts the stream once, at
+            // `commit`. The other backends add each root as `watch` does.
+            let mut batch = watcher.paths_mut();
+            for path in &paths {
+                if config.recursive && is_forbidden_recursive_root(path) {
+                    // A configured path the guard refuses (operator
+                    // configuration, or a CI workspace fallback): warn.
+                    warn!(
+                        "FIM: refusing to watch {} recursively (filesystem root or system tree)",
+                        path.display()
+                    );
+                    continue;
+                }
+                if !path.exists() {
+                    debug!("FIM: skipping non-existent path {}", path.display());
+                    continue;
+                }
+                if es_source {
+                    actual_paths.push(path.clone());
+                    continue;
+                }
+                if let Err(e) = batch.add(path, mode) {
+                    warn!("FIM: failed to watch {}: {}", path.display(), e);
+                } else {
+                    info!("FIM: watching {}", path.display());
+                    actual_paths.push(path.clone());
+                }
             }
-            if !path.exists() {
-                debug!("FIM: skipping non-existent path {}", path.display());
-                continue;
-            }
-            if es_source {
-                actual_paths.push(path.clone());
-                continue;
-            }
-            if let Err(e) = watcher.watch(path, mode) {
-                warn!("FIM: failed to watch {}: {}", path.display(), e);
-            } else {
-                info!("FIM: watching {}", path.display());
-                actual_paths.push(path.clone());
+            if let Err(e) = batch.commit() {
+                warn!("FIM: failed to start watching the roots: {}", e);
             }
         }
 
@@ -502,10 +513,14 @@ impl FimWatcher {
                     warn!(
                         "FIM: ES sink already installed; falling back to FSEvents for this watcher"
                     );
+                    let mut batch = watcher.paths_mut();
                     for path in &actual_paths {
-                        if let Err(e) = watcher.watch(path, mode) {
+                        if let Err(e) = batch.add(path, mode) {
                             warn!("FIM: failed to watch {}: {}", path.display(), e);
                         }
+                    }
+                    if let Err(e) = batch.commit() {
+                        warn!("FIM: failed to start watching the roots: {}", e);
                     }
                 }
             }
