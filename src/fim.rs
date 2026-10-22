@@ -474,7 +474,10 @@ impl FimWatcher {
                 }
             }
             if let Err(e) = batch.commit() {
+                // Nothing is watched: report no root, as a root whose own
+                // `watch` failed was dropped before the batch.
                 warn!("FIM: failed to start watching the roots: {}", e);
+                actual_paths.clear();
             }
         }
 
