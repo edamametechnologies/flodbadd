@@ -195,11 +195,39 @@ fn now_ms() -> u64 {
     crate::process_events::now_ms()
 }
 
+// A test's own table (`isolated_table_for_tests`), read before the
+// process-wide one: tests run in parallel in one process, and a read that
+// meets another test's hold past its budget reads empty. Compiled in every
+// build like the other test hooks: edamame_core's tests install it.
+thread_local! {
+    static TEST_TABLE: std::cell::RefCell<Option<OpenTable>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: until the guard drops, this thread's reads and
+/// `record_open_for_tests` / `clear_for_tests` use a table of its own.
+pub fn isolated_table_for_tests() -> IsolatedTableGuard {
+    TEST_TABLE.with(|table| *table.borrow_mut() = Some(OpenTable::default()));
+    IsolatedTableGuard
+}
+
+/// Drops this thread's own table (`isolated_table_for_tests`).
+pub struct IsolatedTableGuard;
+
+impl Drop for IsolatedTableGuard {
+    fn drop(&mut self) {
+        TEST_TABLE.with(|table| *table.borrow_mut() = None);
+    }
+}
+
 /// Run `f` under the table lock, retrying while it is contended until
 /// `budget` runs out. For readers and the test helpers only: `record_open`
 /// keeps its single attempt, because the backends call it from
 /// kernel-callback threads that never wait.
 fn with_table_retrying<R>(budget: Duration, mut f: impl FnMut(&mut OpenTable) -> R) -> Option<R> {
+    if TEST_TABLE.with(|table| table.borrow().is_some()) {
+        return TEST_TABLE.with(|table| table.borrow_mut().as_mut().map(&mut f));
+    }
     let deadline = Instant::now() + budget;
     loop {
         if let Some(result) = TABLE.try_with(&mut f) {
