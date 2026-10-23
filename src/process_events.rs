@@ -247,6 +247,16 @@ pub fn recent(limit: usize) -> Vec<ProcessEvent> {
         .unwrap_or_default()
 }
 
+/// The events delivered at or after `since_ms`, oldest first, at most the
+/// newest `limit` of them: what a consumer in another process (the core on
+/// the app path, behind the helper) has not read yet. The consumer's table
+/// deduplicates the events at its watermark, so asking again from the same
+/// timestamp is harmless. `None` when the ring lock was contended (nothing
+/// read: ask again), never an empty answer standing for "no events".
+pub fn since(since_ms: u64, limit: usize) -> Option<(Vec<ProcessEvent>, Option<u64>)> {
+    RING.try_with(|ring| (ring_since(ring, since_ms, limit), ring_oldest_ms(ring)))
+}
+
 /// Image (name, path) of the most recent `Exec` the ring holds for `pid`.
 ///
 /// Searched in place, newest first, so the lock is held for a scan and one
@@ -280,6 +290,24 @@ fn ring_push(ring: &mut VecDeque<ProcessEvent>, event: ProcessEvent) -> bool {
 fn ring_recent(ring: &VecDeque<ProcessEvent>, limit: usize) -> Vec<ProcessEvent> {
     let skip = ring.len().saturating_sub(limit);
     ring.iter().skip(skip).cloned().collect()
+}
+
+/// Events of `ring` at or after `since_ms`, oldest first, the newest
+/// `limit` of them. The ring is in push order, which is delivery order per
+/// sensor thread; the scan does not assume timestamps are sorted.
+fn ring_since(ring: &VecDeque<ProcessEvent>, since_ms: u64, limit: usize) -> Vec<ProcessEvent> {
+    let matching = ring.iter().filter(|event| event.timestamp_ms >= since_ms);
+    let count = matching.clone().count();
+    matching
+        .skip(count.saturating_sub(limit))
+        .cloned()
+        .collect()
+}
+
+/// Timestamp of the oldest event the ring still holds: a consumer whose
+/// watermark is older lost the events evicted in between.
+fn ring_oldest_ms(ring: &VecDeque<ProcessEvent>) -> Option<u64> {
+    ring.front().map(|event| event.timestamp_ms)
 }
 
 /// The newest `Exec` of `pid` in `ring`: its image name and path.
@@ -372,6 +400,27 @@ mod tests {
         let tail = ring_recent(&ring, 3);
         assert_eq!(tail.len(), 3);
         assert_eq!(tail.last().unwrap().pid, PROCESS_EVENT_RING_MAX as u32 + 9);
+    }
+
+    /// A consumer in another process reads what it has not read yet: the
+    /// events at or after its watermark (the watermark itself included, its
+    /// table deduplicates), oldest first, bounded to the newest `limit`.
+    #[test]
+    fn since_returns_the_unread_tail_in_order() {
+        let mut ring: VecDeque<ProcessEvent> = VecDeque::new();
+        for (ts, pid) in [(100, 1), (200, 2), (200, 3), (300, 4), (400, 5)] {
+            let mut event = ev(ProcessEventKind::Exec, pid);
+            event.timestamp_ms = ts;
+            ring_push(&mut ring, event);
+        }
+        let pids = |events: Vec<ProcessEvent>| events.iter().map(|e| e.pid).collect::<Vec<_>>();
+        assert_eq!(pids(ring_since(&ring, 0, usize::MAX)), vec![1, 2, 3, 4, 5]);
+        assert_eq!(pids(ring_since(&ring, 200, usize::MAX)), vec![2, 3, 4, 5]);
+        assert_eq!(pids(ring_since(&ring, 401, usize::MAX)), Vec::<u32>::new());
+        // Bounded: the newest of the matching events.
+        assert_eq!(pids(ring_since(&ring, 0, 2)), vec![4, 5]);
+        assert_eq!(ring_oldest_ms(&ring), Some(100));
+        assert_eq!(ring_oldest_ms(&VecDeque::new()), None);
     }
 
     /// The in-place lookup answers what the copy-then-search it replaces
