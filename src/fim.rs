@@ -857,6 +857,14 @@ fn translate_notify_event_with_attribution(
             continue;
         }
 
+        // A directory's own modify event is its last-write time moving
+        // because an entry inside it changed (Windows reports one for every
+        // child write): not a write, and no writer to name. The child's own
+        // event carries the change and its writer.
+        if event_type == FimEventType::Modify && path_is_directory(path) {
+            continue;
+        }
+
         // FP-CI-2: gate content hashing on `sensitive`. Non-sensitive
         // events (temp-staging files, files under operator-specified
         // explicit watch roots) get `hash = None` because the downstream
@@ -1235,6 +1243,40 @@ fn file_size_without_opening(path: &Path) -> Option<u64> {
         return None;
     }
     Some((u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow))
+}
+
+/// Whether `path` is a directory, from its directory entry: the file is not
+/// opened (a producer may hold it exclusively, see `file_size_without_opening`).
+#[cfg(target_os = "windows")]
+fn path_is_directory(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesExW, GetFileExInfoStandard, FILE_ATTRIBUTE_DIRECTORY,
+        WIN32_FILE_ATTRIBUTE_DATA,
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut data = WIN32_FILE_ATTRIBUTE_DATA::default();
+    let found = unsafe {
+        GetFileAttributesExW(
+            PCWSTR(wide.as_ptr()),
+            GetFileExInfoStandard,
+            &mut data as *mut WIN32_FILE_ATTRIBUTE_DATA as *mut core::ffi::c_void,
+        )
+    }
+    .is_ok();
+    found && data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+}
+
+/// Whether `path` is a directory (not following a symlink).
+#[cfg(not(target_os = "windows"))]
+fn path_is_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -2725,6 +2767,36 @@ mod tests {
         assert!(
             events[0].size.is_some(),
             "Size must still be populated for non-sensitive events (used for dedup)",
+        );
+    }
+
+    /// A directory's own modify event (its last-write time moving because a
+    /// child changed) is not recorded; the child's events and the
+    /// directory's creation are.
+    #[test]
+    fn test_translate_notify_event_skips_a_directory_s_own_modify() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let dir = temp.path().join("Profile 1");
+        fs::create_dir(&dir).expect("mkdir");
+        let file = dir.join("Preferences");
+        fs::write(&file, "{}").expect("write");
+        let explicit_roots = vec![temp.path().to_string_lossy().replace('\\', "/")];
+        let translate = |kind: EventKind, path: &Path| {
+            let event = Event {
+                kind,
+                paths: vec![path.to_path_buf()],
+                attrs: Default::default(),
+            };
+            translate_notify_event(&event, FIM_HASH_SIZE_THRESHOLD, &explicit_roots)
+                .unwrap_or_default()
+        };
+        let modify = || EventKind::Modify(notify::event::ModifyKind::Any);
+        assert!(translate(modify(), &dir).is_empty(), "the directory's modify");
+        assert_eq!(translate(modify(), &file).len(), 1, "the child's modify");
+        assert_eq!(
+            translate(EventKind::Create(notify::event::CreateKind::Folder), &dir).len(),
+            1,
+            "the directory's creation"
         );
     }
 
