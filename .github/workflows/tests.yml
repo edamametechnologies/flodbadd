@@ -185,6 +185,8 @@ jobs:
           rustup toolchain install "${RUST_NIGHTLY}" --component rust-src
           rustup component add --toolchain "${RUST_NIGHTLY}" llvm-tools-preview
           # Use the pinned nightly by default so that build.rs picks it up automatically
+          # (newer macOS images have no ~/.cargo until something creates it)
+          mkdir -p "$HOME/.cargo"
           echo "RUSTUP_TOOLCHAIN=${RUST_NIGHTLY}" >> $HOME/.cargo/env
 
       - name: iOS add-ons
