@@ -2791,7 +2791,10 @@ mod tests {
                 .unwrap_or_default()
         };
         let modify = || EventKind::Modify(notify::event::ModifyKind::Any);
-        assert!(translate(modify(), &dir).is_empty(), "the directory's modify");
+        assert!(
+            translate(modify(), &dir).is_empty(),
+            "the directory's modify"
+        );
         assert_eq!(translate(modify(), &file).len(), 1, "the child's modify");
         assert_eq!(
             translate(EventKind::Create(notify::event::CreateKind::Folder), &dir).len(),
