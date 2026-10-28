@@ -22,7 +22,77 @@
 // codebase does not need to care whether ES is available.
 
 use crate::sessions::SessionL7;
+use es_epoch::ImageEpoch;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
 use tracing::info;
+
+/// When a process-table row's image was recorded, and since when the row has
+/// stood for the same process.
+///
+/// The L7 caches in `l7.rs` remember the moment they read a process
+/// (`resolved_at`) and ask, on every hit, whether the table has since recorded
+/// a newer image for the process they read (`exec_newer_than`). A process
+/// whose first connection is seen before its EXEC event has been processed is
+/// resolved from its fork-time row, which carries the forker's image; the
+/// exec arm then overwrites the row, and the entry is re-read instead of
+/// serving that image for the life of the flow. A row created after the entry
+/// was resolved is a later occupant of the pid, not the process the entry
+/// read, and never answers for it.
+///
+/// Pure so the rule is tested without Endpoint Security.
+mod es_epoch {
+    use std::time::Instant;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct ImageEpoch {
+        /// Since when the row has stood for this process.
+        pub known_since: Instant,
+        /// When the image the row carries was recorded.
+        pub image_since: Instant,
+    }
+
+    impl ImageEpoch {
+        /// A fork row: the forker's image, recorded now, for a process known
+        /// from now.
+        pub(crate) fn fork(now: Instant) -> Self {
+            Self {
+                known_since: now,
+                image_since: now,
+            }
+        }
+
+        /// An exec row. `own_row` is the row already held for the pid, as
+        /// `(ppid, known_since)`. It is the same process when it names the
+        /// parent this exec names (`lineage_ppid`), and its `known_since`
+        /// carries over. A row naming another parent, or none, belongs to an
+        /// earlier occupant of the pid (see `es_lineage`), and no row at all
+        /// is a process the table first sees now: both start a new epoch.
+        pub(crate) fn exec(
+            own_row: Option<(u32, Instant)>,
+            lineage_ppid: Option<u32>,
+            now: Instant,
+        ) -> Self {
+            let known_since = own_row
+                .filter(|(ppid, _)| *ppid != 0 && Some(*ppid) == lineage_ppid)
+                .map(|(_, since)| since)
+                .unwrap_or(now);
+            Self {
+                known_since,
+                image_since: now,
+            }
+        }
+
+        /// Whether a reader that read the process at `since` may hold an
+        /// older image: the row stood for the process then, and its image
+        /// was recorded after. A fork row never does (its image is as old as
+        /// the row), nor does a row for a later occupant of the pid.
+        pub(crate) fn newer_than(&self, since: Instant) -> bool {
+            self.known_since <= since && self.image_since > since
+        }
+    }
+}
 
 /// Parent and grandparent of a process as the Endpoint Security handler
 /// records them on its FORK and EXEC rows.
@@ -307,9 +377,23 @@ mod macos {
         pub grandparent_process_name: String,
         pub grandparent_process_path: String,
         pub grandparent_args: Vec<String>,
+        /// Since when the row has stood for this process (`es_epoch`): the
+        /// fork that created it, carried across its execs.
+        pub known_since: Instant,
+        /// When the image the row carries was recorded: the fork, then each
+        /// exec. The L7 caches compare it with the moment they read the
+        /// process.
+        pub image_since: Instant,
     }
 
     impl EsProcessInfo {
+        fn epoch(&self) -> ImageEpoch {
+            ImageEpoch {
+                known_since: self.known_since,
+                image_since: self.image_since,
+            }
+        }
+
         fn known(&self) -> KnownProcess {
             KnownProcess {
                 ppid: self.ppid,
@@ -621,6 +705,7 @@ mod macos {
                                 child.signing_id().to_string_lossy().trim().to_string();
                             let child_team_id =
                                 child.team_id().to_string_lossy().trim().to_string();
+                            let epoch = ImageEpoch::fork(Instant::now());
 
                             let info = EsProcessInfo {
                                 pid: child_pid,
@@ -643,6 +728,8 @@ mod macos {
                                 grandparent_process_name: lineage.grandparent_name,
                                 grandparent_process_path: lineage.grandparent_path,
                                 grandparent_args: lineage.grandparent_args,
+                                known_since: epoch.known_since,
+                                image_since: epoch.image_since,
                             };
                             let child_path_for_event = info.process_path.clone();
                             let child_name_for_event = info.process_name.clone();
@@ -725,6 +812,20 @@ mod macos {
 
                             let username = resolve_username(target.audit_token().euid());
 
+                            // The row's epoch (`es_epoch`): the row the fork
+                            // arm wrote keeps its `known_since` when it names
+                            // the parent this exec names; the image is new
+                            // from now. Copied out, guard dropped, before the
+                            // insert below. Stamped last, after the lookups
+                            // above, so a reader stamped between this instant
+                            // and the insert is as narrow a window as the
+                            // insert itself.
+                            let own_row_epoch = table_for_handler
+                                .get(&target_pid)
+                                .map(|row| (row.ppid, row.known_since));
+                            let epoch =
+                                ImageEpoch::exec(own_row_epoch, lineage.ppid, Instant::now());
+
                             let info = EsProcessInfo {
                                 pid: target_pid,
                                 ppid: lineage.ppid.unwrap_or(0),
@@ -746,6 +847,8 @@ mod macos {
                                 grandparent_process_name: lineage.grandparent_name,
                                 grandparent_process_path: lineage.grandparent_path,
                                 grandparent_args: lineage.grandparent_args,
+                                known_since: epoch.known_since,
+                                image_since: epoch.image_since,
                             };
                             // FLODBADD2 §1b.2 monitoring stream: exec with
                             // argv digested (I5) and the kernel-vouched
@@ -1340,6 +1443,22 @@ mod macos {
             // for every parked entry on each populate pass; it was the
             // dominant helper cost on macOS (fmba-3, 2026-09-19).
             let pid = l7_macos::quick_lookup_session_pid(session)?;
+            self.l7_for_pid(pid)
+        }
+
+        /// Whether the table records, for the process that was `pid` at
+        /// `since`, an image newer than `since` (`es_epoch`): one table read,
+        /// no system call.
+        pub fn exec_newer_than(&self, pid: u32, since: Instant) -> bool {
+            self.process_table
+                .get(&pid)
+                .is_some_and(|row| row.epoch().newer_than(since))
+        }
+
+        /// The process as the table records it now: image, arguments and
+        /// lineage. What the eager path resolves once libproc has named the
+        /// pid, and what an L7 cache entry is re-read from after an exec.
+        pub fn l7_for_pid(&self, pid: u32) -> Option<SessionL7> {
             let entry = self.process_table.get(&pid)?;
             let es_info = entry.value();
             let mut l7 = SessionL7 {
@@ -1441,6 +1560,14 @@ mod macos {
             None
         }
 
+        pub fn exec_newer_than(&self, _pid: u32, _since: Instant) -> bool {
+            false
+        }
+
+        pub fn l7_for_pid(&self, _pid: u32) -> Option<SessionL7> {
+            None
+        }
+
         pub fn is_available(&self) -> bool {
             false
         }
@@ -1502,6 +1629,94 @@ pub fn get_process_info(pid: u32) -> Option<EsProcessInfo> {
 
 pub fn enrich_session_l7(pid: u32, base_l7: &mut SessionL7) {
     macos::global().enrich_session_l7(pid, base_l7);
+}
+
+// A test's own process table, read before the kernel's: a unit test stands
+// in for the handler (`record_fork_for_tests` / `record_exec_for_tests`) and
+// the L7 caches read it through the same `exec_newer_than` / `l7_for_pid`
+// they read the kernel table through. Per thread, as the credential-open
+// table's, so parallel tests never see each other's rows; compiled in every
+// build like the other test hooks.
+thread_local! {
+    static TEST_TABLE: RefCell<Option<HashMap<u32, (ImageEpoch, SessionL7)>>> =
+        const { RefCell::new(None) };
+}
+
+/// Test hook: until the guard drops, this thread's `exec_newer_than` and
+/// `l7_for_pid` read a table of its own, filled by `record_fork_for_tests`
+/// and `record_exec_for_tests`.
+pub fn isolated_table_for_tests() -> IsolatedTableGuard {
+    TEST_TABLE.with(|table| *table.borrow_mut() = Some(HashMap::new()));
+    IsolatedTableGuard
+}
+
+/// Drops this thread's own table (`isolated_table_for_tests`).
+pub struct IsolatedTableGuard;
+
+impl Drop for IsolatedTableGuard {
+    fn drop(&mut self) {
+        TEST_TABLE.with(|table| *table.borrow_mut() = None);
+    }
+}
+
+/// Test-only: the fork arm's row for `pid`, `l7` standing for the forker's
+/// image the child carries until its exec.
+pub fn record_fork_for_tests(pid: u32, l7: SessionL7) {
+    TEST_TABLE.with(|table| {
+        let mut table = table.borrow_mut();
+        let table = table
+            .as_mut()
+            .expect("record_fork_for_tests needs isolated_table_for_tests");
+        table.insert(pid, (ImageEpoch::fork(Instant::now()), l7));
+    });
+}
+
+/// Test-only: the exec arm's row for `pid`, with the same epoch rule as the
+/// handler: the row already held keeps its `known_since` when it names the
+/// parent `l7` names.
+pub fn record_exec_for_tests(pid: u32, l7: SessionL7) {
+    TEST_TABLE.with(|table| {
+        let mut table = table.borrow_mut();
+        let table = table
+            .as_mut()
+            .expect("record_exec_for_tests needs isolated_table_for_tests");
+        let own_row = table
+            .get(&pid)
+            .map(|(epoch, row)| (row.parent_pid.unwrap_or(0), epoch.known_since));
+        let epoch = ImageEpoch::exec(own_row, l7.parent_pid, Instant::now());
+        table.insert(pid, (epoch, l7));
+    });
+}
+
+/// Whether the Endpoint Security process table records, for the process that
+/// was `pid` at `since`, an image newer than `since`: it exec'd after a reader
+/// stamped `since` read it, and that reader may hold its previous image. One
+/// table read, no system call; `false` without a table (other platforms, no
+/// client) or for a pid the table never saw.
+pub fn exec_newer_than(pid: u32, since: Instant) -> bool {
+    if let Some(answer) = TEST_TABLE.with(|table| {
+        table.borrow().as_ref().map(|rows| {
+            rows.get(&pid)
+                .is_some_and(|(epoch, _)| epoch.newer_than(since))
+        })
+    }) {
+        return answer;
+    }
+    macos::global().exec_newer_than(pid, since)
+}
+
+/// The process as the Endpoint Security table records it now (image,
+/// arguments, lineage), `None` where no table holds the pid.
+pub fn l7_for_pid(pid: u32) -> Option<SessionL7> {
+    if let Some(answer) = TEST_TABLE.with(|table| {
+        table
+            .borrow()
+            .as_ref()
+            .map(|rows| rows.get(&pid).map(|(_, l7)| l7.clone()))
+    }) {
+        return answer;
+    }
+    macos::global().l7_for_pid(pid)
 }
 
 pub fn is_available() -> bool {
@@ -1774,6 +1989,117 @@ mod es_lineage_tests {
         assert_eq!(lineage.grandparent_pid, Some(50));
         assert_eq!(lineage.grandparent_path, "/bin/zsh");
         assert_eq!(fork_lineage(7, 7, "/bin/sh", |_| None), Lineage::default());
+    }
+}
+
+#[cfg(test)]
+mod es_epoch_tests {
+    //! The epoch rule the L7 caches invalidate on, without Endpoint
+    //! Security.
+    use super::es_epoch::ImageEpoch;
+    use std::time::{Duration, Instant};
+
+    fn instants() -> (Instant, Instant, Instant) {
+        let t0 = Instant::now();
+        (
+            t0,
+            t0 + Duration::from_millis(10),
+            t0 + Duration::from_millis(20),
+        )
+    }
+
+    /// A reader that read the fork row holds the forker's image: the exec
+    /// recorded after it is newer. A reader that read after the exec is not
+    /// stale, and a fork row is never newer than anything.
+    #[test]
+    fn an_exec_after_the_read_is_newer_a_fork_row_never_is() {
+        let (forked, read, exec) = instants();
+        let fork_row = ImageEpoch::fork(forked);
+        assert!(!fork_row.newer_than(read));
+        assert!(!fork_row.newer_than(forked));
+
+        let exec_row = ImageEpoch::exec(Some((100, forked)), Some(100), exec);
+        assert_eq!(exec_row.known_since, forked);
+        assert!(exec_row.newer_than(read));
+        assert!(exec_row.newer_than(forked));
+        assert!(!exec_row.newer_than(exec));
+        assert!(!exec_row.newer_than(exec + Duration::from_millis(1)));
+    }
+
+    /// A row created after the read is a later occupant of the pid: its
+    /// exec is not an exec of the process the reader read.
+    #[test]
+    fn a_later_occupant_of_the_pid_is_not_newer() {
+        let (read, forked, exec) = instants();
+        let occupant = ImageEpoch::exec(Some((100, forked)), Some(100), exec);
+        assert_eq!(occupant.known_since, forked);
+        assert!(!occupant.newer_than(read));
+        assert!(occupant.newer_than(forked));
+    }
+
+    /// The row held for the pid lends its `known_since` only when it names
+    /// the parent the exec names; a row naming another parent is an earlier
+    /// occupant's, a row naming none and no row at all start a new epoch.
+    #[test]
+    fn the_known_since_carries_only_from_a_row_naming_the_same_parent() {
+        let (forked, _, exec) = instants();
+        assert_eq!(
+            ImageEpoch::exec(Some((100, forked)), Some(100), exec).known_since,
+            forked
+        );
+        assert_eq!(
+            ImageEpoch::exec(Some((300, forked)), Some(100), exec).known_since,
+            exec
+        );
+        assert_eq!(
+            ImageEpoch::exec(Some((0, forked)), Some(100), exec).known_since,
+            exec
+        );
+        assert_eq!(
+            ImageEpoch::exec(Some((100, forked)), None, exec).known_since,
+            exec
+        );
+        assert_eq!(ImageEpoch::exec(None, Some(100), exec).known_since, exec);
+    }
+
+    /// The test table applies the same rule through the public readers.
+    #[test]
+    fn the_test_table_answers_through_the_public_readers() {
+        use crate::sessions::SessionL7;
+        let _guard = super::isolated_table_for_tests();
+        let pid = 4_000_010;
+        let fork_image = SessionL7 {
+            pid,
+            process_path: "/opt/daemon/stand-in".into(),
+            parent_pid: Some(100),
+            ..Default::default()
+        };
+        super::record_fork_for_tests(pid, fork_image);
+        std::thread::sleep(Duration::from_millis(2));
+        let read = Instant::now();
+        assert!(!super::exec_newer_than(pid, read));
+        assert_eq!(
+            super::l7_for_pid(pid).map(|l7| l7.process_path),
+            Some("/opt/daemon/stand-in".to_string())
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        let exec_image = SessionL7 {
+            pid,
+            process_path: "/usr/bin/curl".into(),
+            parent_pid: Some(100),
+            ..Default::default()
+        };
+        super::record_exec_for_tests(pid, exec_image);
+        assert!(super::exec_newer_than(pid, read));
+        assert!(!super::exec_newer_than(pid, Instant::now()));
+        assert_eq!(
+            super::l7_for_pid(pid).map(|l7| l7.process_path),
+            Some("/usr/bin/curl".to_string())
+        );
+        // A pid the table never saw answers nothing.
+        assert!(!super::exec_newer_than(pid + 1, read));
+        assert!(super::l7_for_pid(pid + 1).is_none());
     }
 }
 

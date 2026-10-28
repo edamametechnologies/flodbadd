@@ -125,6 +125,25 @@ In `l7.rs` the eager order is eBPF, then ETW, then ES, then plain libproc. On th
 path the resolution source is reported as `EndpointSecurity` when `l7_es::is_available()`
 is true and `MacosLibproc` otherwise.
 
+### The fork-time image and the L7 caches
+
+A child's row carries the forker's image from `NOTIFY_FORK` until its `NOTIFY_EXEC` is
+processed. A session resolved in between (its first packets seen before the exec arm ran)
+is attributed to that image, and the L7 caches would serve it for the life of the flow:
+the session map serves a resolved entry as is, and the port cache validates its entry by
+pid and start time, both unchanged by an exec in place.
+
+Every row therefore carries an epoch (`es_epoch::ImageEpoch`): `known_since`, the fork
+that created the row, carried across its execs when the row the fork arm wrote names the
+parent the exec names (a row naming another parent is an earlier occupant's, see
+`es_lineage`); and `image_since`, when the image it carries was recorded. The caches stamp
+each entry with the instant before its process was read and ask `l7_es::exec_newer_than`
+on every hit: the entry is re-read (`l7_es::l7_for_pid`) when the row stood for the process
+at the stamp and its image is newer. A fork row is never newer than anything, nor is a row
+created after the stamp. The exec arm takes the stamp last, right before the insert, so a
+reader stamped between the two is as narrow a window as the insert itself. Details and the
+cost model in `L7.md` ("Re-resolution after an exec").
+
 ## FIM
 
 ### ES as the event source

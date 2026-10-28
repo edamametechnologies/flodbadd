@@ -24,6 +24,13 @@
 // session only from evidence consistent with BOTH of its ends (`l7_endpoints::evidence_end`): the evidence's
 // local address and port are one end of the session, a wildcard address standing only for an address this
 // host owns, and its peer, when known, is the other end. A port number alone is not evidence.
+// Both caches stamp an entry with the instant before its process was read (`resolved_at`). A pid and a start
+// time say the process still runs, not that it still runs the same image: an exec in place keeps both. On a
+// hit, the kernel process table is asked whether it recorded a newer image for the process since
+// (`kernel_image_newer_than`, Endpoint Security only; one table read, no system call), and the entry is
+// re-read from the table when it did (`refresh_after_exec`). Without that, a session whose first packets are
+// seen before its process's EXEC event is processed is resolved from the fork-time row (the forker's image)
+// and keeps it for the life of the flow.
 // - `Cache Cleanup Task`: Periodically removes stale entries from caches (`start_cache_cleanup_task`).
 //
 // Resolution Logic:
@@ -199,6 +206,12 @@ pub struct L7Resolution {
     /// `add_connection_to_resolver_ex`). Bounded by
     /// `MAX_L7_REQUEUE_ROUNDS_DYNAMIC`.
     pub requeue_rounds: usize,
+    /// The instant before the process data `l7` carries was read (a resolver
+    /// round's table refresh, an eager read of the kernel tables). An exec
+    /// the kernel table records after it may have changed the image the
+    /// process runs, and `get_resolved_l7` re-reads the entry
+    /// (`kernel_image_newer_than`).
+    pub resolved_at: Instant,
 }
 
 /// A resolution remembered under its local (port, protocol). It is one
@@ -213,6 +226,10 @@ pub struct ProcessCacheEntry {
     pub termination_time: Option<Instant>,
     pub local_ip: IpAddr,
     pub remote: (IpAddr, u16),
+    /// The instant before `l7` was read from the process (see
+    /// `L7Resolution::resolved_at`). The pid and start time say the process
+    /// still runs; this says whether it is still the image the entry read.
+    pub resolved_at: Instant,
 }
 
 impl ProcessCacheEntry {
@@ -223,6 +240,39 @@ impl ProcessCacheEntry {
             remote: Some(self.remote),
         }
     }
+}
+
+/// Whether a kernel process table records, for the process that was `pid` at
+/// `since`, an image newer than `since`: the process exec'd after a cache
+/// entry read it, and the entry may carry the image it ran before (a child
+/// resolved from its fork-time row carries the forker's). Endpoint Security
+/// records the fact (`l7_es::exec_newer_than`); the eBPF and ETW tables do
+/// not, answer `false`, and their resolutions are served from cache as
+/// before. One table read per cache hit, no system call.
+fn kernel_image_newer_than(pid: u32, since: Instant) -> bool {
+    l7_es::exec_newer_than(pid, since)
+}
+
+/// Re-read `previous.pid` from the kernel table once it has recorded a newer
+/// image for it: image, arguments and lineage as the table holds them now,
+/// which is what the eager path would have resolved had the exec row been
+/// there. The stamp is taken before the read, so an exec the table records
+/// meanwhile is seen on the next hit. The sensitive open files of the
+/// previous read are kept, as on every re-resolution
+/// (`merge_previous_sensitive`). `None` when the table no longer holds the
+/// pid (the process exited): the entry is then served as it was.
+fn refresh_after_exec(previous: &SessionL7) -> Option<(SessionL7, Instant)> {
+    let resolved_at = Instant::now();
+    let mut fresh = l7_es::l7_for_pid(previous.pid)?;
+    fresh.open_files = crate::open_files::merge_sensitive_open_files(
+        std::mem::take(&mut fresh.open_files),
+        &previous.open_files,
+    );
+    debug!(
+        "L7 re-read pid {} after an exec: {} -> {}",
+        previous.pid, previous.process_path, fresh.process_path
+    );
+    Some((fresh, resolved_at))
 }
 
 pub struct FlodbaddL7 {
@@ -359,7 +409,13 @@ impl FlodbaddL7 {
                             sleep(MIN_ROUND_INTERVAL - since).await;
                         }
                     }
-                    last_round_started = Some(Instant::now());
+                    // Every resolution of this round reads the process table
+                    // refreshed below, so this is the instant it is stamped
+                    // with (`L7Resolution::resolved_at`): an exec the kernel
+                    // table records after it is newer than what the round
+                    // read, however late in the round the session is reached.
+                    let round_started = Instant::now();
+                    last_round_started = Some(round_started);
                     {
                         let mut sys = system.write().await;
                         sys.refresh_specifics(refresh_kind);
@@ -462,6 +518,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: Some(l7_ebpf_data),
                                     date: Utc::now(),
                                     retry_count: 0,
@@ -481,6 +538,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: Some(l7_etw_data),
                                     date: Utc::now(),
                                     retry_count: 0,
@@ -520,6 +578,7 @@ impl FlodbaddL7 {
                                         owned_end,
                                         &l7_data,
                                         start_time,
+                                        round_started,
                                         &port_process_cache,
                                     )
                                     .await;
@@ -538,6 +597,7 @@ impl FlodbaddL7 {
                                     l7_map.insert(
                                         connection.clone(),
                                         L7Resolution {
+                                            resolved_at: round_started,
                                             l7: Some(l7_data),
                                             date: Utc::now(),
                                             retry_count: 0,
@@ -574,6 +634,7 @@ impl FlodbaddL7 {
                                 owned_end,
                                 &l7_fast,
                                 start_time_fast,
+                                round_started,
                                 &port_process_cache,
                             )
                             .await;
@@ -582,6 +643,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: Some(l7_fast),
                                     date: Utc::now(),
                                     retry_count: 0,
@@ -634,6 +696,7 @@ impl FlodbaddL7 {
                                 owned_end,
                                 &session_l7_data,
                                 0,
+                                round_started,
                                 &port_process_cache,
                             )
                             .await;
@@ -647,6 +710,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: Some(session_l7_data),
                                     date: Utc::now(),
                                     retry_count: 0,
@@ -717,6 +781,7 @@ impl FlodbaddL7 {
                                     owned_end,
                                     &l7_data,
                                     process_start_time,
+                                    round_started,
                                     &port_process_cache,
                                 )
                                 .await;
@@ -726,6 +791,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: Some(l7_data),
                                     date: Utc::now(),
                                     retry_count: 0,
@@ -787,6 +853,7 @@ impl FlodbaddL7 {
                                             l7_map.insert(
                                                 connection.clone(),
                                                 L7Resolution {
+                                                    resolved_at: round_started,
                                                     l7: None,
                                                     date: Utc::now(),
                                                     retry_count: 1,
@@ -839,6 +906,7 @@ impl FlodbaddL7 {
                                         owned_end,
                                         &l7_data,
                                         process_start_time,
+                                        round_started,
                                         &port_process_cache,
                                     )
                                     .await;
@@ -858,6 +926,7 @@ impl FlodbaddL7 {
                                         l7_map.insert(
                                             connection.clone(),
                                             L7Resolution {
+                                                resolved_at: round_started,
                                                 l7: Some(l7_data),
                                                 date: Utc::now(),
                                                 retry_count: 0,
@@ -892,6 +961,7 @@ impl FlodbaddL7 {
                                         l7_map.insert(
                                             connection.clone(),
                                             L7Resolution {
+                                                resolved_at: round_started,
                                                 l7: Some(l7_data),
                                                 date: Utc::now(),
                                                 retry_count: 0,
@@ -947,6 +1017,7 @@ impl FlodbaddL7 {
                                 l7_map.insert(
                                     connection.clone(),
                                     L7Resolution {
+                                        resolved_at: round_started,
                                         l7: None,
                                         date: Utc::now(),
                                         retry_count: 0, // Start retries from 0
@@ -967,6 +1038,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
+                                    resolved_at: round_started,
                                     l7: None,
                                     date: Utc::now(),
                                     retry_count: 0, // Start retries from 0
@@ -1305,11 +1377,15 @@ impl FlodbaddL7 {
     /// service port included, and to answer any later session on that port:
     /// a LAN probe of 10.0.0.1:80 then attributed every other connection to
     /// a :80 to the prober.
+    ///
+    /// `resolved_at` is the instant before `l7_data` was read from the
+    /// process (`ProcessCacheEntry::resolved_at`).
     async fn update_port_process_cache(
         connection: &Session,
         owned_end: SessionEnd,
         l7_data: &SessionL7,
         process_start_time: u64,
+        resolved_at: Instant,
         port_process_cache: &CustomDashMap<(u16, Protocol), ProcessCacheEntry>,
     ) {
         let (local_ip, port) = owned_end.endpoint(connection);
@@ -1326,8 +1402,17 @@ impl FlodbaddL7 {
                 && entry.local_ip == local_ip
                 && entry.remote == remote
             {
-                entry.value_mut().last_seen = Instant::now();
-                entry.value_mut().hit_count += 1;
+                let entry = entry.value_mut();
+                entry.last_seen = Instant::now();
+                entry.hit_count += 1;
+                // The entry carries the newest read of the process: a read
+                // after an exec in place carries the new image, and a read
+                // older than the entry's (a resolver round that started
+                // before a hit re-read the entry) does not replace it.
+                if resolved_at > entry.resolved_at {
+                    entry.l7 = l7_data.clone();
+                    entry.resolved_at = resolved_at;
+                }
             } else {
                 *entry.value_mut() = ProcessCacheEntry {
                     l7: l7_data.clone(),
@@ -1337,6 +1422,7 @@ impl FlodbaddL7 {
                     termination_time: None,
                     local_ip,
                     remote,
+                    resolved_at,
                 };
             }
         } else {
@@ -1350,6 +1436,7 @@ impl FlodbaddL7 {
                     termination_time: None,
                     local_ip,
                     remote,
+                    resolved_at,
                 },
             );
             debug!("Cached L7 data for port {:?}: {:?}", cache_key, l7_data);
@@ -1440,9 +1527,25 @@ impl FlodbaddL7 {
                 if let Some(mut cached_entry) = port_process_cache.get_mut(key) {
                     if let Some(process) = system.process(Pid::from_u32(pid)) {
                         if process.start_time() == process_start_time {
-                            cached_entry.value_mut().hit_count += 1;
-                            cached_entry.value_mut().last_seen = Instant::now();
-                            cached_entry.value_mut().termination_time = None;
+                            let entry = cached_entry.value_mut();
+                            entry.hit_count += 1;
+                            entry.last_seen = Instant::now();
+                            entry.termination_time = None;
+                            // The same process still runs, but not always
+                            // the same image: an exec in place keeps the
+                            // pid and the start time. When the kernel table
+                            // recorded one after the entry read the process
+                            // (a child read from its fork-time row), the
+                            // entry is re-read from the table instead of
+                            // serving the previous image for the life of
+                            // the flow.
+                            if kernel_image_newer_than(pid, entry.resolved_at) {
+                                if let Some((fresh, resolved_at)) = refresh_after_exec(&entry.l7) {
+                                    entry.l7 = fresh.clone();
+                                    entry.resolved_at = resolved_at;
+                                    return Some((fresh, L7ResolutionSource::CacheHitRunning));
+                                }
+                            }
                             return Some((l7_data, L7ResolutionSource::CacheHitRunning));
                         }
                     }
@@ -1646,6 +1749,10 @@ impl FlodbaddL7 {
             return;
         }
 
+        // Stamped before any table or process is read
+        // (`L7Resolution::resolved_at`).
+        let resolved_at = Instant::now();
+
         // Try kernel-level sources eagerly: if a kernel table already has this
         // connection we can resolve it immediately before the process exits.
         if eager {
@@ -1654,6 +1761,7 @@ impl FlodbaddL7 {
                 self.l7_map.insert(
                     connection.clone(),
                     L7Resolution {
+                        resolved_at,
                         l7: Some(l7_data),
                         date: Utc::now(),
                         retry_count: 0,
@@ -1671,6 +1779,7 @@ impl FlodbaddL7 {
                 self.l7_map.insert(
                     connection.clone(),
                     L7Resolution {
+                        resolved_at,
                         l7: Some(l7_data),
                         date: Utc::now(),
                         retry_count: 0,
@@ -1687,6 +1796,7 @@ impl FlodbaddL7 {
                 self.l7_map.insert(
                     connection.clone(),
                     L7Resolution {
+                        resolved_at,
                         l7: Some(l7_data),
                         date: Utc::now(),
                         retry_count: 0,
@@ -1710,6 +1820,7 @@ impl FlodbaddL7 {
                         HostAddresses::current().local_end_of(connection),
                         &l7_data,
                         start_time,
+                        resolved_at,
                         &self.port_process_cache,
                     )
                     .await;
@@ -1722,6 +1833,7 @@ impl FlodbaddL7 {
                     self.l7_map.insert(
                         connection.clone(),
                         L7Resolution {
+                            resolved_at,
                             l7: Some(l7_data),
                             date: Utc::now(),
                             retry_count: 0,
@@ -1739,6 +1851,7 @@ impl FlodbaddL7 {
         self.l7_map.insert(
             connection.clone(),
             L7Resolution {
+                resolved_at,
                 l7: None,
                 date: Utc::now(),
                 retry_count: 0,
@@ -1761,6 +1874,8 @@ impl FlodbaddL7 {
     /// Try all kernel-level sources (eBPF, ETW, ES+libproc) in priority order.
     /// Returns the first successful resolution and inserts it into `l7_map`.
     fn try_kernel_resolve(&self, connection: &Session) -> Option<L7Resolution> {
+        // Stamped before the tables are read (`L7Resolution::resolved_at`).
+        let resolved_at = Instant::now();
         if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
             Self::enrich_ebpf_l7_from_proc(&mut l7_data);
             let resolution = L7Resolution {
@@ -1770,6 +1885,7 @@ impl FlodbaddL7 {
                 last_retry: None,
                 requeue_rounds: 0,
                 source: L7ResolutionSource::Ebpf,
+                resolved_at,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
             return Some(resolution);
@@ -1783,6 +1899,7 @@ impl FlodbaddL7 {
                 last_retry: None,
                 requeue_rounds: 0,
                 source: L7ResolutionSource::Etw,
+                resolved_at,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
             return Some(resolution);
@@ -1795,6 +1912,7 @@ impl FlodbaddL7 {
                 last_retry: None,
                 requeue_rounds: 0,
                 source: L7ResolutionSource::EndpointSecurity,
+                resolved_at,
             };
             self.l7_map.insert(connection.clone(), resolution.clone());
             return Some(resolution);
@@ -1805,7 +1923,29 @@ impl FlodbaddL7 {
     pub async fn get_resolved_l7(&self, connection: &Session) -> Option<L7Resolution> {
         // Check cached result first
         if let Some(l7) = self.l7_map.get(connection).map(|s| s.value().clone()) {
-            if l7.l7.is_some() {
+            if let Some(data) = &l7.l7 {
+                // Served as resolved, unless the kernel table has since
+                // recorded a newer image for the process: a session whose
+                // first packets were seen before its process's EXEC event
+                // was processed was resolved from the fork-time row, i.e.
+                // to the forker's image, and would keep it for the life of
+                // the flow. One table read per served entry, no system
+                // call; the re-read is what the eager path resolves.
+                if kernel_image_newer_than(data.pid, l7.resolved_at) {
+                    if let Some((fresh, resolved_at)) = refresh_after_exec(data) {
+                        let resolution = L7Resolution {
+                            l7: Some(fresh),
+                            date: Utc::now(),
+                            retry_count: 0,
+                            last_retry: None,
+                            requeue_rounds: 0,
+                            source: L7ResolutionSource::EndpointSecurity,
+                            resolved_at,
+                        };
+                        self.l7_map.insert(connection.clone(), resolution.clone());
+                        return Some(resolution);
+                    }
+                }
                 return Some(l7);
             }
             // Parked after max retries: `rearm_failed_resolution` decides
@@ -1876,6 +2016,7 @@ impl FlodbaddL7 {
             self.l7_map.insert(
                 connection.clone(),
                 L7Resolution {
+                    resolved_at: Instant::now(),
                     l7: None,
                     date: Utc::now(),
                     retry_count: 1,
@@ -2863,6 +3004,7 @@ mod tests {
 
     fn failed_resolution(last_retry: Option<Instant>, requeue_rounds: usize) -> L7Resolution {
         L7Resolution {
+            resolved_at: Instant::now(),
             l7: None,
             date: Utc::now(),
             retry_count: *MAX_L7_RETRIES_DYNAMIC + 1,
@@ -3092,6 +3234,7 @@ mod tests {
                 termination_time: None,
                 local_ip: IpAddr::from_str("192.168.1.100").unwrap(),
                 remote: (IpAddr::from_str("93.184.216.34").unwrap(), 80),
+                resolved_at: Instant::now(),
             },
         );
 
@@ -3401,8 +3544,15 @@ mod tests {
 
         // The daemon's own connection on local port 41000 to its backend.
         let daemon = session(Protocol::TCP, ("10.0.0.4", 41000), ("52.1.2.3", 443));
-        FlodbaddL7::update_port_process_cache(&daemon, SessionEnd::Src, &l7, start_time, &cache)
-            .await;
+        FlodbaddL7::update_port_process_cache(
+            &daemon,
+            SessionEnd::Src,
+            &l7,
+            start_time,
+            Instant::now(),
+            &cache,
+        )
+        .await;
 
         // WALinuxAgent later gets 41000 for the WireServer: not the daemon's.
         assert!(FlodbaddL7::try_resolve_from_cache(
@@ -3420,6 +3570,213 @@ mod tests {
             hit.map(|(l7, source)| (l7.pid, source)),
             Some((pid, L7ResolutionSource::CacheHitRunning))
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Re-resolution after an exec. A child forked by a daemon carries the
+    // daemon's image in the kernel process table until its EXEC event is
+    // processed; a session resolved in between is attributed to that image.
+    // Once the table records the exec, the cached entry is re-read. The
+    // table is the test's own (`l7_es::isolated_table_for_tests`), read
+    // through the same functions the kernel table is.
+    // ---------------------------------------------------------------
+
+    /// The daemon that forks the child.
+    const FORKER_PID: u32 = 4_000_000;
+
+    /// The child's fork row: the forker's image, the forker as parent.
+    fn fork_time_image(pid: u32) -> SessionL7 {
+        SessionL7 {
+            pid,
+            process_name: "stand-in-daemon".to_string(),
+            process_path: "/opt/stand-in/daemon".to_string(),
+            parent_pid: Some(FORKER_PID),
+            parent_process_name: "stand-in-daemon".to_string(),
+            parent_process_path: "/opt/stand-in/daemon".to_string(),
+            ..SessionL7::default()
+        }
+    }
+
+    /// The child's exec row: its own image, the same parent.
+    fn exec_image(pid: u32) -> SessionL7 {
+        SessionL7 {
+            pid,
+            process_name: "curl".to_string(),
+            process_path: "/usr/bin/curl".to_string(),
+            cmd: vec!["curl".to_string(), "https://example.invalid/".to_string()],
+            parent_pid: Some(FORKER_PID),
+            parent_process_name: "stand-in-daemon".to_string(),
+            parent_process_path: "/opt/stand-in/daemon".to_string(),
+            ..SessionL7::default()
+        }
+    }
+
+    /// The port cache: the entry is validated by pid and start time, both
+    /// unchanged by an exec in place, so it answered `CacheHitRunning` with
+    /// the fork-time image forever. A newer exec in the table re-reads it;
+    /// the re-read entry is then served from cache again.
+    #[tokio::test]
+    async fn port_cache_hit_is_re_read_after_a_newer_exec() {
+        let _table = l7_es::isolated_table_for_tests();
+        let system = own_process_system();
+        let pid = std::process::id();
+        let start_time = system
+            .process(Pid::from_u32(pid))
+            .expect("test process enumerable")
+            .start_time();
+        let cache = CustomDashMap::new("test_port_process_cache_exec");
+        let egress = session(Protocol::TCP, ("10.0.0.4", 41000), ("52.1.2.3", 443));
+
+        // The child's first connection is resolved from its fork row.
+        l7_es::record_fork_for_tests(pid, fork_time_image(pid));
+        sleep(Duration::from_millis(2)).await;
+        FlodbaddL7::update_port_process_cache(
+            &egress,
+            SessionEnd::Src,
+            &fork_time_image(pid),
+            start_time,
+            Instant::now(),
+            &cache,
+        )
+        .await;
+        let hit = FlodbaddL7::try_resolve_from_cache(&egress, &cache, &system, &host()).await;
+        assert_eq!(
+            hit.map(|(l7, source)| (l7.process_path, source)),
+            Some((
+                "/opt/stand-in/daemon".to_string(),
+                L7ResolutionSource::CacheHitRunning
+            )),
+            "no exec recorded yet: the fork-time image is served"
+        );
+
+        // The EXEC event is processed after the entry was resolved.
+        sleep(Duration::from_millis(2)).await;
+        l7_es::record_exec_for_tests(pid, exec_image(pid));
+        let before = cache
+            .get(&(41000, Protocol::TCP))
+            .map(|e| e.resolved_at)
+            .expect("entry present");
+        let hit = FlodbaddL7::try_resolve_from_cache(&egress, &cache, &system, &host()).await;
+        let (l7, source) = hit.expect("the entry still answers its conversation");
+        assert_eq!(source, L7ResolutionSource::CacheHitRunning);
+        assert_eq!(l7.pid, pid);
+        assert_eq!(l7.process_path, "/usr/bin/curl");
+        assert_eq!(l7.process_name, "curl");
+        assert_eq!(l7.parent_process_path, "/opt/stand-in/daemon");
+        let entry = cache.get(&(41000, Protocol::TCP)).expect("entry present");
+        assert_eq!(entry.l7.process_path, "/usr/bin/curl");
+        assert!(
+            entry.resolved_at > before,
+            "the entry is stamped by its re-read"
+        );
+        assert_eq!(
+            entry.process_start_time, start_time,
+            "the process validation is untouched"
+        );
+        drop(entry);
+
+        // Re-read once: the next hit is served from the cache as it stands.
+        let stamped = cache
+            .get(&(41000, Protocol::TCP))
+            .map(|e| e.resolved_at)
+            .expect("entry present");
+        let hit = FlodbaddL7::try_resolve_from_cache(&egress, &cache, &system, &host()).await;
+        assert_eq!(
+            hit.map(|(l7, _)| l7.process_path),
+            Some("/usr/bin/curl".to_string())
+        );
+        assert_eq!(
+            cache.get(&(41000, Protocol::TCP)).map(|e| e.resolved_at),
+            Some(stamped)
+        );
+    }
+
+    /// The session map: a resolved entry is served as is for its lifetime
+    /// (five minutes), so a session resolved from the fork row kept the
+    /// forker's image on every read. A newer exec in the table re-reads it
+    /// and replaces the entry; a later occupant of the pid does not.
+    #[tokio::test]
+    async fn resolved_session_is_re_read_after_a_newer_exec() {
+        let _table = l7_es::isolated_table_for_tests();
+        let flodbadd_l7 = FlodbaddL7::new();
+        let pid = 4_000_020;
+        let egress = session(Protocol::TCP, ("10.0.0.4", 41001), ("52.1.2.3", 443));
+
+        l7_es::record_fork_for_tests(pid, fork_time_image(pid));
+        sleep(Duration::from_millis(2)).await;
+        let resolved_at = Instant::now();
+        let mut previous = fork_time_image(pid);
+        previous.open_files = vec!["/Users/u/.aws/credentials".to_string()];
+        flodbadd_l7.l7_map.insert(
+            egress.clone(),
+            L7Resolution {
+                l7: Some(previous),
+                date: Utc::now(),
+                retry_count: 0,
+                last_retry: None,
+                requeue_rounds: 0,
+                source: L7ResolutionSource::EndpointSecurity,
+                resolved_at,
+            },
+        );
+        let served = flodbadd_l7.get_resolved_l7(&egress).await.unwrap();
+        assert_eq!(
+            served.l7.as_ref().map(|l7| l7.process_path.as_str()),
+            Some("/opt/stand-in/daemon"),
+            "no exec recorded yet: the entry is served as resolved"
+        );
+
+        sleep(Duration::from_millis(2)).await;
+        l7_es::record_exec_for_tests(pid, exec_image(pid));
+        let served = flodbadd_l7.get_resolved_l7(&egress).await.unwrap();
+        let l7 = served.l7.expect("still resolved");
+        assert_eq!(l7.process_path, "/usr/bin/curl");
+        assert_eq!(l7.cmd[0], "curl");
+        assert_eq!(l7.parent_process_path, "/opt/stand-in/daemon");
+        assert_eq!(
+            l7.open_files,
+            vec!["/Users/u/.aws/credentials".to_string()],
+            "sensitive open files of the previous read are kept"
+        );
+        assert_eq!(served.source, L7ResolutionSource::EndpointSecurity);
+        assert!(served.resolved_at > resolved_at);
+        let stored = flodbadd_l7.l7_map.get(&egress).unwrap();
+        assert_eq!(
+            stored.l7.as_ref().map(|l7| l7.process_path.as_str()),
+            Some("/usr/bin/curl"),
+            "the map entry is replaced, not only the answer"
+        );
+        drop(stored);
+
+        // A fork row written after the entry is another occupant of the
+        // pid: the entry is not re-read from it, nor from that occupant's
+        // exec.
+        let other = session(Protocol::TCP, ("10.0.0.4", 41002), ("52.1.2.3", 443));
+        let resolved_at = Instant::now();
+        flodbadd_l7.l7_map.insert(
+            other.clone(),
+            L7Resolution {
+                l7: Some(exec_image(pid)),
+                date: Utc::now(),
+                retry_count: 0,
+                last_retry: None,
+                requeue_rounds: 0,
+                source: L7ResolutionSource::EndpointSecurity,
+                resolved_at,
+            },
+        );
+        sleep(Duration::from_millis(2)).await;
+        l7_es::record_fork_for_tests(pid, fork_time_image(pid));
+        sleep(Duration::from_millis(2)).await;
+        let mut occupant = exec_image(pid);
+        occupant.process_path = "/usr/bin/python3".to_string();
+        l7_es::record_exec_for_tests(pid, occupant);
+        let served = flodbadd_l7.get_resolved_l7(&other).await.unwrap();
+        assert_eq!(
+            served.l7.as_ref().map(|l7| l7.process_path.as_str()),
+            Some("/usr/bin/curl")
+        );
+        assert_eq!(served.resolved_at, resolved_at);
     }
 
     #[tokio::test]
@@ -3441,8 +3798,15 @@ mod tests {
         let probe = session(Protocol::TCP, ("10.0.0.4", 41001), ("10.0.0.1", 80));
         let lan_dns = session(Protocol::UDP, ("10.0.0.4", 50001), ("10.0.0.1", 53));
         for s in [&probe, &lan_dns] {
-            FlodbaddL7::update_port_process_cache(s, SessionEnd::Src, &l7, start_time, &cache)
-                .await;
+            FlodbaddL7::update_port_process_cache(
+                s,
+                SessionEnd::Src,
+                &l7,
+                start_time,
+                Instant::now(),
+                &cache,
+            )
+            .await;
         }
         assert!(!cache.contains_key(&(80, Protocol::TCP)));
         assert!(!cache.contains_key(&(53, Protocol::UDP)));
@@ -3466,8 +3830,15 @@ mod tests {
         // A local web server's inbound conversation is keyed by :80, at this
         // host's address; it does not answer a connection to a remote :80.
         let inbound = session(Protocol::TCP, ("203.0.113.9", 51000), ("10.0.0.4", 80));
-        FlodbaddL7::update_port_process_cache(&inbound, SessionEnd::Dst, &l7, start_time, &cache)
-            .await;
+        FlodbaddL7::update_port_process_cache(
+            &inbound,
+            SessionEnd::Dst,
+            &l7,
+            start_time,
+            Instant::now(),
+            &cache,
+        )
+        .await;
         assert!(FlodbaddL7::try_resolve_from_cache(
             &wireserver_http(41002),
             &cache,
