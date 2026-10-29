@@ -1237,8 +1237,45 @@ impl DeviceInfo {
             }
         }
 
+        Self::release_addresses_of_other_nics(devices);
+
         debug!("Total devices after merge: {}", devices.len());
         landed
+    }
+
+    /// An IPv4 address that is a record's current primary address belongs to
+    /// that NIC: it leaves every other record whose burned-in MACs say it is a
+    /// different NIC. A host with several interfaces announces all its
+    /// addresses under one mDNS name, so each NIC record could otherwise carry
+    /// the others' addresses (from this node's mDNS view or from a peer's
+    /// shared record), and so could the previous tenant of a reused address.
+    /// Records are only edited in place, never removed, so merge indices hold.
+    pub fn release_addresses_of_other_nics(devices: &mut [DeviceInfo]) {
+        let owners: Vec<(Ipv4Addr, usize)> = devices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, device)| match device.ip_address {
+                IpAddr::V4(v4) if is_identity_bearing_ipv4(&v4) => Some((v4, index)),
+                _ => None,
+            })
+            .collect();
+        for (address, owner) in owners {
+            for index in 0..devices.len() {
+                if index == owner
+                    || devices[index].ip_address == IpAddr::V4(address)
+                    || !devices[index]
+                        .ip_addresses_v4
+                        .iter()
+                        .any(|entry| entry.address == address)
+                    || !Self::has_universal_mac_conflict(&devices[index], &devices[owner])
+                {
+                    continue;
+                }
+                devices[index]
+                    .ip_addresses_v4
+                    .retain(|entry| entry.address != address);
+            }
+        }
     }
 
     /// Both records carry burned-in (universally administered, non-group)
@@ -6655,6 +6692,61 @@ mod tests {
         let c = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 92))));
         assert!(!DeviceInfo::has_universal_mac_conflict(&a, &c));
         assert!(!DeviceInfo::has_conflicting_characteristics(&a, &c));
+    }
+
+    /// One host, two interfaces (a TV on Ethernet and Wi-Fi): two burned-in
+    /// MACs, so two records, but each had been handed both addresses from the
+    /// host's mDNS record (or a peer's copy of it). Each keeps its own.
+    #[test]
+    fn a_nic_record_releases_the_address_another_nic_holds_as_primary() {
+        let now = Utc::now();
+        let eth = Ipv4Addr::new(192, 168, 1, 59);
+        let wifi = Ipv4Addr::new(192, 168, 1, 175);
+        let record = |own: Ipv4Addr, other: Ipv4Addr, last: u8| {
+            let mut d = DeviceInfo::new(Some(IpAddr::V4(own)));
+            d.hostname = "Android-2.local".to_string();
+            d.add_ipv4_entry(own, now);
+            d.add_ipv4_entry(other, now - chrono::Duration::minutes(30));
+            d.set_mac_address_with_timestamp(
+                MacAddr6::new(0x8c, 0x97, 0xea, 0x0f, 0xdd, last),
+                vec![],
+                now,
+            );
+            d
+        };
+        let mut devices = vec![record(eth, wifi, 0xfe), record(wifi, eth, 0xff)];
+
+        DeviceInfo::merge_vec(&mut devices, &Vec::new());
+
+        assert_eq!(devices.len(), 2, "two burned-in MACs stay two records");
+        let addresses = |d: &DeviceInfo| -> Vec<Ipv4Addr> {
+            d.ip_addresses_v4.iter().map(|e| e.address).collect()
+        };
+        assert_eq!(addresses(&devices[0]), vec![eth]);
+        assert_eq!(addresses(&devices[1]), vec![wifi]);
+    }
+
+    /// Without a burned-in MAC on both sides nothing says the address changed
+    /// hands, so the history stays.
+    #[test]
+    fn an_address_without_mac_evidence_stays_in_the_history() {
+        let now = Utc::now();
+        let old = Ipv4Addr::new(192, 168, 1, 81);
+        let mut speaker = DeviceInfo::new(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 105))));
+        speaker.hostname = "Sonos-542A1BD321D6.local".to_string();
+        speaker.add_ipv4_entry(old, now - chrono::Duration::days(3));
+        speaker.set_mac_address_with_timestamp(
+            MacAddr6::new(0x54, 0x2a, 0x1b, 0xd3, 0x21, 0xd6),
+            vec![],
+            now,
+        );
+        let mut other = DeviceInfo::new(Some(IpAddr::V4(old)));
+        other.hostname = "Sonos-B8E937664A32.local".to_string();
+        let mut devices = vec![speaker, other];
+
+        DeviceInfo::release_addresses_of_other_nics(&mut devices);
+
+        assert!(devices[0].ip_addresses_v4.iter().any(|e| e.address == old));
     }
 
     #[test]
