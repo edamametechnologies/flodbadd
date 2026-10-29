@@ -190,6 +190,11 @@ pub enum FimMode {
 pub struct FimConfig {
     pub hash_size_threshold: u64,
     pub recursive: bool,
+    /// A directory of the process's own, watched next to the roots, where
+    /// the delivery probe creates its files ([`crate::fim_delivery`]). Not a
+    /// temp, sensitive or operator root, so another file monitor on the host
+    /// drops its events. `None`: delivery is not probed.
+    pub delivery_probe_dir: Option<PathBuf>,
 }
 
 impl Default for FimConfig {
@@ -197,6 +202,7 @@ impl Default for FimConfig {
         Self {
             hash_size_threshold: FIM_HASH_SIZE_THRESHOLD,
             recursive: true,
+            delivery_probe_dir: None,
         }
     }
 }
@@ -277,6 +283,8 @@ pub struct FimWatcher {
     store: Arc<FimEventStore>,
     watch_paths: Vec<PathBuf>,
     running: Arc<AtomicBool>,
+    /// The delivery probe, or why there is none.
+    delivery: std::result::Result<Arc<crate::fim_delivery::DeliveryProbe>, String>,
     /// Wall-clock time of the last `get_events(incremental=true)` call.
     /// Mirrors `FlodbaddCapture::last_get_sessions_fetch_timestamp`. The next
     /// incremental call returns only events whose `last_modified` is strictly
@@ -440,6 +448,11 @@ impl FimWatcher {
         #[cfg(not(target_os = "macos"))]
         let es_source = false;
 
+        let mut delivery = match config.delivery_probe_dir.as_deref() {
+            Some(dir) => crate::fim_delivery::DeliveryProbe::prepare(dir),
+            None => Err("no probe directory configured".to_string()),
+        };
+
         let mut actual_paths = Vec::new();
         {
             // Every root in one batch. On macOS each `watch` restarts the
@@ -473,6 +486,14 @@ impl FimWatcher {
                     actual_paths.push(path.clone());
                 }
             }
+            // The probe directory rides the same stream as the roots.
+            if !es_source && !actual_paths.is_empty() {
+                if let Ok(probe) = &delivery {
+                    if let Err(e) = batch.add(probe.dir(), RecursiveMode::NonRecursive) {
+                        delivery = Err(format!("{}: {}", probe.dir().display(), e));
+                    }
+                }
+            }
             if let Err(e) = batch.commit() {
                 // Nothing is watched: report no root, as a root whose own
                 // `watch` failed was dropped before the batch.
@@ -483,7 +504,20 @@ impl FimWatcher {
 
         if actual_paths.is_empty() {
             warn!("FIM: no valid watch paths, watcher started but inactive");
+            delivery = Err("no root is watched".to_string());
         }
+
+        // The roots the Endpoint Security sink filters on: the watched roots
+        // and the probe directory (not a root the status reports, nor one
+        // the attribution sensors confine to).
+        #[cfg(target_os = "macos")]
+        let es_roots: Vec<PathBuf> = {
+            let mut roots = actual_paths.clone();
+            if let Ok(probe) = &delivery {
+                roots.push(probe.dir().to_path_buf());
+            }
+            roots
+        };
 
         // Publish the roots for the kernel-time attribution sensors BEFORE the
         // event-source decision below, so the Endpoint Security source and the
@@ -494,7 +528,7 @@ impl FimWatcher {
 
         #[cfg(target_os = "macos")]
         if es_source && !actual_paths.is_empty() {
-            match crate::fim_es::install(&actual_paths, config.recursive) {
+            match crate::fim_es::install(&es_roots, config.recursive) {
                 Some(rx) => {
                     info!(
                         "FIM: Endpoint Security is the event source for {} root(s) ({} spellings); FSEvents watcher idle",
@@ -522,6 +556,11 @@ impl FimWatcher {
                             warn!("FIM: failed to watch {}: {}", path.display(), e);
                         }
                     }
+                    if let Ok(probe) = &delivery {
+                        if let Err(e) = batch.add(probe.dir(), RecursiveMode::NonRecursive) {
+                            delivery = Err(format!("{}: {}", probe.dir().display(), e));
+                        }
+                    }
                     if let Err(e) = batch.commit() {
                         warn!("FIM: failed to start watching the roots: {}", e);
                     }
@@ -537,7 +576,7 @@ impl FimWatcher {
         #[cfg(target_os = "macos")]
         if !es_source && !actual_paths.is_empty() && crate::l7_es::es_expected() {
             spawn_fim_es_late_takeover(
-                actual_paths.clone(),
+                es_roots.clone(),
                 config.recursive,
                 store.clone(),
                 running.clone(),
@@ -555,11 +594,20 @@ impl FimWatcher {
         #[cfg(all(target_os = "linux", feature = "ebpf"))]
         crate::fim_fanotify::init(&actual_paths);
 
+        match &delivery {
+            Ok(probe) => {
+                probe.spawn_writer(running.clone());
+                info!("FIM: delivery probe in {}", probe.dir().display());
+            }
+            Err(reason) => debug!("FIM: delivery not probed: {}", reason),
+        }
+
         Ok(Self {
             _watcher: watcher,
             store,
             watch_paths: actual_paths,
             running,
+            delivery,
             last_get_file_events_fetch_timestamp: Arc::new(CustomRwLock::new(Utc::now())),
             #[cfg(target_os = "windows")]
             _hash_worker: hash_worker,
@@ -594,8 +642,19 @@ impl FimWatcher {
         &self.watch_paths
     }
 
+    /// The watcher was started and not stopped. Says nothing about whether
+    /// events still arrive: [`FimWatcher::delivery_status`] does.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    /// Whether file events reach this watcher, measured by its delivery
+    /// probe ([`crate::fim_delivery`]).
+    pub fn delivery_status(&self) -> crate::fim_delivery::FimDeliveryStatus {
+        match &self.delivery {
+            Ok(probe) => probe.status(),
+            Err(reason) => crate::fim_delivery::FimDeliveryStatus::not_probed(reason.clone()),
+        }
     }
 
     /// Clone the cursor handle (`Arc<CustomRwLock<DateTime<Utc>>>`) so callers can
@@ -819,6 +878,13 @@ fn translate_notify_event_with_attribution(
     #[cfg(target_os = "windows")]
     let _ = hash_threshold;
 
+    // The delivery probe's own files: counted as delivered, never stored
+    // (whatever the kind: a create may come back as an access or a metadata
+    // change on some backends).
+    if !event.paths.is_empty() && event.paths.iter().all(|p| crate::fim_delivery::observe(p)) {
+        return None;
+    }
+
     let event_type = match &event.kind {
         EventKind::Create(_) => FimEventType::Create,
         EventKind::Modify(modify_kind) => match modify_kind {
@@ -848,6 +914,9 @@ fn translate_notify_event_with_attribution(
         #[cfg(target_os = "windows")]
         let path: &Path = folded.as_path();
         let path_str = path.to_string_lossy().to_string();
+        if crate::fim_delivery::observe(path) {
+            continue;
+        }
 
         // Early-drop: skip hashing, attribution, and store insertion for
         // events that fall outside the sensitive / temp / explicit-watch
@@ -2595,6 +2664,55 @@ mod tests {
             events.iter().map(|e| &e.path).collect::<Vec<_>>()
         );
 
+        watcher.stop();
+    }
+
+    #[test]
+    fn test_delivery_probe_events_come_back_and_stay_out_of_the_store() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let probe_dir = tempfile::tempdir().expect("create probe dir");
+        let config = FimConfig {
+            recursive: true,
+            delivery_probe_dir: Some(probe_dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let watcher =
+            FimWatcher::start(vec![temp.path().to_path_buf()], config).expect("start watcher");
+        // The probe directory is not a root the status reports.
+        assert_eq!(watcher.watch_paths().len(), 1);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut status = watcher.delivery_status();
+        while status.probes_seen == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            status = watcher.delivery_status();
+        }
+        assert!(status.probes_written >= 1, "no probe written: {status:?}");
+        assert!(
+            status.probes_seen >= 1,
+            "the probe's event never came back: {status:?}"
+        );
+        assert!(matches!(
+            status.verdict(Utc::now()),
+            crate::fim_delivery::FimDeliveryVerdict::Delivering { .. }
+        ));
+        assert!(
+            watcher
+                .store()
+                .get_all_events()
+                .iter()
+                .all(|e| !e.path.contains("edamame-fim-probe-")),
+            "probe events must not reach the store"
+        );
+
+        // Without a probe directory, delivery is not measured.
+        let unprobed = FimWatcher::start(vec![temp.path().to_path_buf()], FimConfig::default())
+            .expect("start watcher");
+        assert!(matches!(
+            unprobed.delivery_status().verdict(Utc::now()),
+            crate::fim_delivery::FimDeliveryVerdict::NotProbed(_)
+        ));
+        unprobed.stop();
         watcher.stop();
     }
 

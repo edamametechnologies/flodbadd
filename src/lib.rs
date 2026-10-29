@@ -36,6 +36,12 @@ pub mod fim;
 /// Always compiled: the sensors that consult it are gated on independent
 /// features, and a predicate that vanishes under a `#[cfg]` stops confining.
 pub mod fim_attribution;
+/// The file monitor's delivery probe: whether events still reach the watcher.
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    feature = "fim"
+))]
+pub mod fim_delivery;
 /// Endpoint Security as the FIM event source (macOS): the ES handler hands
 /// file events under the FIM roots, writer attached, to the watcher.
 #[cfg(all(target_os = "macos", feature = "fim"))]
