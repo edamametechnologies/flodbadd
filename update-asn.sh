@@ -42,6 +42,26 @@ download_asn "$V6_URL" "$TMP_DIR/ip2asn-v6.tsv"
 V6_LINES=$(wc -l < "$TMP_DIR/ip2asn-v6.tsv" | tr -d ' ')
 echo "  $V6_LINES entries"
 
+# Whitelist endpoints match a session's AS owner exactly (`as_owner`; learned
+# custom whitelists carry it), so a refresh that renames owners changes what
+# every stored whitelist matches. iptoasn.com did that on 2026-11-02 (AS174's
+# "COGENT-174" became "COGENT-174 - Cogent Communications, LLC", and many
+# handles changed). When an owner the tests anchor on (src/asn.rs) is not the
+# one they expect, keep the current databases: adopting a renamed source is a
+# decision that comes with a migration of the stored whitelists, not a refresh.
+anchor_matches() {
+    awk -F'\t' -v as="$2" -v cc="$3" -v own="$4" \
+        '$3 == as && $4 == cc && $5 == own { found = 1; exit } END { exit !found }' "$1"
+}
+if ! anchor_matches "$TMP_DIR/ip2asn-v4.tsv" 174 US "COGENT-174" \
+    || ! anchor_matches "$TMP_DIR/ip2asn-v4.tsv" 33191 US "NOTION" \
+    || ! anchor_matches "$TMP_DIR/ip2asn-v6.tsv" 2500 JP "WIDE-BB WIDE Project"; then
+    echo "WARNING: the downloaded ASN data renames the owners the tests anchor on" >&2
+    echo "  (AS174, AS33191, AS2500): whitelists that match as_owner would change." >&2
+    echo "  Keeping the current src/asn_v4_db.rs and src/asn_v6_db.rs." >&2
+    exit 0
+fi
+
 echo "Writing src/asn_v4_db.rs..."
 {
   printf 'pub static ASN_V4_DB: &str = r###"\n'
