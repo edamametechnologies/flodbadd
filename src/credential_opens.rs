@@ -1,5 +1,5 @@
 // BS-10: remember which process opened a cold credential file, after the
-// descriptor is closed (edamame_core/INPROCESS-KEY-THEFT.md, change 1).
+// descriptor is closed (edamame_core/docs/ai-security/17-case-studies.md, change 1).
 //
 // The open-file poll only sees a credential file while it is held open. An
 // in-process stealer (the @solana/web3.js 1.95.6 shape) reads the key and

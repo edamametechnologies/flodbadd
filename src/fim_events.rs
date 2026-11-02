@@ -41,7 +41,7 @@ pub struct FimEvent {
     /// ES / fanotify / ETW FileIo tables, live lsof). `None` = unmeasured
     /// (cache hits, parent-directory open-handle probes). Lets the
     /// detector join the writer to its kernel exec record by pid instead of
-    /// by image path (DETECTIONGAPSPLAN-2026-09 Inc 6.4 / N-03).
+    /// by image path (the 2026-09-09 detection-gap plan, edamame_core/docs/ai-security/24-evolution.md Inc 6.4 / N-03).
     /// `#[serde(default)]`: the helper ships events to an app that may be one
     /// release behind during an upgrade (same precedent as `last_modified`);
     /// a missing pid reads as unmeasured, never as a fabricated value.

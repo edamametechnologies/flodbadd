@@ -2,7 +2,7 @@
 //! (`FimEventStore::has_suspicious_events_with`) and the edamame_core
 //! attack-pattern detector. Always compiled (no `fim` / OS gate) so every
 //! consumer -- including mobile targets that carry no FIM engine -- links
-//! the same function (DETECTIONGAPSPLAN-2026-09 Inc 6.8 / B-02; same shape
+//! the same function (the 2026-09-09 detection-gap plan, edamame_core/docs/ai-security/24-evolution.md Inc 6.8 / B-02; same shape
 //! as `dns_patterns`).
 
 /// Platform temp roots every consumer agrees on. The CloudModel adds

@@ -77,7 +77,7 @@ runners, and eliminates wasted I/O on Linux/macOS. The vulnerability
 detector only consumes `FimEvent.hash` for change-tracking of *sensitive*
 findings -- non-sensitive hash values are never alerted on, so the gate
 is lossless from the detector's perspective. See
-`../edamame_core/FALSEPOSITIVES.md` § FP-CI-2 for the case study.
+[`registry/ci.md`](../edamame_core/docs/ai-security/registry/ci.md#fp-ci-2) § FP-CI-2 for the case study.
 
 ## Data Flow
 

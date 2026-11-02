@@ -12,7 +12,7 @@
 // Nothing in this module blocks, authorizes, or calls out (no I/O, no
 // RPC, no LLM) -- it is a bounded in-memory ring plus atomic counters.
 //
-// Invariant I5 (VISIBILITYIMPROVEMENTS.md): argv routinely carries
+// Invariant I5 (edamame_core/docs/ai-security/06-agent-visibility-and-telemetry.md): argv routinely carries
 // secrets, so raw argv NEVER enters the ring -- only a SHA-256 digest
 // and the argument count. The per-process tables that some backends
 // keep for attribution (e.g. `EsProcessInfo.args`) are separate,
@@ -97,7 +97,7 @@ pub struct ProcessEvent {
     /// a kernel fact -- `is_platform_binary` stays `None` on such events so
     /// no benign credit can derive from a path. Consumers may use it only
     /// as a ring pre-filter hint and only when no measured publisher
-    /// verdict exists (DETECTIONGAPSPLAN-2026-09 Inc 6.1 / N-01).
+    /// verdict exists (the 2026-09-09 detection-gap plan, edamame_core/docs/ai-security/24-evolution.md Inc 6.1 / N-01).
     pub platform_path_marked: bool,
     /// `TaskAccess` only: the victim process.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -471,7 +471,7 @@ started by bare name (`wmic ...`) and gone before its Start event was handled
 kept `WMIC.exe`. That is not path-marked as OS-shipped, so its READ opens
 reached the detector: the `edamame_cli` Windows gate graded `WMIC.exe` reading
 `Runner.Worker.exe` CRITICAL on every run since 2026-09-30 (FP-CI-20 in
-`edamame_core/FALSEPOSITIVES.md`).
+[`registry/README.md`](../edamame_core/docs/ai-security/registry/README.md)).
 
 Session A now takes `EVENT_TRACE_FLAG_IMAGE_LOAD`. The first program image
 (`.exe`) mapped into a process is its own, logged as the process is created,
