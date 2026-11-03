@@ -181,7 +181,16 @@ mod win {
     // the kernel `FileObject` pointer, so a later FileIo/Write on that
     // object can be attributed to the writer's path. Bounded; entries die
     // at Cleanup/Close or after `FILE_OBJECT_TTL_SECS`.
-    const FILE_OBJECT_MAX_ENTRIES: usize = 16_384;
+    //
+    // 2.3.2: only objects under a FIM watch root are remembered, and a full
+    // table evicts its oldest entries instead of refusing the new one. Until
+    // then every FileIo/Create on the machine took a slot and a full table
+    // dropped the newest object, the one about to be written: on a busy host
+    // the write or rename that followed found no path, and about one Chrome
+    // store write in a hundred reached the detector with no writer (shiawase,
+    // 2026-11-03: 2,168 of 2,186 attributed), each one a CRITICAL
+    // unknown-writer finding on a credential store.
+    const FILE_OBJECT_MAX_ENTRIES: usize = 65_536;
     const FILE_OBJECT_TTL_SECS: u64 = 120;
 
     // Provider GUIDs
@@ -2172,6 +2181,12 @@ mod win {
     }
 
     fn remember_file_object(file_object: u64, path: String) {
+        // Only the objects a FIM lookup can ever ask about: the attribution
+        // tables are confined to the watch roots (`record_file_actor`), so a
+        // file object elsewhere would only crowd this table.
+        if !crate::fim_attribution::is_attributable(&path) {
+            return;
+        }
         THREAD_FILE_OBJECTS.with(|objects| {
             let mut objects = objects.borrow_mut();
             if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
@@ -2180,7 +2195,15 @@ mod win {
                     cutoff.duration_since(*seen).as_secs() < FILE_OBJECT_TTL_SECS
                 });
                 if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
-                    return;
+                    // Still full of live objects: make room by dropping the
+                    // oldest tenth. The newest object is the one whose write
+                    // is about to arrive.
+                    let mut by_age: Vec<(u64, Instant)> =
+                        objects.iter().map(|(k, (_, seen))| (*k, *seen)).collect();
+                    by_age.sort_by_key(|(_, seen)| *seen);
+                    for (key, _) in by_age.iter().take(FILE_OBJECT_MAX_ENTRIES / 10) {
+                        objects.remove(key);
+                    }
                 }
             }
             objects.insert(file_object, (path, Instant::now()));
