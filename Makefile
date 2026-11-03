@@ -90,13 +90,13 @@ macos_benchmark: macos_codesign_es
 	sudo -E "$(BENCH_BIN)" --nocapture
 
 macos_benchmark_no_es:
-	sudo -E cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
+	sudo -E env $(ROOT_CARGO_ENV) cargo test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
 
 linux_benchmark: ebpf_setup
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf --test l7_benchmark_test -- --nocapture
+	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf --test l7_benchmark_test -- --nocapture
 
 linux_benchmark_no_ebpf:
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
+	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture --test l7_benchmark_test -- --nocapture
 
 # FIM Attribution Benchmark targets
 macos_fim_benchmark: macos_codesign_es
@@ -104,7 +104,7 @@ macos_fim_benchmark: macos_codesign_es
 	sudo -E "$(BENCH_BIN)" --nocapture
 
 macos_fim_benchmark_no_es:
-	sudo -E cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
+	sudo -E env $(ROOT_CARGO_ENV) cargo test --features fim --test fim_attribution_benchmark_test -- --nocapture
 
 # Setup the environment for eBPF testing
 ebpf_setup:
@@ -128,7 +128,7 @@ linux_test: ebpf_setup
 	@echo "BPF filesystem: $$(mount | grep bpf || echo 'Not mounted')"
 	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim -- --nocapture --test-threads=1
 	@echo "Running the ignored fanotify end-to-end tests (need root, which this target has)..."
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim --lib -- --ignored fanotify --nocapture --test-threads=1
+	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim --lib -- --ignored fanotify --nocapture --test-threads=1
 
 linux_test_no_ebpf:
 	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
@@ -271,7 +271,7 @@ lima_test: lima_start
 		BINARY_PATH=./target/release/examples/check_ebpf ./tests/ebpf_test.sh && \
 		echo "" && \
 		echo "=== Running Full Test Suite ===" && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
+		sudo -E env $(ROOT_CARGO_ENV) \
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf -- --nocapture --test-threads=1 \
 	'
 
@@ -281,7 +281,7 @@ lima_test_ebpf: lima_start
 	limactl shell $(LIMA_VM_NAME) -- bash -c '\
 		cd /Users/flyonnet/Programming/flodbadd && \
 		source $$HOME/.cargo/env && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
+		sudo -E env $(ROOT_CARGO_ENV) \
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf -- --nocapture \
 	'
 
@@ -293,10 +293,10 @@ lima_test_dns_ebpf: lima_start
 		source $$HOME/.cargo/env && \
 		cargo build --release --features packetcapture,asyncpacketcapture,ebpf --examples && \
 		echo "=== DNS eBPF Check ===" && \
-		sudo -E $$HOME/.cargo/bin/cargo run --release --features packetcapture,asyncpacketcapture,ebpf --example check_dns_ebpf && \
+		sudo -E env $(ROOT_CARGO_ENV) $$HOME/.cargo/bin/cargo run --release --features packetcapture,asyncpacketcapture,ebpf --example check_dns_ebpf && \
 		echo "" && \
 		echo "=== DNS eBPF Integration Tests ===" && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
+		sudo -E env $(ROOT_CARGO_ENV) \
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf dns_ebpf -- --nocapture \
 	'
 
@@ -432,7 +432,7 @@ alpine318_test: alpine318_start
 		echo "=== Alpine 3.18 Environment ===" && \
 		echo "Kernel: $$(uname -r)" && \
 		cat /etc/alpine-release && \
-		sudo -E RUSTUP_HOME=$$HOME/.rustup CARGO_HOME=$$HOME/.cargo \
+		sudo -E env $(ROOT_CARGO_ENV) \
 			$$HOME/.cargo/bin/cargo test --features packetcapture,asyncpacketcapture,ebpf test_ebpf_availability -- --nocapture \
 	'
 
