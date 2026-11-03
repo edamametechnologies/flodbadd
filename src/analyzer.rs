@@ -62,7 +62,7 @@ async fn await_join_with_timeout<T>(
 ///     `Duration` (session duration), `Bytes` (total bytes transferred), `Packets` (total packets),
 ///     `SegmentInterarrival` (timing), `InOutRatio` (inbound/outbound ratio),
 ///     `AvgPacketSize` (average packet size), `InterarrivalRegularity`, `PacketRate`,
-///     `MissedData` (missed bytes), `Segments`, or `DstPort` (destination port)
+///     `MissedData` (missed bytes), `Segments`, or `DstPort` (destination port prevalence in the training window)
 ///   - `descriptor` indicates the type of anomaly: `UnusuallyHigh`, `UnusuallyLow`, `DeviatesFromNorm`, or `Unusual`
 ///
 /// - Multiple unusual features are separated by forward slashes:
@@ -110,8 +110,100 @@ pub const WARMUP_MIN_UNIQUE_SAMPLES: usize = 200;
 // Define the number of features to use by default
 const NUM_FEATURES: usize = 12;
 
+/// Forest hyper-parameters (2.3.2): the paper's defaults rather than 25
+/// trees capped at six splits over 128 points, which quantised every path
+/// length and left the thresholds in the noisiest part of the score range.
+/// Scoring stays a few microseconds; training 100 trees on 256 standardised
+/// points takes milliseconds.
+const FOREST_TREES: usize = 100;
+const FOREST_SAMPLE_SIZE: usize = 256;
+/// The two frequency-encoded columns, recomputed from the window's final
+/// counts at training time (`IsolationForestModel::training_rows`).
+const FEATURE_PROCESS_PREVALENCE: usize = 0;
+const FEATURE_DST_PORT: usize = 11;
+
+/// `ln(count + 1)`: the encoding of a categorical value by how often the
+/// training window saw it. Common values cluster, rare ones isolate.
+fn frequency_encoding(count: u32) -> f64 {
+    (count as f64 + 1.0).ln()
+}
+
 /// Pre-computed mean / std-dev for each feature (None if not computable).
 type FeatureStats = [Option<(f64, f64)>; NUM_FEATURES];
+
+/// Per-feature robust standardisation fitted on the training window: the
+/// median and the scaled median absolute deviation (1.4826 x MAD, the sigma
+/// of a normal distribution). The extended forest's hyperplanes mix every
+/// feature with Gaussian weights, so the features must share a unit; on raw
+/// values the splits followed the widest-ranged columns alone (a port number
+/// against a ratio in 0..1).
+#[derive(Debug, Clone, PartialEq)]
+struct FeatureScaler {
+    center: [f64; NUM_FEATURES],
+    spread: [f64; NUM_FEATURES],
+}
+
+impl FeatureScaler {
+    fn fit(rows: &[[f64; NUM_FEATURES]]) -> Self {
+        let mut center = [0.0; NUM_FEATURES];
+        let mut spread = [1.0; NUM_FEATURES];
+        if rows.is_empty() {
+            return Self { center, spread };
+        }
+        let mut column: Vec<f64> = Vec::with_capacity(rows.len());
+        for i in 0..NUM_FEATURES {
+            column.clear();
+            column.extend(rows.iter().map(|row| row[i]));
+            column.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = quantile_of_sorted(&column, 0.5);
+            let mut deviations: Vec<f64> = column.iter().map(|v| (v - median).abs()).collect();
+            deviations
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mad = quantile_of_sorted(&deviations, 0.5) * 1.4826;
+            // Half the column equal to the median gives a zero MAD: fall back to
+            // the interquartile range, and for a constant column keep 1.0 so a
+            // different value at scoring time still registers as its deviation.
+            let iqr =
+                (quantile_of_sorted(&column, 0.75) - quantile_of_sorted(&column, 0.25)) / 1.349;
+            center[i] = median;
+            spread[i] = if mad > 1e-9 {
+                mad
+            } else if iqr > 1e-9 {
+                iqr
+            } else {
+                1.0
+            };
+        }
+        Self { center, spread }
+    }
+
+    fn apply(&self, x: &[f64; NUM_FEATURES]) -> [f64; NUM_FEATURES] {
+        std::array::from_fn(|i| (x[i] - self.center[i]) / self.spread[i])
+    }
+}
+
+/// Linear-interpolation quantile of an ascending slice.
+fn quantile_of_sorted(sorted: &[f64], q: f64) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        1 => sorted[0],
+        n => {
+            let pos = (n as f64 - 1.0) * q.clamp(0.0, 1.0);
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+        }
+    }
+}
+
+/// What a training run produces: the forest, the scaler it was fitted with,
+/// and the standardised matrix it was trained on. The thresholds are
+/// percentiles of that matrix's scores, so they are consistent with scoring.
+struct TrainedForest {
+    forest: Forest<f64, NUM_FEATURES>,
+    scaler: FeatureScaler,
+    matrix: Vec<[f64; NUM_FEATURES]>,
+}
 
 // Define the Criticality levels as an enum for clarity
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +415,14 @@ struct IsolationForestModel {
     process_names: VecDeque<String>,
     /// Rolling frequency count of each process name in the training window (recent_data)
     process_freq: HashMap<String, u32>,
+    /// Destination ports parallel to recent_data, for the port frequency encoding
+    dst_ports: VecDeque<u16>,
+    /// Rolling frequency count of each destination port in the training window
+    port_freq: HashMap<u16, u32>,
+    /// The scaler fitted with the current forest, applied before every score
+    scaler: Option<FeatureScaler>,
+    /// The standardised matrix the current forest was trained on
+    training_matrix: Vec<[f64; NUM_FEATURES]>,
     /// Per-flow sampling counters used to downsample repeated snapshots from the same flow signature
     per_flow_downsample: CustomDashMap<u64, u32>,
     /// Only 1 out of `downsample_factor` snapshots per flow signature will be kept in `recent_data`
@@ -332,11 +432,8 @@ struct IsolationForestModel {
     /// JoinHandle for the currently running training task (if any).  Only one training task is
     /// allowed at a time.  The flag above remains `true` for as long as this handle is alive and
     /// not finished.
-    training_handle: Option<
-        tokio::task::JoinHandle<
-            Result<Forest<f64, NUM_FEATURES>, extended_isolation_forest::Error>,
-        >,
-    >,
+    training_handle:
+        Option<tokio::task::JoinHandle<Result<TrainedForest, extended_isolation_forest::Error>>>,
     /// Time of last successful model training - used to throttle training frequency
     last_training_time: DateTime<Utc>,
     /// Minimum time between regular trainings (not counting forced retraining)
@@ -368,6 +465,10 @@ impl IsolationForestModel {
             session_cache: CustomDashMap::new("session_cache"),
             process_names: VecDeque::new(),
             process_freq: HashMap::new(),
+            dst_ports: VecDeque::new(),
+            port_freq: HashMap::new(),
+            scaler: None,
+            training_matrix: Vec::new(),
             per_flow_downsample: CustomDashMap::new("per_flow_downsample"),
             downsample_factor: 5,
             training_in_progress: Arc::new(AtomicBool::new(false)),
@@ -393,6 +494,10 @@ impl IsolationForestModel {
         // recent_data buffer: use capacity to reflect reserved space
         bytes = bytes.saturating_add(
             (self.recent_data.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<[f64; NUM_FEATURES]>() as u64),
+        );
+        bytes = bytes.saturating_add(
+            (self.training_matrix.capacity() as u64)
                 .saturating_mul(std::mem::size_of::<[f64; NUM_FEATURES]>() as u64),
         );
         // session_cache: approximate per entry to avoid long DashMap iterators
@@ -471,10 +576,13 @@ impl IsolationForestModel {
             .map(|l7| l7.process_name.clone())
             .unwrap_or_default();
 
-        // Update frequency BEFORE computing features so the current session counts
-        *self.process_freq.entry(process_name.clone()).or_insert(0) += 1;
+        let dst_port = session.session.dst_port;
 
-        let features = compute_features(session, &self.process_freq);
+        // Update the frequencies BEFORE computing features so the current session counts
+        *self.process_freq.entry(process_name.clone()).or_insert(0) += 1;
+        *self.port_freq.entry(dst_port).or_insert(0) += 1;
+
+        let features = compute_features(session, &self.process_freq, &self.port_freq);
 
         if self.recent_data.len() >= self.max_samples {
             self.recent_data.pop_front();
@@ -486,9 +594,49 @@ impl IsolationForestModel {
                     }
                 }
             }
+            if let Some(old_port) = self.dst_ports.pop_front() {
+                if let Some(count) = self.port_freq.get_mut(&old_port) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.port_freq.remove(&old_port);
+                    }
+                }
+            }
         }
         self.recent_data.push_back(features);
         self.process_names.push_back(process_name);
+        self.dst_ports.push_back(dst_port);
+    }
+
+    /// The window's rows with the two frequency columns recomputed from the
+    /// window's final counts. A row inserted early carried the count of that
+    /// moment (the first Chrome snapshot read ln 2, the three-hundredth ln 301),
+    /// which is not the value scoring reads for the same process today.
+    fn training_rows(&self) -> Vec<[f64; NUM_FEATURES]> {
+        self.recent_data
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let mut row = *row;
+                if let Some(name) = self.process_names.get(i) {
+                    row[FEATURE_PROCESS_PREVALENCE] =
+                        frequency_encoding(self.process_freq.get(name).copied().unwrap_or(0));
+                }
+                if let Some(port) = self.dst_ports.get(i) {
+                    row[FEATURE_DST_PORT] =
+                        frequency_encoding(self.port_freq.get(port).copied().unwrap_or(0));
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// Adopt a finished training run: forest, scaler and training matrix move
+    /// together, so scoring and thresholds never mix two fits.
+    fn install_trained(&mut self, trained: TrainedForest) {
+        self.forest = Some(trained.forest);
+        self.scaler = Some(trained.scaler);
+        self.training_matrix = trained.matrix;
     }
 
     /// Train (or retrain) the Isolation Forest model on the recent data.
@@ -531,7 +679,7 @@ impl IsolationForestModel {
                 match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
                     Some(Ok(Ok(forest))) => {
                         info!("train_model: Background training completed successfully");
-                        self.forest = Some(forest);
+                        self.install_trained(forest);
                         self.last_training_time = Utc::now();
                         self.invalidate_score_cache_for_retrain();
                     }
@@ -584,7 +732,7 @@ impl IsolationForestModel {
             self.max_samples
         );
 
-        let data_clone = self.recent_data.clone();
+        let data_clone = self.training_rows();
 
         // Mark that training is starting before we spawn, so concurrent calls bail out early.
         self.training_in_progress.store(true, Ordering::Release);
@@ -623,32 +771,28 @@ impl IsolationForestModel {
                 return Err(extended_isolation_forest::Error::InsufficientTrainingData);
             }
 
-            // Hyper-parameters --------------------------------------------------------------
-            let sample_size = std::cmp::max(1, std::cmp::min(128, n_samples));
-            let n_trees = if n_samples < 10 {
-                10
-            } else if n_samples < 50 {
-                15
-            } else {
-                25
-            };
-            let max_tree_depth = Some(6); // Hard cap to keep trees shallow
-
+            // Standardise, then the paper's hyper-parameters --------------------------------
+            let scaler = FeatureScaler::fit(&unique_data);
+            let scaled: Vec<[f64; NUM_FEATURES]> =
+                unique_data.iter().map(|row| scaler.apply(row)).collect();
+            let sample_size = std::cmp::max(1, std::cmp::min(FOREST_SAMPLE_SIZE, n_samples));
             let options = ForestOptions {
-                n_trees,
+                n_trees: FOREST_TREES,
                 sample_size,
-                max_tree_depth,
+                max_tree_depth: None, // the default, ceil(log2(sample_size))
                 extension_level: NUM_FEATURES - 1,
             };
 
-            debug!("train_model: TRAINING THREAD - Starting Forest::from_slice with {} samples, {} trees, {} sample_size", 
-                  n_samples, n_trees, sample_size);
+            debug!(
+                "train_model: TRAINING THREAD - Starting Forest::from_slice with {} samples, {} trees, {} sample_size",
+                n_samples, FOREST_TREES, sample_size
+            );
 
             // Actual training --------------------------------------------------------------
             let start_time = std::time::Instant::now();
             debug!("train_model: TRAINING THREAD - Calling Forest::from_slice_with_cancel");
             let result = extended_isolation_forest::Forest::from_slice_with_cancel(
-                &unique_data,
+                &scaled,
                 &options,
                 || cancel_flag.load(Ordering::Relaxed),
             );
@@ -658,7 +802,11 @@ impl IsolationForestModel {
                 result.is_ok()
             );
 
-            result
+            result.map(|forest| TrainedForest {
+                forest,
+                scaler,
+                matrix: scaled,
+            })
         });
 
         self.training_handle = Some(handle);
@@ -733,7 +881,7 @@ impl IsolationForestModel {
             ("PacketRate", false),        // 8 - Packets per second
             ("MissedData", false),        // 9 - Missed bytes
             ("Segments", false),          // 10 - Total segment count
-            ("DstPort", true),            // 11 - Destination port (categorical-ish)
+            ("DstPort", false), // 11 - Destination port prevalence (frequency in training window)
         ];
 
         let mut diagnostics = Vec::new();
@@ -878,7 +1026,7 @@ impl IsolationForestModel {
 
         // Compute features if not cached or outdated
         self.cache_misses.fetch_add(1, Ordering::Relaxed);
-        let features = compute_features(session, &self.process_freq);
+        let features = compute_features(session, &self.process_freq, &self.port_freq);
 
         // Score using the model
         trace!(
@@ -888,8 +1036,11 @@ impl IsolationForestModel {
         );
         if let Some(forest) = &self.forest {
             let score_start = std::time::Instant::now();
-            // Use a safe recursion cap (e.g. 2x max_tree_depth = 12)
-            let score = forest.score_with_recursion_cap(&features, 12);
+            let scaled = match &self.scaler {
+                Some(scaler) => scaler.apply(&features),
+                None => features,
+            };
+            let score = forest.score(&scaled);
             let score_elapsed = score_start.elapsed();
 
             if score_elapsed.as_millis() > 50 {
@@ -1113,7 +1264,11 @@ impl IsolationForestModel {
 
 /// Compute the feature vector [f64; 12] for a given session.
 /// Feature order: [process_prevalence, duration, bytes, packets, segment_interarrival, in_out_ratio, avg_packet_size, interarrival_regularity, packet_rate, missed, segments, dst_port]
-fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) -> [f64; 12] {
+fn compute_features(
+    session: &SessionInfo,
+    process_freq: &HashMap<String, u32>,
+    port_freq: &HashMap<u16, u32>,
+) -> [f64; 12] {
     let start_time = std::time::Instant::now();
 
     // Helper function to sanitize values
@@ -1129,14 +1284,14 @@ fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) 
     // Common processes (Chrome, Safari, Google Drive) get high values and cluster together.
     // Rare/unknown processes get low values and are naturally isolated by the iForest.
     let process_prevalence = match &session.l7 {
-        Some(l7) => {
-            let freq = process_freq.get(&l7.process_name).copied().unwrap_or(0);
-            sanitize((freq as f64 + 1.0).ln())
-        }
+        Some(l7) => sanitize(frequency_encoding(
+            process_freq.get(&l7.process_name).copied().unwrap_or(0),
+        )),
         None => 0.0,
     };
 
-    // 2. Duration (keep linear scale for sensitivity)
+    // 2. Duration: seconds, log scale (heavy-tailed like bytes); the raw value
+    //    still drives the regularity and rate features below
     let duration_raw = match session.stats.end_time {
         Some(end_time) => {
             sanitize((end_time - session.stats.start_time).num_milliseconds() as f64 / 1000.0)
@@ -1145,8 +1300,9 @@ fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) 
             (session.stats.last_activity - session.stats.start_time).num_milliseconds() as f64
                 / 1000.0,
         ),
-    };
-    let duration = duration_raw;
+    }
+    .max(0.0);
+    let duration = sanitize(duration_raw.ln_1p());
 
     // 3. Total bytes (log scale to reduce dominance of large transfers while preserving separation)
     // Using ln_1p (ln(1+x)) to handle zero values gracefully
@@ -1157,8 +1313,8 @@ fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) 
     let total_packets = (session.stats.orig_pkts + session.stats.resp_pkts) as f64;
     let packets = sanitize(total_packets.ln_1p());
 
-    // 5. Segment interarrival
-    let segment_interarrival = sanitize(session.stats.segment_interarrival);
+    // 5. Segment interarrival (seconds, heavy-tailed like the duration): log scale
+    let segment_interarrival = sanitize(session.stats.segment_interarrival.max(0.0).ln_1p());
 
     // 6. Inbound/outbound ratio
     let in_out_ratio = sanitize(session.stats.inbound_outbound_ratio);
@@ -1169,8 +1325,8 @@ fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) 
     // 8. Interarrival regularity (0..1): how close average interarrival is to uniform spacing
     // N segments produce N-1 inter-segment gaps, so expected gap = duration / (N-1)
     let segment_count = session.stats.segment_count as f64;
-    let expected_interarrival = if segment_count > 1.0 && duration > 0.0 {
-        duration / (segment_count - 1.0)
+    let expected_interarrival = if segment_count > 1.0 && duration_raw > 0.0 {
+        duration_raw / (segment_count - 1.0)
     } else {
         0.0
     };
@@ -1182,23 +1338,31 @@ fn compute_features(session: &SessionInfo, process_freq: &HashMap<String, u32>) 
         0.0
     };
 
-    // 9. Packet rate (packets per second)
-    let packet_rate = if duration > 0.0 {
-        sanitize(((session.stats.orig_pkts + session.stats.resp_pkts) as f64) / duration)
+    // 9. Packet rate (packets per second), log scale
+    let packet_rate = if duration_raw > 0.0 {
+        sanitize(
+            (((session.stats.orig_pkts + session.stats.resp_pkts) as f64) / duration_raw).ln_1p(),
+        )
     } else {
         0.0
     };
 
-    // 10. Missed bytes
-    let missed = sanitize(session.stats.missed_bytes as f64);
+    // 10. Missed bytes, log scale
+    let missed = sanitize((session.stats.missed_bytes as f64).ln_1p());
 
-    // 11. Segments (count)
-    let segments = sanitize(session.stats.segment_count as f64);
+    // 11. Segments (count), log scale
+    let segments = sanitize((session.stats.segment_count as f64).ln_1p());
 
-    // 12. Destination port as numeric value
-    // TODO: Port number is categorical but treated as ordinal. Grouping into well-known/ephemeral
-    // ranges or frequency encoding would reduce spurious splits on arbitrary port values.
-    let dst_port = sanitize(session.session.dst_port as f64);
+    // 12. Destination port, frequency-encoded like the process: how often the
+    //     training window saw this port. The number itself is a label, not a
+    //     quantity (443 is not "less" than 8443), and as a raw value up to
+    //     65535 it dominated every extended split.
+    let dst_port = sanitize(frequency_encoding(
+        port_freq
+            .get(&session.session.dst_port)
+            .copied()
+            .unwrap_or(0),
+    ));
 
     let features = [
         process_prevalence,
@@ -1244,9 +1408,9 @@ fn compute_dynamic_thresholds(
     );
     let start_time = std::time::Instant::now();
 
-    if model.recent_data.is_empty() || model.forest.is_none() {
+    if model.training_matrix.is_empty() || model.forest.is_none() {
         warn!("compute_dynamic_thresholds: Cannot compute thresholds without data or model. Data size: {}, Has forest: {}",
-            model.recent_data.len(), model.forest.is_some());
+            model.training_matrix.len(), model.forest.is_some());
         return;
     }
 
@@ -1259,11 +1423,11 @@ fn compute_dynamic_thresholds(
     let forest = model.forest.as_ref().unwrap(); // Safe due to check above
     info!("compute_dynamic_thresholds: Forest is available, scoring samples...");
 
-    // Score all recent data points using the NUM_FEATURES forest
+    // Score the standardised matrix the forest was trained on, as scoring does
     let mut scores: Vec<f64> = model
-        .recent_data // This contains [f64; NUM_FEATURES]
+        .training_matrix
         .iter()
-        .map(|features| forest.score_with_recursion_cap(features, 12)) // Match classification scoring
+        .map(|row| forest.score(row))
         .collect();
 
     if scores.is_empty() {
@@ -1578,7 +1742,7 @@ impl SessionAnalyzer {
                     match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
                         Some(Ok(Ok(forest))) => {
                             info!("Analyzer: Background training task completed successfully (processed at analyze_sessions start)");
-                            model_guard.forest = Some(forest);
+                            model_guard.install_trained(forest);
                             model_guard.last_training_time = Utc::now();
                             model_guard.invalidate_score_cache_for_retrain();
                         },
@@ -1684,7 +1848,7 @@ impl SessionAnalyzer {
                                 {
                                     Some(Ok(Ok(forest))) => {
                                         info!("Analyzer (Finalize Warmup): Training task completed successfully.");
-                                        model_guard.forest = Some(forest);
+                                        model_guard.install_trained(forest);
                                         model_guard.last_training_time = Utc::now();
                                         model_guard.invalidate_score_cache_for_retrain();
                                     }
@@ -1711,7 +1875,7 @@ impl SessionAnalyzer {
                         } else {
                             if let Some(handle) = model_guard.training_handle.take() {
                                 match await_join_with_timeout(handle, std::time::Duration::from_secs(10)).await {
-                                    Some(Ok(Ok(forest))) => { model_guard.forest = Some(forest); model_guard.last_training_time = Utc::now(); model_guard.invalidate_score_cache_for_retrain(); },
+                                    Some(Ok(Ok(forest))) => { model_guard.install_trained(forest); model_guard.last_training_time = Utc::now(); model_guard.invalidate_score_cache_for_retrain(); },
                                     Some(Ok(Err(e))) => warn!("Analyzer (Finalize Warmup): Already finished training task returned error: {:?}", e),
                                     Some(Err(e)) => error!("Analyzer (Finalize Warmup): Already finished training task panicked: {:?}", e),
                                     None => {
@@ -1739,7 +1903,7 @@ impl SessionAnalyzer {
                         match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
                             Some(Ok(Ok(forest))) => {
                                 info!("Analyzer (Finalize Warmup): Final forced training task completed successfully.");
-                                model_guard.forest = Some(forest);
+                                model_guard.install_trained(forest);
                                 model_guard.last_training_time = Utc::now();
                                 model_guard.invalidate_score_cache_for_retrain();
                             },
@@ -1850,7 +2014,7 @@ impl SessionAnalyzer {
                     {
                         Some(Ok(Ok(forest))) => {
                             info!("Analyzer (Scheduled Recalc): Training task completed successfully.");
-                            model_guard.forest = Some(forest);
+                            model_guard.install_trained(forest);
                             model_guard.last_training_time = Utc::now();
                             model_guard.invalidate_score_cache_for_retrain();
                         }
@@ -2918,7 +3082,7 @@ impl SessionAnalyzer {
                     match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await
                     {
                         Some(Ok(Ok(forest))) => {
-                            model_write.forest = Some(forest);
+                            model_write.install_trained(forest);
                             model_write.last_training_time = Utc::now();
                         }
                         Some(Ok(Err(_))) | Some(Err(_)) => {
@@ -2951,7 +3115,7 @@ impl SessionAnalyzer {
             if let Some(handle) = model_write.training_handle.take() {
                 match await_join_with_timeout(handle, std::time::Duration::from_secs(120)).await {
                     Some(Ok(Ok(forest))) => {
-                        model_write.forest = Some(forest);
+                        model_write.install_trained(forest);
                         model_write.last_training_time = Utc::now();
                     }
                     Some(Ok(Err(e))) => {
@@ -4130,7 +4294,7 @@ pub(crate) mod tests {
             if let Some(Ok(Ok(forest))) =
                 await_join_with_timeout(handle, std::time::Duration::from_secs(30)).await
             {
-                model.forest = Some(forest);
+                model.install_trained(forest);
                 model.training_in_progress.store(false, Ordering::Release);
             }
         }
@@ -4276,7 +4440,7 @@ pub(crate) mod tests {
         session.stats.end_time = Some(now);
         session.stats.last_activity = now;
 
-        let features = compute_features(&session, &HashMap::new());
+        let features = compute_features(&session, &HashMap::new(), &HashMap::new());
         let interarrival_regularity = features[7];
 
         // With 10 segments over 9 seconds, expected gap = 9/(10-1) = 1.0 second.
@@ -4415,12 +4579,19 @@ pub(crate) mod tests {
     fn test_compute_features_no_l7_returns_zero_prevalence() {
         let session = make_minimal_session(443);
         let freq = HashMap::new();
-        let features = compute_features(&session, &freq);
+        let features = compute_features(&session, &freq, &HashMap::new());
         assert_eq!(
             features[0], 0.0,
             "process_prevalence should be 0 without L7"
         );
-        assert!(features[11] == 443.0, "dst_port should be 443");
+        assert_eq!(features[11], 0.0, "an unseen port encodes as ln(0 + 1)");
+        let mut ports = HashMap::new();
+        ports.insert(443u16, 10u32);
+        let features = compute_features(&session, &freq, &ports);
+        assert!(
+            (features[11] - (11.0_f64).ln()).abs() < 1e-9,
+            "a port seen 10 times encodes as ln(10 + 1)"
+        );
     }
 
     #[test]
@@ -4432,7 +4603,7 @@ pub(crate) mod tests {
         });
         let mut freq = HashMap::new();
         freq.insert("curl".to_string(), 10u32);
-        let features = compute_features(&session, &freq);
+        let features = compute_features(&session, &freq, &HashMap::new());
         let expected = (11.0_f64).ln();
         assert!(
             (features[0] - expected).abs() < 0.001,
@@ -4444,7 +4615,7 @@ pub(crate) mod tests {
     fn test_compute_features_all_finite() {
         let session = make_minimal_session(22);
         let freq = HashMap::new();
-        let features = compute_features(&session, &freq);
+        let features = compute_features(&session, &freq, &HashMap::new());
         for (idx, val) in features.iter().enumerate() {
             assert!(
                 val.is_finite(),
@@ -4453,5 +4624,218 @@ pub(crate) mod tests {
                 val
             );
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Detection quality (2.3.2): the module used to test only its plumbing.
+    // ----------------------------------------------------------------------
+
+    /// Deterministic pseudo-random stream for the synthetic sessions (the
+    /// forest itself keeps its thread rng; the data is what must be fixed).
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+    }
+
+    /// A finished session of the given shape. `regularity` 1.0 spaces the
+    /// segments exactly; lower values stretch the average interarrival so the
+    /// regularity feature reads that value.
+    fn synthetic_session(
+        index: u16,
+        process: &str,
+        dst_port: u16,
+        duration_s: f64,
+        bytes: u64,
+        segments: u32,
+        regularity: f64,
+    ) -> SessionInfo {
+        let mut s = make_minimal_session(dst_port);
+        s.session.src_port = 10_000u16.wrapping_add(index);
+        s.l7 = Some(crate::sessions::SessionL7 {
+            process_name: process.to_string(),
+            ..Default::default()
+        });
+        let start = Utc::now() - chrono::Duration::seconds(duration_s as i64 + 60);
+        let end = start + chrono::Duration::milliseconds((duration_s * 1000.0) as i64);
+        s.stats.start_time = start;
+        s.stats.end_time = Some(end);
+        s.stats.last_activity = end;
+        s.stats.inbound_bytes = bytes / 2;
+        s.stats.outbound_bytes = bytes - bytes / 2;
+        // Packets follow the volume (about 1 KB each on a real link), at least
+        // one per segment and direction; segments are message boundaries.
+        let packets = (bytes / 1000).max(segments as u64 * 2).max(2);
+        s.stats.orig_pkts = packets / 2;
+        s.stats.resp_pkts = packets - packets / 2;
+        s.stats.segment_count = segments;
+        let expected = if segments > 1 {
+            duration_s / (segments as f64 - 1.0)
+        } else {
+            0.0
+        };
+        s.stats.segment_interarrival = expected * (2.0 - regularity);
+        s.stats.average_packet_size = bytes as f64 / packets as f64;
+        s.stats.inbound_outbound_ratio = 1.0;
+        s
+    }
+
+    /// Browser-shaped traffic: three common processes, mostly 443, durations
+    /// and volumes spread over two orders of magnitude, irregular segments.
+    fn benign_sessions(n: u16, rng: &mut Lcg) -> Vec<SessionInfo> {
+        const PROCESSES: [&str; 3] = ["Google Chrome", "Safari", "Slack"];
+        (0..n)
+            .map(|i| {
+                let process = PROCESSES[((rng.next_f64() * 3.0) as usize).min(2)];
+                let dst_port = if rng.next_f64() < 0.9 { 443 } else { 80 };
+                let duration = (rng.next_f64() * 4.0).exp();
+                let bytes = (8.0 + rng.next_f64() * 6.0).exp() as u64;
+                let segments = 2 + (rng.next_f64() * 40.0) as u32;
+                let regularity = 0.2 + rng.next_f64() * 0.5;
+                synthetic_session(i, process, dst_port, duration, bytes, segments, regularity)
+            })
+            .collect()
+    }
+
+    async fn train_now(model: &mut IsolationForestModel) {
+        model.train_model(true).await;
+        let handle = model
+            .training_handle
+            .take()
+            .expect("a training task was spawned");
+        let trained = await_join_with_timeout(handle, std::time::Duration::from_secs(60))
+            .await
+            .expect("training finished in time")
+            .expect("the training task did not panic")
+            .expect("training succeeded");
+        model.install_trained(trained);
+        model.training_in_progress.store(false, Ordering::Release);
+        model.last_training_time = Utc::now();
+    }
+
+    #[tokio::test]
+    async fn a_regular_beacon_from_an_unseen_process_scores_above_the_abnormal_threshold() {
+        let mut rng = Lcg(0x5eed);
+        let mut model = IsolationForestModel::new();
+        for session in benign_sessions(400, &mut rng) {
+            model.add_session_data(&session);
+        }
+        assert!(
+            model.recent_data.len() >= 300,
+            "distinct flows fill the window: {}",
+            model.recent_data.len()
+        );
+        train_now(&mut model).await;
+        compute_dynamic_thresholds(
+            &mut model,
+            DEFAULT_SUSPICIOUS_PERCENTILE,
+            DEFAULT_ABNORMAL_PERCENTILE,
+        );
+
+        // An hour-long, exactly periodic, low-volume flow to an unseen port from
+        // a process the window never saw: the beacon shape.
+        let beacon = synthetic_session(60_000, "svc-updater", 4444, 3600.0, 600 * 64, 600, 1.0);
+        let (beacon_score, _) = model
+            .score_session(&beacon)
+            .expect("a trained model scores");
+        assert!(
+            beacon_score >= model.abnormal_threshold,
+            "beacon {beacon_score:.3} vs abnormal threshold {:.3}",
+            model.abnormal_threshold
+        );
+
+        // A typical browser flow held out of training stays normal.
+        let typical = synthetic_session(60_001, "Google Chrome", 443, 7.0, 60_000, 20, 0.45);
+        let (typical_score, _) = model
+            .score_session(&typical)
+            .expect("a trained model scores");
+        assert!(
+            typical_score < model.suspicious_threshold,
+            "typical {typical_score:.3} vs suspicious threshold {:.3}",
+            model.suspicious_threshold
+        );
+    }
+
+    #[test]
+    fn the_scaler_removes_the_units_of_each_feature() {
+        let mut rng = Lcg(42);
+        let rows: Vec<[f64; NUM_FEATURES]> = (0..200)
+            .map(|_| std::array::from_fn(|i| (i as f64 + 1.0) * rng.next_f64()))
+            .collect();
+        // Duration in milliseconds instead of seconds, the port as its raw
+        // number: the standardised rows must not change.
+        let stretched: Vec<[f64; NUM_FEATURES]> = rows
+            .iter()
+            .map(|r| {
+                let mut r = *r;
+                r[1] *= 1000.0;
+                r[11] *= 65_535.0;
+                r
+            })
+            .collect();
+        let a = FeatureScaler::fit(&rows);
+        let b = FeatureScaler::fit(&stretched);
+        for (r, s) in rows.iter().zip(stretched.iter()) {
+            let x = a.apply(r);
+            let y = b.apply(s);
+            for i in 0..NUM_FEATURES {
+                assert!(
+                    (x[i] - y[i]).abs() < 1e-9,
+                    "feature {i}: {} vs {}",
+                    x[i],
+                    y[i]
+                );
+            }
+        }
+        // A constant column keeps a spread of 1.0, so a new value still
+        // registers as its deviation instead of dividing by zero.
+        let constant: Vec<[f64; NUM_FEATURES]> = (0..50).map(|_| [3.0; NUM_FEATURES]).collect();
+        let c = FeatureScaler::fit(&constant);
+        assert!(c.spread.iter().all(|s| (*s - 1.0).abs() < 1e-12));
+        assert_eq!(c.apply(&[5.0; NUM_FEATURES])[0], 2.0);
+    }
+
+    #[test]
+    fn training_rows_carry_the_windows_final_frequencies() {
+        let mut model = IsolationForestModel::new();
+        for i in 0..20u16 {
+            model.add_session_data(&synthetic_session(
+                i,
+                "Google Chrome",
+                443,
+                5.0,
+                10_000,
+                5,
+                0.5,
+            ));
+        }
+        model.add_session_data(&synthetic_session(
+            99,
+            "rare-tool",
+            8443,
+            5.0,
+            10_000,
+            5,
+            0.5,
+        ));
+        let rows = model.training_rows();
+        // Every Chrome row reads the final count (20), not the count at insertion.
+        for row in rows.iter().take(20) {
+            assert!((row[FEATURE_PROCESS_PREVALENCE] - frequency_encoding(20)).abs() < 1e-12);
+            assert!((row[FEATURE_DST_PORT] - frequency_encoding(20)).abs() < 1e-12);
+        }
+        assert!((rows[20][FEATURE_PROCESS_PREVALENCE] - frequency_encoding(1)).abs() < 1e-12);
+        assert!((rows[20][FEATURE_DST_PORT] - frequency_encoding(1)).abs() < 1e-12);
+        // The stored rows still hold the insertion-time values.
+        assert!(
+            (model.recent_data[0][FEATURE_PROCESS_PREVALENCE] - frequency_encoding(1)).abs()
+                < 1e-12
+        );
     }
 }

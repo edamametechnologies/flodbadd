@@ -1023,7 +1023,7 @@ dependencies = [
 [[package]]
 name = "extended-isolation-forest"
 version = "0.2.3"
-source = "git+https://github.com/edamametechnologies/extended-isolation-forest?branch=main#b373e9dd5681447d5fff50c106a73ec2ee0f4377"
+source = "git+https://github.com/edamametechnologies/extended-isolation-forest?branch=main#42459b2e94b4865eceeb3cade99ae65e85149932"
 dependencies = [
  "num-traits",
  "rand 0.8.8",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "flodbadd"
-version = "2.3.1"
+version = "2.3.2"
 dependencies = [
  "anyhow",
  "arc-swap",
