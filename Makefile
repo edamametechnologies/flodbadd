@@ -115,17 +115,23 @@ ebpf_setup:
 	-sudo sysctl -w kernel.unprivileged_bpf_disabled=0 || true
 	-sudo sysctl -w net.core.bpf_jit_enable=1 || true
 
+# What the root cargo needs to find the caller's toolchain. `sudo -E` alone
+# is not enough on the ubuntu-26.04 image: rustup under root saw no
+# RUSTUP_TOOLCHAIN and the image has no default toolchain, so cargo had no
+# version to run (2026-11-03). The toolchain is the caller's active one.
+ROOT_CARGO_ENV = HOME=$(HOME) RUSTUP_HOME=$(or $(RUSTUP_HOME),$(HOME)/.rustup) CARGO_HOME=$(or $(CARGO_HOME),$(HOME)/.cargo) RUSTUP_TOOLCHAIN=$(or $(RUSTUP_TOOLCHAIN),$(shell rustup show active-toolchain 2>/dev/null | cut -d' ' -f1))
+
 linux_test: ebpf_setup
 	@echo "Running all tests with eBPF support..."
 	@echo "Current kernel: $$(uname -r)"
 	@echo "Debug filesystem: $$(mount | grep debugfs || echo 'Not mounted')"
 	@echo "BPF filesystem: $$(mount | grep bpf || echo 'Not mounted')"
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim -- --nocapture --test-threads=1
+	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim -- --nocapture --test-threads=1
 	@echo "Running the ignored fanotify end-to-end tests (need root, which this target has)..."
 	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,ebpf,fim --lib -- --ignored fanotify --nocapture --test-threads=1
 
 linux_test_no_ebpf:
-	$(shell which sudo) -E $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
+	$(shell which sudo) -E env $(ROOT_CARGO_ENV) $(shell which cargo) test --features packetcapture,asyncpacketcapture,fim -- --nocapture --test-threads=1
 
 macos_test: macos_codesign_es
 	@RC=0; sudo -E cargo test --features packetcapture,asyncpacketcapture,endpointsecurity,fim -- --nocapture --test-threads=1 || RC=$$?; \

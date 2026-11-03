@@ -346,7 +346,11 @@ else
     if [[ $EUID -eq 0 ]]; then
         SUDO_CMD=""
     elif command -v sudo &> /dev/null; then
-        SUDO_CMD="sudo -E"
+        # `sudo -E` alone loses the toolchain on the ubuntu-26.04 image
+        # (rustup under root: "could not choose a version of cargo"), so hand
+        # the caller's rustup homes and active toolchain to root explicitly.
+        TOOLCHAIN="${RUSTUP_TOOLCHAIN:-$(rustup show active-toolchain 2>/dev/null | cut -d' ' -f1)}"
+        SUDO_CMD="sudo -E env HOME=$HOME RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup} CARGO_HOME=${CARGO_HOME:-$HOME/.cargo} RUSTUP_TOOLCHAIN=${TOOLCHAIN}"
     else
         SUDO_CMD=""
     fi
