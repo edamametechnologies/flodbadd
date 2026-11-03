@@ -185,10 +185,14 @@ jobs:
           # For ebpf
           rustup toolchain install "${RUST_NIGHTLY}" --component rust-src
           rustup component add --toolchain "${RUST_NIGHTLY}" llvm-tools-preview
-          # Use the pinned nightly by default so that build.rs picks it up automatically
+          # Use the pinned nightly by default so that build.rs picks it up automatically.
+          # Export it to every later step: ~/.cargo/env is only read by shells that
+          # source it, and the ubuntu-26.04 image ships rustup without a default
+          # toolchain, so cargo had no version to run (2026-11-03).
+          echo "RUSTUP_TOOLCHAIN=${RUST_NIGHTLY}" >> "$GITHUB_ENV"
           # (newer macOS images have no ~/.cargo until something creates it)
           mkdir -p "$HOME/.cargo"
-          echo "RUSTUP_TOOLCHAIN=${RUST_NIGHTLY}" >> $HOME/.cargo/env
+          echo "RUSTUP_TOOLCHAIN=${RUST_NIGHTLY}" >> "$HOME/.cargo/env"
 
       - name: iOS add-ons
         if: matrix.platform == 'ios'
