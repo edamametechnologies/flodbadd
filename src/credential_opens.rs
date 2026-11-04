@@ -859,10 +859,9 @@ mod linux {
                     Ok(events) => {
                         for event in events {
                             if let Some(fd) = event.fd() {
-                                if let Ok(path) = std::fs::read_link(format!(
-                                    "/proc/self/fd/{}",
-                                    fd.as_raw_fd()
-                                )) {
+                                if let Ok(path) =
+                                    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                                {
                                     paths.push(path);
                                 }
                             }
@@ -871,9 +870,7 @@ mod linux {
                             return paths;
                         }
                     }
-                    Err(nix::errno::Errno::EAGAIN) => {
-                        std::thread::sleep(Duration::from_millis(50))
-                    }
+                    Err(nix::errno::Errno::EAGAIN) => std::thread::sleep(Duration::from_millis(50)),
                     Err(e) => panic!("read_events: {e}"),
                 }
             }
@@ -895,8 +892,8 @@ mod linux {
         #[test]
         #[ignore]
         fn a_credential_directory_created_again_is_watched_again() {
-            let scratch = std::env::temp_dir()
-                .join(format!("flodbadd-credopens-{}", std::process::id()));
+            let scratch =
+                std::env::temp_dir().join(format!("flodbadd-credopens-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&scratch);
             let dir = scratch.join(".probe_cred");
             std::fs::create_dir_all(&dir).unwrap();
@@ -926,7 +923,9 @@ mod linux {
             };
             read_with_child(&key);
             assert!(
-                opens_within(&watcher, Duration::from_secs(3)).iter().any(|p| p == &key),
+                opens_within(&watcher, Duration::from_secs(3))
+                    .iter()
+                    .any(|p| p == &key),
                 "the marked directory reports the open"
             );
             drain(&watcher);
@@ -934,12 +933,17 @@ mod linux {
             std::fs::remove_file(&key).unwrap();
             std::fs::remove_dir(&dir).unwrap();
             std::fs::create_dir(&dir).unwrap();
-            let (added, refreshed) =
-                remark_prefixes(&watcher, &[prefix], vec![scratch.clone()]);
-            assert_eq!(added + refreshed, 1, "marked again whatever its inode number");
+            let (added, refreshed) = remark_prefixes(&watcher, &[prefix], vec![scratch.clone()]);
+            assert_eq!(
+                added + refreshed,
+                1,
+                "marked again whatever its inode number"
+            );
             read_with_child(&key);
             assert!(
-                opens_within(&watcher, Duration::from_secs(3)).iter().any(|p| p == &key),
+                opens_within(&watcher, Duration::from_secs(3))
+                    .iter()
+                    .any(|p| p == &key),
                 "the directory created again reports the open"
             );
             let _ = std::fs::remove_dir_all(&scratch);
@@ -982,7 +986,10 @@ mod tests {
             mark_action(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS - 1),
             Some(MarkAction::New)
         );
-        assert_eq!(mark_action(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS), None);
+        assert_eq!(
+            mark_action(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS),
+            None
+        );
     }
 
     use super::*;

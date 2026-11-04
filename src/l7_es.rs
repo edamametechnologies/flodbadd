@@ -318,19 +318,53 @@ mod task_access_coalescing_tests {
         assert!(!task_access_repeats(&mut recent, key, 1_000, 60_000, 4));
         assert!(task_access_repeats(&mut recent, key, 1_500, 60_000, 4));
         // Another target, another mode: their own first events.
-        assert!(!task_access_repeats(&mut recent, (100, 201, 2), 1_500, 60_000, 4));
-        assert!(!task_access_repeats(&mut recent, (100, 200, 1), 1_500, 60_000, 4));
+        assert!(!task_access_repeats(
+            &mut recent,
+            (100, 201, 2),
+            1_500,
+            60_000,
+            4
+        ));
+        assert!(!task_access_repeats(
+            &mut recent,
+            (100, 200, 1),
+            1_500,
+            60_000,
+            4
+        ));
         // The window over: the pair is reported again.
         assert!(!task_access_repeats(&mut recent, key, 61_001, 60_000, 4));
         assert_eq!(recent.len(), 3);
         // The bound: a full table drops its stale entries, then everything if
         // none is stale; either way the new pair is recorded, never dropped.
-        assert!(!task_access_repeats(&mut recent, (300, 301, 2), 200_000, 60_000, 4));
+        assert!(!task_access_repeats(
+            &mut recent,
+            (300, 301, 2),
+            200_000,
+            60_000,
+            4
+        ));
         assert_eq!(recent.len(), 4);
-        assert!(!task_access_repeats(&mut recent, (300, 302, 2), 200_000, 60_000, 4));
-        assert_eq!(recent.len(), 2, "the three stale entries went, the two live ones stay");
+        assert!(!task_access_repeats(
+            &mut recent,
+            (300, 302, 2),
+            200_000,
+            60_000,
+            4
+        ));
+        assert_eq!(
+            recent.len(),
+            2,
+            "the three stale entries went, the two live ones stay"
+        );
         for target in 400..420 {
-            assert!(!task_access_repeats(&mut recent, (300, target, 2), 200_000, 60_000, 4));
+            assert!(!task_access_repeats(
+                &mut recent,
+                (300, target, 2),
+                200_000,
+                60_000,
+                4
+            ));
             assert!(recent.len() <= 4);
         }
     }
@@ -689,8 +723,8 @@ mod macos {
                 if pid == 0 || table.contains_key(&pid) {
                     continue;
                 }
-                let Some((_, image)) = crate::l7_macos::process_identity(pid)
-                    .filter(|(_, path)| !path.is_empty())
+                let Some((_, image)) =
+                    crate::l7_macos::process_identity(pid).filter(|(_, path)| !path.is_empty())
                 else {
                     continue;
                 };
@@ -1120,13 +1154,13 @@ mod macos {
                                                     responsible.signing_id().to_string_lossy(),
                                                 )
                                             }),
-                                        (!info.team_id.is_empty())
-                                            .then_some(info.team_id)
-                                            .or_else(|| {
+                                        (!info.team_id.is_empty()).then_some(info.team_id).or_else(
+                                            || {
                                                 optional_identity(
                                                     responsible.team_id().to_string_lossy(),
                                                 )
-                                            }),
+                                            },
+                                        ),
                                         Some(responsible.is_platform_binary()),
                                     )
                                 }
