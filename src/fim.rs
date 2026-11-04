@@ -621,6 +621,10 @@ impl FimWatcher {
         // Nothing reads the kernel-time attribution table while no watcher is
         // running, so stop paying for it. A restart re-publishes the roots.
         crate::fim_attribution::clear_roots();
+        // The Endpoint Security sink was this watcher's; the next watcher
+        // installs its own instead of falling back to FSEvents.
+        #[cfg(target_os = "macos")]
+        crate::fim_es::uninstall();
         info!("FIM: watcher stopped");
     }
 

@@ -491,16 +491,37 @@ fn resolve_case(base: &Path, rel: &str) -> PathBuf {
     cur
 }
 
-/// Whether the Linux backend marks `dir` on a re-mark pass, given the
-/// (device, inode) it recorded when it last marked that path (`known`), the
-/// directory's identity now (`current`) and how many directories it holds
-/// marks for (`held`). A directory deleted and created again under the same
-/// path is a new inode, and a fanotify mark lives on its inode: the new one
-/// is marked again (it takes over its own entry, whatever the budget).
-pub fn needs_mark(known: Option<(u64, u64)>, current: (u64, u64), held: usize) -> bool {
+/// What the Linux backend does with a credential directory on a re-mark
+/// pass, given the (device, inode) it recorded when it last marked that path
+/// (`known`), the directory's identity now (`current`) and how many
+/// directories it holds marks for (`held`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkAction {
+    /// Never marked: takes a mark while the budget lasts.
+    New,
+    /// Marked before under another identity: deleted and created again, a
+    /// new inode to mark (it takes over its own entry, whatever the budget).
+    Renew,
+    /// Marked before under the same identity: the mark is added again all
+    /// the same. On a marked inode `FAN_MARK_ADD` changes nothing; on an
+    /// inode number ext4 gave back to a directory created again under the
+    /// same path (the gate's `~/.ssh`, deleted by one scenario's cleanup and
+    /// created by the next), it restores the mark the kernel dropped with the
+    /// old directory, which the identity could not tell apart (reproduced on
+    /// 6.8 / ext4, 2026-11-04).
+    Refresh,
+}
+
+pub fn mark_action(
+    known: Option<(u64, u64)>,
+    current: (u64, u64),
+    held: usize,
+) -> Option<MarkAction> {
     match known {
-        Some(previous) => previous != current,
-        None => held < LINUX_MAX_CREDENTIAL_MARKS,
+        Some(previous) if previous != current => Some(MarkAction::Renew),
+        Some(_) => Some(MarkAction::Refresh),
+        None if held < LINUX_MAX_CREDENTIAL_MARKS => Some(MarkAction::New),
+        None => None,
     }
 }
 
@@ -516,22 +537,44 @@ const LINUX_MAX_CREDENTIAL_MARKS: usize = 512;
 mod linux {
     use super::*;
     use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MarkFlags, MaskFlags};
+    use nix::sys::inotify::{AddWatchFlags, InitFlags as InotifyInitFlags, Inotify};
     use once_cell::sync::OnceCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
     use std::sync::Arc;
     use std::time::Duration;
     use tracing::{debug, info, warn};
 
-    /// Wallet / cloud CLI directories are often created after the daemon
-    /// starts; re-mark on this cadence.
-    const REMARK_INTERVAL: Duration = Duration::from_secs(300);
+    /// Safety net under the creation watch (`creation_loop`): a credential
+    /// directory the inotify watch did not see appear (a watch the kernel
+    /// refused, a home that came up later) is marked within this interval.
+    /// Every pass adds every mark again: `FAN_MARK_ADD` on a marked inode
+    /// changes nothing, and the kernel drops a mark with its inode when the
+    /// directory is deleted. Until 2.3.2 a pass skipped a directory whose
+    /// (device, inode) had not changed, and ext4 hands a freed inode number
+    /// straight back to the next `mkdir` of the same name: a `~/.ssh` deleted
+    /// and created again kept its identity, the sensor believed it marked,
+    /// the kernel held no mark, and the directory stayed unwatched for the
+    /// life of the daemon (the posture gate's `sneakpeek_split` misses on
+    /// ubuntu-x64, runs 41637053642 and 41654883355, 2026-11-03; reproduced
+    /// on 6.8 / ext4, docs/ai-security/05-kernel-sensors.md). The pass also
+    /// ran every 300 s, which was the cell's latency when the inode did
+    /// change (413 s and 425 s on the Linux legs against 93 s elsewhere,
+    /// run 41726966002).
+    const REMARK_INTERVAL: Duration = Duration::from_secs(60);
+    /// A `mkdir -p` creates a tree in steps; the re-mark a creation triggers
+    /// waits this long so the subdirectories exist too.
+    const CREATION_SETTLE: Duration = Duration::from_millis(200);
 
     struct Watcher {
         fan: Fanotify,
         /// Each marked directory with the (device, inode) it had when marked.
         marked: CustomMutex<HashMap<PathBuf, (u64, u64)>>,
+        /// Directory creations in the homes, the credential directories'
+        /// parents and the marked directories re-mark at once; `None` when
+        /// inotify could not be set up (the periodic pass alone then).
+        creations: Option<Inotify>,
     }
 
     static WATCHER: OnceCell<Arc<Watcher>> = OnceCell::new();
@@ -550,14 +593,25 @@ mod linux {
                 return;
             }
         };
+        let creations = match Inotify::init(InotifyInitFlags::IN_CLOEXEC) {
+            Ok(inotify) => Some(inotify),
+            Err(e) => {
+                info!(
+                    "credential-open fanotify: no inotify for directory creations ({}); periodic re-mark only",
+                    e
+                );
+                None
+            }
+        };
         let watcher = Arc::new(Watcher {
             fan,
             marked: CustomMutex::new(HashMap::new()),
+            creations,
         });
         if WATCHER.set(Arc::clone(&watcher)).is_err() {
             return;
         }
-        let marked = remark(&watcher);
+        let (marked, _) = remark(&watcher);
         let reader = Arc::clone(&watcher);
         if let Err(e) = std::thread::Builder::new()
             .name("credential-open-fanotify".into())
@@ -565,6 +619,12 @@ mod linux {
         {
             warn!("credential-open fanotify reader spawn failed: {}", e);
             return;
+        }
+        if watcher.creations.is_some() {
+            let creation_watcher = Arc::clone(&watcher);
+            let _ = std::thread::Builder::new()
+                .name("credential-open-dirwatch".into())
+                .spawn(move || creation_loop(creation_watcher));
         }
         let remarker = Arc::clone(&watcher);
         let _ = std::thread::Builder::new()
@@ -612,24 +672,45 @@ mod linux {
         out
     }
 
-    fn remark(watcher: &Watcher) -> usize {
-        let prefixes = kernel_watch_prefixes(&user_homes());
+    /// Mark every credential directory that exists now and watch the places
+    /// where one appears. `(newly marked, marks refreshed)`.
+    fn remark(watcher: &Watcher) -> (usize, usize) {
+        let homes = user_homes();
+        let prefixes = kernel_watch_prefixes(&homes);
+        remark_prefixes(watcher, &prefixes, homes)
+    }
+
+    /// `remark` over explicit prefixes and homes (the live test passes a
+    /// scratch tree). The creation sites: the homes themselves, each
+    /// prefix's parent (`~/.config` for `~/.config/gcloud/`) and every marked
+    /// directory, for the subdirectories created under it.
+    fn remark_prefixes(
+        watcher: &Watcher,
+        prefixes: &[String],
+        homes: Vec<PathBuf>,
+    ) -> (usize, usize) {
+        let mut creation_sites: Vec<PathBuf> = homes;
         let mut added = 0usize;
+        let mut refreshed = 0usize;
         for prefix in prefixes {
-            for dir in directories_for(&prefix) {
+            let prefix_path = PathBuf::from(prefix.trim_end_matches('/'));
+            if let Some(parent) = prefix_path.parent().filter(|parent| parent.is_dir()) {
+                creation_sites.push(parent.to_path_buf());
+            }
+            for dir in directories_for(prefix) {
                 let Ok(metadata) = std::fs::metadata(&dir) else {
                     continue;
                 };
                 let identity = (metadata.dev(), metadata.ino());
-                let fresh = watcher
+                let action = watcher
                     .marked
                     .try_with(|marked| {
-                        needs_mark(marked.get(&dir).copied(), identity, marked.len())
+                        mark_action(marked.get(&dir).copied(), identity, marked.len())
                     })
-                    .unwrap_or(false);
-                if !fresh {
+                    .flatten();
+                let Some(action) = action else {
                     continue;
-                }
+                };
                 let Ok(handle) = std::fs::File::open(&dir) else {
                     continue;
                 };
@@ -643,7 +724,11 @@ mod linux {
                         watcher
                             .marked
                             .try_with(|marked| marked.insert(dir.clone(), identity));
-                        added += 1;
+                        match action {
+                            MarkAction::Refresh => refreshed += 1,
+                            MarkAction::New | MarkAction::Renew => added += 1,
+                        }
+                        creation_sites.push(dir);
                     }
                     Err(e) => debug!(
                         "credential-open fanotify: mark {} failed: {}",
@@ -653,7 +738,70 @@ mod linux {
                 }
             }
         }
-        added
+        watch_creations(watcher, &creation_sites);
+        (added, refreshed)
+    }
+
+    /// Watch `sites` for a directory being created or moved in. Adding a
+    /// watch on a path already watched changes nothing; a site deleted and
+    /// created again gets a fresh watch, the kernel having dropped the old
+    /// one with its inode.
+    fn watch_creations(watcher: &Watcher, sites: &[PathBuf]) {
+        let Some(inotify) = watcher.creations.as_ref() else {
+            return;
+        };
+        let mut seen: HashSet<&Path> = HashSet::new();
+        for site in sites {
+            if !seen.insert(site.as_path()) {
+                continue;
+            }
+            if let Err(e) = inotify.add_watch(
+                site.as_path(),
+                AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO | AddWatchFlags::IN_ONLYDIR,
+            ) {
+                debug!(
+                    "credential-open fanotify: no creation watch on {}: {}",
+                    site.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    /// Re-mark when a directory appears in a watched site: a credential
+    /// directory itself (`~/.aws` after `aws configure`, a `~/.ssh` created
+    /// again) or a subdirectory of one.
+    fn creation_loop(watcher: Arc<Watcher>) {
+        let Some(inotify) = watcher.creations.as_ref() else {
+            return;
+        };
+        loop {
+            let events = match inotify.read_events() {
+                Ok(events) => events,
+                Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
+                Err(e) => {
+                    warn!("credential-open fanotify: creation watch stopped: {}", e);
+                    return;
+                }
+            };
+            let directory_created = events.iter().any(|event| {
+                event.mask.contains(AddWatchFlags::IN_ISDIR)
+                    && event
+                        .mask
+                        .intersects(AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO)
+            });
+            if !directory_created {
+                continue;
+            }
+            std::thread::sleep(CREATION_SETTLE);
+            let (added, _) = remark(&watcher);
+            if added > 0 {
+                debug!(
+                    "credential-open fanotify: {} directory(ies) marked after a creation",
+                    added
+                );
+            }
+        }
     }
 
     fn proc_uid(pid: u32) -> Option<u32> {
@@ -695,6 +843,108 @@ mod linux {
             }
         }
     }
+
+    #[cfg(test)]
+    mod live_tests {
+        use super::*;
+        use std::time::Instant;
+
+        /// The paths of the opens `watcher` reports within `timeout`
+        /// (non-blocking descriptor: the test polls).
+        fn opens_within(watcher: &Watcher, timeout: Duration) -> Vec<PathBuf> {
+            let deadline = Instant::now() + timeout;
+            let mut paths = Vec::new();
+            while Instant::now() < deadline {
+                match watcher.fan.read_events() {
+                    Ok(events) => {
+                        for event in events {
+                            if let Some(fd) = event.fd() {
+                                if let Ok(path) = std::fs::read_link(format!(
+                                    "/proc/self/fd/{}",
+                                    fd.as_raw_fd()
+                                )) {
+                                    paths.push(path);
+                                }
+                            }
+                        }
+                        if !paths.is_empty() {
+                            return paths;
+                        }
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => {
+                        std::thread::sleep(Duration::from_millis(50))
+                    }
+                    Err(e) => panic!("read_events: {e}"),
+                }
+            }
+            paths
+        }
+
+        fn drain(watcher: &Watcher) {
+            while watcher
+                .fan
+                .read_events()
+                .is_ok_and(|events| !events.is_empty())
+            {}
+        }
+
+        /// The gate's sequence: a credential directory marked, deleted by a
+        /// cleanup, created again (ext4 gives its inode number back) and read
+        /// again. Root and a fanotify-capable kernel:
+        /// `sudo -E cargo test --features ebpf credential_directory -- --ignored`.
+        #[test]
+        #[ignore]
+        fn a_credential_directory_created_again_is_watched_again() {
+            let scratch = std::env::temp_dir()
+                .join(format!("flodbadd-credopens-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&scratch);
+            let dir = scratch.join(".probe_cred");
+            std::fs::create_dir_all(&dir).unwrap();
+            let watcher = Watcher {
+                fan: Fanotify::init(
+                    InitFlags::FAN_CLASS_NOTIF | InitFlags::FAN_CLOEXEC | InitFlags::FAN_NONBLOCK,
+                    EventFFlags::O_RDONLY | EventFFlags::O_CLOEXEC | EventFFlags::O_LARGEFILE,
+                )
+                .expect("fanotify needs root"),
+                marked: CustomMutex::new(HashMap::new()),
+                creations: None,
+            };
+            let prefix = format!("{}/", dir.display());
+            assert_eq!(
+                remark_prefixes(&watcher, &[prefix.clone()], vec![scratch.clone()]),
+                (1, 0)
+            );
+            let key = dir.join("key");
+            let read_with_child = |key: &Path| {
+                std::fs::write(key, "probe").unwrap();
+                assert!(std::process::Command::new("cat")
+                    .arg(key)
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success());
+            };
+            read_with_child(&key);
+            assert!(
+                opens_within(&watcher, Duration::from_secs(3)).iter().any(|p| p == &key),
+                "the marked directory reports the open"
+            );
+            drain(&watcher);
+            // The cleanup, then the next scenario.
+            std::fs::remove_file(&key).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            let (added, refreshed) =
+                remark_prefixes(&watcher, &[prefix], vec![scratch.clone()]);
+            assert_eq!(added + refreshed, 1, "marked again whatever its inode number");
+            read_with_child(&key);
+            assert!(
+                opens_within(&watcher, Duration::from_secs(3)).iter().any(|p| p == &key),
+                "the directory created again reports the open"
+            );
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
 }
 
 /// Start the backend that is not hosted by an existing sensor thread
@@ -711,17 +961,28 @@ mod tests {
     fn a_recreated_credential_directory_is_marked_again() {
         // Deleted and created again under the same path: a new inode, marked
         // again even with the budget spent (it takes over its own entry).
-        assert!(needs_mark(
-            Some((1, 100)),
-            (1, 200),
-            LINUX_MAX_CREDENTIAL_MARKS
-        ));
-        assert!(needs_mark(Some((1, 100)), (2, 100), 0));
-        // The same directory: already marked.
-        assert!(!needs_mark(Some((1, 100)), (1, 100), 0));
+        assert_eq!(
+            mark_action(Some((1, 100)), (1, 200), LINUX_MAX_CREDENTIAL_MARKS),
+            Some(MarkAction::Renew)
+        );
+        assert_eq!(
+            mark_action(Some((1, 100)), (2, 100), 0),
+            Some(MarkAction::Renew)
+        );
+        // The same identity: marked again all the same. ext4 gives a deleted
+        // directory's inode number to the one created in its place, and the
+        // kernel dropped the mark with the old inode; the identity cannot
+        // tell the two apart, so every pass adds the (idempotent) mark.
+        assert_eq!(
+            mark_action(Some((1, 100)), (1, 100), 0),
+            Some(MarkAction::Refresh)
+        );
         // A new directory: marked while the budget lasts.
-        assert!(needs_mark(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS - 1));
-        assert!(!needs_mark(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS));
+        assert_eq!(
+            mark_action(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS - 1),
+            Some(MarkAction::New)
+        );
+        assert_eq!(mark_action(None, (1, 300), LINUX_MAX_CREDENTIAL_MARKS), None);
     }
 
     use super::*;

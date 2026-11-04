@@ -15,7 +15,7 @@
 //! the watcher config: recursive roots accept every descendant, otherwise
 //! only direct children.
 
-use once_cell::sync::OnceCell;
+use arc_swap::ArcSwapOption;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -50,7 +50,9 @@ struct Sink {
     dropped_full: AtomicU64,
 }
 
-static SINK: OnceCell<Sink> = OnceCell::new();
+// One sink at a time, the running watcher's; `uninstall` clears it when
+// that watcher stops, so the next one installs its own.
+static SINK: ArcSwapOption<Sink> = ArcSwapOption::const_empty();
 
 // Root matching lives in `fim_attribution` so the sink filter here and the
 // attribution confinement in the sensors cannot drift apart.
@@ -58,10 +60,10 @@ pub use crate::fim_attribution::{normalize, path_under_root};
 
 /// Install the sink for the given roots (raw and canonical spellings are
 /// both kept: ES reports `/private/var/...` while callers often pass
-/// `/var/...`). Returns the receiver the watcher consumes. `None` when a
-/// sink is already installed.
+/// `/var/...`). Returns the receiver the watcher consumes. `None` while the
+/// sink of a running watcher is installed (`uninstall` releases it).
 pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceEvent>> {
-    if SINK.get().is_some() {
+    if SINK.load().is_some() {
         return None;
     }
     let mut set = std::collections::BTreeSet::new();
@@ -85,17 +87,30 @@ pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceE
         delivered: AtomicU64::new(0),
         dropped_full: AtomicU64::new(0),
     };
-    SINK.set(sink).ok()?;
+    SINK.store(Some(std::sync::Arc::new(sink)));
     Some(rx)
 }
 
 pub fn is_active() -> bool {
-    SINK.get().is_some()
+    SINK.load().is_some()
+}
+
+/// Release the sink: the watcher that installed it stopped
+/// (`FimWatcher::stop`), the next one installs its own. Until 2.3.2 the sink
+/// was a `OnceCell` nothing cleared: a second `start_file_monitor` in the
+/// same process found the stopped watcher's sink, fell back to FSEvents for
+/// the rest of the process's life, and its events carried a writer only when
+/// the kernel path table happened to hold the path (eight starts in one
+/// helper process on the operator Mac, 2026-10-29; the AWS CLI's sqlite
+/// sidecar writes with no writer at all, FP-MAC-52).
+pub fn uninstall() {
+    SINK.store(None);
 }
 
 /// `(delivered, dropped_because_full)` since install.
 pub fn stats() -> (u64, u64) {
-    SINK.get()
+    SINK.load()
+        .as_ref()
         .map(|s| {
             (
                 s.delivered.load(Ordering::Relaxed),
@@ -108,7 +123,7 @@ pub fn stats() -> (u64, u64) {
 /// Called from the ES handler for every file event it records. Cheap when
 /// no sink is installed or the path is outside every root.
 pub fn push(kind: FimSourceKind, path: &str, pid: u32, process_name: &str, process_path: &str) {
-    let Some(sink) = SINK.get() else {
+    let Some(sink) = SINK.load_full() else {
         return;
     };
     let normalized = normalize(path);
@@ -177,7 +192,7 @@ impl Coalescer {
 
 /// Convenience for the watcher: how many root spellings are installed.
 pub fn root_count() -> usize {
-    SINK.get().map(|s| s.roots.len()).unwrap_or(0)
+    SINK.load().as_ref().map(|s| s.roots.len()).unwrap_or(0)
 }
 
 #[cfg(test)]

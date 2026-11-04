@@ -271,6 +271,71 @@ mod es_lineage {
     }
 }
 
+/// Whether a task-access event for `key` (requester pid, target pid, mode)
+/// repeats one pushed less than `window_ms` ago; `now_ms` is recorded for the
+/// key otherwise. `recent` is bounded: past `max_entries` the stale entries
+/// go, then the whole table (a repeat then counts as new: an edge is never
+/// lost, only a repeat count). The detector reads task access as edges, which
+/// the first event of a window carries (`process_lineage::task_access_edges`);
+/// a monitor (`sysmond`, Activity Monitor, `ps`) that reads every process's
+/// task port every few seconds filled the ring with the repeats (the operator
+/// Mac, 2026-11-04: ~300 events/s, the ring turning over in ~27 s against the
+/// core's 60 s relay, the exec records of short-lived writers gone unread).
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) fn task_access_repeats(
+    recent: &mut HashMap<(u32, u32, u32), u64>,
+    key: (u32, u32, u32),
+    now_ms: u64,
+    window_ms: u64,
+    max_entries: usize,
+) -> bool {
+    if let Some(at) = recent.get(&key) {
+        if now_ms.saturating_sub(*at) < window_ms {
+            return true;
+        }
+    }
+    if recent.len() >= max_entries {
+        recent.retain(|_, at| now_ms.saturating_sub(*at) < window_ms);
+        if recent.len() >= max_entries {
+            recent.clear();
+        }
+    }
+    recent.insert(key, now_ms);
+    false
+}
+
+#[cfg(test)]
+mod task_access_coalescing_tests {
+    use super::*;
+
+    #[test]
+    fn a_repeat_within_the_window_is_coalesced_and_an_edge_never_lost() {
+        let mut recent = HashMap::new();
+        let key = (100, 200, 2);
+        assert!(!task_access_repeats(&mut recent, key, 1_000, 60_000, 4));
+        assert!(task_access_repeats(&mut recent, key, 1_500, 60_000, 4));
+        // Another target, another mode: their own first events.
+        assert!(!task_access_repeats(&mut recent, (100, 201, 2), 1_500, 60_000, 4));
+        assert!(!task_access_repeats(&mut recent, (100, 200, 1), 1_500, 60_000, 4));
+        // The window over: the pair is reported again.
+        assert!(!task_access_repeats(&mut recent, key, 61_001, 60_000, 4));
+        assert_eq!(recent.len(), 3);
+        // The bound: a full table drops its stale entries, then everything if
+        // none is stale; either way the new pair is recorded, never dropped.
+        assert!(!task_access_repeats(&mut recent, (300, 301, 2), 200_000, 60_000, 4));
+        assert_eq!(recent.len(), 4);
+        assert!(!task_access_repeats(&mut recent, (300, 302, 2), 200_000, 60_000, 4));
+        assert_eq!(recent.len(), 2, "the three stale entries went, the two live ones stay");
+        for target in 400..420 {
+            assert!(!task_access_repeats(&mut recent, (300, target, 2), 200_000, 60_000, 4));
+            assert!(recent.len() <= 4);
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
 mod macos {
     use super::es_lineage::{self, extract_process_name, ExecKernelFacts, KnownProcess};
@@ -278,7 +343,7 @@ mod macos {
     use dashmap::DashMap;
     use endpoint_sec::version;
     use endpoint_sec::{Client, Event};
-    use once_cell::sync::OnceCell;
+    use once_cell::sync::{Lazy, OnceCell};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::panic::AssertUnwindSafe;
@@ -286,8 +351,20 @@ mod macos {
     use std::sync::Arc;
     use std::time::Instant;
     use tracing::{debug, error, warn};
+    use undeadlock::{CustomMutex, CustomMutexExt};
 
     use crate::process_events as proc_events;
+
+    /// One `TaskAccess` event per (requester, target, mode) per window
+    /// (`task_access_repeats`): the repeats a process monitor produces every
+    /// few seconds filled the ring. Sixty seconds keeps an edge's recency
+    /// within the detector's windows.
+    const TASK_ACCESS_COALESCE_MS: u64 = 60_000;
+    const TASK_ACCESS_RECENT_MAX: usize = 4_096;
+    static TASK_ACCESS_RECENT: Lazy<CustomMutex<HashMap<(u32, u32, u32), u64>>> =
+        Lazy::new(|| CustomMutex::new(HashMap::new()));
+    /// Repeats not pushed since start (status line).
+    static TASK_ACCESS_COALESCED: AtomicU64 = AtomicU64::new(0);
 
     fn optional_identity(value: std::borrow::Cow<'_, str>) -> Option<String> {
         let value = value.trim();
@@ -308,15 +385,33 @@ mod macos {
         target: &endpoint_sec::Process<'_>,
         mode: u32,
     ) {
+        let target_pid = target.audit_token().pid() as u32;
+        let now_ms = proc_events::now_ms();
+        // A contended table (the handler never waits) pushes the event: a
+        // repeat in the ring costs an entry, a lost first event an edge.
+        let repeat = TASK_ACCESS_RECENT
+            .try_with(|recent| {
+                super::task_access_repeats(
+                    recent,
+                    (responsible_pid, target_pid, mode),
+                    now_ms,
+                    TASK_ACCESS_COALESCE_MS,
+                    TASK_ACCESS_RECENT_MAX,
+                )
+            })
+            .unwrap_or(false);
+        if repeat {
+            TASK_ACCESS_COALESCED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let requestor_path = responsible
             .executable()
             .path()
             .to_string_lossy()
             .to_string();
-        let target_pid = target.audit_token().pid() as u32;
         let target_path = target.executable().path().to_string_lossy().to_string();
         proc_events::push(proc_events::ProcessEvent {
-            timestamp_ms: proc_events::now_ms(),
+            timestamp_ms: now_ms,
             kind: proc_events::ProcessEventKind::TaskAccess,
             pid: responsible_pid,
             ppid: None,
@@ -562,6 +657,118 @@ mod macos {
                 info!("ES helper: {}", status);
             }
             this
+        }
+
+        /// The processes already running when the client subscribes, recorded
+        /// as the ETW rundown records them on Windows (`Process/DCStart`): a
+        /// row in the process table and a `Running` event in the ring. Without
+        /// it a process that predates the client had no kernel record: its
+        /// sessions carried no `kernel_exec` (Zoom's helper, attributed to
+        /// `xpcproxy`, FP-MAC-8) and its children's ancestry stopped at it
+        /// (the agent ancestry of a tool the harness started before the
+        /// helper did, FP-MAC-47 / FP-MAC-53; 2026-11-04). A row the handler
+        /// already wrote (a fork or exec seen first) is left alone. The rows
+        /// written here carry no signing facts (the exit arm reads them from
+        /// the message), and their image epoch is the rundown itself, so no
+        /// L7 cache entry is re-read from them (`ImageEpoch::newer_than`). The
+        /// parent is named only when it is older than the child: a reused pid
+        /// is not the parent.
+        fn rundown_running_processes(table: &DashMap<u32, EsProcessInfo>) -> usize {
+            let now = Instant::now();
+            let pids = crate::l7_macos::list_all_pids();
+            let mut starts: HashMap<u32, u64> = HashMap::with_capacity(pids.len());
+            let mut rows: Vec<(u32, u32, u32, u64)> = Vec::with_capacity(pids.len());
+            for pid in pids {
+                if let Some((ppid, uid, start)) = crate::l7_macos::process_bsd_info(pid) {
+                    starts.insert(pid, start);
+                    rows.push((pid, ppid, uid, start));
+                }
+            }
+            let mut recorded = 0usize;
+            for (pid, ppid, uid, start_time) in rows {
+                if pid == 0 || table.contains_key(&pid) {
+                    continue;
+                }
+                let Some((_, image)) = crate::l7_macos::process_identity(pid)
+                    .filter(|(_, path)| !path.is_empty())
+                else {
+                    continue;
+                };
+                let parent_older = ppid != 0
+                    && ppid != pid
+                    && starts
+                        .get(&ppid)
+                        .is_some_and(|parent_start| *parent_start <= start_time);
+                let parent_path = if parent_older {
+                    crate::l7_macos::process_identity(ppid)
+                        .map(|(_, path)| path)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let ppid = if parent_older { ppid } else { 0 };
+                let username = uzers::get_user_by_uid(uid)
+                    .map(|user| user.name().to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let args = crate::process_args::macos_command_line(pid).unwrap_or_default();
+                let info = EsProcessInfo {
+                    pid,
+                    ppid,
+                    uid,
+                    process_name: extract_process_name(&image),
+                    process_path: image.clone(),
+                    cwd: None,
+                    args: args.clone(),
+                    username,
+                    start_time,
+                    code_signing_flags: 0,
+                    is_platform_binary: false,
+                    signing_id: String::new(),
+                    team_id: String::new(),
+                    parent_process_name: if parent_path.is_empty() {
+                        String::new()
+                    } else {
+                        extract_process_name(&parent_path)
+                    },
+                    parent_process_path: parent_path.clone(),
+                    parent_args: Vec::new(),
+                    grandparent_pid: None,
+                    grandparent_process_name: String::new(),
+                    grandparent_process_path: String::new(),
+                    grandparent_args: Vec::new(),
+                    known_since: now,
+                    image_since: now,
+                };
+                let process_name = info.process_name.clone();
+                table.insert(pid, info);
+                proc_events::push(proc_events::ProcessEvent {
+                    timestamp_ms: proc_events::now_ms(),
+                    kind: proc_events::ProcessEventKind::Running,
+                    pid,
+                    ppid: (ppid != 0).then_some(ppid),
+                    uid: Some(uid),
+                    process_name,
+                    process_path: image,
+                    parent_process_path: (!parent_path.is_empty()).then_some(parent_path),
+                    argv_sha256: if args.is_empty() {
+                        None
+                    } else {
+                        proc_events::argv_digest(&args)
+                    },
+                    argv_len: (!args.is_empty()).then_some(args.len() as u32),
+                    signing_id: None,
+                    team_id: None,
+                    is_platform_binary: None,
+                    platform_path_marked: false,
+                    target_pid: None,
+                    target_process_path: None,
+                    task_access_mode: None,
+                    task_access_mask: None,
+                    net_dst: None,
+                });
+                recorded += 1;
+            }
+            recorded
         }
 
         fn record_file_attribution(
@@ -896,14 +1103,31 @@ mod macos {
                                 exit_platform,
                             ) = match removed {
                                 Some((_, info)) => {
+                                    // The exiting process is the message's own:
+                                    // its signing facts come from the kernel here
+                                    // too. A row the rundown wrote carries none
+                                    // (`is_platform_binary` false there is
+                                    // unmeasured, never a verdict).
                                     let ppid = info.parent_pid();
                                     (
                                         info.process_name,
                                         info.process_path,
                                         ppid,
-                                        (!info.signing_id.is_empty()).then_some(info.signing_id),
-                                        (!info.team_id.is_empty()).then_some(info.team_id),
-                                        Some(info.is_platform_binary),
+                                        (!info.signing_id.is_empty())
+                                            .then_some(info.signing_id)
+                                            .or_else(|| {
+                                                optional_identity(
+                                                    responsible.signing_id().to_string_lossy(),
+                                                )
+                                            }),
+                                        (!info.team_id.is_empty())
+                                            .then_some(info.team_id)
+                                            .or_else(|| {
+                                                optional_identity(
+                                                    responsible.team_id().to_string_lossy(),
+                                                )
+                                            }),
+                                        Some(responsible.is_platform_binary()),
                                     )
                                 }
                                 None => {
@@ -1215,6 +1439,11 @@ mod macos {
             last_error.store(None);
             available.store(true, Ordering::Release);
             info!("ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK");
+            let running = Self::rundown_running_processes(&table);
+            info!(
+                "ES rundown: {} process(es) already running recorded",
+                running
+            );
             let waited = started.elapsed().as_secs();
             if waited >= 2 {
                 info!(

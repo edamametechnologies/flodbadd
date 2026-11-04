@@ -349,6 +349,59 @@ pub fn scan_process_sockets(pid: u32) -> Vec<MacosSocketEntry> {
     entries
 }
 
+// proc_bsdinfo (PROC_PIDTBSDINFO): 136 bytes.
+#[allow(non_camel_case_types, dead_code)]
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct proc_bsdinfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [c_char; 16],
+    pbi_name: [c_char; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+const PROC_PIDTBSDINFO: i32 = 3;
+
+/// Parent pid, effective uid and start time (seconds since the epoch) of a
+/// running process, from libproc's BSD info; `None` when the process is gone
+/// or not visible. The Endpoint Security rundown reads it for the processes
+/// that predate the client.
+#[cfg_attr(not(feature = "endpointsecurity"), allow(dead_code))]
+pub fn process_bsd_info(pid: u32) -> Option<(u32, u32, u64)> {
+    let mut info: proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<proc_bsdinfo>() as i32;
+    let written = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut proc_bsdinfo as *mut std::ffi::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some((info.pbi_ppid, info.pbi_uid, info.pbi_start_tvsec))
+}
+
 /// List all PIDs on the system.
 pub fn list_all_pids() -> Vec<u32> {
     let estimated = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };

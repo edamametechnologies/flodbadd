@@ -24,11 +24,16 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use undeadlock::{CustomMutex, CustomMutexExt};
 
-/// Bounded ring size. At a pathological 2,000 events/s (process storm)
-/// this holds ~4 s of history; the point of the ring is "what just
-/// happened around this finding", not long-term storage -- consumers
-/// that need history drain it on their own cadence.
-pub const PROCESS_EVENT_RING_MAX: usize = 8192;
+/// Bounded ring size: a window for the consumer's cadence, not a store.
+/// The core drains it every 10 s on both paths (its own ring standalone,
+/// the helper's over `process_events_since` on the app path) and at each
+/// detector tick. With 8,192 entries and the operator Mac's ~300 events/s
+/// (task-port reads, since coalesced at the sensor) the ring turned over in
+/// ~27 s against a 60 s drain, so the exec records of short-lived processes
+/// were evicted unread: 43.6 million evictions in 40 h and no kernel fact
+/// on the writes of `sed`, `cat` or a Python heredoc (FP-MAC-47,
+/// 2026-11-04). At the coalesced rate 16,384 entries hold several minutes.
+pub const PROCESS_EVENT_RING_MAX: usize = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessEventKind {

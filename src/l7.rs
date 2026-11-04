@@ -88,7 +88,7 @@ use netstat2::{
     get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, SocketInfo, TcpState,
 };
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -253,6 +253,60 @@ fn kernel_image_newer_than(pid: u32, since: Instant) -> bool {
     l7_es::exec_newer_than(pid, since)
 }
 
+/// The instant each live pid was first listed by the sysinfo table with its
+/// current start time. The table fixes a process's image when it first lists
+/// the pid and refreshes it only when the start time changes (pid reuse), so
+/// a process that exec'd in place after that listing (launchd's `xpcproxy`
+/// trampoline, a shell's `exec`) keeps its first image there for life: a
+/// resolution read from the table is as old as that listing, not as the round
+/// that read it (Zoom's helper attributed to `/usr/libexec/xpcproxy` for
+/// hours on the operator Mac, 2026-10-05 and 2026-11-03, FP-MAC-8 /
+/// FP-MAC-30). Stamped with the listing, the resolution is re-read from the
+/// kernel table when an exec is recorded after it
+/// (`kernel_image_newer_than`): in the round itself, and on each later hit
+/// (`get_resolved_l7`, `try_resolve_from_cache`). Pids no longer listed are
+/// forgotten.
+fn note_listed_processes(
+    listed: &mut HashMap<u32, (u64, Instant)>,
+    live: impl Iterator<Item = (u32, u64)>,
+    now: Instant,
+) {
+    let mut seen: HashSet<u32> = HashSet::new();
+    for (pid, start_time) in live {
+        seen.insert(pid);
+        match listed.get(&pid) {
+            Some((listed_start, _)) if *listed_start == start_time => {}
+            _ => {
+                listed.insert(pid, (start_time, now));
+            }
+        }
+    }
+    listed.retain(|pid, _| seen.contains(pid));
+}
+
+#[cfg(test)]
+mod listed_since_tests {
+    use super::*;
+
+    #[test]
+    fn a_listing_keeps_its_first_instant_until_the_start_time_changes() {
+        let t0 = Instant::now();
+        let t1 = t0 + std::time::Duration::from_secs(5);
+        let t2 = t1 + std::time::Duration::from_secs(5);
+        let mut listed = HashMap::new();
+        note_listed_processes(&mut listed, [(10, 100), (11, 100)].into_iter(), t0);
+        assert_eq!(listed[&10], (100, t0));
+        // The same process one round later: as old as its first listing.
+        note_listed_processes(&mut listed, [(10, 100), (11, 100)].into_iter(), t1);
+        assert_eq!(listed[&10], (100, t0));
+        // The pid reused by a new process is a new listing; a pid no longer
+        // listed is forgotten.
+        note_listed_processes(&mut listed, [(10, 200)].into_iter(), t2);
+        assert_eq!(listed[&10], (200, t2));
+        assert!(!listed.contains_key(&11));
+    }
+}
+
 /// Re-read `previous.pid` from the kernel table once it has recorded a newer
 /// image for it: image, arguments and lineage as the table holds them now,
 /// which is what the eager path would have resolved had the exec row been
@@ -359,6 +413,9 @@ impl FlodbaddL7 {
             // trigger five such rounds within ~60 ms.
             const MIN_ROUND_INTERVAL: Duration = Duration::from_millis(250);
             let mut last_round_started: Option<Instant> = None;
+            // When the sysinfo table first listed each live pid
+            // (`note_listed_processes`): the age of a resolution read from it.
+            let mut listed_since: HashMap<u32, (u64, Instant)> = HashMap::new();
 
             while !*stop_rx.borrow() {
                 let mut to_process_this_cycle: Vec<Session> = Vec::new();
@@ -419,6 +476,13 @@ impl FlodbaddL7 {
                     {
                         let mut sys = system.write().await;
                         sys.refresh_specifics(refresh_kind);
+                        note_listed_processes(
+                            &mut listed_since,
+                            sys.processes()
+                                .iter()
+                                .map(|(pid, process)| (pid.as_u32(), process.start_time())),
+                            round_started,
+                        );
 
                         let mut users = users.write().await;
                         users.refresh();
@@ -560,6 +624,7 @@ impl FlodbaddL7 {
                                 &macos_all_entries,
                                 &host_addresses,
                             ) {
+                                let listed = pid_to_process.contains_key(&pid);
                                 let extracted = if let Some(process) = pid_to_process.get(&pid) {
                                     Self::extract_l7_from_pid(
                                         pid,
@@ -573,17 +638,40 @@ impl FlodbaddL7 {
                                 };
 
                                 if let Some((l7_data, start_time)) = extracted {
+                                    // A resolution read from the sysinfo table is
+                                    // as old as the table's first listing of the
+                                    // pid (`note_listed_processes`); a fresh read
+                                    // is as old as this round.
+                                    let mut read_at = if listed {
+                                        listed_since
+                                            .get(&pid)
+                                            .map(|(_, at)| *at)
+                                            .unwrap_or(round_started)
+                                    } else {
+                                        round_started
+                                    };
+                                    let mut l7_data = l7_data;
+                                    l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
+                                    // The table serves the image it first listed
+                                    // the pid with; when the kernel table recorded
+                                    // an exec after that listing (launchd's
+                                    // `xpcproxy` exec'ing the service in place),
+                                    // its row is the process as it runs now.
+                                    if kernel_image_newer_than(pid, read_at) {
+                                        if let Some((fresh, at)) = refresh_after_exec(&l7_data) {
+                                            l7_data = fresh;
+                                            read_at = at;
+                                        }
+                                    }
                                     Self::update_port_process_cache(
                                         &connection,
                                         owned_end,
                                         &l7_data,
                                         start_time,
-                                        round_started,
+                                        read_at,
                                         &port_process_cache,
                                     )
                                     .await;
-                                    let mut l7_data = l7_data;
-                                    l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
                                     let source = if l7_es::is_available() {
                                         L7ResolutionSource::EndpointSecurity
                                     } else {
@@ -597,7 +685,7 @@ impl FlodbaddL7 {
                                     l7_map.insert(
                                         connection.clone(),
                                         L7Resolution {
-                                            resolved_at: round_started,
+                                            resolved_at: read_at,
                                             l7: Some(l7_data),
                                             date: Utc::now(),
                                             retry_count: 0,
@@ -629,12 +717,17 @@ impl FlodbaddL7 {
                                 connection,
                                 l7_fast
                             );
+                            // Read from the sysinfo table: as old as its listing.
+                            let read_at = listed_since
+                                .get(&l7_fast.pid)
+                                .map(|(_, at)| *at)
+                                .unwrap_or(round_started);
                             Self::update_port_process_cache(
                                 &connection,
                                 owned_end,
                                 &l7_fast,
                                 start_time_fast,
-                                round_started,
+                                read_at,
                                 &port_process_cache,
                             )
                             .await;
@@ -643,7 +736,7 @@ impl FlodbaddL7 {
                             l7_map.insert(
                                 connection.clone(),
                                 L7Resolution {
-                                    resolved_at: round_started,
+                                    resolved_at: read_at,
                                     l7: Some(l7_fast),
                                     date: Utc::now(),
                                     retry_count: 0,
