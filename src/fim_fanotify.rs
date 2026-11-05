@@ -1221,6 +1221,18 @@ mod tests {
         // alive until the attribution is read: a creator is resolved from
         // /proc while it lives, and the creation thread can lag by seconds
         // in the serial run right after a build (one VM run in three).
+        // Alpine's container legs ship no python3: nothing to measure with.
+        let python_runs = std::process::Command::new("python3")
+            .args(["-c", "pass"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !python_runs {
+            eprintln!(
+                "python3 is not installed here (Alpine's container legs); the test cannot run here"
+            );
+            return;
+        }
         let mut child = std::process::Command::new("python3")
             .arg("-c")
             .arg(format!(
