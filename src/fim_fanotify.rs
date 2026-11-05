@@ -644,12 +644,8 @@ fn parse_creation_records(buf: &[u8]) -> Vec<CreationRecord> {
                     let handle_bytes =
                         u32::from_ne_bytes([buf[fh], buf[fh + 1], buf[fh + 2], buf[fh + 3]])
                             as usize;
-                    let handle_type = i32::from_ne_bytes([
-                        buf[fh + 4],
-                        buf[fh + 5],
-                        buf[fh + 6],
-                        buf[fh + 7],
-                    ]);
+                    let handle_type =
+                        i32::from_ne_bytes([buf[fh + 4], buf[fh + 5], buf[fh + 6], buf[fh + 7]]);
                     let handle_start = fh + 8;
                     let name_start = handle_start + handle_bytes;
                     if name_start <= info + len {
@@ -734,7 +730,10 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
                 let sub = entry.path();
                 remark_directory(&sub);
                 marked += 1;
-                if table.marked.contains_key(&sub.to_string_lossy().to_string()) {
+                if table
+                    .marked
+                    .contains_key(&sub.to_string_lossy().to_string())
+                {
                     queue.push_back(sub);
                 }
             }
@@ -837,7 +836,10 @@ mod tests {
         meta.pid = pid;
         let mut out = Vec::with_capacity(meta.event_len as usize);
         out.extend_from_slice(unsafe {
-            std::slice::from_raw_parts((&meta as *const libc::fanotify_event_metadata).cast::<u8>(), meta_size)
+            std::slice::from_raw_parts(
+                (&meta as *const libc::fanotify_event_metadata).cast::<u8>(),
+                meta_size,
+            )
         });
         out.push(libc::FAN_EVENT_INFO_TYPE_DFID_NAME);
         out.push(0);
@@ -1097,10 +1099,8 @@ mod tests {
                 forget_directory(&self.0);
             }
         }
-        let base = std::env::temp_dir().join(format!(
-            "flodbadd-fanotify-creator-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("flodbadd-fanotify-creator-{}", std::process::id()));
         let _cleanup = Cleanup(base.clone());
         std::fs::create_dir_all(&base).unwrap();
         init(std::slice::from_ref(&base));
@@ -1140,14 +1140,16 @@ mod tests {
         let _ = child.wait();
         let ((pid, name, path), inferred) =
             found.expect("the write into the new directory is attributed");
-        assert_eq!(pid, child_pid, "attributed to {name} {path} (inferred: {inferred})");
+        assert_eq!(
+            pid, child_pid,
+            "attributed to {name} {path} (inferred: {inferred})"
+        );
         assert!(created_total() > 0, "the creation group saw the creations");
         // Nothing above a file directly under the root was created: no
         // creator to infer from.
-        assert!(get_inferred_creator_attribution(
-            &base.join("plain.txt").to_string_lossy()
-        )
-        .is_none());
+        assert!(
+            get_inferred_creator_attribution(&base.join("plain.txt").to_string_lossy()).is_none()
+        );
     }
 
     /// Same privilege as the end-to-end test below. A second `init` -- the
