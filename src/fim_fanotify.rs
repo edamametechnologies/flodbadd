@@ -34,6 +34,15 @@
 //! `FAN_CREATE` names its creator exactly. The table itself lives for the
 //! process: a FIM restart with other paths calls `init` again, which marks
 //! the roots not covered yet instead of returning.
+//!
+//! The creation group is inert, and says so once in the log, where the
+//! kernel refuses its FID marks (a filesystem without file handles) or this
+//! process cannot open the handle a record carries (`open_by_handle_at`
+//! needs CAP_DAC_READ_SEARCH, which a Docker container's default
+//! capabilities lack: the flodbadd CI's container legs, 2026-11-05). The
+//! writer table then works as before 2.3.2, and the root test reads
+//! `creation_marks_total` / `creation_unresolved_total` to skip there
+//! instead of failing.
 
 use dashmap::DashMap;
 use nix::libc;
@@ -115,6 +124,18 @@ struct FanotifyTable {
     events_total: std::sync::atomic::AtomicU64,
     /// Creation events consumed (directories and files).
     created_total: std::sync::atomic::AtomicU64,
+    /// FID marks the creation group holds, the marks the kernel refused and
+    /// the last refusal's errno: a filesystem without file handles refuses
+    /// every one, and the group is then inert on that root.
+    creation_marks: std::sync::atomic::AtomicU64,
+    creation_mark_failures: std::sync::atomic::AtomicU64,
+    creation_mark_last_errno: std::sync::atomic::AtomicI32,
+    /// Creation records whose parent handle this process could not open,
+    /// and the last errno: `open_by_handle_at` needs CAP_DAC_READ_SEARCH,
+    /// which a container's capability set lacks (EPERM). The group is then
+    /// inert and new directories are marked from inotify only.
+    creation_unresolved: std::sync::atomic::AtomicU64,
+    creation_unresolved_last_errno: std::sync::atomic::AtomicI32,
 }
 
 static TABLE: OnceCell<Arc<FanotifyTable>> = OnceCell::new();
@@ -176,6 +197,11 @@ pub fn init(roots: &[PathBuf]) {
             roots: CustomDashMap::new("fim_fanotify_roots"),
             events_total: std::sync::atomic::AtomicU64::new(0),
             created_total: std::sync::atomic::AtomicU64::new(0),
+            creation_marks: std::sync::atomic::AtomicU64::new(0),
+            creation_mark_failures: std::sync::atomic::AtomicU64::new(0),
+            creation_mark_last_errno: std::sync::atomic::AtomicI32::new(0),
+            creation_unresolved: std::sync::atomic::AtomicU64::new(0),
+            creation_unresolved_last_errno: std::sync::atomic::AtomicI32::new(0),
         });
         let reader = Arc::clone(&table);
         std::thread::Builder::new()
@@ -437,6 +463,46 @@ pub fn created_total() -> u64 {
         .unwrap_or(0)
 }
 
+/// FID marks the creation group holds.
+pub fn creation_marks_total() -> u64 {
+    TABLE
+        .get()
+        .map(|t| t.creation_marks.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// FID marks the kernel refused, and the last refusal's errno (a filesystem
+/// without file handles refuses every mark on it).
+pub fn creation_mark_failures() -> (u64, i32) {
+    TABLE
+        .get()
+        .map(|t| {
+            (
+                t.creation_mark_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                t.creation_mark_last_errno
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Creation records this process could not resolve to a directory, and the
+/// last errno (EPERM: no CAP_DAC_READ_SEARCH, a container).
+pub fn creation_unresolved_total() -> (u64, i32) {
+    TABLE
+        .get()
+        .map(|t| {
+            (
+                t.creation_unresolved
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                t.creation_unresolved_last_errno
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
 fn normalize(path: &str) -> String {
     path.trim().to_string()
 }
@@ -459,17 +525,30 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             // The creation group marks the same directory: a file or
             // subdirectory created in it is reported with its creator.
             if let Some(dir_fan) = table.dir_fan.as_ref() {
-                if let Err(e) = dir_fan.mark::<_, Path>(
+                match dir_fan.mark::<_, Path>(
                     MarkFlags::FAN_MARK_ADD,
                     MaskFlags::FAN_CREATE | MaskFlags::FAN_ONDIR | MaskFlags::FAN_EVENT_ON_CHILD,
                     &handle,
                     None,
                 ) {
-                    debug!(
-                        "FIM fanotify: creation mark {} failed: {}",
-                        dir.display(),
-                        e
-                    );
+                    Ok(()) => {
+                        table
+                            .creation_marks
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        table
+                            .creation_mark_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        table
+                            .creation_mark_last_errno
+                            .store(e as i32, std::sync::atomic::Ordering::Relaxed);
+                        debug!(
+                            "FIM fanotify: creation mark {} failed: {}",
+                            dir.display(),
+                            e
+                        );
+                    }
                 }
             }
             table.marked.insert(key, ());
@@ -683,6 +762,7 @@ fn resolve_parent_directory(table: &FanotifyTable, record: &CreationRecord) -> O
     raw[..4].copy_from_slice(&(record.handle.len() as u32).to_ne_bytes());
     raw[4..8].copy_from_slice(&record.handle_type.to_ne_bytes());
     raw[8..].copy_from_slice(&record.handle);
+    let mut last_errno = 0i32;
     for root in table.root_handles.iter() {
         // SAFETY: `raw` holds a well-formed file_handle (handle_bytes names
         // exactly the bytes that follow) and outlives the call.
@@ -694,6 +774,7 @@ fn resolve_parent_directory(table: &FanotifyTable, record: &CreationRecord) -> O
             )
         };
         if fd < 0 {
+            last_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             continue;
         }
         let path = std::fs::read_link(format!("/proc/self/fd/{fd}")).ok();
@@ -704,6 +785,19 @@ fn resolve_parent_directory(table: &FanotifyTable, record: &CreationRecord) -> O
         if let Some(path) = path {
             return Some(path);
         }
+    }
+    table
+        .creation_unresolved
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    table
+        .creation_unresolved_last_errno
+        .store(last_errno, std::sync::atomic::Ordering::Relaxed);
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        info!(
+            "FIM fanotify: a directory-creation record could not be resolved (open_by_handle_at: {}); without CAP_DAC_READ_SEARCH (a container) new directories are marked from inotify only",
+            std::io::Error::from_raw_os_error(last_errno)
+        );
     }
     None
 }
@@ -1109,15 +1203,28 @@ mod tests {
             eprintln!("creation group unavailable on this kernel; the test cannot run here");
             return;
         }
+        if creation_marks_total() == 0 {
+            // Every FID mark refused: a filesystem without file handles (a
+            // container's overlayfs). Production fails open the same way.
+            let (failures, errno) = creation_mark_failures();
+            eprintln!(
+                "the creation group could not mark {} ({failures} mark(s) refused, last errno {errno}: a filesystem without file handles); the test cannot run here",
+                base.display()
+            );
+            return;
+        }
         let store = base.join("pki").join("nssdb");
         let key_db = store.join("key4.db");
         // One process makes the directories and writes the file, as NSS
         // does (a shell's `mkdir` is a child of its own: the inference names
-        // the directory's creator, which would be that child).
+        // the directory's creator, which would be that child). It stays
+        // alive until the attribution is read: a creator is resolved from
+        // /proc while it lives, and the creation thread can lag by seconds
+        // in the serial run right after a build (one VM run in three).
         let mut child = std::process::Command::new("python3")
             .arg("-c")
             .arg(format!(
-                "import os, time; os.makedirs({store:?}); open({key_db:?}, 'w').write('key'); time.sleep(2)",
+                "import os, time; os.makedirs({store:?}); open({key_db:?}, 'w').write('key'); time.sleep(20)",
                 store = store.to_string_lossy(),
                 key_db = key_db.to_string_lossy()
             ))
@@ -1125,7 +1232,7 @@ mod tests {
             .unwrap();
         let child_pid = child.id();
         let mut found = None;
-        for _ in 0..50 {
+        for _ in 0..80 {
             let key = key_db.to_string_lossy().to_string();
             if let Some(att) = get_file_attribution(&key) {
                 found = Some((att, false));
@@ -1137,9 +1244,35 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        let _ = child.kill();
         let _ = child.wait();
-        let ((pid, name, path), inferred) =
-            found.expect("the write into the new directory is attributed");
+        if found.is_none() && created_total() == 0 {
+            let (unresolved, errno) = creation_unresolved_total();
+            if unresolved > 0 {
+                // The kernel reported the creations; this process could not
+                // open their parent handles (open_by_handle_at needs
+                // CAP_DAC_READ_SEARCH, which a Docker container lacks: the
+                // flodbadd CI's container legs). Production fails open the
+                // same way, with the one-time log.
+                eprintln!(
+                    "{unresolved} creation record(s) could not be resolved (open_by_handle_at errno {errno}: no CAP_DAC_READ_SEARCH, a container); the test cannot run here"
+                );
+                return;
+            }
+        }
+        let table = TABLE.get().unwrap();
+        let ((pid, name, path), inferred) = found.unwrap_or_else(|| {
+            panic!(
+                "the write into the new directory is attributed (created {}, creation marks {}, refused {:?}, unresolved {:?}, creators {}, marked {}, entries {})",
+                created_total(),
+                creation_marks_total(),
+                creation_mark_failures(),
+                creation_unresolved_total(),
+                table.creators.len(),
+                table.marked.len(),
+                table.entries.len()
+            )
+        });
         assert_eq!(
             pid, child_pid,
             "attributed to {name} {path} (inferred: {inferred})"
