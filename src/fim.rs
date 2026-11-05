@@ -1648,6 +1648,18 @@ fn best_effort_process_attribution(
     if let Some((pid, name, proc_path)) = crate::fim_fanotify::get_file_attribution(&path_str) {
         return (Some(name), Some(proc_path), Some(pid), false);
     }
+    // Tier 1b (Linux, 2.3.2): the creator of the directory the file was just
+    // made in, when the file landed before the mark its directory's creation
+    // triggered (NSS writing `key4.db` and its journal into the `pki/nssdb/`
+    // it made a millisecond earlier: FP-LIN-6, the CI lab's ubuntu-26.04
+    // leg). An inferred writer, reported as such; the detector keeps it only
+    // where it explains the write as the store owner's own.
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    if let Some((pid, name, proc_path)) =
+        crate::fim_fanotify::get_inferred_creator_attribution(&path_str)
+    {
+        return (Some(name), Some(proc_path), Some(pid), true);
+    }
 
     // Tier 2: in-memory lsof result cache (positive or negative). The cache
     // keys on path and remembers the binary, not the instance: no pid.
