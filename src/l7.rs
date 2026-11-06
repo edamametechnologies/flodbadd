@@ -1382,8 +1382,8 @@ impl FlodbaddL7 {
                 }
 
                 // Scan FDs on a blocking thread (I/O varies by platform).
-                // Full scan for PIDs with empty open_files; sensitive-only for
-                // those already populated.
+                // Full scan for PIDs with empty open_files; sensitive files and
+                // ownership lock files for those already populated.
                 let scan_results = tokio::task::spawn_blocking(move || {
                     targets
                         .into_iter()
@@ -1391,7 +1391,7 @@ impl FlodbaddL7 {
                             let files = if needs_full {
                                 crate::open_files::get_open_file_paths(pid)
                             } else {
-                                crate::open_files::get_sensitive_open_file_paths(pid)
+                                crate::open_files::get_retained_open_file_paths(pid)
                             };
                             if files.is_empty() {
                                 None

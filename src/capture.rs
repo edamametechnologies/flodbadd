@@ -2169,7 +2169,7 @@ impl FlodbaddCapture {
                 let l7_resolution = l7.get_resolved_l7(&session_info.session).await;
 
                 if let Some(l7_resolution) = l7_resolution {
-                    if let Some(l7_data) = l7_resolution.l7 {
+                    if let Some(mut l7_data) = l7_resolution.l7 {
                         if matches!(
                             l7_resolution.source,
                             L7ResolutionSource::CacheHitTerminated
@@ -2177,6 +2177,14 @@ impl FlodbaddCapture {
                         ) {
                             continue;
                         }
+
+                        // The lock files of the process and its same-image
+                        // parent: read on the first attach, carried forward
+                        // from the session's record afterwards.
+                        crate::open_files::retain_ownership_lock_files(
+                            &mut l7_data,
+                            session_info.l7.as_ref(),
+                        );
 
                         let write_start = Instant::now();
                         if let Some(mut entry) = sessions.get_mut(key) {

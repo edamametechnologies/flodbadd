@@ -1,4 +1,5 @@
 use crate::sensitive_paths::SENSITIVE_PATHS;
+use crate::sessions::SessionL7;
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -124,6 +125,46 @@ pub fn sensitive_patterns() -> Vec<String> {
     PATTERNS_SNAPSHOT.load().as_ref().clone()
 }
 
+lazy_static::lazy_static! {
+    /// The file names that mark a store as the process's own (the detector
+    /// params' `ownership_lock_file_names`: LevelDB `LOCK`, Firefox
+    /// `parent.lock`, ...), lowercase. Empty until the params are handed over
+    /// ([`set_ownership_lock_file_names`]): the capture then records no lock.
+    static ref OWNERSHIP_LOCK_NAMES: ArcSwap<Vec<String>> = ArcSwap::from_pointee(Vec::new());
+}
+
+/// Install the lock-file names the capture records for the detector's
+/// OWNS-by-lock relation. Foundation hands them over from the detector params
+/// in whichever process runs the capture (the helper on the app path, the
+/// daemon standalone), at capture start and after each params update.
+pub fn set_ownership_lock_file_names(names: &[String]) {
+    let names: Vec<String> = names
+        .iter()
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    OWNERSHIP_LOCK_NAMES.store(Arc::new(names));
+}
+
+/// `path`'s file name is one of the ownership lock-file names.
+pub fn is_ownership_lock_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let name = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    !name.is_empty() && OWNERSHIP_LOCK_NAMES.load().iter().any(|lock| *lock == name)
+}
+
+/// A path a session's record keeps by name and carries across
+/// re-resolutions: sensitive material, or a lock file marking the store its
+/// process owns.
+fn is_retained_open_file_path(path: &str) -> bool {
+    is_sensitive_path(path) || is_ownership_lock_path(path)
+}
+
 fn should_keep_open_file_path(path: &str) -> bool {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -144,8 +185,9 @@ fn directory_glob_entry(dir: &str) -> String {
 }
 
 /// Aggregate file paths when the list exceeds MAX_OPEN_FILES.
-/// Sensitive paths (credentials, keys, etc.) are always preserved individually;
-/// only non-sensitive paths are subject to directory-level aggregation.
+/// Sensitive paths (credentials, keys, etc.) and ownership lock files are
+/// always preserved individually; only the other paths are subject to
+/// directory-level aggregation.
 pub fn aggregate_open_files(mut paths: Vec<String>) -> Vec<String> {
     paths.retain(|path| should_keep_open_file_path(path));
     paths.sort();
@@ -155,9 +197,10 @@ pub fn aggregate_open_files(mut paths: Vec<String>) -> Vec<String> {
         return paths;
     }
 
-    // Partition: sensitive paths survive aggregation unconditionally
-    let (sensitive, regular): (Vec<_>, Vec<_>) =
-        paths.into_iter().partition(|p| is_sensitive_path(p));
+    // Partition: retained paths survive aggregation unconditionally
+    let (sensitive, regular): (Vec<_>, Vec<_>) = paths
+        .into_iter()
+        .partition(|p| is_retained_open_file_path(p));
 
     let budget = MAX_OPEN_FILES.saturating_sub(sensitive.len());
     let mut result = sensitive;
@@ -218,20 +261,98 @@ fn aggregate_regular(paths: Vec<String>, budget: usize) -> Vec<String> {
 }
 
 /// Merge sensitive paths from a previous snapshot into the current one.
-/// Sensitive files that were observed in `previous` but are absent from
-/// `current` are carried forward (sticky), so a file that was open during
-/// one L7 refresh cycle remains visible even if the process closed it
-/// before the next cycle. Non-sensitive paths are NOT carried forward.
+/// Sensitive files and ownership lock files that were observed in
+/// `previous` but are absent from `current` are carried forward (sticky), so
+/// a file that was open during one L7 refresh cycle remains visible even if
+/// the process closed it before the next cycle. Other paths are NOT carried
+/// forward, and they are the ones the cap drops first.
 pub fn merge_sensitive_open_files(mut current: Vec<String>, previous: &[String]) -> Vec<String> {
     for p in previous {
-        if is_sensitive_path(p) && !current.contains(p) {
+        if is_retained_open_file_path(p) && !current.contains(p) {
             current.push(p.clone());
         }
     }
     current.sort();
     current.dedup();
-    current.truncate(MAX_OPEN_FILES);
+    if current.len() > MAX_OPEN_FILES {
+        let (retained, other): (Vec<_>, Vec<_>) = current
+            .into_iter()
+            .partition(|p| is_retained_open_file_path(p));
+        current = retained;
+        let room = MAX_OPEN_FILES.saturating_sub(current.len());
+        current.extend(other.into_iter().take(room));
+        current.sort();
+        current.truncate(MAX_OPEN_FILES);
+    }
     current
+}
+
+/// The lock files a session's process and its parent of the same image hold,
+/// appended to `l7.open_files` (FP-MAC-29): what the detector's OWNS-by-lock
+/// relation reads. Chromium's network service, the session's process, holds
+/// the profile's `Cookies`; the browser process of the same image holds the
+/// profile's LevelDB `LOCK` files. The capture calls it each time it attaches
+/// a resolution to its session: the first time it sees the process there it
+/// reads them, afterwards it carries forward what `previous` (the session's
+/// record) holds for the same process, so a browser that exited before the
+/// detector's tick keeps the fact. Only lock files are added: a parent's
+/// other open files would attribute material to a child that never opened
+/// it.
+pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&SessionL7>) {
+    if OWNERSHIP_LOCK_NAMES.load().is_empty() {
+        return;
+    }
+    retain_ownership_lock_files_with(l7, previous, &mut |pid| {
+        get_open_file_paths(pid)
+            .into_iter()
+            .filter(|path| is_ownership_lock_path(path))
+            .collect()
+    });
+}
+
+/// The pure half of [`retain_ownership_lock_files`]: `locks_of` reports the
+/// lock files a pid holds now. The same process is the same pid with the
+/// same start time (a recycled pid is a new process, its predecessor's locks
+/// are not its own). A pid of zero, or a parent of another image, is not
+/// asked.
+fn retain_ownership_lock_files_with(
+    l7: &mut SessionL7,
+    previous: Option<&SessionL7>,
+    locks_of: &mut dyn FnMut(u32) -> Vec<String>,
+) {
+    fn append(l7: &mut SessionL7, path: String) {
+        if !l7.open_files.contains(&path) {
+            l7.open_files.push(path);
+        }
+    }
+    if let Some(previous) =
+        previous.filter(|prev| prev.pid == l7.pid && prev.start_time == l7.start_time)
+    {
+        for path in previous
+            .open_files
+            .iter()
+            .filter(|path| is_ownership_lock_path(path))
+        {
+            append(l7, path.clone());
+        }
+        return;
+    }
+    let mut pids: Vec<u32> = Vec::new();
+    if l7.pid > 0 {
+        pids.push(l7.pid);
+    }
+    let same_image =
+        !l7.process_path.trim().is_empty() && l7.process_path == l7.parent_process_path;
+    if let (Some(parent_pid), true) = (l7.parent_pid, same_image) {
+        if parent_pid > 0 && parent_pid != l7.pid {
+            pids.push(parent_pid);
+        }
+    }
+    for pid in pids {
+        for lock in locks_of(pid) {
+            append(l7, lock);
+        }
+    }
 }
 
 /// Lightweight scan: only returns open file paths that match sensitive
@@ -241,6 +362,16 @@ pub fn get_sensitive_open_file_paths(pid: u32) -> Vec<String> {
     get_open_file_paths(pid)
         .into_iter()
         .filter(|p| is_sensitive_path(p))
+        .collect()
+}
+
+/// The paths the L7 sensitive scan adds to a populated session: sensitive
+/// material and ownership lock files (a store the process opened after its
+/// session was first resolved). Same I/O as [`get_sensitive_open_file_paths`].
+pub fn get_retained_open_file_paths(pid: u32) -> Vec<String> {
+    get_open_file_paths(pid)
+        .into_iter()
+        .filter(|p| is_retained_open_file_path(p))
         .collect()
 }
 
@@ -1593,5 +1724,145 @@ mod tests {
 
         drop(handles);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- ownership lock files (FP-MAC-29) ---
+
+    /// `set_ownership_lock_file_names` installs a process-wide snapshot:
+    /// every test that needs it installs this same list.
+    fn install_test_lock_names() {
+        set_ownership_lock_file_names(&[
+            "LOCK".to_string(),
+            "parent.lock".to_string(),
+            "lockfile".to_string(),
+        ]);
+    }
+
+    const HEADLESS: &str =
+        "/Users/u/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell";
+    const PROFILE_LOCKS: [&str; 2] = [
+        "/w/browser-test-profile/Default/Local Storage/leveldb/LOCK",
+        "/w/browser-test-profile/Default/Session Storage/LOCK",
+    ];
+
+    fn network_service_l7(pid: u32, parent_pid: Option<u32>, parent_image: &str) -> SessionL7 {
+        SessionL7 {
+            pid,
+            parent_pid,
+            start_time: 1_000,
+            process_path: HEADLESS.to_string(),
+            parent_process_path: parent_image.to_string(),
+            open_files: vec!["/w/browser-test-profile/Default/Cookies".to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn locks_by_pid(pid: u32) -> Vec<String> {
+        match pid {
+            // The browser process holds the profile's LevelDB locks.
+            200 => PROFILE_LOCKS.iter().map(|p| p.to_string()).collect(),
+            // The network service holds no lock of its own.
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_attach_records_the_same_image_parent_s_locks() {
+        install_test_lock_names();
+        let mut l7 = network_service_l7(300, Some(200), HEADLESS);
+        let mut asked = Vec::new();
+        retain_ownership_lock_files_with(&mut l7, None, &mut |pid| {
+            asked.push(pid);
+            locks_by_pid(pid)
+        });
+        assert_eq!(asked, vec![300, 200]);
+        assert_eq!(
+            l7.open_files,
+            vec![
+                "/w/browser-test-profile/Default/Cookies".to_string(),
+                PROFILE_LOCKS[0].to_string(),
+                PROFILE_LOCKS[1].to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_parent_of_another_image_or_a_pid_zero_is_not_asked() {
+        install_test_lock_names();
+        let mut l7 = network_service_l7(300, Some(200), "/usr/bin/python3");
+        let mut asked = Vec::new();
+        retain_ownership_lock_files_with(&mut l7, None, &mut |pid| {
+            asked.push(pid);
+            locks_by_pid(pid)
+        });
+        assert_eq!(asked, vec![300]);
+        assert_eq!(l7.open_files.len(), 1);
+
+        let mut orphan = network_service_l7(0, Some(0), HEADLESS);
+        retain_ownership_lock_files_with(&mut orphan, None, &mut |pid| {
+            panic!("pid {pid} must not be asked")
+        });
+        assert_eq!(orphan.open_files.len(), 1);
+    }
+
+    /// The browser exited: the resolver's next answer carries no lock, the
+    /// session's record keeps those of the same process without asking.
+    #[test]
+    fn the_same_process_keeps_its_locks_after_it_exits() {
+        install_test_lock_names();
+        let mut recorded = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut recorded, None, &mut locks_by_pid);
+        let mut fresh = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut fresh, Some(&recorded), &mut |pid| {
+            panic!("pid {pid} must not be asked again")
+        });
+        assert_eq!(fresh.open_files, recorded.open_files);
+    }
+
+    /// A recycled pid is another process: its predecessor's locks are not its
+    /// own, so the record reads the new process's locks instead.
+    #[test]
+    fn a_recycled_pid_does_not_inherit_its_predecessor_s_locks() {
+        install_test_lock_names();
+        let mut recorded = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut recorded, None, &mut locks_by_pid);
+        let mut reused = network_service_l7(300, None, "");
+        reused.start_time = 2_000;
+        reused.process_path = "/tmp/x/agent".to_string();
+        retain_ownership_lock_files_with(&mut reused, Some(&recorded), &mut |_| Vec::new());
+        assert!(!reused.open_files.iter().any(|p| is_ownership_lock_path(p)));
+    }
+
+    #[test]
+    fn lock_files_survive_aggregation_and_re_resolution() {
+        install_test_lock_names();
+        let mut paths: Vec<String> = (0..(MAX_OPEN_FILES + 20))
+            .map(|i| format!("/w/browser-test-profile/Default/Cache/data_{i:03}"))
+            .collect();
+        paths.push(PROFILE_LOCKS[0].to_string());
+        let aggregated = aggregate_open_files(paths);
+        assert!(aggregated.len() <= MAX_OPEN_FILES);
+        assert!(aggregated.contains(&PROFILE_LOCKS[0].to_string()));
+
+        let previous = vec![PROFILE_LOCKS[1].to_string(), "/w/other.dat".to_string()];
+        let merged = merge_sensitive_open_files(vec!["/w/now.dat".to_string()], &previous);
+        assert!(merged.contains(&PROFILE_LOCKS[1].to_string()));
+        assert!(!merged.contains(&"/w/other.dat".to_string()));
+
+        // At the cap, the other paths go before a carried lock file.
+        let full: Vec<String> = (0..MAX_OPEN_FILES).map(|i| format!("/a/{i:03}")).collect();
+        let merged = merge_sensitive_open_files(full, &[PROFILE_LOCKS[1].to_string()]);
+        assert_eq!(merged.len(), MAX_OPEN_FILES);
+        assert!(merged.contains(&PROFILE_LOCKS[1].to_string()));
+    }
+
+    #[test]
+    fn lock_names_match_the_file_name_only_case_insensitively() {
+        install_test_lock_names();
+        assert!(is_ownership_lock_path("/p/Default/shared_proto_db/LOCK"));
+        assert!(is_ownership_lock_path("C:\\Users\\x\\profile\\lockfile"));
+        assert!(is_ownership_lock_path("/p/Parent.Lock"));
+        assert!(!is_ownership_lock_path("/p/LOCK/Cookies"));
+        assert!(!is_ownership_lock_path("/p/Default/Cookies"));
     }
 }
