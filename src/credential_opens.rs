@@ -456,13 +456,17 @@ fn home_root_component(home_prefix: &str) -> Option<&str> {
 pub fn kernel_watch_prefixes(homes: &[PathBuf]) -> Vec<String> {
     let patterns = home_relative_cold_patterns();
     let mut out: Vec<String> = Vec::new();
+    // Each directory is listed once per call: every pattern of a home
+    // resolves its first component against the same listing, and the Linux
+    // re-mark pass calls this every minute and after directory creations.
+    let mut listings = DirectoryListings::default();
     for home in homes {
         for rel in &patterns {
             if out.len() >= MAX_WATCH_PREFIXES {
                 return out;
             }
             let trailing_slash = rel.ends_with('/');
-            let resolved = resolve_case(home, rel.trim_matches('/'));
+            let resolved = resolve_case(home, rel.trim_matches('/'), &mut listings);
             let mut prefix = resolved.to_string_lossy().to_string();
             if trailing_slash && !prefix.ends_with('/') {
                 prefix.push('/');
@@ -475,16 +479,37 @@ pub fn kernel_watch_prefixes(homes: &[PathBuf]) -> Vec<String> {
     out
 }
 
+/// Entry names of the directories [`resolve_case`] read, in listing order
+/// (`None`: not a readable directory).
+#[derive(Default)]
+struct DirectoryListings(HashMap<PathBuf, Option<Vec<String>>>);
+
+impl DirectoryListings {
+    fn names(&mut self, dir: &Path) -> Option<&[String]> {
+        self.0
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                std::fs::read_dir(dir).ok().map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+            })
+            .as_deref()
+    }
+}
+
 /// `base` joined with `rel`, each component replaced by the on-disk entry
 /// that matches it case-insensitively when one exists.
-fn resolve_case(base: &Path, rel: &str) -> PathBuf {
+fn resolve_case(base: &Path, rel: &str, listings: &mut DirectoryListings) -> PathBuf {
     let mut cur = base.to_path_buf();
     for component in rel.split('/').filter(|c| !c.is_empty()) {
-        let on_disk = std::fs::read_dir(&cur).ok().and_then(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().to_string())
+        let on_disk = listings.names(&cur).and_then(|names| {
+            names
+                .iter()
                 .find(|name| name.eq_ignore_ascii_case(component))
+                .cloned()
         });
         cur.push(on_disk.as_deref().unwrap_or(component));
     }
@@ -1251,7 +1276,11 @@ mod tests {
         let base = std::env::temp_dir().join(format!("flodbadd-credopen-{}", std::process::id()));
         let dir = base.join("Library/Application Support/Exodus");
         std::fs::create_dir_all(&dir).unwrap();
-        let resolved = resolve_case(&base, "library/application support/exodus");
+        let resolved = resolve_case(
+            &base,
+            "library/application support/exodus",
+            &mut DirectoryListings::default(),
+        );
         let _ = std::fs::remove_dir_all(&base);
         assert_eq!(resolved, dir);
     }
