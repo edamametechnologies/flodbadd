@@ -295,14 +295,19 @@ pub fn merge_sensitive_open_files(mut current: Vec<String>, previous: &[String])
 /// a resolution to its session: the first time it sees the process there it
 /// reads them, afterwards it carries forward what `previous` (the session's
 /// record) holds for the same process, so a browser that exited before the
-/// detector's tick keeps the fact. Only lock files are added: a parent's
+/// detector's tick keeps the fact. A record that holds no lock file yet asks
+/// the same-image parent again at each attach ([`ASKS_PARENT_AGAIN`]): the
+/// first read can come back without the locks a parent holds (a headless
+/// browser's network-service sessions carried none while the browser held
+/// four, 2026-11-08), and that one miss used to stay for the life of the
+/// session. Only lock files are added: a parent's
 /// other open files would attribute material to a child that never opened
 /// it.
 pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&SessionL7>) {
     if OWNERSHIP_LOCK_NAMES.load().is_empty() {
         return;
     }
-    retain_ownership_lock_files_with(l7, previous, &mut |pid| {
+    retain_ownership_lock_files_with(l7, previous, ASKS_PARENT_AGAIN, &mut |pid| {
         get_open_file_paths(pid)
             .into_iter()
             .filter(|path| is_ownership_lock_path(path))
@@ -310,14 +315,23 @@ pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&Session
     });
 }
 
+/// Whether a session's record that holds no lock file yet asks the
+/// same-image parent again at the next attach. Not on Windows: the
+/// enumeration leaves out the handles a process holds for writing
+/// (`win_handles`), and a lock file is held for writing, so asking again
+/// would only repeat the parent's enumeration.
+const ASKS_PARENT_AGAIN: bool = cfg!(not(target_os = "windows"));
+
 /// The pure half of [`retain_ownership_lock_files`]: `locks_of` reports the
 /// lock files a pid holds now. The same process is the same pid with the
 /// same start time (a recycled pid is a new process, its predecessor's locks
 /// are not its own). A pid of zero, or a parent of another image, is not
-/// asked.
+/// asked. With `asks_parent_again`, a record of the same process that holds
+/// no lock file asks the same-image parent its current lineage names.
 fn retain_ownership_lock_files_with(
     l7: &mut SessionL7,
     previous: Option<&SessionL7>,
+    asks_parent_again: bool,
     locks_of: &mut dyn FnMut(u32) -> Vec<String>,
 ) {
     fn append(l7: &mut SessionL7, path: String) {
@@ -335,23 +349,38 @@ fn retain_ownership_lock_files_with(
         {
             append(l7, path.clone());
         }
+        let holds_a_lock = l7
+            .open_files
+            .iter()
+            .any(|path| is_ownership_lock_path(path));
+        if asks_parent_again && !holds_a_lock {
+            if let Some(parent_pid) = same_image_parent(l7) {
+                for lock in locks_of(parent_pid) {
+                    append(l7, lock);
+                }
+            }
+        }
         return;
     }
     let mut pids: Vec<u32> = Vec::new();
     if l7.pid > 0 {
         pids.push(l7.pid);
     }
-    let same_image =
-        !l7.process_path.trim().is_empty() && l7.process_path == l7.parent_process_path;
-    if let (Some(parent_pid), true) = (l7.parent_pid, same_image) {
-        if parent_pid > 0 && parent_pid != l7.pid {
-            pids.push(parent_pid);
-        }
-    }
+    pids.extend(same_image_parent(l7));
     for pid in pids {
         for lock in locks_of(pid) {
             append(l7, lock);
         }
+    }
+}
+
+/// The parent `l7` names when it runs the process's own image.
+fn same_image_parent(l7: &SessionL7) -> Option<u32> {
+    let same_image =
+        !l7.process_path.trim().is_empty() && l7.process_path == l7.parent_process_path;
+    match (l7.parent_pid, same_image) {
+        (Some(parent_pid), true) if parent_pid > 0 && parent_pid != l7.pid => Some(parent_pid),
+        _ => None,
     }
 }
 
@@ -1771,7 +1800,7 @@ mod tests {
         install_test_lock_names();
         let mut l7 = network_service_l7(300, Some(200), HEADLESS);
         let mut asked = Vec::new();
-        retain_ownership_lock_files_with(&mut l7, None, &mut |pid| {
+        retain_ownership_lock_files_with(&mut l7, None, true, &mut |pid| {
             asked.push(pid);
             locks_by_pid(pid)
         });
@@ -1791,7 +1820,7 @@ mod tests {
         install_test_lock_names();
         let mut l7 = network_service_l7(300, Some(200), "/usr/bin/python3");
         let mut asked = Vec::new();
-        retain_ownership_lock_files_with(&mut l7, None, &mut |pid| {
+        retain_ownership_lock_files_with(&mut l7, None, true, &mut |pid| {
             asked.push(pid);
             locks_by_pid(pid)
         });
@@ -1799,7 +1828,7 @@ mod tests {
         assert_eq!(l7.open_files.len(), 1);
 
         let mut orphan = network_service_l7(0, Some(0), HEADLESS);
-        retain_ownership_lock_files_with(&mut orphan, None, &mut |pid| {
+        retain_ownership_lock_files_with(&mut orphan, None, true, &mut |pid| {
             panic!("pid {pid} must not be asked")
         });
         assert_eq!(orphan.open_files.len(), 1);
@@ -1811,9 +1840,9 @@ mod tests {
     fn the_same_process_keeps_its_locks_after_it_exits() {
         install_test_lock_names();
         let mut recorded = network_service_l7(300, Some(200), HEADLESS);
-        retain_ownership_lock_files_with(&mut recorded, None, &mut locks_by_pid);
+        retain_ownership_lock_files_with(&mut recorded, None, true, &mut locks_by_pid);
         let mut fresh = network_service_l7(300, Some(200), HEADLESS);
-        retain_ownership_lock_files_with(&mut fresh, Some(&recorded), &mut |pid| {
+        retain_ownership_lock_files_with(&mut fresh, Some(&recorded), true, &mut |pid| {
             panic!("pid {pid} must not be asked again")
         });
         assert_eq!(fresh.open_files, recorded.open_files);
@@ -1825,12 +1854,87 @@ mod tests {
     fn a_recycled_pid_does_not_inherit_its_predecessor_s_locks() {
         install_test_lock_names();
         let mut recorded = network_service_l7(300, Some(200), HEADLESS);
-        retain_ownership_lock_files_with(&mut recorded, None, &mut locks_by_pid);
+        retain_ownership_lock_files_with(&mut recorded, None, true, &mut locks_by_pid);
         let mut reused = network_service_l7(300, None, "");
         reused.start_time = 2_000;
         reused.process_path = "/tmp/x/agent".to_string();
-        retain_ownership_lock_files_with(&mut reused, Some(&recorded), &mut |_| Vec::new());
+        retain_ownership_lock_files_with(&mut reused, Some(&recorded), true, &mut |_| Vec::new());
         assert!(!reused.open_files.iter().any(|p| is_ownership_lock_path(p)));
+    }
+
+    /// A first attach that could not ask the browser (its lineage named
+    /// another image), then a resolution that names it: the record asks the
+    /// same-image parent then, and carries its locks from there on.
+    #[test]
+    fn a_record_without_a_lock_asks_the_same_image_parent_again() {
+        install_test_lock_names();
+        let mut first = network_service_l7(300, Some(200), "/usr/bin/python3");
+        let mut asked = Vec::new();
+        retain_ownership_lock_files_with(&mut first, None, true, &mut |pid| {
+            asked.push(pid);
+            locks_by_pid(pid)
+        });
+        assert_eq!(asked, vec![300]);
+        assert!(!first.open_files.iter().any(|p| is_ownership_lock_path(p)));
+
+        let mut corrected = network_service_l7(300, Some(200), HEADLESS);
+        asked.clear();
+        retain_ownership_lock_files_with(&mut corrected, Some(&first), true, &mut |pid| {
+            asked.push(pid);
+            locks_by_pid(pid)
+        });
+        assert_eq!(asked, vec![200]);
+        for lock in PROFILE_LOCKS {
+            assert!(corrected.open_files.contains(&lock.to_string()));
+        }
+
+        // Found once: the record carries them without asking, after the
+        // browser exited too.
+        let mut later = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut later, Some(&corrected), true, &mut |pid| {
+            panic!("pid {pid} must not be asked again")
+        });
+        for lock in PROFILE_LOCKS {
+            assert!(later.open_files.contains(&lock.to_string()));
+        }
+    }
+
+    /// A first read of the parent that came back without its locks is not
+    /// final either.
+    #[test]
+    fn a_parent_whose_first_read_missed_is_asked_again() {
+        install_test_lock_names();
+        let mut first = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut first, None, true, &mut |_| Vec::new());
+        assert!(!first.open_files.iter().any(|p| is_ownership_lock_path(p)));
+        let mut next = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut next, Some(&first), true, &mut locks_by_pid);
+        for lock in PROFILE_LOCKS {
+            assert!(next.open_files.contains(&lock.to_string()));
+        }
+    }
+
+    /// Where a lock never shows (Windows), and for a parent of another image,
+    /// a record without a lock does not ask again.
+    #[test]
+    fn a_record_without_a_lock_asks_no_one_else() {
+        install_test_lock_names();
+        let mut first = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut first, None, false, &mut |_| Vec::new());
+        let mut next = network_service_l7(300, Some(200), HEADLESS);
+        retain_ownership_lock_files_with(&mut next, Some(&first), false, &mut |pid| {
+            panic!("pid {pid} must not be asked without asks_parent_again")
+        });
+        assert!(!next.open_files.iter().any(|p| is_ownership_lock_path(p)));
+
+        let mut other_image = network_service_l7(300, Some(200), "/usr/bin/python3");
+        retain_ownership_lock_files_with(&mut other_image, Some(&first), true, &mut |pid| {
+            panic!("pid {pid} runs another image and must not be asked")
+        });
+        assert!(!other_image
+            .open_files
+            .iter()
+            .any(|p| is_ownership_lock_path(p)));
     }
 
     #[test]

@@ -2180,7 +2180,8 @@ impl FlodbaddCapture {
 
                         // The lock files of the process and its same-image
                         // parent: read on the first attach, carried forward
-                        // from the session's record afterwards.
+                        // from the session's record afterwards; a record that
+                        // holds none yet asks the same-image parent again.
                         crate::open_files::retain_ownership_lock_files(
                             &mut l7_data,
                             session_info.l7.as_ref(),
