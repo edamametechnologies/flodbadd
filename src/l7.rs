@@ -1851,6 +1851,7 @@ impl FlodbaddL7 {
         if eager {
             if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
                 Self::enrich_ebpf_l7_from_proc(&mut l7_data);
+                crate::open_files::add_same_image_parent_lock_files(&mut l7_data);
                 self.l7_map.insert(
                     connection.clone(),
                     L7Resolution {
@@ -1885,7 +1886,8 @@ impl FlodbaddL7 {
                 return;
             }
 
-            if let Some(l7_data) = l7_es::get_l7_for_session(connection) {
+            if let Some(mut l7_data) = l7_es::get_l7_for_session(connection) {
+                crate::open_files::add_same_image_parent_lock_files(&mut l7_data);
                 self.l7_map.insert(
                     connection.clone(),
                     L7Resolution {
@@ -1918,6 +1920,7 @@ impl FlodbaddL7 {
                     )
                     .await;
                     l7_es::enrich_session_l7(l7_data.pid, &mut l7_data);
+                    crate::open_files::add_same_image_parent_lock_files(&mut l7_data);
                     let source = if l7_es::is_available() {
                         L7ResolutionSource::EndpointSecurity
                     } else {
@@ -1971,6 +1974,7 @@ impl FlodbaddL7 {
         let resolved_at = Instant::now();
         if let Some(mut l7_data) = l7_ebpf::get_l7_for_session(connection) {
             Self::enrich_ebpf_l7_from_proc(&mut l7_data);
+            crate::open_files::add_same_image_parent_lock_files(&mut l7_data);
             let resolution = L7Resolution {
                 l7: Some(l7_data),
                 date: Utc::now(),
@@ -1997,7 +2001,8 @@ impl FlodbaddL7 {
             self.l7_map.insert(connection.clone(), resolution.clone());
             return Some(resolution);
         }
-        if let Some(l7_data) = l7_es::get_l7_for_session(connection) {
+        if let Some(mut l7_data) = l7_es::get_l7_for_session(connection) {
+            crate::open_files::add_same_image_parent_lock_files(&mut l7_data);
             let resolution = L7Resolution {
                 l7: Some(l7_data),
                 date: Utc::now(),
@@ -2887,6 +2892,9 @@ impl FlodbaddL7 {
         connection: &Session,
         l7_data: &mut SessionL7,
     ) {
+        // The resolver round's paths all pass here once the lineage is
+        // complete: the parent's locks are read now, while it runs.
+        crate::open_files::add_same_image_parent_lock_files(l7_data);
         if let Some(prev) = l7_map.get(connection) {
             if let Some(prev_l7) = &prev.l7 {
                 l7_data.open_files = crate::open_files::merge_sensitive_open_files(

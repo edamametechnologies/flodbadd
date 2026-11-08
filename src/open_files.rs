@@ -295,19 +295,19 @@ pub fn merge_sensitive_open_files(mut current: Vec<String>, previous: &[String])
 /// a resolution to its session: the first time it sees the process there it
 /// reads them, afterwards it carries forward what `previous` (the session's
 /// record) holds for the same process, so a browser that exited before the
-/// detector's tick keeps the fact. A record that holds no lock file yet asks
-/// the same-image parent again at each attach ([`ASKS_PARENT_AGAIN`]): the
-/// first read can come back without the locks a parent holds (a headless
-/// browser's network-service sessions carried none while the browser held
-/// four, 2026-11-08), and that one miss used to stay for the life of the
-/// session. Only lock files are added: a parent's
+/// detector's tick keeps the fact. The resolver reads the parent's locks
+/// already, while the process runs ([`add_same_image_parent_lock_files`]):
+/// the update pass that attaches a resolution can come after a short-lived
+/// browser exited, and a read at that point finds no parent. A record that
+/// holds no lock file yet asks the same-image parent again at each attach
+/// ([`READS_PARENT_LOCKS`]). Only lock files are added: a parent's
 /// other open files would attribute material to a child that never opened
 /// it.
 pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&SessionL7>) {
     if OWNERSHIP_LOCK_NAMES.load().is_empty() {
         return;
     }
-    retain_ownership_lock_files_with(l7, previous, ASKS_PARENT_AGAIN, &mut |pid| {
+    retain_ownership_lock_files_with(l7, previous, READS_PARENT_LOCKS, &mut |pid| {
         get_open_file_paths(pid)
             .into_iter()
             .filter(|path| is_ownership_lock_path(path))
@@ -315,12 +315,36 @@ pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&Session
     });
 }
 
-/// Whether a session's record that holds no lock file yet asks the
-/// same-image parent again at the next attach. Not on Windows: the
-/// enumeration leaves out the handles a process holds for writing
-/// (`win_handles`), and a lock file is held for writing, so asking again
-/// would only repeat the parent's enumeration.
-const ASKS_PARENT_AGAIN: bool = cfg!(not(target_os = "windows"));
+/// Whether a parent's lock files are read beyond a session's first attach
+/// (when the resolver resolves a connection, and again while the record
+/// holds none). Not on Windows: the enumeration leaves out the handles a
+/// process holds for writing (`win_handles`), and a lock file is held for
+/// writing, so a read would only repeat the parent's enumeration.
+const READS_PARENT_LOCKS: bool = cfg!(not(target_os = "windows"));
+
+/// Appends to `l7.open_files` the lock files its parent of the same image
+/// holds now (the browser process of a Chromium network service). The
+/// resolver calls it on every resolution, while the process runs: the
+/// capture attaches a resolution to its session on its update pass, which a
+/// short-lived browser can outlive (2026-11-08: a headless browser that ran
+/// 45 s between two passes left all its sessions without the locks, read at
+/// attach time after it exited). Not on Windows ([`READS_PARENT_LOCKS`]).
+pub fn add_same_image_parent_lock_files(l7: &mut SessionL7) {
+    if !READS_PARENT_LOCKS || OWNERSHIP_LOCK_NAMES.load().is_empty() {
+        return;
+    }
+    let Some(parent_pid) = same_image_parent(l7) else {
+        return;
+    };
+    for lock in get_open_file_paths(parent_pid)
+        .into_iter()
+        .filter(|path| is_ownership_lock_path(path))
+    {
+        if !l7.open_files.contains(&lock) {
+            l7.open_files.push(lock);
+        }
+    }
+}
 
 /// The pure half of [`retain_ownership_lock_files`]: `locks_of` reports the
 /// lock files a pid holds now. The same process is the same pid with the
@@ -1935,6 +1959,54 @@ mod tests {
             .open_files
             .iter()
             .any(|p| is_ownership_lock_path(p)));
+    }
+
+    /// The resolver's read, against the OS: the test process stands in for
+    /// the browser and holds a `LOCK` file; a child record of the same image
+    /// gets it (not on Windows, where a lock file never shows).
+    #[test]
+    fn a_resolution_records_the_same_image_parent_s_locks() {
+        install_test_lock_names();
+        let dir = std::env::temp_dir().join(format!("flodbadd-parent-lock-{}", std::process::id()));
+        let store = dir.join("Default").join("Local Storage").join("leveldb");
+        std::fs::create_dir_all(&store).unwrap();
+        let lock = store.join("LOCK");
+        let held = std::fs::File::create(&lock).unwrap();
+        invalidate_open_files_cache(std::process::id());
+
+        let image = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let mut child = SessionL7 {
+            pid: u32::MAX - 1,
+            parent_pid: Some(std::process::id()),
+            process_path: image.clone(),
+            parent_process_path: image,
+            ..Default::default()
+        };
+        add_same_image_parent_lock_files(&mut child);
+        let recorded = child
+            .open_files
+            .iter()
+            .any(|path| path.ends_with("Local Storage/leveldb/LOCK"));
+        assert_eq!(recorded, READS_PARENT_LOCKS, "{:?}", child.open_files);
+
+        let mut stranger = SessionL7 {
+            pid: u32::MAX - 1,
+            parent_pid: Some(std::process::id()),
+            process_path: "/usr/bin/other".to_string(),
+            parent_process_path: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            ..Default::default()
+        };
+        add_same_image_parent_lock_files(&mut stranger);
+        assert!(stranger.open_files.is_empty());
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
