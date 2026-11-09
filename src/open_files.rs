@@ -365,13 +365,22 @@ fn lock_material(l7: &SessionL7) -> Vec<String> {
 fn locks_held_by(pid: u32, material: &[String]) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        let mut locks: Vec<String> = lock_file_holders(&lock_file_candidates(material))
-            .into_iter()
-            .filter(|(_, pids)| pids.contains(&pid))
-            .map(|(path, _)| path)
-            .collect();
-        locks.sort();
-        locks
+        cached_locks_held_with(
+            &LOCKS_HELD_CACHE,
+            pid,
+            lock_material_key(material),
+            Instant::now(),
+            LOCKS_HELD_CACHE_TTL,
+            || {
+                let mut locks: Vec<String> = lock_file_holders(&lock_file_candidates(material))
+                    .into_iter()
+                    .filter(|(_, pids)| pids.contains(&pid))
+                    .map(|(path, _)| path)
+                    .collect();
+                locks.sort();
+                locks
+            },
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -646,6 +655,93 @@ fn same_image_parent(l7: &SessionL7) -> Option<u32> {
     }
 }
 
+/// How long the lock files a process holds, once read, are reused for the
+/// other sessions of the same process. On Windows the read is a Restart
+/// Manager query (`restart_manager::holders`, a scan of the running
+/// processes per session it starts) over the lock files listed around the
+/// process's open files (`lock_file_candidates`, directory listings), and
+/// the capture asked for it on every session it attached a resolution to:
+/// a scanner's own sessions, ~16,000 a minute from one pid on the perf
+/// gate's Windows `all` scenario, cost 40 % of a core on average against
+/// 7 % before the lock reads (posture tests.yml 42679176729, windows-x64,
+/// 2026-11-09). The locks a process holds change with the stores it opens,
+/// not with its connections: one read per process per minute, re-read when
+/// the material it is asked about changes.
+#[cfg(target_os = "windows")]
+const LOCKS_HELD_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[cfg(any(target_os = "windows", test))]
+struct CachedLocksHeld {
+    locks: Arc<Vec<String>>,
+    refreshed_at: Instant,
+    /// [`lock_material_key`] of the material the read was asked about: a
+    /// process that opened another store since is asked again.
+    material: u64,
+}
+
+/// Per-pid memo of [`locks_held_by`]'s answers (Windows). A pid recycled
+/// within the TTL can briefly be served its predecessor's locks, the same
+/// window [`OPEN_FILES_CACHE`] accepts; a process exit invalidates both
+/// ([`invalidate_open_files_cache`]).
+#[cfg(target_os = "windows")]
+static LOCKS_HELD_CACHE: Lazy<CustomDashMap<u32, CachedLocksHeld>> =
+    Lazy::new(|| CustomDashMap::new("locks_held_cache"));
+
+/// Order-independent key of the material a lock read is asked about.
+#[cfg(any(target_os = "windows", test))]
+fn lock_material_key(material: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&str> = material.iter().map(|path| path.trim()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Cache-or-compute behind [`locks_held_by`], with an injectable clock and
+/// reader so the policy is unit-testable without the OS. Bounded like the
+/// open-files cache: full, it drops the expired entries, then the oldest
+/// half.
+#[cfg(any(target_os = "windows", test))]
+fn cached_locks_held_with(
+    cache: &CustomDashMap<u32, CachedLocksHeld>,
+    pid: u32,
+    material: u64,
+    now: Instant,
+    ttl: Duration,
+    read: impl FnOnce() -> Vec<String>,
+) -> Vec<String> {
+    if let Some(hit) = cache.get(&pid) {
+        if now.saturating_duration_since(hit.refreshed_at) < ttl && hit.material == material {
+            return hit.locks.as_ref().clone();
+        }
+    }
+    let locks = read();
+    if cache.len() >= OPEN_FILES_CACHE_MAX_ENTRIES {
+        cache.retain(|_, v| now.saturating_duration_since(v.refreshed_at) < ttl);
+        if cache.len() >= OPEN_FILES_CACHE_MAX_ENTRIES {
+            let mut ages: Vec<(u32, Instant)> = cache
+                .iter()
+                .map(|e| (*e.key(), e.value().refreshed_at))
+                .collect();
+            ages.sort_by_key(|(_, at)| *at);
+            for (old_pid, _) in ages.into_iter().take(OPEN_FILES_CACHE_MAX_ENTRIES / 2) {
+                cache.remove(&old_pid);
+            }
+        }
+    }
+    cache.insert(
+        pid,
+        CachedLocksHeld {
+            locks: Arc::new(locks.clone()),
+            refreshed_at: now,
+            material,
+        },
+    );
+    locks
+}
+
 /// Lightweight scan: only returns open file paths that match sensitive
 /// patterns.  Same procfs / libproc I/O as `get_open_file_paths` but skips
 /// aggregation, making it cheap enough to run every 30 s.
@@ -850,7 +946,10 @@ pub fn get_open_file_paths(pid: u32) -> Vec<String> {
 pub fn invalidate_open_files_cache(pid: u32) {
     OPEN_FILES_CACHE.remove(&pid);
     #[cfg(target_os = "windows")]
-    win_handles::invalidate_snapshot();
+    {
+        LOCKS_HELD_CACHE.remove(&pid);
+        win_handles::invalidate_snapshot();
+    }
 }
 
 /// Number of pids currently cached (diagnostics).
@@ -1503,6 +1602,89 @@ mod tests {
 
     fn fresh_cache() -> CustomDashMap<u32, CachedOpenFiles> {
         CustomDashMap::new("open_files_cache_test")
+    }
+
+    // --- locks-held memo (the Restart Manager read behind locks_held_by) ---
+
+    /// One read per process within the TTL, whatever the number of sessions
+    /// asking; another process, other material or an expired entry read
+    /// again.
+    #[test]
+    fn locks_held_memo_reads_once_per_process_within_the_ttl() {
+        let cache: CustomDashMap<u32, CachedLocksHeld> = CustomDashMap::new("locks_held_test");
+        let ttl = Duration::from_secs(60);
+        let now = Instant::now();
+        let reads = Cell::new(0usize);
+        let key = lock_material_key(&["C:\\p\\Cookies".to_string()]);
+        let counter = &reads;
+        let read = |answer: Vec<String>| {
+            move || {
+                counter.set(counter.get() + 1);
+                answer
+            }
+        };
+
+        let first = cached_locks_held_with(
+            &cache,
+            7,
+            key,
+            now,
+            ttl,
+            read(vec!["C:\\p\\LOCK".to_string()]),
+        );
+        assert_eq!(first, vec!["C:\\p\\LOCK".to_string()]);
+        assert_eq!(reads.get(), 1);
+
+        // Every further session of pid 7 in the minute: the memo, not a read.
+        for i in 1..1000u64 {
+            let again = cached_locks_held_with(
+                &cache,
+                7,
+                key,
+                now + Duration::from_millis(i * 59),
+                ttl,
+                read(Vec::new()),
+            );
+            assert_eq!(again, first);
+        }
+        assert_eq!(reads.get(), 1);
+
+        // Another process reads for itself.
+        let other = cached_locks_held_with(&cache, 8, key, now, ttl, read(Vec::new()));
+        assert!(other.is_empty());
+        assert_eq!(reads.get(), 2);
+
+        // The same process asked about other material (a store opened since).
+        let key2 = lock_material_key(&["C:\\q\\Login Data".to_string()]);
+        let _ = cached_locks_held_with(&cache, 7, key2, now, ttl, read(Vec::new()));
+        assert_eq!(reads.get(), 3);
+
+        // Expired: read again.
+        let _ = cached_locks_held_with(&cache, 7, key2, now + ttl, ttl, read(Vec::new()));
+        assert_eq!(reads.get(), 4);
+    }
+
+    #[test]
+    fn lock_material_key_ignores_order_duplicates_and_surrounding_blanks() {
+        let a = lock_material_key(&["C:\\p\\Cookies".to_string(), "C:\\p\\Web Data".to_string()]);
+        let b = lock_material_key(&[
+            " C:\\p\\Web Data ".to_string(),
+            "C:\\p\\Cookies".to_string(),
+            "C:\\p\\Cookies".to_string(),
+        ]);
+        assert_eq!(a, b);
+        assert_ne!(a, lock_material_key(&["C:\\p\\Cookies".to_string()]));
+        assert_ne!(a, lock_material_key(&[]));
+    }
+
+    #[test]
+    fn locks_held_memo_stays_bounded_under_pid_churn() {
+        let cache: CustomDashMap<u32, CachedLocksHeld> = CustomDashMap::new("locks_held_bound");
+        let now = Instant::now();
+        for pid in 0..(OPEN_FILES_CACHE_MAX_ENTRIES as u32 * 2) {
+            let _ = cached_locks_held_with(&cache, pid, 0, now, Duration::from_secs(60), Vec::new);
+            assert!(cache.len() <= OPEN_FILES_CACHE_MAX_ENTRIES);
+        }
     }
 
     #[test]
