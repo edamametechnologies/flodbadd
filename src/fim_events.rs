@@ -514,10 +514,7 @@ mod tests {
 
         let mut listing = store.uids_and_modified();
         listing.sort();
-        let mut expected = vec![
-            (recent.uid.clone(), ts),
-            (stale.uid.clone(), older),
-        ];
+        let mut expected = vec![(recent.uid.clone(), ts), (stale.uid.clone(), older)];
         expected.sort();
         assert_eq!(listing, expected);
 
