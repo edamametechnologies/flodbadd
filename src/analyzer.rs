@@ -445,6 +445,10 @@ struct IsolationForestModel {
     training_timeouts_count: u64,
     /// Cooperative cancellation flag for the training thread
     training_cancel: Arc<AtomicBool>,
+    /// Seed of the random source the forest is grown from. `None` (production)
+    /// draws a fresh seed per training; tests set one through
+    /// `SessionAnalyzer::set_forest_seed` so a run is reproducible.
+    forest_seed: Option<u64>,
     /// Cache hits for session scoring
     cache_hits: std::sync::atomic::AtomicU64,
     /// Cache misses for session scoring
@@ -479,6 +483,7 @@ impl IsolationForestModel {
             current_abnormal_percentile: DEFAULT_ABNORMAL_PERCENTILE,
             training_timeouts_count: 0,
             training_cancel: Arc::new(AtomicBool::new(false)),
+            forest_seed: None,
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cache_misses: std::sync::atomic::AtomicU64::new(0),
             last_cache_cleanup: Utc::now() - chrono::Duration::hours(1),
@@ -743,6 +748,7 @@ impl IsolationForestModel {
         // Reset cancel flag for this run and capture it in the blocking thread
         self.training_cancel.store(false, Ordering::Release);
         let cancel_flag = self.training_cancel.clone();
+        let forest_seed = self.forest_seed;
         let handle = tokio::task::spawn_blocking(move || {
             debug!(
                 "train_model: TRAINING THREAD STARTED with {} samples",
@@ -781,6 +787,7 @@ impl IsolationForestModel {
                 sample_size,
                 max_tree_depth: None, // the default, ceil(log2(sample_size))
                 extension_level: NUM_FEATURES - 1,
+                seed: forest_seed,
             };
 
             debug!(
@@ -1572,6 +1579,9 @@ pub struct SessionAnalyzer {
     analyses_count: Arc<AtomicU64>,
     analysis_total_duration_ms: Arc<AtomicU64>,
     last_analysis_duration_ms: Arc<AtomicU64>,
+    /// Seed handed to the model `start()` creates (see
+    /// `IsolationForestModel::forest_seed`). `None` in production.
+    forest_seed: Option<u64>,
 }
 
 impl SessionAnalyzer {
@@ -1610,7 +1620,17 @@ impl SessionAnalyzer {
             analyses_count: Arc::new(AtomicU64::new(0)),
             analysis_total_duration_ms: Arc::new(AtomicU64::new(0)),
             last_analysis_duration_ms: Arc::new(AtomicU64::new(0)),
+            forest_seed: None,
         }
+    }
+
+    /// Test-only determinism: fix the seed of the random source the isolation
+    /// forest is grown from, so two runs over the same sessions train the same
+    /// forest and score alike. Takes effect for the model `start()` creates,
+    /// so call it before `start()`. Production never sets one: every training
+    /// draws a fresh seed.
+    pub fn set_forest_seed(&mut self, seed: Option<u64>) {
+        self.forest_seed = seed;
     }
 
     /// Helper function to check if a session is anomalous based on its criticality
@@ -2916,7 +2936,9 @@ impl SessionAnalyzer {
         if !already_initialized {
             let mut model_guard = self.model.write().await;
             if model_guard.is_none() {
-                *model_guard = Some(CustomRwLock::new(IsolationForestModel::new()));
+                let mut model = IsolationForestModel::new();
+                model.forest_seed = self.forest_seed;
+                *model_guard = Some(CustomRwLock::new(model));
                 debug!("Analyzer start: created new model");
             } else {
                 debug!("Analyzer start: model became available before write; reusing existing model and thresholds");
@@ -4723,6 +4745,9 @@ pub(crate) mod tests {
     async fn a_regular_beacon_from_an_unseen_process_scores_above_the_abnormal_threshold() {
         let mut rng = Lcg(0x5eed);
         let mut model = IsolationForestModel::new();
+        // The sessions and the forest are both seeded: the margin this test
+        // measures is a property of the detector, not of one draw.
+        model.forest_seed = Some(0x5eed);
         for session in benign_sessions(400, &mut rng) {
             model.add_session_data(&session);
         }
@@ -4744,6 +4769,11 @@ pub(crate) mod tests {
         let (beacon_score, _) = model
             .score_session(&beacon)
             .expect("a trained model scores");
+        println!(
+            "beacon {beacon_score:.3} vs abnormal threshold {:.3} (margin {:+.3})",
+            model.abnormal_threshold,
+            beacon_score - model.abnormal_threshold
+        );
         assert!(
             beacon_score >= model.abnormal_threshold,
             "beacon {beacon_score:.3} vs abnormal threshold {:.3}",
@@ -4755,6 +4785,11 @@ pub(crate) mod tests {
         let (typical_score, _) = model
             .score_session(&typical)
             .expect("a trained model scores");
+        println!(
+            "typical {typical_score:.3} vs suspicious threshold {:.3} (margin {:+.3})",
+            model.suspicious_threshold,
+            model.suspicious_threshold - typical_score
+        );
         assert!(
             typical_score < model.suspicious_threshold,
             "typical {typical_score:.3} vs suspicious threshold {:.3}",

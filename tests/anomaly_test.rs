@@ -43,6 +43,9 @@ const PROCESS_NAMES: &[&str] = &[
 
 // Keep the mixed-traffic test deterministic so CI exercises a stable score distribution.
 const MIXED_ANOMALY_SEED: u64 = 0xEDA5_1EED_2026_0325;
+// The DNS-tunnel separation test seeds both its traffic and the forest it
+// trains, so the separation it measures does not move from run to run.
+const DNS_TUNNEL_SEED: u64 = 0xEDA5_1EED_2026_1109;
 
 fn random_web_dst(rng: &mut impl Rng) -> IpAddr {
     let (a, b, c, d) = WEB_DESTINATIONS[rng.random_range(0..WEB_DESTINATIONS.len())];
@@ -431,7 +434,17 @@ struct DetectionResult {
 }
 
 async fn setup_analyzer(baseline: &mut [SessionInfo]) -> SessionAnalyzer {
-    let analyzer = SessionAnalyzer::new();
+    setup_analyzer_with_seed(baseline, None).await
+}
+
+/// `setup_analyzer` with a fixed forest seed (`SessionAnalyzer::set_forest_seed`)
+/// for the tests that assert on score statistics.
+async fn setup_analyzer_with_seed(
+    baseline: &mut [SessionInfo],
+    forest_seed: Option<u64>,
+) -> SessionAnalyzer {
+    let mut analyzer = SessionAnalyzer::new();
+    analyzer.set_forest_seed(forest_seed);
     analyzer.start().await;
     analyzer.disable_warmup_for_testing().await;
 
@@ -760,11 +773,12 @@ async fn test_port_scan_score_separation() {
 
 #[tokio::test]
 async fn test_dns_tunnel_score_separation() {
-    let mut baseline = generate_normal_web_traffic(200);
-    let analyzer = setup_analyzer(&mut baseline).await;
+    let mut rng = StdRng::seed_from_u64(DNS_TUNNEL_SEED);
+    let mut baseline = generate_normal_web_traffic_with_rng(200, &mut rng);
+    let analyzer = setup_analyzer_with_seed(&mut baseline, Some(DNS_TUNNEL_SEED)).await;
 
-    let mut mixed = generate_normal_web_traffic(100);
-    let tunnels = generate_dns_tunnel_traffic(20);
+    let mut mixed = generate_normal_web_traffic_with_rng(100, &mut rng);
+    let tunnels = generate_dns_tunnel_traffic_with_rng(20, &mut rng);
     mixed.extend(tunnels);
 
     let _ = analyzer.analyze_sessions(&mut mixed).await;
