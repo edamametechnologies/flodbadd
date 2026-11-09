@@ -176,6 +176,25 @@ impl FimEventStore {
         events
     }
 
+    /// `(uid, last_modified)` of every event: the store's keys, without the
+    /// events. A reader that keeps its own record of what it has seen finds
+    /// the entries new to it here and fetches those by uid
+    /// (`events_by_uids`) instead of copying the store to look.
+    pub fn uids_and_modified(&self) -> Vec<(String, DateTime<Utc>)> {
+        self.events
+            .iter()
+            .map(|e| (e.key().clone(), e.value().last_modified))
+            .collect()
+    }
+
+    /// The events with these uids, in the given order; a uid the store no
+    /// longer holds is skipped.
+    pub fn events_by_uids(&self, uids: &[String]) -> Vec<FimEvent> {
+        uids.iter()
+            .filter_map(|uid| self.events.get(uid).map(|e| e.value().clone()))
+            .collect()
+    }
+
     pub fn get_sensitive_events(&self) -> Vec<FimEvent> {
         let mut events: Vec<FimEvent> = self
             .events
@@ -463,6 +482,53 @@ mod tests {
         let events = store.get_all_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].path, "/test/file.txt");
+    }
+
+    #[test]
+    fn uid_listing_and_fetch_by_uid_read_without_copying_the_store() {
+        let store = FimEventStore::new();
+        let ts = Utc::now();
+        let older = ts - ChronoDuration::minutes(30);
+        let make = |path: &str, last_modified: DateTime<Utc>| FimEvent {
+            path: path.to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            process_pid: None,
+            writer_inferred: false,
+            writer_unmeasured: false,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive: false,
+            labels: vec![],
+            uid: FimEvent::compute_uid(path, &FimEventType::Modify, &ts),
+            last_modified,
+        };
+        let recent = make("/w/recent", ts);
+        let stale = make("/w/stale", older);
+        store.insert(recent.clone());
+        store.insert(stale.clone());
+
+        let mut listing = store.uids_and_modified();
+        listing.sort();
+        let mut expected = vec![
+            (recent.uid.clone(), ts),
+            (stale.uid.clone(), older),
+        ];
+        expected.sort();
+        assert_eq!(listing, expected);
+
+        let fetched = store.events_by_uids(&[
+            stale.uid.clone(),
+            "not-in-the-store".to_string(),
+            recent.uid.clone(),
+        ]);
+        let paths: Vec<&str> = fetched.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["/w/stale", "/w/recent"]);
+        assert!(store.events_by_uids(&[]).is_empty());
     }
 
     #[test]
@@ -1339,11 +1405,11 @@ mod tests {
             vec!["/w/f999", "/w/f996", "/w/f993", "/w/f990", "/w/f987"]
         );
 
-        // Fewer matches than asked: all of them, newest first.
+        // Fewer matches than asked: all of them, newest first (f100 .. f900).
         let few = store.recent_matching(50, |e| e.path.ends_with("00"));
-        assert_eq!(few.len(), 10);
+        assert_eq!(few.len(), 9);
         assert_eq!(few[0].path, "/w/f900");
-        assert_eq!(few[9].path, "/w/f0");
+        assert_eq!(few[8].path, "/w/f100");
 
         assert!(store.recent_matching(0, |_| true).is_empty());
         assert!(store.recent_matching(10, |_| false).is_empty());
