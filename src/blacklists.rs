@@ -1,4 +1,4 @@
-use crate::blacklists_db::BLACKLISTS;
+use crate::blacklists_db::blacklists_json;
 use crate::sessions::{Session, SessionInfo};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -285,7 +285,7 @@ impl Blacklists {
 
 lazy_static! {
     static ref LISTS: CloudModel<Blacklists> = {
-        let model = CloudModel::initialize(BLACKLISTS_FILE_NAME.to_string(), &BLACKLISTS, |data| {
+        let model = CloudModel::initialize(BLACKLISTS_FILE_NAME.to_string(), &blacklists_json(), |data| {
             let blacklist_info_json: BlacklistsJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             // Filter local ranges for default/embedded blacklists
@@ -837,7 +837,7 @@ mod tests {
     /// instead. See also whitelists/sensitive_paths/threats/cve_params.
     #[test]
     fn test_embedded_blacklists_snapshot_parses() {
-        serde_json::from_str::<BlacklistsJSON>(&BLACKLISTS)
+        serde_json::from_str::<BlacklistsJSON>(&blacklists_json())
             .expect("embedded blacklists snapshot must parse as BlacklistsJSON");
     }
 

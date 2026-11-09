@@ -13,4 +13,4 @@
 
 use crate::obfuscated_cloud_model_fallback;
 
-obfuscated_cloud_model_fallback!(pub BLACKLISTS: include_bytes!("blacklists_db.bin"));
+obfuscated_cloud_model_fallback!(pub fn blacklists_json: include_bytes!("blacklists_db.bin"));

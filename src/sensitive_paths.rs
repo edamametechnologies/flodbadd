@@ -229,7 +229,7 @@ lazy_static! {
     pub static ref SENSITIVE_PATHS: CloudModel<SensitivePathsDB> = {
         let model = CloudModel::initialize(
             SENSITIVE_PATHS_NAME.to_string(),
-            &SENSITIVE_PATHS_DB,
+            &sensitive_paths_json(),
             |data| {
                 let json: SensitivePathsJSON = serde_json::from_str(data)
                     .with_context(|| "Failed to parse sensitive paths JSON")?;
@@ -253,38 +253,38 @@ lazy_static! {
 }
 
 fn build_fallback_labels() -> HashMap<String, Vec<String>> {
-    match serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB) {
+    match serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json()) {
         Ok(json) => json.labels,
         Err(_) => HashMap::new(),
     }
 }
 
 fn build_fallback_watch_roots() -> WatchRootsJSON {
-    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+    serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
         .map(|json| json.watch_roots)
         .unwrap_or_default()
 }
 
 fn build_fallback_watch_roots_early_drop() -> WatchRootsJSON {
-    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+    serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
         .map(|json| json.watch_roots_early_drop)
         .unwrap_or_default()
 }
 
 fn build_fallback_fim_forbidden_watch_roots() -> FimForbiddenWatchRootsJSON {
-    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+    serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
         .map(|json| json.fim_forbidden_watch_roots)
         .unwrap_or_default()
 }
 
 fn build_fallback_credential_opens() -> CredentialOpensJSON {
-    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+    serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
         .map(|json| json.credential_opens)
         .unwrap_or_default()
 }
 
 fn build_fallback_fim_excluded_patterns() -> Vec<String> {
-    serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+    serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
         .map(|json| {
             json.fim_excluded_path_patterns
                 .into_iter()
@@ -527,7 +527,7 @@ mod tests {
     /// instead. See also whitelists/blacklists/threats/cve_params.
     #[test]
     fn test_embedded_sensitive_paths_snapshot_parses() {
-        serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB)
+        serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json())
             .expect("embedded sensitive paths snapshot must parse as SensitivePathsJSON");
     }
 
@@ -537,7 +537,7 @@ mod tests {
     /// 2.0.8).
     #[test]
     fn test_embedded_early_drop_roots_are_the_generic_app_data_roots() {
-        let json = serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB).unwrap();
+        let json = serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json()).unwrap();
         let early = &json.watch_roots_early_drop;
         let roots = &json.watch_roots;
         for (early, roots) in [
@@ -571,7 +571,7 @@ mod tests {
     fn test_default_watch_roots_split_by_the_early_drop_list() {
         let home = std::env::temp_dir().join(format!("flodbadd-split-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let json = serde_json::from_str::<SensitivePathsJSON>(&SENSITIVE_PATHS_DB).unwrap();
+        let json = serde_json::from_str::<SensitivePathsJSON>(&sensitive_paths_json()).unwrap();
         for entry in home_relative_entries(&json.watch_roots) {
             std::fs::create_dir_all(home.join(entry)).unwrap();
         }

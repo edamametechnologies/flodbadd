@@ -20,10 +20,10 @@
 //! gzip-compress the JSON (destroys readable strings, raises section
 //! entropy) and XOR with a fixed key (defeats trivial signature scanners
 //! that look for known prefixes / file magic). The transform is reversed
-//! once on first access via `Lazy<String>`. There is no security boundary
-//! here -- a debugger or `strings` against the running process recovers
-//! the JSON immediately. The point is anti-static-analysis noise so the
-//! distributed binary's rodata does not look like an infostealer.
+//! on demand by the function the macro emits. There is no security
+//! boundary here -- a debugger or `strings` against the running process
+//! recovers the JSON immediately. The point is anti-static-analysis noise
+//! so the distributed binary's rodata does not look like an infostealer.
 //!
 //! # Usage
 //!
@@ -32,15 +32,20 @@
 //! ```ignore
 //! use crate::obfuscated_cloud_model_fallback;
 //!
-//! obfuscated_cloud_model_fallback!(pub PORT_VULNS_DB: &[
+//! obfuscated_cloud_model_fallback!(pub fn port_vulns_json: &[
 //!     0xab, 0x12, 0x44, 0x9d, /* ... gzip+XOR encoded JSON ... */
 //! ]);
 //! ```
 //!
-//! The macro produces a `pub static PORT_VULNS_DB: Lazy<String>` whose
-//! `Deref` target is the decoded JSON string. Callers that previously took
-//! `&'static str` typically migrate by writing `&FOO_DB` (which derefs
-//! through `Lazy<String>` and `String` to `&str`).
+//! The macro produces a `pub fn port_vulns_json() -> String` that decodes
+//! the blob each time it is called. The decoded text is only ever needed
+//! for the few milliseconds a parser reads it (`CloudModel::initialize`
+//! keeps the parsed value, not the text), so nothing retains it: until
+//! 2.3.2 the macro emitted a process-lifetime `Lazy<String>`, and the
+//! decoded vendor-vulnerability snapshot (~75 MB of JSON) stayed resident
+//! in every helper, daemon and app for the life of the process after a
+//! single parse at startup. Callers pass `&foo_json()` where they used to
+//! pass `&FOO`.
 //!
 //! Encode with `tools/encode_cloud_fallback.py`. The encoder is invoked
 //! automatically from `update-threats.sh` and `update-asn.sh` after each
@@ -73,17 +78,19 @@ pub fn decode_fallback(obfuscated: &[u8]) -> String {
     out
 }
 
-/// Declare an obfuscated CloudModel fallback as a `Lazy<String>`.
+/// Declare an obfuscated CloudModel fallback as a function returning the
+/// decoded JSON.
 ///
-/// The decoded string is built once on first access and cached for the
-/// process lifetime. Subsequent accesses are just a pointer load.
+/// Each call decodes the blob anew and the caller owns the result, so the
+/// decoded text lives exactly as long as the parse that needs it (see the
+/// module docs). Nothing is cached: the fallbacks are read once at startup
+/// and again only when a model is reset to its built-in data.
 #[macro_export]
 macro_rules! obfuscated_cloud_model_fallback {
-    ($vis:vis $name:ident : $bytes:expr) => {
-        $vis static $name: once_cell::sync::Lazy<String> =
-            once_cell::sync::Lazy::new(|| {
-                $crate::cloud_model_fallback::decode_fallback($bytes)
-            });
+    ($vis:vis fn $name:ident : $bytes:expr) => {
+        $vis fn $name() -> String {
+            $crate::cloud_model_fallback::decode_fallback($bytes)
+        }
     };
 }
 
@@ -138,5 +145,23 @@ mod tests {
     #[should_panic(expected = "gzip decode failed")]
     fn corrupt_input_panics() {
         let _ = decode_fallback(&[0x00, 0x01, 0x02, 0x03]);
+    }
+
+    static TEST_BLOB: once_cell::sync::Lazy<Vec<u8>> =
+        once_cell::sync::Lazy::new(|| encode_for_test(r#"{"date":"x","signature":"y"}"#));
+    obfuscated_cloud_model_fallback!(fn test_blob_json: &TEST_BLOB);
+
+    /// The macro emits a function, not a cached static: every call returns
+    /// its own buffer, which the caller drops once parsed.
+    #[test]
+    fn the_macro_decodes_on_demand_and_retains_nothing() {
+        let first = test_blob_json();
+        let second = test_blob_json();
+        assert_eq!(first, r#"{"date":"x","signature":"y"}"#);
+        assert_eq!(first, second);
+        assert_ne!(first.as_ptr(), second.as_ptr(), "a fresh buffer per call");
+        // The declared item is callable as a plain function (no `Deref`).
+        let f: fn() -> String = test_blob_json;
+        assert!(!f().is_empty());
     }
 }

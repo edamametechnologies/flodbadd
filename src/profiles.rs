@@ -84,11 +84,12 @@ impl DeviceTypeList {
 
 lazy_static! {
     pub static ref PROFILES: CloudModel<DeviceTypeList> = {
-        let model = CloudModel::initialize(PROFILES_NAME.to_string(), &DEVICE_PROFILES, |data| {
-            let profiles_list: DeviceTypeListJSON =
-                serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
-            Ok(DeviceTypeList::new_from_json(profiles_list))
-        });
+        let model =
+            CloudModel::initialize(PROFILES_NAME.to_string(), &device_profiles_json(), |data| {
+                let profiles_list: DeviceTypeListJSON =
+                    serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
+                Ok(DeviceTypeList::new_from_json(profiles_list))
+            });
         match model {
             Ok(m) => m,
             Err(e) => {
@@ -392,6 +393,7 @@ fn match_condition(
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     info!("Starting profiles update from backend");
 
+    let signature_before = PROFILES.get_signature().await;
     let status = PROFILES
         .update(branch, force, |data| {
             let profiles_list: DeviceTypeListJSON =
@@ -400,8 +402,12 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
         })
         .await?;
 
-    // Clear computed device_type cache whenever we attempt an update (conservative)
-    DEVICE_TYPE_CACHE.clear();
+    // The computed device types stay valid while the profiles are the same
+    // data. Clearing on every attempt made each unknown device recompute,
+    // and log its WARN again, every 10 minutes.
+    if device_type_cache_is_stale(&signature_before, &PROFILES.get_signature().await, &status) {
+        DEVICE_TYPE_CACHE.clear();
+    }
 
     match status {
         UpdateStatus::Updated => info!("Profiles were successfully updated."),
@@ -413,6 +419,17 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     Ok(status)
 }
 
+/// Whether an update attempt invalidates the computed device types: the
+/// profiles' signature changed, or a format error reset the model to its
+/// built-in data (the signature may then read as before).
+fn device_type_cache_is_stale(
+    signature_before: &str,
+    signature_after: &str,
+    status: &UpdateStatus,
+) -> bool {
+    signature_before != signature_after || matches!(status, UpdateStatus::FormatError)
+}
+
 // Tests
 #[cfg(test)]
 mod tests {
@@ -421,6 +438,41 @@ mod tests {
     use std::sync::Once;
     use threatmodels_rs::UpdateStatus;
 
+    #[test]
+    fn device_type_cache_survives_an_unchanged_update() {
+        assert!(!device_type_cache_is_stale(
+            "abc",
+            "abc",
+            &UpdateStatus::NotUpdated
+        ));
+        assert!(!device_type_cache_is_stale(
+            "abc",
+            "abc",
+            &UpdateStatus::SkippedCustom
+        ));
+        assert!(!device_type_cache_is_stale(
+            "abc",
+            "abc",
+            &UpdateStatus::Updated
+        ));
+        assert!(device_type_cache_is_stale(
+            "abc",
+            "def",
+            &UpdateStatus::Updated
+        ));
+        assert!(device_type_cache_is_stale(
+            "abc",
+            "def",
+            &UpdateStatus::NotUpdated
+        ));
+        // A format error resets the model to its built-in data.
+        assert!(device_type_cache_is_stale(
+            "abc",
+            "abc",
+            &UpdateStatus::FormatError
+        ));
+    }
+
     /// Regression guard (helper/app/posture startup): the embedded device-
     /// profiles snapshot MUST decode and parse. If a bad regen makes it
     /// unparseable, the `PROFILES` CloudModel `lazy_static` panics on its first
@@ -428,7 +480,7 @@ mod tests {
     /// See also whitelists/blacklists/sensitive_paths/port_vulns/vendor_vulns.
     #[test]
     fn test_embedded_profiles_snapshot_parses() {
-        serde_json::from_str::<DeviceTypeListJSON>(&DEVICE_PROFILES)
+        serde_json::from_str::<DeviceTypeListJSON>(&device_profiles_json())
             .expect("embedded device profiles snapshot must parse as DeviceTypeListJSON");
     }
 
@@ -794,7 +846,7 @@ mod tests {
         assert!(corpus.devices.len() >= 50, "corpus unexpectedly small");
 
         let embedded: DeviceTypeListJSON =
-            serde_json::from_str(&DEVICE_PROFILES).expect("embedded profiles parse");
+            serde_json::from_str(&device_profiles_json()).expect("embedded profiles parse");
         let mut mismatches = classify_corpus("embedded", &embedded.profiles, &corpus);
 
         let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

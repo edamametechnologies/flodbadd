@@ -1,6 +1,6 @@
 use crate::dns_patterns::is_reverse_dns_pattern;
 use crate::sessions::{Session, SessionInfo, WhitelistState};
-use crate::whitelists_db::WHITELISTS;
+use crate::whitelists_db::whitelists_json;
 use anyhow::{anyhow, Context, Result};
 use chrono;
 use chrono::{DateTime, Utc};
@@ -1156,7 +1156,7 @@ fn match_endpoints(
 
 lazy_static! {
     static ref LISTS: CloudModel<Whitelists> = {
-        let model = CloudModel::initialize(WHITELISTS_FILE_NAME.to_string(), &WHITELISTS, |data| {
+        let model = CloudModel::initialize(WHITELISTS_FILE_NAME.to_string(), &whitelists_json(), |data| {
             let whitelist_info_json: WhitelistsJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(Whitelists::new_from_json(whitelist_info_json))
@@ -2926,7 +2926,7 @@ mod tests {
     /// instead. See also blacklists/sensitive_paths/threats/cve_params.
     #[test]
     fn test_embedded_whitelists_snapshot_parses() {
-        serde_json::from_str::<WhitelistsJSON>(&WHITELISTS)
+        serde_json::from_str::<WhitelistsJSON>(&whitelists_json())
             .expect("embedded whitelists snapshot must parse as WhitelistsJSON");
     }
 

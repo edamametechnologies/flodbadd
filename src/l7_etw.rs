@@ -302,7 +302,93 @@ mod win {
         file_insert_counter: Arc<AtomicU64>,
         file_event_counters: Arc<FileEventCounters>,
         available: Arc<AtomicBool>,
-        init_status: String,
+    }
+
+    /// How long `init` waits for the session thread to say whether the
+    /// trace opened. StartTrace and OpenTrace answer within milliseconds;
+    /// past this the status is read live and the start is logged as still
+    /// under way.
+    const SESSION_START_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// The session thread's report to `init`: `true` once the trace is open
+    /// and consuming, `false` when the thread gives up before that (sent on
+    /// drop when the thread returns, or unwinds, unreported).
+    struct SessionOutcome(Option<std::sync::mpsc::Sender<bool>>);
+
+    impl SessionOutcome {
+        fn report(&mut self, started: bool) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(started);
+            }
+        }
+    }
+
+    impl Drop for SessionOutcome {
+        fn drop(&mut self) {
+            self.report(false);
+        }
+    }
+
+    /// What `init` learnt within its wait: `Some(started)`, or `None` while
+    /// the thread is still starting. A dropped sender (the thread never ran)
+    /// is a start that did not happen.
+    fn session_start_outcome(
+        received: Result<bool, std::sync::mpsc::RecvTimeoutError>,
+    ) -> Option<bool> {
+        match received {
+            Ok(started) => Some(started),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Some(false),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        }
+    }
+
+    /// The status text for the trace's state now. Computed when read: the
+    /// session opens after `init` returns and ends when it is stopped, so a
+    /// text frozen at `init` described neither.
+    fn status_text(available: bool) -> &'static str {
+        if available {
+            "Enabled: Windows ETW kernel trace with TCP/IP, Process, and FileIo providers"
+        } else {
+            "Disabled: ETW kernel trace session is not running (needs Administrator)"
+        }
+    }
+
+    #[cfg(test)]
+    mod session_start_tests {
+        use super::{session_start_outcome, status_text, SessionOutcome};
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::Duration;
+
+        #[test]
+        fn the_status_follows_the_trace_state() {
+            assert!(status_text(true).starts_with("Enabled"));
+            assert!(status_text(false).starts_with("Disabled"));
+        }
+
+        #[test]
+        fn the_start_outcome_is_what_the_thread_reported_or_a_timeout() {
+            assert_eq!(session_start_outcome(Ok(true)), Some(true));
+            assert_eq!(session_start_outcome(Ok(false)), Some(false));
+            assert_eq!(
+                session_start_outcome(Err(RecvTimeoutError::Disconnected)),
+                Some(false)
+            );
+            assert_eq!(session_start_outcome(Err(RecvTimeoutError::Timeout)), None);
+        }
+
+        #[test]
+        fn an_unreported_outcome_reads_as_not_started_and_a_report_is_sent_once() {
+            let (tx, rx) = channel();
+            drop(SessionOutcome(Some(tx)));
+            assert_eq!(rx.recv_timeout(Duration::from_secs(1)), Ok(false));
+
+            let (tx, rx) = channel();
+            let mut outcome = SessionOutcome(Some(tx));
+            outcome.report(true);
+            drop(outcome);
+            assert_eq!(rx.recv_timeout(Duration::from_secs(1)), Ok(true));
+            assert!(rx.try_recv().is_err(), "the drop does not report again");
+        }
     }
 
     // Raw event payloads from the kernel trace.
@@ -357,6 +443,8 @@ mod win {
             let nt = Arc::clone(&file_namespace_table);
             let fc = Arc::clone(&file_insert_counter);
             let av = Arc::clone(&available);
+            let (outcome_tx, outcome_rx) = std::sync::mpsc::channel::<bool>();
+            let outcome = SessionOutcome(Some(outcome_tx));
 
             // Statics are never dropped, so nothing stops the sessions when
             // the host exits unless it calls `shutdown`; the CRT's exit hook
@@ -371,9 +459,11 @@ mod win {
             if let Err(e) = std::thread::Builder::new()
                 .name("etw-client".into())
                 .spawn(move || {
-                    Self::run_etw_session(pt, ct, ft, nt, fc, av);
+                    Self::run_etw_session(pt, ct, ft, nt, fc, av, outcome);
                 })
             {
+                // The closure, and the outcome sender with it, is dropped:
+                // the wait below reads a start that did not happen.
                 error!("Failed to spawn ETW client thread: {}", e);
             }
 
@@ -389,21 +479,12 @@ mod win {
                 warn!("Failed to spawn ETW audit-api-calls thread: {}", e);
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
-
-            let is_available = available.load(Ordering::Acquire);
-            let init_status = if is_available {
-                "Enabled: Windows ETW kernel trace with TCP/IP, Process, and FileIo providers"
-                    .to_string()
-            } else {
-                "Disabled: ETW kernel trace session failed to start (need Administrator)"
-                    .to_string()
-            };
-
-            if is_available {
-                info!("ETW helper initialized: {}", init_status);
-            } else {
-                warn!("ETW helper: {}", init_status);
+            // The session thread reports once it knows; a start that failed
+            // has already logged its own warning (`run_etw_session`).
+            match session_start_outcome(outcome_rx.recv_timeout(SESSION_START_WAIT)) {
+                Some(true) => info!("ETW helper initialized: {}", status_text(true)),
+                Some(false) => info!("ETW helper: {}", status_text(false)),
+                None => info!("ETW helper: kernel trace session starting"),
             }
 
             Self {
@@ -414,7 +495,6 @@ mod win {
                 file_insert_counter,
                 file_event_counters,
                 available,
-                init_status,
             }
         }
 
@@ -624,6 +704,7 @@ mod win {
             namespace_table: Arc<DashMap<String, FimEtwAttribution>>,
             file_counter: Arc<AtomicU64>,
             available: Arc<AtomicBool>,
+            mut outcome: SessionOutcome,
         ) {
             if SHUTDOWN.load(Ordering::SeqCst) {
                 return;
@@ -793,6 +874,7 @@ mod win {
                 }
 
                 available.store(true, Ordering::Release);
+                outcome.report(true);
                 info!("ETW trace session open and consuming events");
 
                 // ProcessTrace blocks until the session is stopped or an error occurs
@@ -877,8 +959,9 @@ mod win {
             self.available.load(Ordering::Acquire)
         }
 
-        pub fn init_status(&self) -> &str {
-            &self.init_status
+        /// The trace's state now (see `status_text`).
+        pub fn init_status(&self) -> &'static str {
+            status_text(self.is_available())
         }
 
         pub fn process_count(&self) -> usize {

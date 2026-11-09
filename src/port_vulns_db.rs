@@ -13,4 +13,4 @@
 
 use crate::obfuscated_cloud_model_fallback;
 
-obfuscated_cloud_model_fallback!(pub PORT_VULNS: include_bytes!("port_vulns_db.bin"));
+obfuscated_cloud_model_fallback!(pub fn port_vulns_json: include_bytes!("port_vulns_db.bin"));

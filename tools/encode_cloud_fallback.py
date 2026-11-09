@@ -11,8 +11,8 @@ strings(1) and Microsoft Defender's Stealc/Stealga ML model both read it
 trivially, and our JSON corpora (sensitive_paths_db.rs,
 threat_metrics_windows.rs, etc.) look like classic credential-stealer
 reconnaissance to the model. Compressing destroys readable substrings,
-XOR breaks magic-byte signature scanners, and `Lazy<String>` decodes once
-on first access at runtime.
+XOR breaks magic-byte signature scanners, and the emitted `fn *_json()`
+decodes on demand at runtime (the decoded text lives only for the parse).
 
 Output shape: writes TWO files alongside each other:
   <output_stem>.bin   -- the gzip+XOR'd bytes (binary, ~plain/3-5x size)
@@ -33,7 +33,7 @@ Example:
     python3 tools/encode_cloud_fallback.py \\
         ../threatmodels/lanscan-sensitive-paths-db.json \\
         src/sensitive_paths_db.rs \\
-        SENSITIVE_PATHS_DB \\
+        sensitive_paths_json \\
         "Built in default sensitive paths db (obfuscated)"
 
 This writes both `src/sensitive_paths_db.rs` (Rust) and
@@ -77,7 +77,7 @@ def format_rust(name: str, comment: str, bin_relpath: str, plain_len: int, obf_l
 
 use crate::obfuscated_cloud_model_fallback;
 
-obfuscated_cloud_model_fallback!(pub {name}: include_bytes!("{bin_relpath}"));
+obfuscated_cloud_model_fallback!(pub fn {name}: include_bytes!("{bin_relpath}"));
 """
 
 

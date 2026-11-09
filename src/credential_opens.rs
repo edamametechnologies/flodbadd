@@ -554,6 +554,73 @@ pub fn mark_action(
 /// `max_user_marks`, which `fim_fanotify` also draws from).
 const LINUX_MAX_CREDENTIAL_MARKS: usize = 512;
 
+/// Directories a re-mark pass marks for `prefixes`, each listed once.
+///
+/// A prefix that is a directory contributes itself and its subdirectories
+/// (breadth first, [`MAX_MARK_WALK`] per root); one not there yet
+/// (`~/.aws/` before `aws configure`) contributes its parent instead, so the
+/// directory is seen when it appears. Most missing prefixes of a home fall
+/// back to the home itself: until 2.3.2 each walked and marked the home's
+/// tree again, every 60 s. The walk runs once per root and a directory
+/// reached from several roots is planned once; the marks themselves are
+/// still added again on every pass (`MarkAction::Refresh`: a mark lives on
+/// an inode, and ext4 reuses inode numbers).
+#[cfg(any(test, all(target_os = "linux", feature = "ebpf")))]
+pub(crate) fn plan_mark_dirs(prefixes: &[String]) -> Vec<PathBuf> {
+    let mut walked: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut planned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        let path = PathBuf::from(prefix.trim_end_matches('/'));
+        let root = if path.is_dir() {
+            path
+        } else {
+            match path.parent() {
+                Some(parent) if parent.is_dir() => parent.to_path_buf(),
+                _ => continue,
+            }
+        };
+        if !walked.insert(root.clone()) {
+            continue;
+        }
+        for dir in directories_below(root) {
+            if planned.insert(dir.clone()) {
+                out.push(dir);
+            }
+        }
+    }
+    out
+}
+
+/// Directories one root contributes to a pass (`plan_mark_dirs`).
+#[cfg(any(test, all(target_os = "linux", feature = "ebpf")))]
+const MAX_MARK_WALK: usize = 64;
+
+/// `root` and its subdirectories, breadth first, symlinks not followed,
+/// at most [`MAX_MARK_WALK`] of them.
+#[cfg(any(test, all(target_os = "linux", feature = "ebpf")))]
+fn directories_below(root: PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(dir) = queue.pop_front() {
+        if out.len() >= MAX_MARK_WALK {
+            break;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_type()
+                    .is_ok_and(|ft| ft.is_dir() && !ft.is_symlink())
+                {
+                    queue.push_back(entry.path());
+                }
+            }
+        }
+        out.push(dir);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Linux backend: fanotify FAN_OPEN on the cold directories only
 // ---------------------------------------------------------------------------
@@ -664,39 +731,6 @@ mod linux {
         );
     }
 
-    /// Directories to mark for one prefix: the prefix itself when it is a
-    /// directory (and its subdirectories, bounded), else its parent.
-    fn directories_for(prefix: &str) -> Vec<PathBuf> {
-        let path = PathBuf::from(prefix.trim_end_matches('/'));
-        let root = if path.is_dir() {
-            path
-        } else {
-            match path.parent() {
-                Some(parent) if parent.is_dir() => parent.to_path_buf(),
-                _ => return Vec::new(),
-            }
-        };
-        let mut out = Vec::new();
-        let mut queue = std::collections::VecDeque::from([root]);
-        while let Some(dir) = queue.pop_front() {
-            if out.len() >= 64 {
-                break;
-            }
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_type()
-                        .is_ok_and(|ft| ft.is_dir() && !ft.is_symlink())
-                    {
-                        queue.push_back(entry.path());
-                    }
-                }
-            }
-            out.push(dir);
-        }
-        out
-    }
-
     /// Mark every credential directory that exists now and watch the places
     /// where one appears. `(newly marked, marks refreshed)`.
     fn remark(watcher: &Watcher) -> (usize, usize) {
@@ -708,7 +742,8 @@ mod linux {
     /// `remark` over explicit prefixes and homes (the live test passes a
     /// scratch tree). The creation sites: the homes themselves, each
     /// prefix's parent (`~/.config` for `~/.config/gcloud/`) and every marked
-    /// directory, for the subdirectories created under it.
+    /// directory, for the subdirectories created under it. The directories
+    /// come from [`plan_mark_dirs`]: each marked once per pass.
     fn remark_prefixes(
         watcher: &Watcher,
         prefixes: &[String],
@@ -722,45 +757,43 @@ mod linux {
             if let Some(parent) = prefix_path.parent().filter(|parent| parent.is_dir()) {
                 creation_sites.push(parent.to_path_buf());
             }
-            for dir in directories_for(prefix) {
-                let Ok(metadata) = std::fs::metadata(&dir) else {
-                    continue;
-                };
-                let identity = (metadata.dev(), metadata.ino());
-                let action = watcher
-                    .marked
-                    .try_with(|marked| {
-                        mark_action(marked.get(&dir).copied(), identity, marked.len())
-                    })
-                    .flatten();
-                let Some(action) = action else {
-                    continue;
-                };
-                let Ok(handle) = std::fs::File::open(&dir) else {
-                    continue;
-                };
-                match watcher.fan.mark::<_, Path>(
-                    MarkFlags::FAN_MARK_ADD,
-                    MaskFlags::FAN_OPEN | MaskFlags::FAN_EVENT_ON_CHILD,
-                    &handle,
-                    None,
-                ) {
-                    Ok(()) => {
-                        watcher
-                            .marked
-                            .try_with(|marked| marked.insert(dir.clone(), identity));
-                        match action {
-                            MarkAction::Refresh => refreshed += 1,
-                            MarkAction::New | MarkAction::Renew => added += 1,
-                        }
-                        creation_sites.push(dir);
+        }
+        for dir in plan_mark_dirs(prefixes) {
+            let Ok(metadata) = std::fs::metadata(&dir) else {
+                continue;
+            };
+            let identity = (metadata.dev(), metadata.ino());
+            let action = watcher
+                .marked
+                .try_with(|marked| mark_action(marked.get(&dir).copied(), identity, marked.len()))
+                .flatten();
+            let Some(action) = action else {
+                continue;
+            };
+            let Ok(handle) = std::fs::File::open(&dir) else {
+                continue;
+            };
+            match watcher.fan.mark::<_, Path>(
+                MarkFlags::FAN_MARK_ADD,
+                MaskFlags::FAN_OPEN | MaskFlags::FAN_EVENT_ON_CHILD,
+                &handle,
+                None,
+            ) {
+                Ok(()) => {
+                    watcher
+                        .marked
+                        .try_with(|marked| marked.insert(dir.clone(), identity));
+                    match action {
+                        MarkAction::Refresh => refreshed += 1,
+                        MarkAction::New | MarkAction::Renew => added += 1,
                     }
-                    Err(e) => debug!(
-                        "credential-open fanotify: mark {} failed: {}",
-                        dir.display(),
-                        e
-                    ),
+                    creation_sites.push(dir);
                 }
+                Err(e) => debug!(
+                    "credential-open fanotify: mark {} failed: {}",
+                    dir.display(),
+                    e
+                ),
             }
         }
         watch_creations(watcher, &creation_sites);
@@ -1283,5 +1316,53 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&base);
         assert_eq!(resolved, dir);
+    }
+
+    /// The re-mark plan over a scratch home: a present prefix contributes its
+    /// tree, a missing one its parent, and every directory is planned once
+    /// however many prefixes reach it.
+    #[test]
+    fn mark_plan_lists_each_directory_once() {
+        let home = std::env::temp_dir().join(format!("flodbadd-markplan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".ssh").join("keys")).unwrap();
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        let prefixes: Vec<String> = [
+            ".ssh/",            // present: itself and its subdirectory
+            ".aws/credentials", // missing: its parent, the home
+            ".gnupg/",          // missing: the home again
+            ".config/gcloud/",  // missing: `.config`
+            ".docker/config.json",
+        ]
+        .iter()
+        .map(|rel| format!("{}/{}", home.display(), rel))
+        .collect();
+
+        let planned = plan_mark_dirs(&prefixes);
+        let unique: std::collections::HashSet<&PathBuf> = planned.iter().collect();
+        assert_eq!(planned.len(), unique.len(), "{planned:?}");
+        for dir in [
+            home.clone(),
+            home.join(".ssh"),
+            home.join(".ssh").join("keys"),
+            home.join(".config"),
+            home.join("Documents"),
+        ] {
+            assert_eq!(
+                planned.iter().filter(|p| **p == dir).count(),
+                1,
+                "{} planned once in {planned:?}",
+                dir.display()
+            );
+        }
+        assert_eq!(planned.len(), 5, "{planned:?}");
+        // The present prefix comes first, walked as its own root; the home,
+        // reached by three missing prefixes, is walked once.
+        assert_eq!(planned[0], home.join(".ssh"));
+        // A prefix with no existing parent contributes nothing.
+        let outside = format!("{}/.nowhere/.aws/", home.display());
+        assert!(plan_mark_dirs(&[outside]).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

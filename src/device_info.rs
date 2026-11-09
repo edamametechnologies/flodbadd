@@ -7,11 +7,27 @@ use edamame_backend::lanscan_device_info_backend::DeviceInfoBackend;
 use edamame_backend::lanscan_port_info_backend::PortInfoBackend;
 use edamame_backend::lanscan_vulnerability_info_backend::VulnerabilityInfoBackend;
 use macaddr::MacAddr6;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::{debug, info, warn};
+use undeadlock::{CustomMutex, CustomMutexExt};
+
+/// Pairs of records whose merge was refused for conflicting characteristics,
+/// by [`DeviceInfo::merge_identity`]. The lists are deduplicated on every
+/// scan (every minute, and on each community exchange), and a refused pair
+/// stays in the lists: until 2.3.2 each pass evaluated the conflict again
+/// and logged both records whole (~116 MB of log a day on one host). A
+/// known pair skips the check; the refusal is logged once, at debug.
+static REFUSED_MERGES: Lazy<CustomMutex<HashSet<(u64, u64)>>> =
+    Lazy::new(|| CustomMutex::new(HashSet::new()));
+
+/// Memo bound; a full memo starts over (the next pass re-evaluates once).
+const REFUSED_MERGES_MAX: usize = 4_096;
 
 /// Upper bound on open ports for a standard-breadth scan (the ~5099-port DB).
 /// Real phones, IoT, and routers sit well below this; a standard scan that
@@ -1051,8 +1067,6 @@ impl DeviceInfo {
                         .any(|e2| e1.address == e2.address)
                 });
 
-                let has_conflicts = Self::has_conflicting_characteristics(&devices[i], &devices[j]);
-
                 // IPv4 overlap alone is WEAK evidence - IPs are frequently reused by DHCP
                 // Require additional confirmation: MAC or hostname match
                 let ipv4_confirmed = ipv4_overlap && (mac_match || mac_overlap || hostname_match);
@@ -1065,11 +1079,19 @@ impl DeviceInfo {
                 // - Hostname match: weak evidence, requires specific hostname
                 let is_duplicate =
                     if primary_ip_match || ipv4_confirmed || ipv6_overlap || mac_match {
-                        if has_conflicts {
-                            warn!(
-                            "Conflicting device characteristics - aborting merge of {:?} and {:?}",
-                            devices[i], devices[j]
-                        );
+                        // A pair refused on an earlier pass is not checked
+                        // again (`REFUSED_MERGES`).
+                        let key = Self::refused_merge_key(&devices[i], &devices[j]);
+                        if Self::is_refused_merge(key) {
+                            false
+                        } else if Self::has_conflicting_characteristics(&devices[i], &devices[j]) {
+                            if Self::note_refused_merge(key) {
+                                debug!(
+                                    "Conflicting device characteristics - not merging {} and {}",
+                                    devices[i].merge_summary(),
+                                    devices[j].merge_summary()
+                                );
+                            }
                             false
                         } else {
                             true
@@ -1090,6 +1112,79 @@ impl DeviceInfo {
             }
             i += 1;
         }
+    }
+
+    /// What identifies a record in the refused-merge memo: its MAC when it
+    /// has one, else the addresses and hostname a merge compares; and its
+    /// vendor, so a record whose vendor is learnt later is compared again.
+    fn merge_identity(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        match self.get_mac_address() {
+            Some(mac) => {
+                0u8.hash(&mut hasher);
+                mac.as_bytes().hash(&mut hasher);
+            }
+            None => {
+                1u8.hash(&mut hasher);
+                self.ip_address.hash(&mut hasher);
+                self.hostname.hash(&mut hasher);
+                for entry in &self.ip_addresses_v4 {
+                    entry.address.hash(&mut hasher);
+                }
+                for entry in &self.ip_addresses_v6 {
+                    entry.address.hash(&mut hasher);
+                }
+            }
+        }
+        self.device_vendor.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The memo key of a pair, whichever order the records come in.
+    fn refused_merge_key(a: &DeviceInfo, b: &DeviceInfo) -> (u64, u64) {
+        let (x, y) = (a.merge_identity(), b.merge_identity());
+        if x <= y {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    }
+
+    /// Whether the pair's merge was refused on an earlier pass. A contended
+    /// memo reads as unknown: the check simply runs again.
+    fn is_refused_merge(key: (u64, u64)) -> bool {
+        REFUSED_MERGES
+            .try_with(|memo| memo.contains(&key))
+            .unwrap_or(false)
+    }
+
+    /// Record a refused pair; `true` the first time it is seen (the caller
+    /// logs it then and never again).
+    fn note_refused_merge(key: (u64, u64)) -> bool {
+        REFUSED_MERGES
+            .try_with(|memo| {
+                if memo.len() >= REFUSED_MERGES_MAX {
+                    memo.clear();
+                }
+                memo.insert(key)
+            })
+            .unwrap_or(true)
+    }
+
+    /// `ip (hostname, mac)` for a one-line log.
+    fn merge_summary(&self) -> String {
+        format!(
+            "{} ({}, {})",
+            self.ip_address,
+            if self.hostname.is_empty() {
+                "-"
+            } else {
+                self.hostname.as_str()
+            },
+            self.get_mac_address()
+                .map(|mac| mac.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        )
     }
 
     // Combine the devices based on the same criteria as above
@@ -6797,5 +6892,43 @@ mod ipv6_merge_bounds_tests {
             .max()
             .expect("entries retained");
         assert_eq!(newest, base + chrono::Duration::seconds(199));
+    }
+
+    /// A pair whose merge is refused (same primary address, two burned-in
+    /// MACs) is kept twice and remembered: the second pass neither checks
+    /// the conflict again nor logs it.
+    #[test]
+    fn a_refused_merge_is_remembered_and_logged_once() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 77, 0, 23));
+        let mut a = DeviceInfo::new(Some(ip));
+        a.hostname = "printer".to_string();
+        a.mac_address = Some(MacAddr6::new(0x00, 0x1E, 0xC2, 0x7A, 0x11, 0x01));
+        let mut b = DeviceInfo::new(Some(ip));
+        b.hostname = "printer".to_string();
+        b.mac_address = Some(MacAddr6::new(0x00, 0x1E, 0xC2, 0x7A, 0x11, 0x02));
+        let key = DeviceInfo::refused_merge_key(&a, &b);
+        assert_eq!(key, DeviceInfo::refused_merge_key(&b, &a));
+        assert!(!DeviceInfo::is_refused_merge(key));
+
+        let mut devices = vec![a.clone(), b.clone()];
+        DeviceInfo::dedup_vec(&mut devices);
+        assert_eq!(devices.len(), 2, "conflicting records are both kept");
+        assert!(
+            DeviceInfo::is_refused_merge(key),
+            "the refusal is remembered"
+        );
+        // Known: nothing to log on the next pass.
+        assert!(!DeviceInfo::note_refused_merge(key));
+
+        let mut again = vec![a.clone(), b.clone()];
+        DeviceInfo::dedup_vec(&mut again);
+        assert_eq!(again.len(), 2);
+
+        // A record that learns its vendor is a new pair: compared again.
+        let mut c = b.clone();
+        c.device_vendor = "Acme".to_string();
+        assert!(!DeviceInfo::is_refused_merge(
+            DeviceInfo::refused_merge_key(&a, &c)
+        ));
     }
 }

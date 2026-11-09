@@ -135,7 +135,7 @@ impl CloudSignature for ServicePortsMap {
 
 lazy_static! {
     pub static ref VULNS: CloudModel<VulnerabilityPortInfoList> = {
-        let model = CloudModel::initialize(PORT_VULNS_NAME.to_string(), &PORT_VULNS, |data| {
+        let model = CloudModel::initialize(PORT_VULNS_NAME.to_string(), &port_vulns_json(), |data| {
             let vuln_info_json: VulnerabilityPortInfoListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(VulnerabilityPortInfoList::new_from_json(vuln_info_json))
@@ -503,7 +503,7 @@ mod tests {
     /// whitelists/blacklists/sensitive_paths/profiles/vendor_vulns.
     #[test]
     fn test_embedded_port_vulns_snapshot_parses() {
-        serde_json::from_str::<VulnerabilityPortInfoListJSON>(&PORT_VULNS)
+        serde_json::from_str::<VulnerabilityPortInfoListJSON>(&port_vulns_json())
             .expect("embedded port vulns snapshot must parse as VulnerabilityPortInfoListJSON");
     }
 

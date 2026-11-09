@@ -13,4 +13,4 @@
 
 use crate::obfuscated_cloud_model_fallback;
 
-obfuscated_cloud_model_fallback!(pub VENDOR_VULNS: include_bytes!("vendor_vulns_db.bin"));
+obfuscated_cloud_model_fallback!(pub fn vendor_vulns_json: include_bytes!("vendor_vulns_db.bin"));

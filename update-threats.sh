@@ -103,41 +103,41 @@ done
 update_obfuscated_fallback \
     "lanscan-profiles-db.json" \
     "./src/profiles_db.rs" \
-    "DEVICE_PROFILES" \
+    "device_profiles_json" \
     "Built in default device profiles db (obfuscated)" \
     "$USE_LOCAL"
 
 update_obfuscated_fallback \
     "lanscan-port-vulns-db.json" \
     "./src/port_vulns_db.rs" \
-    "PORT_VULNS" \
+    "port_vulns_json" \
     "Built in default port vulns db (obfuscated)" \
     "$USE_LOCAL"
 
 update_obfuscated_fallback \
     "lanscan-vendor-vulns-db.json" \
     "./src/vendor_vulns_db.rs" \
-    "VENDOR_VULNS" \
+    "vendor_vulns_json" \
     "Built in default vendor vulns db (obfuscated)" \
     "$USE_LOCAL"
 
 update_obfuscated_fallback \
     "whitelists-db.json" \
     "./src/whitelists_db.rs" \
-    "WHITELISTS" \
+    "whitelists_json" \
     "Built in default whitelists db (obfuscated)" \
     "$USE_LOCAL"
 
 update_obfuscated_fallback \
     "blacklists-db.json" \
     "./src/blacklists_db.rs" \
-    "BLACKLISTS" \
+    "blacklists_json" \
     "Built in default blacklists db (obfuscated)" \
     "$USE_LOCAL"
 
 update_obfuscated_fallback \
     "sensitive-paths-db.json" \
     "./src/sensitive_paths_db.rs" \
-    "SENSITIVE_PATHS_DB" \
+    "sensitive_paths_json" \
     "Built in default sensitive paths db (obfuscated)" \
     "$USE_LOCAL"

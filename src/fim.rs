@@ -1,5 +1,6 @@
 use crate::fim_events::{
-    is_temp_directory_path, FimEvent, FimEventStore, FimEventType, FIM_HASH_SIZE_THRESHOLD,
+    is_temp_directory_path, process_attribution_missing, FimEvent, FimEventStore, FimEventType,
+    FIM_HASH_SIZE_THRESHOLD,
 };
 use crate::open_files::is_sensitive_path;
 use crate::sensitive_paths::{classify_sensitive_path_labels_sync, is_fim_excluded_path};
@@ -1565,20 +1566,18 @@ fn kernel_table_attribution(path: &str) -> Option<(u32, String, String)> {
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn backfill_temp_events_from_kernel_tables(store: &FimEventStore, max_events: usize) -> usize {
     let removal_measured = removal_actor_measured();
-    let candidates: Vec<FimEvent> = store
-        .get_recent_events_missing_process_attribution(max_events.saturating_mul(4))
-        .into_iter()
-        .filter(|event| {
-            !event.is_sensitive
-                && kernel_lookup_eligible(
-                    Path::new(&event.path),
-                    false,
-                    event.event_type,
-                    removal_measured,
-                )
-        })
-        .take(max_events)
-        .collect();
+    // The selection runs in the store's predicate: only the events this
+    // backfill will look up are gathered and cloned.
+    let candidates: Vec<FimEvent> = store.recent_matching(max_events, |event| {
+        process_attribution_missing(event)
+            && !event.is_sensitive
+            && kernel_lookup_eligible(
+                Path::new(&event.path),
+                false,
+                event.event_type,
+                removal_measured,
+            )
+    });
     if candidates.is_empty() {
         return 0;
     }

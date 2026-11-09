@@ -146,16 +146,16 @@ pub fn set_ownership_lock_file_names(names: &[String]) {
     OWNERSHIP_LOCK_NAMES.store(Arc::new(names));
 }
 
-/// `path`'s file name is one of the ownership lock-file names.
+/// `path`'s file name is one of the ownership lock-file names. Compared in
+/// place (the names are stored lowercase): this runs on every open-file
+/// path a resolution keeps.
 pub fn is_ownership_lock_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let name = normalized
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    !name.is_empty() && OWNERSHIP_LOCK_NAMES.load().iter().any(|lock| *lock == name)
+    let name = path.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    !name.is_empty()
+        && OWNERSHIP_LOCK_NAMES
+            .load()
+            .iter()
+            .any(|lock| lock.eq_ignore_ascii_case(name))
 }
 
 /// A path a session's record keeps by name and carries across
@@ -307,20 +307,19 @@ pub fn retain_ownership_lock_files(l7: &mut SessionL7, previous: Option<&Session
     if OWNERSHIP_LOCK_NAMES.load().is_empty() {
         return;
     }
+    let material = lock_material(l7);
     retain_ownership_lock_files_with(l7, previous, READS_PARENT_LOCKS, &mut |pid| {
-        get_open_file_paths(pid)
-            .into_iter()
-            .filter(|path| is_ownership_lock_path(path))
-            .collect()
+        locks_held_by(pid, &material)
     });
 }
 
 /// Whether a parent's lock files are read beyond a session's first attach
 /// (when the resolver resolves a connection, and again while the record
-/// holds none). Not on Windows: the enumeration leaves out the handles a
-/// process holds for writing (`win_handles`), and a lock file is held for
-/// writing, so a read would only repeat the parent's enumeration.
-const READS_PARENT_LOCKS: bool = cfg!(not(target_os = "windows"));
+/// holds none). Everywhere since 2.3.2: on Windows the handle enumeration
+/// leaves out the handles a process holds for writing (`win_handles`), a
+/// lock file among them, so the holders are asked by path instead
+/// ([`lock_file_holders`]).
+const READS_PARENT_LOCKS: bool = true;
 
 /// Appends to `l7.open_files` the lock files its parent of the same image
 /// holds now (the browser process of a Chromium network service). The
@@ -328,7 +327,7 @@ const READS_PARENT_LOCKS: bool = cfg!(not(target_os = "windows"));
 /// capture attaches a resolution to its session on its update pass, which a
 /// short-lived browser can outlive (2026-11-08: a headless browser that ran
 /// 45 s between two passes left all its sessions without the locks, read at
-/// attach time after it exited). Not on Windows ([`READS_PARENT_LOCKS`]).
+/// attach time after it exited).
 pub fn add_same_image_parent_lock_files(l7: &mut SessionL7) {
     if !READS_PARENT_LOCKS || OWNERSHIP_LOCK_NAMES.load().is_empty() {
         return;
@@ -336,13 +335,252 @@ pub fn add_same_image_parent_lock_files(l7: &mut SessionL7) {
     let Some(parent_pid) = same_image_parent(l7) else {
         return;
     };
-    for lock in get_open_file_paths(parent_pid)
-        .into_iter()
-        .filter(|path| is_ownership_lock_path(path))
-    {
+    for lock in locks_held_by(parent_pid, &lock_material(l7)) {
         if !l7.open_files.contains(&lock) {
             l7.open_files.push(lock);
         }
+    }
+}
+
+/// The paths whose store's lock files [`locks_held_by`] looks for on
+/// Windows: the record's open files. Elsewhere the holder is enumerated
+/// directly and nothing is copied.
+fn lock_material(l7: &SessionL7) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        l7.open_files.clone()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = l7;
+        Vec::new()
+    }
+}
+
+/// The lock files `pid` holds now, read from its open files where the
+/// enumeration sees them. On Windows a handle held for writing is left out
+/// of the enumeration (`win_handles`), so the lock files that may mark the
+/// stores `material` lies in are listed on disk ([`lock_file_candidates`])
+/// and their holders asked for by path ([`lock_file_holders`]).
+fn locks_held_by(pid: u32, material: &[String]) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut locks: Vec<String> = lock_file_holders(&lock_file_candidates(material))
+            .into_iter()
+            .filter(|(_, pids)| pids.contains(&pid))
+            .map(|(path, _)| path)
+            .collect();
+        locks.sort();
+        locks
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = material;
+        get_open_file_paths(pid)
+            .into_iter()
+            .filter(|path| is_ownership_lock_path(path))
+            .collect()
+    }
+}
+
+/// Directory roots listed per call of [`lock_file_candidates`], and the
+/// directories read below each root (two levels, breadth first).
+const LOCK_CANDIDATE_ROOTS: usize = 32;
+const LOCK_CANDIDATE_DIRS_PER_ROOT: usize = 64;
+const LOCK_CANDIDATE_DEPTH: usize = 2;
+/// Lock files reported per call.
+const LOCK_CANDIDATES: usize = 128;
+
+/// The lock files on disk that may mark the stores `material` (paths a
+/// process holds open) lies in: files named like an ownership lock
+/// (compared without case) in each path's directory, its parent, and the
+/// subdirectories of both, two levels down and bounded. A profile's locks
+/// sit beside its databases (`parent.lock`), a level above them
+/// (`lockfile`) or in a store's own subdirectory (`Local Storage/leveldb/LOCK`
+/// beside `Cookies`). The paths are what [`lock_file_holders`] is asked
+/// about; the listing runs where the files are readable (the helper, a
+/// standalone daemon), like the enumeration itself.
+pub fn lock_file_candidates(material: &[String]) -> Vec<String> {
+    let names = OWNERSHIP_LOCK_NAMES.load();
+    if names.is_empty() || material.is_empty() {
+        return Vec::new();
+    }
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for path in material {
+        let path = Path::new(path.trim());
+        for root in [path.parent(), path.parent().and_then(Path::parent)]
+            .into_iter()
+            .flatten()
+        {
+            if roots.len() >= LOCK_CANDIDATE_ROOTS {
+                break;
+            }
+            if !root.as_os_str().is_empty() && !roots.iter().any(|known| known == root) {
+                roots.push(root.to_path_buf());
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut listed: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for root in roots {
+        let mut queue = std::collections::VecDeque::from([(root, 0usize)]);
+        let mut read = 0usize;
+        while let Some((dir, depth)) = queue.pop_front() {
+            if read >= LOCK_CANDIDATE_DIRS_PER_ROOT || out.len() >= LOCK_CANDIDATES {
+                break;
+            }
+            if !listed.insert(dir.clone()) {
+                continue;
+            }
+            read += 1;
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() && !file_type.is_symlink() {
+                    if depth < LOCK_CANDIDATE_DEPTH {
+                        queue.push_back((entry.path(), depth + 1));
+                    }
+                } else if file_type.is_file() {
+                    let name = entry.file_name();
+                    let is_lock = name.to_str().is_some_and(|name| {
+                        names.iter().any(|lock| lock.eq_ignore_ascii_case(name))
+                    });
+                    if is_lock {
+                        let candidate = entry.path().to_string_lossy().to_string();
+                        if !out.contains(&candidate) {
+                            out.push(candidate);
+                            if out.len() >= LOCK_CANDIDATES {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The processes holding each of `paths` open, by path. On Windows the
+/// Restart Manager answers for the files the handle enumeration leaves out
+/// (those held for writing, a lock file among them), without duplicating any
+/// handle; elsewhere the enumeration sees them and this reads empty.
+pub fn lock_file_holders(paths: &[String]) -> HashMap<String, Vec<u32>> {
+    #[cfg(target_os = "windows")]
+    {
+        restart_manager::holders(paths)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = paths;
+        HashMap::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod restart_manager {
+    //! Which processes hold a file open, asked of the Restart Manager: it
+    //! answers by path, for handles of every access mode, and duplicates
+    //! nothing into this process (see `win_handles::resolvable` for why a
+    //! writer's handle must never be duplicated).
+
+    use std::collections::HashMap;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows::Win32::System::RestartManager::{
+        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+        RM_PROCESS_INFO,
+    };
+
+    /// Paths asked about per call; a session costs a scan of the running
+    /// processes, so one shared session first, then one per path only when
+    /// something holds one of them.
+    const MAX_QUERIED_PATHS: usize = 64;
+
+    pub(super) fn holders(paths: &[String]) -> HashMap<String, Vec<u32>> {
+        let mut out = HashMap::new();
+        let paths: Vec<&String> = paths.iter().take(MAX_QUERIED_PATHS).collect();
+        if paths.is_empty() {
+            return out;
+        }
+        let any = holders_of(&paths);
+        if any.is_empty() {
+            return out;
+        }
+        if paths.len() == 1 {
+            out.insert(paths[0].clone(), any);
+            return out;
+        }
+        for path in paths {
+            let pids = holders_of(&[path]);
+            if !pids.is_empty() {
+                out.insert(path.clone(), pids);
+            }
+        }
+        out
+    }
+
+    /// The pids holding any of `paths`, sorted, each once.
+    fn holders_of(paths: &[&String]) -> Vec<u32> {
+        let wide: Vec<Vec<u16>> = paths
+            .iter()
+            .map(|path| path.encode_utf16().chain(std::iter::once(0)).collect())
+            .collect();
+        let names: Vec<PCWSTR> = wide.iter().map(|w| PCWSTR(w.as_ptr())).collect();
+        let mut session: u32 = 0;
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+        let mut pids: Vec<u32> = Vec::new();
+        // SAFETY: plain Win32 calls over buffers that outlive them; the
+        // session is ended on every path once started.
+        unsafe {
+            if RmStartSession(&mut session, None, PWSTR(key.as_mut_ptr())) != ERROR_SUCCESS {
+                return pids;
+            }
+            if RmRegisterResources(session, Some(&names), None, None) == ERROR_SUCCESS {
+                let mut needed: u32 = 0;
+                let mut count: u32 = 0;
+                let mut reasons: u32 = 0;
+                let mut infos: Vec<RM_PROCESS_INFO> = Vec::new();
+                // The first call sizes the list (ERROR_MORE_DATA), the
+                // second fills it; one more round covers a process that
+                // opened the file in between.
+                for _ in 0..3 {
+                    let status = RmGetList(
+                        session,
+                        &mut needed,
+                        &mut count,
+                        if infos.is_empty() {
+                            None
+                        } else {
+                            Some(infos.as_mut_ptr())
+                        },
+                        &mut reasons,
+                    );
+                    if status == ERROR_SUCCESS {
+                        let filled = (count as usize).min(infos.len());
+                        pids = infos[..filled]
+                            .iter()
+                            .map(|info| info.Process.dwProcessId)
+                            .collect();
+                        break;
+                    }
+                    if status != ERROR_MORE_DATA {
+                        break;
+                    }
+                    infos = vec![RM_PROCESS_INFO::default(); needed as usize];
+                    count = needed;
+                }
+            }
+            let _ = RmEndSession(session);
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 }
 
@@ -1978,18 +2216,22 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
+        // The child's own material names the store (Windows asks the lock
+        // holders by path, under the material's directory and its parent).
+        let cookies = dir.join("Default").join("Cookies");
         let mut child = SessionL7 {
             pid: u32::MAX - 1,
             parent_pid: Some(std::process::id()),
             process_path: image.clone(),
             parent_process_path: image,
+            open_files: vec![cookies.to_string_lossy().to_string()],
             ..Default::default()
         };
         add_same_image_parent_lock_files(&mut child);
-        let recorded = child
-            .open_files
-            .iter()
-            .any(|path| path.ends_with("Local Storage/leveldb/LOCK"));
+        let recorded = child.open_files.iter().any(|path| {
+            path.replace('\\', "/")
+                .ends_with("Local Storage/leveldb/LOCK")
+        });
         assert_eq!(recorded, READS_PARENT_LOCKS, "{:?}", child.open_files);
 
         let mut stranger = SessionL7 {
@@ -2040,5 +2282,96 @@ mod tests {
         assert!(is_ownership_lock_path("/p/Parent.Lock"));
         assert!(!is_ownership_lock_path("/p/LOCK/Cookies"));
         assert!(!is_ownership_lock_path("/p/Default/Cookies"));
+        // Backslash separators, mixed case and trailing whitespace, as the
+        // Windows handle enumeration and a padded record hand them over.
+        assert!(is_ownership_lock_path(
+            "C:\\Users\\x\\Profile\\Default\\LOCK"
+        ));
+        assert!(is_ownership_lock_path("C:\\Users\\x\\Profile\\LockFile"));
+        assert!(is_ownership_lock_path(
+            "C:\\Users\\x\\Profile\\PARENT.LOCK  "
+        ));
+        assert!(is_ownership_lock_path("/p/Default/lock \t"));
+        assert!(is_ownership_lock_path("/p/mixed\\separators/Lock"));
+        assert!(!is_ownership_lock_path(
+            "C:\\Users\\x\\Profile\\LOCK\\Cookies"
+        ));
+        assert!(!is_ownership_lock_path("C:\\Users\\x\\Profile\\LOCKS"));
+        assert!(!is_ownership_lock_path(""));
+        assert!(!is_ownership_lock_path("   "));
+        assert!(!is_ownership_lock_path("/p/Default/"));
+    }
+
+    /// The lock files listed for a store: beside the material, a level
+    /// above it, and in the store's own subdirectories, by name without
+    /// case; nothing deeper, nothing that is not a lock name.
+    #[test]
+    fn lock_candidates_are_the_lock_files_around_the_material() {
+        install_test_lock_names();
+        let dir = std::env::temp_dir().join(format!("flodbadd-lock-cand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let profile = dir.join("User Data");
+        let default = profile.join("Default");
+        let leveldb = default.join("Local Storage").join("leveldb");
+        let deep = leveldb.join("too").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        for file in [
+            profile.join("lockfile"),
+            default.join("Cookies"),
+            default.join("LOCK"),
+            leveldb.join("LOCK"),
+            leveldb.join("CURRENT"),
+            deep.join("LOCK"),
+        ] {
+            std::fs::write(&file, "x").unwrap();
+        }
+        let material = vec![default.join("Cookies").to_string_lossy().to_string()];
+        let mut found = lock_file_candidates(&material);
+        found.sort();
+        let mut expected: Vec<String> = [
+            profile.join("lockfile"),
+            default.join("LOCK"),
+            leveldb.join("LOCK"),
+        ]
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+        expected.sort();
+        assert_eq!(found, expected);
+        assert!(lock_file_candidates(&[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Off Windows the holders are read from the enumeration, never by path.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn lock_file_holders_read_empty_where_the_enumeration_sees_writers() {
+        assert!(lock_file_holders(&["/p/LOCK".to_string()]).is_empty());
+    }
+
+    /// The Restart Manager names this process for a file it holds open for
+    /// writing, which the handle enumeration leaves out.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_file_held_for_writing_names_this_process() {
+        let dir = std::env::temp_dir().join(format!("flodbadd-lock-hold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("LOCK");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock)
+            .unwrap();
+        let path = lock.to_string_lossy().to_string();
+        let holders = lock_file_holders(&[path.clone()]);
+        assert!(
+            holders
+                .get(&path)
+                .is_some_and(|pids| pids.contains(&std::process::id())),
+            "{holders:?}"
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -195,21 +195,46 @@ impl FimEventStore {
         self.events.clear();
     }
 
+    /// Newest `timestamp` over the store, `None` when empty. One pass over
+    /// the entries, no copy: the status readers used to sort a clone of the
+    /// whole store for this one value.
+    pub fn latest_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.events.iter().map(|e| e.value().timestamp).max()
+    }
+
+    /// The newest `max` events matching `pred`, newest first.
+    ///
+    /// Only the `(timestamp, uid)` of each match is gathered before the
+    /// selection, and only the selected events are cloned. The callers run
+    /// this on every `get_file_events` (thousands of times a day on a
+    /// host), each used to clone every match of a 10,000-event store, sort
+    /// the clones and keep a handful.
+    pub fn recent_matching(&self, max: usize, pred: impl Fn(&FimEvent) -> bool) -> Vec<FimEvent> {
+        if max == 0 {
+            return Vec::new();
+        }
+        let mut keys: Vec<(DateTime<Utc>, String)> = self
+            .events
+            .iter()
+            .filter(|e| pred(e.value()))
+            .map(|e| (e.value().timestamp, e.key().clone()))
+            .collect();
+        if keys.len() > max {
+            // Newest first: the `max` newest end up before index `max`.
+            keys.select_nth_unstable_by(max - 1, |a, b| b.0.cmp(&a.0));
+            keys.truncate(max);
+        }
+        keys.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        keys.into_iter()
+            .filter_map(|(_, uid)| self.events.get(&uid).map(|e| e.value().clone()))
+            .collect()
+    }
+
     pub fn get_recent_events_missing_process_attribution(
         &self,
         max_events: usize,
     ) -> Vec<FimEvent> {
-        let mut events: Vec<FimEvent> = self
-            .events
-            .iter()
-            .filter(|e| process_attribution_missing(e.value()))
-            .map(|e| e.value().clone())
-            .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        if events.len() > max_events {
-            events.truncate(max_events);
-        }
-        events
+        self.recent_matching(max_events, process_attribution_missing)
     }
 
     /// Like [`Self::get_recent_events_missing_process_attribution`], but only
@@ -224,22 +249,11 @@ impl FimEventStore {
         &self,
         max_events: usize,
     ) -> Vec<FimEvent> {
-        let mut events: Vec<FimEvent> = self
-            .events
-            .iter()
-            .filter(|e| {
-                let event = e.value();
-                process_attribution_missing(event)
-                    && event.is_sensitive
-                    && event.event_type != FimEventType::Delete
-            })
-            .map(|e| e.value().clone())
-            .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        if events.len() > max_events {
-            events.truncate(max_events);
-        }
-        events
+        self.recent_matching(max_events, |event| {
+            process_attribution_missing(event)
+                && event.is_sensitive
+                && event.event_type != FimEventType::Delete
+        })
     }
 
     pub fn update_process_attribution(
@@ -381,7 +395,7 @@ impl FimEventStore {
     }
 }
 
-fn process_attribution_missing(event: &FimEvent) -> bool {
+pub(crate) fn process_attribution_missing(event: &FimEvent) -> bool {
     event
         .process_name
         .as_deref()
@@ -1267,5 +1281,98 @@ mod tests {
         assert!(delta[0].path.contains("file_5"), "{}", delta[0].path);
         assert!(delta[1].path.contains("file_3"), "{}", delta[1].path);
         assert!(delta[2].path.contains("file_1"), "{}", delta[2].path);
+    }
+
+    fn plain_event(path: &str, ts: DateTime<Utc>, is_sensitive: bool) -> FimEvent {
+        FimEvent {
+            path: path.to_string(),
+            event_type: FimEventType::Modify,
+            timestamp: ts,
+            size: None,
+            hash: None,
+            process_name: None,
+            process_path: None,
+            process_pid: None,
+            writer_inferred: false,
+            writer_unmeasured: false,
+            parent_process_name: None,
+            parent_process_path: None,
+            is_sensitive,
+            labels: vec![],
+            uid: FimEvent::compute_uid(path, &FimEventType::Modify, &ts),
+            last_modified: ts,
+        }
+    }
+
+    /// `recent_matching` over a 1,000-event store: the newest N of the
+    /// matches, newest first, the predicate applied before the selection.
+    #[test]
+    fn recent_matching_selects_the_newest_matches_in_order() {
+        let store = FimEventStore::with_limits(2_000, ChronoDuration::hours(8));
+        let base = Utc::now() - ChronoDuration::hours(1);
+        // Insertion order is scrambled on purpose: the store is a map, the
+        // selection has to order by timestamp.
+        for i in (0..1_000u32)
+            .rev()
+            .step_by(3)
+            .chain((0..1_000u32).filter(|i| i % 3 != 0))
+        {
+            let ts = base + ChronoDuration::seconds(i64::from(i));
+            // Every third event (by timestamp rank) is sensitive.
+            store.insert(plain_event(&format!("/w/f{i}"), ts, i % 3 == 0));
+        }
+        assert_eq!(store.event_count(), 1_000);
+
+        let newest = store.recent_matching(10, |_| true);
+        assert_eq!(newest.len(), 10);
+        let expected: Vec<String> = (990..1_000u32).rev().map(|i| format!("/w/f{i}")).collect();
+        let got: Vec<String> = newest.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(got, expected);
+        assert!(newest.windows(2).all(|w| w[0].timestamp >= w[1].timestamp));
+
+        // The filter runs before the selection: the N newest SENSITIVE
+        // events, not the sensitive ones among the N newest.
+        let sensitive = store.recent_matching(5, |e| e.is_sensitive);
+        let got: Vec<String> = sensitive.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            got,
+            vec!["/w/f999", "/w/f996", "/w/f993", "/w/f990", "/w/f987"]
+        );
+
+        // Fewer matches than asked: all of them, newest first.
+        let few = store.recent_matching(50, |e| e.path.ends_with("00"));
+        assert_eq!(few.len(), 10);
+        assert_eq!(few[0].path, "/w/f900");
+        assert_eq!(few[9].path, "/w/f0");
+
+        assert!(store.recent_matching(0, |_| true).is_empty());
+        assert!(store.recent_matching(10, |_| false).is_empty());
+
+        // The convenience selectors are the same selection.
+        let missing = store.get_recent_sensitive_events_missing_process_attribution(5);
+        let got: Vec<String> = missing.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            got,
+            vec!["/w/f999", "/w/f996", "/w/f993", "/w/f990", "/w/f987"]
+        );
+    }
+
+    #[test]
+    fn latest_timestamp_is_the_newest_event() {
+        let store = FimEventStore::new();
+        assert_eq!(store.latest_timestamp(), None);
+        let base = Utc::now() - ChronoDuration::minutes(10);
+        for offset in [3i64, 9, 1, 7] {
+            let ts = base + ChronoDuration::seconds(offset);
+            store.insert(plain_event(&format!("/w/f{offset}"), ts, false));
+        }
+        assert_eq!(
+            store.latest_timestamp(),
+            Some(base + ChronoDuration::seconds(9))
+        );
+        assert_eq!(
+            store.latest_timestamp(),
+            store.get_all_events().first().map(|e| e.timestamp)
+        );
     }
 }

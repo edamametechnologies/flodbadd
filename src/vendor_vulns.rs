@@ -80,7 +80,7 @@ impl VulnerabilityInfoList {
 
 lazy_static! {
     pub static ref VULNS: CloudModel<VulnerabilityInfoList> = {
-        let model = CloudModel::initialize(VENDOR_VULNS_NAME.to_string(), &VENDOR_VULNS, |data| {
+        let model = CloudModel::initialize(VENDOR_VULNS_NAME.to_string(), &vendor_vulns_json(), |data| {
             let vuln_info_json: VulnerabilityVendorInfoListJSON =
                 serde_json::from_str(data).with_context(|| "Failed to parse JSON data")?;
             Ok(VulnerabilityInfoList::new_from_json(&vuln_info_json))
@@ -259,7 +259,7 @@ mod tests {
     /// whitelists/blacklists/sensitive_paths/port_vulns/profiles.
     #[test]
     fn test_embedded_vendor_vulns_snapshot_parses() {
-        serde_json::from_str::<VulnerabilityVendorInfoListJSON>(&VENDOR_VULNS)
+        serde_json::from_str::<VulnerabilityVendorInfoListJSON>(&vendor_vulns_json())
             .expect("embedded vendor vulns snapshot must parse as VulnerabilityVendorInfoListJSON");
     }
 
