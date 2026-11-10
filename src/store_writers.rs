@@ -1024,6 +1024,78 @@ pub fn counters() -> StoreWriterCounters {
     }
 }
 
+/// The kernel-time sensor that feeds the record in this build, and its state
+/// now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreWriterSensor {
+    /// `endpoint_security`, `fanotify`, `etw`, or `none` when this build
+    /// runs no such sensor.
+    pub kind: String,
+    /// The sensor delivers events now.
+    pub active: bool,
+    /// Creations, removals and moves are delivered with their process.
+    pub entry_events: bool,
+    /// The operations that set a file's size or its names without a write
+    /// are delivered.
+    pub extended_events: bool,
+    /// Times the sensor reported dropped events since the process started.
+    pub dropped_reports: u64,
+}
+
+/// The state of the sensor that feeds the record in this build.
+pub fn sensor() -> StoreWriterSensor {
+    #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
+    {
+        let active = crate::l7_es::is_available();
+        StoreWriterSensor {
+            kind: "endpoint_security".to_string(),
+            active,
+            entry_events: active,
+            extended_events: active && crate::l7_es::extended_file_events(),
+            dropped_reports: crate::l7_es::dropped_message_gaps(),
+        }
+    }
+    #[cfg(all(target_os = "linux", feature = "fim", feature = "ebpf"))]
+    {
+        let active = crate::fim_fanotify::is_active();
+        StoreWriterSensor {
+            kind: "fanotify".to_string(),
+            active,
+            entry_events: active
+                && crate::fim_fanotify::creation_group_active()
+                && crate::fim_fanotify::creation_marks_total() > 0,
+            extended_events: false,
+            dropped_reports: crate::fim_fanotify::queue_overflows(),
+        }
+    }
+    #[cfg(all(target_os = "windows", feature = "etw"))]
+    {
+        let active = crate::l7_etw::is_available();
+        StoreWriterSensor {
+            kind: "etw".to_string(),
+            active,
+            entry_events: active,
+            extended_events: active,
+            dropped_reports: crate::l7_etw::lost_event_reports(),
+        }
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", feature = "endpointsecurity"),
+        all(target_os = "linux", feature = "fim", feature = "ebpf"),
+        all(target_os = "windows", feature = "etw")
+    )))]
+    {
+        // No sensor in this build: nothing is delivered, nothing recorded.
+        StoreWriterSensor {
+            kind: "none".to_string(),
+            active: false,
+            entry_events: false,
+            extended_events: false,
+            dropped_reports: 0,
+        }
+    }
+}
+
 /// `btime` of `/proc/stat`: the boot time in seconds since the epoch.
 pub fn parse_boot_time_secs(proc_stat: &str) -> Option<u64> {
     proc_stat

@@ -32,6 +32,13 @@
 //! dropped all four at its opcode check, so no delete or rename ever had an
 //! actor on Windows. An open with `FILE_DELETE_ON_CLOSE` deletes without
 //! either event: the file goes when the opener's last handle closes.
+//!
+//! `FileIo/SetInfo` (69) is the same `SetInformationFile` request for the
+//! other information classes, among them the ones that set a file's size
+//! (`FileEndOfFileInformation`, `FileAllocationInformation`), its times and
+//! attributes (`FileBasicInformation`) and a hard link to it
+//! (`FileLinkInformation`). It is decoded for the store-writer record
+//! ([`store_ops_for_set_info`]); the attribution tables do not read it.
 
 /// FileIo/Create: a file open or create, with the path.
 pub const FILEIO_CREATE: u8 = 64;
@@ -41,6 +48,8 @@ pub const FILEIO_CLEANUP: u8 = 65;
 pub const FILEIO_CLOSE: u8 = 66;
 /// FileIo/Write: a write initiated on an open file object.
 pub const FILEIO_WRITE: u8 = 68;
+/// FileIo/SetInfo: information set on an open file object.
+pub const FILEIO_SET_INFO: u8 = 69;
 /// FileIo/Delete: the delete disposition set on an open file object.
 pub const FILEIO_DELETE: u8 = 70;
 /// FileIo/Rename: a rename requested on an open file object (its old name).
@@ -58,6 +67,18 @@ const FILE_SUPERSEDE: u32 = 0;
 const FILE_CREATE: u32 = 2;
 const FILE_OVERWRITE: u32 = 4;
 const FILE_OVERWRITE_IF: u32 = 5;
+
+/// `FILE_INFORMATION_CLASS` values a FileIo/SetInfo carries in `InfoClass`.
+const FILE_BASIC_INFORMATION: u32 = 4;
+const FILE_RENAME_INFORMATION: u32 = 10;
+const FILE_LINK_INFORMATION: u32 = 11;
+const FILE_DISPOSITION_INFORMATION: u32 = 13;
+const FILE_ALLOCATION_INFORMATION: u32 = 19;
+const FILE_END_OF_FILE_INFORMATION: u32 = 20;
+const FILE_VALID_DATA_LENGTH_INFORMATION: u32 = 39;
+const FILE_DISPOSITION_INFORMATION_EX: u32 = 64;
+const FILE_RENAME_INFORMATION_EX: u32 = 65;
+const FILE_LINK_INFORMATION_EX: u32 = 72;
 /// `CreateOptions` (low 24 bits) flag: the file is deleted when the last
 /// handle to it closes.
 const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
@@ -94,6 +115,8 @@ pub enum FileIoAction {
         file_object: Option<u64>,
         new_path: String,
     },
+    /// Information of class `info_class` set through an open file object.
+    SetInfo { file_object: u64, info_class: u32 },
 }
 
 /// Whether a FileIo/Create with this `CreateOptions` value creates or
@@ -109,6 +132,48 @@ pub fn create_disposition_is_write(create_options: u32) -> bool {
 /// for deletion on its last close.
 pub fn create_options_delete_on_close(create_options: u32) -> bool {
     create_options & FILE_DELETE_ON_CLOSE != 0
+}
+
+/// `CreateOptions` of a FileIo/Create payload: the NT create options in the
+/// low 24 bits, the create disposition in the top byte. `None` when the
+/// payload is too short to hold it.
+pub fn open_create_options(data: &[u8], ptr_size: usize) -> Option<u32> {
+    let p = if ptr_size == 4 { 4 } else { 8 };
+    read_u32(data, 2 * p + 4)
+}
+
+/// The store-writer operation (`crate::store_writers::ops`) an open with
+/// this `CreateOptions` value is in itself: `FILE_CREATE` creates the file
+/// (the request fails when it exists); `FILE_SUPERSEDE`, `FILE_OVERWRITE`
+/// and `FILE_OVERWRITE_IF` replace its content. `FILE_OPEN` and
+/// `FILE_OPEN_IF` are no operation by themselves: a write through the
+/// object is one.
+pub fn store_ops_for_open(create_options: u32) -> u32 {
+    use crate::store_writers::ops;
+    match create_options >> 24 {
+        FILE_CREATE => ops::CREATE,
+        FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF => ops::TRUNCATE,
+        _ => 0,
+    }
+}
+
+/// The store-writer operation a FileIo/SetInfo of class `info_class` is: a
+/// size set, times and attributes set, a hard link made; a rename or a
+/// delete disposition should the kernel log one under this event type. 0 for
+/// the classes that set state of the handle rather than of the file
+/// (position, mode, completion).
+pub fn store_ops_for_set_info(info_class: u32) -> u32 {
+    use crate::store_writers::ops;
+    match info_class {
+        FILE_END_OF_FILE_INFORMATION
+        | FILE_ALLOCATION_INFORMATION
+        | FILE_VALID_DATA_LENGTH_INFORMATION => ops::TRUNCATE,
+        FILE_BASIC_INFORMATION => ops::ATTRIBUTES,
+        FILE_LINK_INFORMATION | FILE_LINK_INFORMATION_EX => ops::LINK,
+        FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX => ops::RENAME_FROM,
+        FILE_DISPOSITION_INFORMATION | FILE_DISPOSITION_INFORMATION_EX => ops::REMOVE,
+        _ => 0,
+    }
 }
 
 /// Decode one FileIo initiation payload. `ptr_size` is 8 on a 64-bit
@@ -144,6 +209,11 @@ pub fn decode(opcode: u8, data: &[u8], ptr_size: usize) -> Option<FileIoAction> 
         }),
         FILEIO_DELETE => Some(FileIoAction::Delete {
             file_object: info_file_object(data, p)?,
+        }),
+        FILEIO_SET_INFO => Some(FileIoAction::SetInfo {
+            file_object: info_file_object(data, p)?,
+            // IrpPtr, FileObject, FileKey, ExtraInfo, TTID, then InfoClass.
+            info_class: read_u32(data, 4 * p + 4)?,
         }),
         FILEIO_RENAME => Some(FileIoAction::Rename {
             file_object: info_file_object(data, p)?,
@@ -391,9 +461,72 @@ mod tests {
         }
     }
 
+    /// A FileIo/SetInfo names its file object and its information class,
+    /// with 8- and 4-byte pointers, and maps to the operation the class is.
+    #[test]
+    fn a_set_info_names_its_file_object_and_class() {
+        use crate::store_writers::ops;
+        assert_eq!(
+            decode(FILEIO_SET_INFO, &info(8, 4096, 20), 8),
+            Some(FileIoAction::SetInfo {
+                file_object: FO,
+                info_class: 20,
+            })
+        );
+        assert_eq!(
+            decode(FILEIO_SET_INFO, &info(4, 0, 4), 4),
+            Some(FileIoAction::SetInfo {
+                file_object: FO as u32 as u64,
+                info_class: 4,
+            })
+        );
+        // Too short to hold the class.
+        assert_eq!(decode(FILEIO_SET_INFO, &info(8, 0, 20)[..39], 8), None);
+        // Size, attributes, link; the handle's own state is no operation.
+        assert_eq!(store_ops_for_set_info(20), ops::TRUNCATE);
+        assert_eq!(store_ops_for_set_info(19), ops::TRUNCATE);
+        assert_eq!(store_ops_for_set_info(39), ops::TRUNCATE);
+        assert_eq!(store_ops_for_set_info(4), ops::ATTRIBUTES);
+        assert_eq!(store_ops_for_set_info(11), ops::LINK);
+        assert_eq!(store_ops_for_set_info(72), ops::LINK);
+        assert_eq!(store_ops_for_set_info(10), ops::RENAME_FROM);
+        assert_eq!(store_ops_for_set_info(64), ops::REMOVE);
+        for handle_state in [14u32, 16, 30] {
+            assert_eq!(store_ops_for_set_info(handle_state), 0, "{handle_state}");
+        }
+    }
+
+    /// The create disposition of an open: `FILE_CREATE` is a creation, the
+    /// superseding and overwriting dispositions replace the content, and an
+    /// open that keeps the content is no operation by itself.
+    #[test]
+    fn an_open_maps_to_a_creation_or_a_replacement_by_its_disposition() {
+        use crate::store_writers::ops;
+        let path = r"\Device\HarddiskVolume4\Users\u\.claude\projects\p\s.jsonl";
+        let options_of =
+            |disposition: u32| open_create_options(&create(8, disposition << 24 | 0x60, path), 8);
+        assert_eq!(options_of(2), Some(0x0200_0060));
+        assert_eq!(
+            open_create_options(&create(4, 0x0500_0060, path), 4),
+            Some(0x0500_0060)
+        );
+        assert_eq!(open_create_options(&[0u8; 8], 8), None);
+        assert_eq!(store_ops_for_open(0x0200_0060), ops::CREATE);
+        for replacing in [0u32, 4, 5] {
+            assert_eq!(
+                store_ops_for_open(replacing << 24 | 0x60),
+                ops::TRUNCATE,
+                "{replacing}"
+            );
+        }
+        // FILE_OPEN and FILE_OPEN_IF.
+        assert_eq!(store_ops_for_open(0x0100_0060), 0);
+        assert_eq!(store_ops_for_open(0x0300_0060), 0);
+    }
+
     /// Truncated payloads and empty names are unmeasured, and the opcodes
-    /// the tables do not read (SetInfo 69, QueryInfo 74, DirEnum 72, ...)
-    /// decode to nothing.
+    /// the tables do not read (QueryInfo 74, DirEnum 72, ...) decode to
+    /// nothing.
     #[test]
     fn short_payloads_empty_names_and_other_opcodes_decode_to_nothing() {
         assert_eq!(decode(FILEIO_DELETE, &info(8, 1, 64)[..39], 8), None);
@@ -403,7 +536,7 @@ mod tests {
         assert_eq!(decode(FILEIO_DELETE_PATH, &empty_name, 8), None);
         assert_eq!(decode(FILEIO_CREATE, &create(8, 0, "")[..32], 8), None);
         assert_eq!(decode(FILEIO_WRITE, &[0u8; 20], 8), None);
-        for opcode in [67u8, 69, 72, 74, 75, 81] {
+        for opcode in [67u8, 72, 74, 75, 81] {
             assert_eq!(decode(opcode, &info(8, 0, 4), 8), None, "opcode {opcode}");
         }
     }
