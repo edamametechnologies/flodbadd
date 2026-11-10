@@ -220,10 +220,17 @@ impl Default for FimConfig {
 /// ([`should_keep_fim_event`]). AppData\Roaming, AppData\Local, ~/.config
 /// and ~/.local/share are defaults watched for the credential stores inside
 /// them, not for the churn around those.
+///
+/// The `stores` are a third class ([`crate::store_writers`]): their roots are
+/// given to the kernel-time sensors whatever the other two classes hold, so
+/// the processes that operate on a store file are recorded. A store root
+/// that no operator or default root covers adds no file event: it is watched
+/// for the record only ([`FimWatchRoots::store_only_roots`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FimWatchRoots {
     pub operator: Vec<PathBuf>,
     pub defaults: Vec<PathBuf>,
+    pub stores: Vec<crate::store_writers::StoreSpec>,
 }
 
 impl FimWatchRoots {
@@ -232,6 +239,7 @@ impl FimWatchRoots {
         Self {
             operator: paths,
             defaults: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -240,7 +248,46 @@ impl FimWatchRoots {
         Self {
             operator: Vec::new(),
             defaults: paths,
+            stores: Vec::new(),
         }
+    }
+
+    /// The same roots, with the stores to record.
+    pub fn with_stores(mut self, stores: Vec<crate::store_writers::StoreSpec>) -> Self {
+        self.stores = stores;
+        self
+    }
+
+    /// The directories of the stores (their roots and their pid-file roots)
+    /// that no operator or default root covers, each once: what is watched
+    /// for the record only. A store root at or below a watched root is
+    /// already delivered with it.
+    pub fn store_only_roots(&self) -> Vec<PathBuf> {
+        let watched: Vec<String> = self
+            .all()
+            .iter()
+            .map(|root| crate::fim_attribution::normalize(&root.to_string_lossy()))
+            .map(|root| root.trim_end_matches('/').to_string())
+            .filter(|root| !root.is_empty())
+            .collect();
+        let mut only: Vec<PathBuf> = Vec::new();
+        for store in &self.stores {
+            for root in store.roots.iter().chain(store.pid_file_roots.iter()) {
+                let normalized = crate::fim_attribution::normalize(&root.to_string_lossy());
+                let normalized = normalized.trim_end_matches('/');
+                if normalized.is_empty() {
+                    continue;
+                }
+                let covered = watched.iter().any(|watched| {
+                    normalized == watched
+                        || crate::fim_attribution::path_under_root(normalized, watched, true)
+                });
+                if !covered && !only.contains(root) {
+                    only.push(root.clone());
+                }
+            }
+        }
+        only
     }
 
     /// Every root to watch, operator roots first, each once.
@@ -314,6 +361,14 @@ impl FimWatcher {
         crate::l7_es::init_and_log_status();
 
         let paths = roots.all();
+        // The store roots no watch root covers: given to the sensors and to
+        // the directory watcher for the store-writer record, never a source
+        // of file events (`fim_attribution::is_record_only`).
+        let store_only_roots: Vec<PathBuf> = roots
+            .store_only_roots()
+            .into_iter()
+            .filter(|root| !(config.recursive && is_forbidden_recursive_root(root)))
+            .collect();
         let store = Arc::new(FimEventStore::new());
         let running = Arc::new(AtomicBool::new(true));
 
@@ -384,6 +439,19 @@ impl FimWatcher {
                     ) {
                         for p in &event.paths {
                             crate::fim_fanotify::forget_directory(p);
+                        }
+                    }
+                    // Windows: the directory notification is what announces
+                    // a change of a store file to its reader; the kernel
+                    // event that names the process is recorded when the
+                    // FileIo session delivers it.
+                    #[cfg(target_os = "windows")]
+                    if crate::store_writers::is_configured()
+                        && !matches!(event.kind, EventKind::Access(_))
+                    {
+                        let now = crate::store_writers::now_ms();
+                        for p in &event.paths {
+                            crate::store_writers::note_change(&p.to_string_lossy(), now);
                         }
                     }
                     if let Some(fim_events) =
@@ -495,6 +563,20 @@ impl FimWatcher {
                     }
                 }
             }
+            // The store-only roots ride it too, whole (a store keeps its
+            // files below per-project directories). They are not roots the
+            // status reports.
+            if !es_source {
+                for root in &store_only_roots {
+                    if !root.exists() {
+                        debug!("FIM: store root {} does not exist yet", root.display());
+                        continue;
+                    }
+                    if let Err(e) = batch.add(root, RecursiveMode::Recursive) {
+                        warn!("FIM: failed to watch store root {}: {}", root.display(), e);
+                    }
+                }
+            }
             if let Err(e) = batch.commit() {
                 // Nothing is watched: report no root, as a root whose own
                 // `watch` failed was dropped before the batch.
@@ -525,7 +607,15 @@ impl FimWatcher {
         // FSEvents fallback are both covered. Without this the FSEvents
         // configuration -- which still reads the ES attribution table for the
         // writer pid -- would find it empty.
-        crate::fim_attribution::set_roots(&actual_paths, config.recursive);
+        crate::fim_attribution::set_roots_with_record_only(
+            &actual_paths,
+            &store_only_roots,
+            config.recursive,
+        );
+        // The stores themselves, for the store-writer record the sensors
+        // feed. Published with every start, also with none: a start is a new
+        // instance of the record.
+        crate::store_writers::configure(&roots.stores);
 
         #[cfg(target_os = "macos")]
         if es_source && !actual_paths.is_empty() {
@@ -555,6 +645,11 @@ impl FimWatcher {
                     for path in &actual_paths {
                         if let Err(e) = batch.add(path, mode) {
                             warn!("FIM: failed to watch {}: {}", path.display(), e);
+                        }
+                    }
+                    for root in store_only_roots.iter().filter(|root| root.exists()) {
+                        if let Err(e) = batch.add(root, RecursiveMode::Recursive) {
+                            warn!("FIM: failed to watch store root {}: {}", root.display(), e);
                         }
                     }
                     if let Ok(probe) = &delivery {
@@ -593,7 +688,15 @@ impl FimWatcher {
         // restart (paths changed) this extends the running table's marks
         // to the roots it does not cover yet.
         #[cfg(all(target_os = "linux", feature = "ebpf"))]
-        crate::fim_fanotify::init(&actual_paths);
+        {
+            let mut marked_roots = actual_paths.clone();
+            for root in store_only_roots.iter().filter(|root| root.exists()) {
+                if !marked_roots.contains(root) {
+                    marked_roots.push(root.clone());
+                }
+            }
+            crate::fim_fanotify::init(&marked_roots);
+        }
 
         match &delivery {
             Ok(probe) => {
@@ -622,6 +725,9 @@ impl FimWatcher {
         // Nothing reads the kernel-time attribution table while no watcher is
         // running, so stop paying for it. A restart re-publishes the roots.
         crate::fim_attribution::clear_roots();
+        // The stores were this watcher's: nothing is recorded for them until
+        // the next watcher publishes its own.
+        crate::store_writers::clear();
         // The Endpoint Security sink was this watcher's; the next watcher
         // installs its own instead of falling back to FSEvents.
         #[cfg(target_os = "macos")]
@@ -831,6 +937,11 @@ fn spawn_fim_es_consumer(
 ///   under a sensitive watch root.
 fn should_keep_fim_event(path_str: &str, explicit_watch_roots: &[String]) -> (bool, bool) {
     if is_fim_excluded_path(path_str) {
+        return (false, false);
+    }
+    // Under a store root that no watch root covers: watched for the
+    // store-writer record, never a file event.
+    if crate::fim_attribution::is_record_only(path_str) {
         return (false, false);
     }
 
@@ -2505,7 +2616,11 @@ pub fn default_watch_roots_for_home(home: &Path) -> FimWatchRoots {
             operator.push(p);
         }
     }
-    FimWatchRoots { operator, defaults }
+    FimWatchRoots {
+        operator,
+        defaults,
+        stores: Vec::new(),
+    }
 }
 
 /// [`default_watch_paths`] by who chose what they keep: CI roots keep every
@@ -3646,6 +3761,7 @@ mod tests {
         let roots = FimWatchRoots {
             operator: vec![PathBuf::from("/a"), PathBuf::from("/b")],
             defaults: vec![PathBuf::from("/b"), PathBuf::from("/c")],
+            stores: Vec::new(),
         };
         assert_eq!(
             roots.all(),
@@ -3665,6 +3781,118 @@ mod tests {
         assert!(FimWatchRoots::defaults(vec![PathBuf::from("/a")])
             .operator
             .is_empty());
+    }
+
+    fn store_spec(
+        agent: &str,
+        roots: &[&str],
+        pid_roots: &[&str],
+    ) -> crate::store_writers::StoreSpec {
+        crate::store_writers::StoreSpec {
+            agent: agent.to_string(),
+            roots: roots.iter().map(PathBuf::from).collect(),
+            path_segment: String::new(),
+            file_suffixes: vec![".jsonl".to_string()],
+            pid_file_roots: pid_roots.iter().map(PathBuf::from).collect(),
+            pid_file_suffixes: vec![".json".to_string()],
+        }
+    }
+
+    /// The store roots a watch root already covers add nothing; the others
+    /// are watched for the record only, each once, whatever class the
+    /// covering root is in.
+    #[test]
+    fn test_store_only_roots_are_the_stores_no_watch_root_covers() {
+        let roots = FimWatchRoots {
+            operator: vec![PathBuf::from("/home/u/.claude")],
+            defaults: vec![PathBuf::from("/home/u/.config")],
+            stores: vec![
+                store_spec(
+                    "claude_code",
+                    &["/home/u/.claude/projects"],
+                    &["/home/u/.claude/sessions"],
+                ),
+                store_spec("codex", &["/home/u/.codex/sessions"], &[]),
+                store_spec(
+                    "other",
+                    &["/home/u/.config/other/sessions", "/home/u/.codex/sessions"],
+                    &["/home/u/.other/pids"],
+                ),
+                // A sibling that only shares a prefix with a watched root.
+                store_spec("sibling", &["/home/u/.claude-old/projects"], &[]),
+            ],
+        };
+        assert_eq!(
+            roots.store_only_roots(),
+            vec![
+                PathBuf::from("/home/u/.codex/sessions"),
+                PathBuf::from("/home/u/.other/pids"),
+                PathBuf::from("/home/u/.claude-old/projects"),
+            ]
+        );
+        // The watch roots themselves are unchanged by the stores.
+        assert_eq!(
+            roots.all(),
+            vec![
+                PathBuf::from("/home/u/.claude"),
+                PathBuf::from("/home/u/.config")
+            ]
+        );
+        // A store root that is a watch root is covered.
+        let same = FimWatchRoots::operator(vec![PathBuf::from("/home/u/.codex/sessions")])
+            .with_stores(vec![store_spec("codex", &["/home/u/.codex/sessions"], &[])]);
+        assert!(same.store_only_roots().is_empty());
+        assert!(FimWatchRoots::operator(vec![PathBuf::from("/a")])
+            .stores
+            .is_empty());
+    }
+
+    /// A watcher started with stores publishes them for the record and
+    /// keeps no file event for a store root no watch root covers; stopping
+    /// it withdraws them.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn test_watcher_publishes_its_stores_and_keeps_no_event_for_a_store_only_root() {
+        let watched = plain_scratch_dir("stores-watched");
+        let store_root = plain_scratch_dir("stores-only");
+        let roots = FimWatchRoots::operator(vec![watched.clone()]).with_stores(vec![store_spec(
+            "claude_code",
+            &[store_root.to_string_lossy().as_ref()],
+            &[],
+        )]);
+        assert_eq!(roots.store_only_roots(), vec![store_root.clone()]);
+        let watcher =
+            FimWatcher::start_with_roots(roots, FimConfig::default()).expect("start watcher");
+        // The status reports the watch roots only.
+        assert_eq!(watcher.watch_paths(), &[watched.clone()]);
+        assert!(crate::store_writers::is_configured());
+        let transcript = store_root.join("p").join("s.jsonl");
+        let transcript_str = transcript.to_string_lossy().to_string();
+        assert_eq!(
+            crate::store_writers::classify(&transcript_str),
+            Some((
+                "claude_code".to_string(),
+                crate::store_writers::StoreFileKind::Transcript
+            ))
+        );
+        assert!(crate::fim_attribution::is_attributable(&transcript_str));
+        assert!(crate::fim_attribution::is_record_only(&transcript_str));
+        // Whatever else would keep it, a path there is no file event.
+        let explicit = operator_keep_roots(&[store_root.clone()]);
+        assert_eq!(
+            should_keep_fim_event(&transcript_str, &explicit),
+            (false, false)
+        );
+        // A path under the watch root is kept as before.
+        let kept = watched.join("note.txt").to_string_lossy().to_string();
+        assert!(!crate::fim_attribution::is_record_only(&kept));
+        assert!(should_keep_fim_event(&kept, &operator_keep_roots(&[watched.clone()])).0);
+
+        watcher.stop();
+        assert!(!crate::store_writers::is_configured());
+        assert!(!crate::fim_attribution::is_record_only(&transcript_str));
+        let _ = std::fs::remove_dir_all(&watched);
+        let _ = std::fs::remove_dir_all(&store_root);
     }
 
     #[test]
