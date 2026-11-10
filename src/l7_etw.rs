@@ -3129,6 +3129,7 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: 1_000,
         }]);
         let wanted = crate::fim_attribution::normalize(&file_arg);
         let rows_of_file = || {

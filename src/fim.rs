@@ -225,12 +225,18 @@ impl Default for FimConfig {
 /// given to the kernel-time sensors whatever the other two classes hold, so
 /// the processes that operate on a store file are recorded. A store root
 /// that no operator or default root covers adds no file event: it is watched
-/// for the record only ([`FimWatchRoots::store_only_roots`]).
+/// for the record only ([`FimWatchRoots::store_only_roots`]). A caller that
+/// was given no home to resolve the stores under says so
+/// ([`FimWatchRoots::with_unresolved_stores`]) instead of passing none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FimWatchRoots {
     pub operator: Vec<PathBuf>,
     pub defaults: Vec<PathBuf>,
     pub stores: Vec<crate::store_writers::StoreSpec>,
+    /// The stores were not resolved: no home was given for them. `stores`
+    /// is then empty, and the watcher publishes that state
+    /// ([`crate::store_writers::configure_unresolved`]).
+    pub stores_unresolved: bool,
 }
 
 impl FimWatchRoots {
@@ -240,6 +246,7 @@ impl FimWatchRoots {
             operator: paths,
             defaults: Vec::new(),
             stores: Vec::new(),
+            stores_unresolved: false,
         }
     }
 
@@ -249,12 +256,22 @@ impl FimWatchRoots {
             operator: Vec::new(),
             defaults: paths,
             stores: Vec::new(),
+            stores_unresolved: false,
         }
     }
 
     /// The same roots, with the stores to record.
     pub fn with_stores(mut self, stores: Vec<crate::store_writers::StoreSpec>) -> Self {
         self.stores = stores;
+        self.stores_unresolved = false;
+        self
+    }
+
+    /// The same roots, with no store and the statement that the stores were
+    /// not resolved: the caller was given no home for them.
+    pub fn with_unresolved_stores(mut self) -> Self {
+        self.stores = Vec::new();
+        self.stores_unresolved = true;
         self
     }
 
@@ -339,6 +356,11 @@ pub struct FimWatcher {
     /// newer than this timestamp, so backfilled attribution / content-hash
     /// updates on existing events are picked up alongside fresh inserts.
     last_get_file_events_fetch_timestamp: Arc<CustomRwLock<DateTime<Utc>>>,
+    /// The publications this watcher made when it started: its roots for
+    /// the attribution sensors and its stores. [`FimWatcher::stop`]
+    /// withdraws these, never what a watcher started later published.
+    roots_generation: u64,
+    stores_generation: u64,
     #[cfg(target_os = "windows")]
     _hash_worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "windows")]
@@ -607,15 +629,20 @@ impl FimWatcher {
         // FSEvents fallback are both covered. Without this the FSEvents
         // configuration -- which still reads the ES attribution table for the
         // writer pid -- would find it empty.
-        crate::fim_attribution::set_roots_with_record_only(
+        let roots_generation = crate::fim_attribution::set_roots_with_record_only(
             &actual_paths,
             &store_only_roots,
             config.recursive,
         );
         // The stores themselves, for the store-writer record the sensors
         // feed. Published with every start, also with none: a start is a new
-        // instance of the record.
-        crate::store_writers::configure(&roots.stores);
+        // instance of the record. A caller that had no home to resolve them
+        // under publishes that instead.
+        let stores_generation = if roots.stores_unresolved {
+            crate::store_writers::configure_unresolved()
+        } else {
+            crate::store_writers::configure(&roots.stores)
+        };
 
         #[cfg(target_os = "macos")]
         if es_source && !actual_paths.is_empty() {
@@ -713,6 +740,8 @@ impl FimWatcher {
             running,
             delivery,
             last_get_file_events_fetch_timestamp: Arc::new(CustomRwLock::new(Utc::now())),
+            roots_generation,
+            stores_generation,
             #[cfg(target_os = "windows")]
             _hash_worker: hash_worker,
             #[cfg(target_os = "windows")]
@@ -724,10 +753,11 @@ impl FimWatcher {
         self.running.store(false, Ordering::SeqCst);
         // Nothing reads the kernel-time attribution table while no watcher is
         // running, so stop paying for it. A restart re-publishes the roots.
-        crate::fim_attribution::clear_roots();
-        // The stores were this watcher's: nothing is recorded for them until
-        // the next watcher publishes its own.
-        crate::store_writers::clear();
+        // Only this watcher's own publication is withdrawn: a watcher
+        // started after it replaced the roots and the stores with its own,
+        // and those stay, with the instance of the store-writer record.
+        crate::fim_attribution::clear_roots_if(self.roots_generation);
+        crate::store_writers::clear_if(self.stores_generation);
         // The Endpoint Security sink was this watcher's; the next watcher
         // installs its own instead of falling back to FSEvents.
         #[cfg(target_os = "macos")]
@@ -2620,6 +2650,7 @@ pub fn default_watch_roots_for_home(home: &Path) -> FimWatchRoots {
         operator,
         defaults,
         stores: Vec::new(),
+        stores_unresolved: false,
     }
 }
 
@@ -3762,6 +3793,7 @@ mod tests {
             operator: vec![PathBuf::from("/a"), PathBuf::from("/b")],
             defaults: vec![PathBuf::from("/b"), PathBuf::from("/c")],
             stores: Vec::new(),
+            stores_unresolved: false,
         };
         assert_eq!(
             roots.all(),
@@ -3795,6 +3827,7 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: pid_roots.iter().map(PathBuf::from).collect(),
             pid_file_suffixes: vec![".json".to_string()],
+            creation_reorder_ms: 1_000,
         }
     }
 
@@ -3821,6 +3854,7 @@ mod tests {
                 // A sibling that only shares a prefix with a watched root.
                 store_spec("sibling", &["/home/u/.claude-old/projects"], &[]),
             ],
+            stores_unresolved: false,
         };
         assert_eq!(
             roots.store_only_roots(),
@@ -3893,6 +3927,106 @@ mod tests {
         assert!(!crate::fim_attribution::is_record_only(&transcript_str));
         let _ = std::fs::remove_dir_all(&watched);
         let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    /// Two watchers in one process: the first one stopping withdraws
+    /// nothing the second one published. Its roots, its stores and the
+    /// instance of the store-writer record stay until the second one stops.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn test_a_stale_watcher_stopping_leaves_the_newer_watchers_roots_and_stores() {
+        let first_root = plain_scratch_dir("stale-first");
+        let first_store = plain_scratch_dir("stale-first-store");
+        let second_root = plain_scratch_dir("stale-second");
+        let second_store = plain_scratch_dir("stale-second-store");
+        let start =
+            |root: &Path, store: &Path| {
+                FimWatcher::start_with_roots(
+                    FimWatchRoots::operator(vec![root.to_path_buf()]).with_stores(vec![
+                        store_spec("claude_code", &[store.to_string_lossy().as_ref()], &[]),
+                    ]),
+                    FimConfig::default(),
+                )
+                .expect("start watcher")
+            };
+        let in_first = first_root.join("a.txt").to_string_lossy().to_string();
+        let in_second = second_root.join("a.txt").to_string_lossy().to_string();
+        let first_transcript = first_store.join("s.jsonl").to_string_lossy().to_string();
+        let second_transcript = second_store.join("s.jsonl").to_string_lossy().to_string();
+
+        let first = start(&first_root, &first_store);
+        assert!(crate::fim_attribution::is_attributable(&in_first));
+        assert!(crate::store_writers::classify(&first_transcript).is_some());
+
+        let second = start(&second_root, &second_store);
+        let instance = crate::store_writers::rows_since(0)
+            .expect("the record is free")
+            .instance;
+        let roots_generation = crate::fim_attribution::roots_generation();
+        let stores_generation = crate::store_writers::stores_generation();
+        assert!(crate::fim_attribution::is_attributable(&in_second));
+        assert!(!crate::fim_attribution::is_attributable(&in_first));
+
+        first.stop();
+        // The second watcher's publications are in place, untouched.
+        assert_eq!(crate::fim_attribution::roots_generation(), roots_generation);
+        assert_eq!(crate::store_writers::stores_generation(), stores_generation);
+        assert!(crate::fim_attribution::is_attributable(&in_second));
+        assert!(crate::fim_attribution::is_record_only(&second_transcript));
+        assert!(crate::store_writers::is_configured());
+        assert_eq!(
+            crate::store_writers::classify(&second_transcript),
+            Some((
+                "claude_code".to_string(),
+                crate::store_writers::StoreFileKind::Transcript
+            ))
+        );
+        assert_eq!(
+            crate::store_writers::rows_since(0)
+                .expect("the record is free")
+                .instance,
+            instance
+        );
+
+        second.stop();
+        assert!(!crate::store_writers::is_configured());
+        assert!(!crate::fim_attribution::is_attributable(&in_second));
+        assert_eq!(crate::fim_attribution::roots_generation(), 0);
+        assert_ne!(
+            crate::store_writers::rows_since(0)
+                .expect("the record is free")
+                .instance,
+            instance
+        );
+        for dir in [&first_root, &first_store, &second_root, &second_store] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// A watcher whose caller had no home for the stores publishes that
+    /// state, and withdraws it when it stops.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn test_a_watcher_without_a_home_for_the_stores_publishes_that() {
+        let watched = plain_scratch_dir("stores-unresolved");
+        let roots = FimWatchRoots::operator(vec![watched.clone()]).with_unresolved_stores();
+        assert!(roots.stores.is_empty());
+        assert!(roots.store_only_roots().is_empty());
+        let watcher =
+            FimWatcher::start_with_roots(roots, FimConfig::default()).expect("start watcher");
+        assert!(crate::store_writers::stores_unresolved());
+        assert!(!crate::store_writers::is_configured());
+        assert!(crate::store_writers::sensor().stores_unresolved);
+        watcher.stop();
+        assert!(!crate::store_writers::stores_unresolved());
+        // Stores given after all replace the statement.
+        assert!(
+            !FimWatchRoots::operator(vec![watched.clone()])
+                .with_unresolved_stores()
+                .with_stores(Vec::new())
+                .stores_unresolved
+        );
+        let _ = std::fs::remove_dir_all(&watched);
     }
 
     #[test]

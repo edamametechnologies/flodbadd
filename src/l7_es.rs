@@ -319,9 +319,63 @@ pub(crate) fn global_sequence_follows(previous: u64, seq: u64) -> bool {
     previous == u64::MAX || seq == previous.wrapping_add(1)
 }
 
+/// What the client's thread does about its extended file events
+/// (TRUNCATE, LINK, CLONE, EXCHANGEDATA), which it asks for while stores are
+/// published (`store_writers::is_configured`).
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtendedStep {
+    Subscribe,
+    Unsubscribe,
+    Keep,
+}
+
+/// The step that brings the extended subscription (`subscribed`) in line with
+/// whether stores are published (`wanted`).
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) fn extended_subscription_step(wanted: bool, subscribed: bool) -> ExtendedStep {
+    match (wanted, subscribed) {
+        (true, false) => ExtendedStep::Subscribe,
+        (false, true) => ExtendedStep::Unsubscribe,
+        _ => ExtendedStep::Keep,
+    }
+}
+
+/// How often the client's thread looks at the published stores when nothing
+/// woke it.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) const EXTENDED_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(test)]
 mod global_sequence_tests {
     use super::*;
+
+    #[test]
+    fn the_extended_events_follow_the_published_stores() {
+        // Stores published and not subscribed: subscribe. Also after a
+        // refusal, at the next look.
+        assert_eq!(
+            extended_subscription_step(true, false),
+            ExtendedStep::Subscribe
+        );
+        // Stores withdrawn and still subscribed: unsubscribe.
+        assert_eq!(
+            extended_subscription_step(false, true),
+            ExtendedStep::Unsubscribe
+        );
+        // In line already: nothing is asked of the client.
+        assert_eq!(extended_subscription_step(true, true), ExtendedStep::Keep);
+        assert_eq!(extended_subscription_step(false, false), ExtendedStep::Keep);
+    }
 
     #[test]
     fn a_sequence_number_follows_the_previous_one_plus_one() {
@@ -1704,32 +1758,25 @@ mod macos {
             }
 
             // The operations that change a file's content or names without
-            // a write, for the store-writer record. Subscribed on their own:
-            // a refusal leaves the first set delivering as before, and
-            // `extended_file_events` says which set runs.
+            // a write, for the store-writer record: asked for while stores
+            // are published and no longer once they are withdrawn (the loop
+            // below). Subscribed on their own: a refusal leaves the first
+            // set delivering as before, and `extended_file_events` says
+            // which set runs.
             let extended = [
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_TRUNCATE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_LINK,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_CLONE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA,
             ];
-            match client.subscribe(&extended) {
-                Ok(()) => EXTENDED_FILE_EVENTS.store(true, Ordering::Release),
-                Err(e) => warn!(
-                    "ES subscribe to TRUNCATE/LINK/CLONE/EXCHANGEDATA failed: {:?}",
-                    e
-                ),
-            }
+            EXTENDED_FILE_EVENTS.store(false, Ordering::Release);
+            // Woken when the stores are published or withdrawn.
+            crate::store_writers::wake_on_store_change(std::thread::current());
 
             last_error.store(None);
             available.store(true, Ordering::Release);
             info!(
-                "ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK{}",
-                if EXTENDED_FILE_EVENTS.load(Ordering::Acquire) {
-                    " + TRUNCATE/LINK/CLONE/EXCHANGEDATA"
-                } else {
-                    ""
-                }
+                "ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK"
             );
             let running = Self::rundown_running_processes(&table);
             info!(
@@ -1746,9 +1793,52 @@ mod macos {
 
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
-            // not on this thread, so parking is fine.
+            // not on this thread, so parking is fine. It wakes when the
+            // stores are published or withdrawn (and every few seconds, in
+            // case a wake-up was for something else) and brings the
+            // extended subscription in line with them.
+            let mut refusal_logged = false;
             loop {
-                std::thread::park();
+                let wanted = crate::store_writers::is_configured();
+                let subscribed = EXTENDED_FILE_EVENTS.load(Ordering::Acquire);
+                match extended_subscription_step(wanted, subscribed) {
+                    ExtendedStep::Subscribe => match client.subscribe(&extended) {
+                        Ok(()) => {
+                            EXTENDED_FILE_EVENTS.store(true, Ordering::Release);
+                            refusal_logged = false;
+                            info!("ES client subscribed to TRUNCATE/LINK/CLONE/EXCHANGEDATA (stores published)");
+                        }
+                        Err(e) => {
+                            if !refusal_logged {
+                                refusal_logged = true;
+                                warn!(
+                                    "ES subscribe to TRUNCATE/LINK/CLONE/EXCHANGEDATA failed: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                    ExtendedStep::Unsubscribe => match client.unsubscribe(&extended) {
+                        Ok(()) => {
+                            EXTENDED_FILE_EVENTS.store(false, Ordering::Release);
+                            refusal_logged = false;
+                            info!("ES client unsubscribed from TRUNCATE/LINK/CLONE/EXCHANGEDATA (stores withdrawn)");
+                        }
+                        Err(e) => {
+                            // Still delivered: the flag stays, the handler
+                            // records nothing while no store is published.
+                            if !refusal_logged {
+                                refusal_logged = true;
+                                warn!(
+                                    "ES unsubscribe from TRUNCATE/LINK/CLONE/EXCHANGEDATA failed: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                    ExtendedStep::Keep => {}
+                }
+                std::thread::park_timeout(EXTENDED_RECHECK);
             }
         }
 

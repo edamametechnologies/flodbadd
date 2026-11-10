@@ -3,7 +3,8 @@
 //! A store is a set of directories an application keeps one file per unit of
 //! work in (an agent's transcripts, the files that name its running
 //! processes). The file monitor publishes the stores when it starts
-//! ([`configure`]) and withdraws them when it stops ([`clear`]). While they
+//! ([`configure`]) and withdraws its own publication when it stops
+//! ([`clear_if`]). While they
 //! are published, the kernel-time sensors (Endpoint Security, fanotify, the
 //! ETW FileIo session) call [`record`] from their handlers for each file
 //! operation under a store root, and this module keeps, per file:
@@ -33,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,12 +51,6 @@ pub const MAX_FILES: usize = 1_024;
 pub const MAX_WRITERS_PER_FILE: usize = 4;
 /// Spans per file between two takes.
 pub const MAX_SPANS_PER_FILE: usize = 8;
-
-/// How far after a record was opened the report of the file's creation may
-/// still arrive and be taken as the creation the record opened with. The
-/// sensors deliver a creation and the first write on different threads or in
-/// different buffers, and a change can be noted before either.
-const CREATION_REORDER_MS: u64 = 1_000;
 
 /// How long a sensor handler retries a contended record before it counts the
 /// operation as not recorded. Handlers run on kernel-callback threads and
@@ -132,6 +127,12 @@ pub struct StoreSpec {
     /// `pid_file_suffixes` name a running process of the application.
     pub pid_file_roots: Vec<PathBuf>,
     pub pid_file_suffixes: Vec<String>,
+    /// How long after a file's record was opened the report of the file's
+    /// creation is still taken as the creation the record opened with
+    /// (milliseconds; 0: never). The sensors deliver a creation and the
+    /// first write on different threads or in different buffers, and a
+    /// change can be noted before either.
+    pub creation_reorder_ms: u64,
 }
 
 /// What a recorded file is to its store.
@@ -314,6 +315,12 @@ pub struct DirtyTake {
 
 #[derive(Debug, Default)]
 struct StoreMatcher {
+    /// Which publication this set is (0: none): what [`configure`] returned
+    /// to the file monitor that published it.
+    generation: u64,
+    /// The file monitor runs and published no store because it was given no
+    /// home to resolve them under.
+    unresolved: bool,
     stores: Vec<MatchedStore>,
     /// Every ending of every store, for the test that runs before a path is
     /// normalized: the sensors ask about every file event under a watch
@@ -330,6 +337,7 @@ struct MatchedStore {
     file_suffixes: Vec<String>,
     pid_file_roots: Vec<String>,
     pid_file_suffixes: Vec<String>,
+    creation_reorder_ms: u64,
 }
 
 fn normalized_spellings(roots: &[PathBuf]) -> Vec<String> {
@@ -372,6 +380,7 @@ impl StoreMatcher {
                 file_suffixes: lower(&spec.file_suffixes),
                 pid_file_roots: normalized_spellings(&spec.pid_file_roots),
                 pid_file_suffixes: lower(&spec.pid_file_suffixes),
+                creation_reorder_ms: spec.creation_reorder_ms,
             })
             .collect();
         let mut endings: Vec<String> = stores
@@ -386,7 +395,12 @@ impl StoreMatcher {
             .collect();
         endings.sort();
         endings.dedup();
-        Self { stores, endings }
+        Self {
+            generation: 0,
+            unresolved: false,
+            stores,
+            endings,
+        }
     }
 
     /// Whether `path`, as a sensor spelled it, ends like a file of one of
@@ -402,7 +416,7 @@ impl StoreMatcher {
     }
 
     /// The store and kind of a normalized path.
-    fn classify(&self, normalized: &str) -> Option<(&str, StoreFileKind)> {
+    fn classify(&self, normalized: &str) -> Option<(&MatchedStore, StoreFileKind)> {
         for store in &self.stores {
             if store
                 .file_suffixes
@@ -414,14 +428,14 @@ impl StoreMatcher {
                         continue;
                     }
                     if store.path_segment.is_empty() {
-                        return Some((&store.agent, StoreFileKind::Transcript));
+                        return Some((store, StoreFileKind::Transcript));
                     }
                     // The directories between the root and the file name.
                     let below = &normalized[root.len() + 1..];
                     let mut parts: Vec<&str> = below.split('/').collect();
                     parts.pop();
                     if parts.iter().any(|part| *part == store.path_segment) {
-                        return Some((&store.agent, StoreFileKind::Transcript));
+                        return Some((store, StoreFileKind::Transcript));
                     }
                 }
             }
@@ -434,7 +448,7 @@ impl StoreMatcher {
                     .iter()
                     .any(|root| path_under_root(normalized, root, false))
             {
-                return Some((&store.agent, StoreFileKind::PidFile));
+                return Some((store, StoreFileKind::PidFile));
             }
         }
         None
@@ -454,12 +468,23 @@ pub fn classify(path: &str) -> Option<(String, StoreFileKind)> {
     }
     matcher
         .classify(&normalize(path))
-        .map(|(agent, kind)| (agent.to_string(), kind))
+        .map(|(store, kind)| (store.agent.clone(), kind))
 }
 
 /// Whether stores are published.
 pub fn is_configured() -> bool {
     !MATCHER.load().stores.is_empty()
+}
+
+/// Whether the file monitor runs and published no store because it was given
+/// no home to resolve the stores under.
+pub fn stores_unresolved() -> bool {
+    MATCHER.load().unresolved
+}
+
+/// The generation of the publication in place; 0 when there is none.
+pub fn stores_generation() -> u64 {
+    MATCHER.load().generation
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +613,7 @@ impl Table {
         kind: StoreFileKind,
         display_path: &str,
         op: &Operation<'_>,
+        creation_reorder_ms: u64,
         counters: &Counters,
     ) {
         let writer = WriterInstance {
@@ -608,7 +634,8 @@ impl Table {
                 && !record.unlinked
                 && record.rows_evicted == 0
                 && record.complete_since_ms == record.first_seen_ms
-                && op.at_ms <= record.first_seen_ms.saturating_add(CREATION_REORDER_MS)
+                && creation_reorder_ms > 0
+                && op.at_ms <= record.first_seen_ms.saturating_add(creation_reorder_ms)
                 && record
                     .rows
                     .iter()
@@ -877,19 +904,96 @@ fn display_path(path: &str) -> String {
     }
 }
 
-/// Publish the stores. Replaces any previous set and starts a new instance
-/// of the record: what was recorded for the previous set is dropped.
-pub fn configure(specs: &[StoreSpec]) {
-    MATCHER.store(Arc::new(StoreMatcher::from_specs(specs)));
-    restart_instance();
+/// Numbers the publications of this process, from 1.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A sensor thread to wake when the stores are published or withdrawn: a
+/// sensor that asks for some events only while stores are published.
+static LISTENER: ArcSwapOption<std::thread::Thread> = ArcSwapOption::const_empty();
+
+/// Wake `thread` (unpark it) each time the stores are published or
+/// withdrawn. One thread: the last one registered.
+pub fn wake_on_store_change(thread: std::thread::Thread) {
+    LISTENER.store(Some(Arc::new(thread)));
 }
 
-/// Withdraw the stores (the file monitor stopped). Nothing is recorded until
+fn stores_changed() {
+    if let Some(thread) = LISTENER.load_full() {
+        thread.unpark();
+    }
+}
+
+fn publish(mut matcher: StoreMatcher) -> u64 {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    matcher.generation = generation;
+    let stores = matcher.stores.len();
+    let unresolved = matcher.unresolved;
+    let previous = MATCHER.swap(Arc::new(matcher));
+    restart_instance();
+    stores_changed();
+    if unresolved {
+        tracing::info!("store writers: no store published, no home was given for the stores");
+    } else if stores > 0 {
+        tracing::info!("store writers: {} store(s) published", stores);
+    } else if !previous.stores.is_empty() || previous.unresolved {
+        tracing::info!("store writers: stores withdrawn");
+    }
+    generation
+}
+
+/// Publish the stores. Replaces any previous set and starts a new instance
+/// of the record: what was recorded for the previous set is dropped. Returns
+/// the generation of this publication: the file monitor that stops withdraws
+/// it with [`clear_if`].
+pub fn configure(specs: &[StoreSpec]) -> u64 {
+    publish(StoreMatcher::from_specs(specs))
+}
+
+/// Publish that the file monitor runs and has no store to publish because it
+/// was given no home to resolve them under ([`stores_unresolved`]). Nothing
+/// is recorded. Returns the generation of this publication, as
+/// [`configure`].
+pub fn configure_unresolved() -> u64 {
+    publish(StoreMatcher {
+        unresolved: true,
+        ..StoreMatcher::default()
+    })
+}
+
+/// Withdraw the stores, whoever published them. Nothing is recorded until
 /// they are published again, and the record starts a new instance.
 pub fn clear() {
-    MATCHER.store(Arc::new(StoreMatcher::default()));
-    restart_instance();
+    let previous = MATCHER.swap(Arc::new(StoreMatcher::default()));
+    withdrawn(&previous);
 }
+
+/// Withdraw the stores when they are still the publication `generation`
+/// names: a file monitor that stops withdraws its own stores, and leaves in
+/// place, with the record's instance, the stores a file monitor started
+/// after it published. `true` when they were withdrawn.
+pub fn clear_if(generation: u64) -> bool {
+    let current = MATCHER.load_full();
+    if generation == 0 || current.generation != generation {
+        return false;
+    }
+    let previous = MATCHER.compare_and_swap(&current, Arc::new(StoreMatcher::default()));
+    if !Arc::ptr_eq(&*previous, &current) {
+        return false;
+    }
+    withdrawn(&current);
+    true
+}
+
+fn withdrawn(previous: &StoreMatcher) {
+    restart_instance();
+    stores_changed();
+    if !previous.stores.is_empty() || previous.unresolved {
+        tracing::info!("store writers: stores withdrawn");
+    }
+}
+
+/// Whether the first dropped-event report of this instance was logged.
+static LOST_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn restart_instance() {
     // A configuration change is not a kernel callback: it may wait for the
@@ -901,6 +1005,7 @@ fn restart_instance() {
         // The next holder writes the gap; the instance stays.
         PENDING_LOST.store(true, Ordering::Release);
     }
+    LOST_LOGGED.store(false, Ordering::Release);
     wake_reader();
 }
 
@@ -912,13 +1017,21 @@ pub fn record(op: &Operation<'_>) {
         return;
     }
     let key = normalize(op.path);
-    let Some((agent, kind)) = matcher.classify(&key) else {
+    let Some((store, kind)) = matcher.classify(&key) else {
         return;
     };
     let display = display_path(op.path);
     COUNTERS.operations.fetch_add(1, Ordering::Relaxed);
     let recorded = with_table(SENSOR_RETRY_BUDGET, |table| {
-        table.record(&key, agent, kind, &display, op, &COUNTERS);
+        table.record(
+            &key,
+            &store.agent,
+            kind,
+            &display,
+            op,
+            store.creation_reorder_ms,
+            &COUNTERS,
+        );
     });
     if recorded.is_none() {
         COUNTERS.dropped_locked.fetch_add(1, Ordering::Relaxed);
@@ -935,13 +1048,13 @@ pub fn note_change(path: &str, at_ms: u64) {
         return;
     }
     let key = normalize(path);
-    let Some((agent, kind)) = matcher.classify(&key) else {
+    let Some((store, kind)) = matcher.classify(&key) else {
         return;
     };
     let display = display_path(path);
     COUNTERS.changes_noted.fetch_add(1, Ordering::Relaxed);
     let noted = with_table(SENSOR_RETRY_BUDGET, |table| {
-        table.note_change(&key, agent, kind, &display, at_ms, &COUNTERS);
+        table.note_change(&key, &store.agent, kind, &display, at_ms, &COUNTERS);
     });
     if noted.is_none() {
         COUNTERS.dropped_locked.fetch_add(1, Ordering::Relaxed);
@@ -960,6 +1073,10 @@ pub fn note_lost(at_ms: u64) {
     let noted = with_table(SENSOR_RETRY_BUDGET, |table| table.note_lost(at_ms));
     if noted.is_none() {
         PENDING_LOST.store(true, Ordering::Release);
+    }
+    // Once per instance of the record; the reports are counted.
+    if !LOST_LOGGED.swap(true, Ordering::AcqRel) {
+        tracing::info!("store writers: a sensor reported dropped events");
     }
     wake_reader();
 }
@@ -1040,10 +1157,40 @@ pub struct StoreWriterSensor {
     pub extended_events: bool,
     /// Times the sensor reported dropped events since the process started.
     pub dropped_reports: u64,
+    /// The file monitor runs and published no store because it was given no
+    /// home to resolve the stores under ([`stores_unresolved`]).
+    pub stores_unresolved: bool,
 }
 
-/// The state of the sensor that feeds the record in this build.
+/// The state [`sensor`] last logged (`u32::MAX`: none yet).
+static SENSOR_LOGGED: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The state of the sensor that feeds the record in this build. A change of
+/// that state since the previous call is logged, once.
 pub fn sensor() -> StoreWriterSensor {
+    let sensor = sensor_now();
+    let published = is_configured();
+    let state = u32::from(sensor.active)
+        | u32::from(sensor.entry_events) << 1
+        | u32::from(sensor.extended_events) << 2
+        | u32::from(sensor.stores_unresolved) << 3
+        | u32::from(published) << 4;
+    if SENSOR_LOGGED.swap(state, Ordering::AcqRel) != state {
+        tracing::info!(
+            "store writers: sensor {} active={} entry_events={} extended_events={} stores_published={} stores_unresolved={}",
+            sensor.kind,
+            sensor.active,
+            sensor.entry_events,
+            sensor.extended_events,
+            published,
+            sensor.stores_unresolved
+        );
+    }
+    sensor
+}
+
+fn sensor_now() -> StoreWriterSensor {
+    let stores_unresolved = stores_unresolved();
     #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
     {
         let active = crate::l7_es::is_available();
@@ -1053,6 +1200,7 @@ pub fn sensor() -> StoreWriterSensor {
             entry_events: active,
             extended_events: active && crate::l7_es::extended_file_events(),
             dropped_reports: crate::l7_es::dropped_message_gaps(),
+            stores_unresolved,
         }
     }
     #[cfg(all(target_os = "linux", feature = "fim", feature = "ebpf"))]
@@ -1066,6 +1214,7 @@ pub fn sensor() -> StoreWriterSensor {
                 && crate::fim_fanotify::creation_marks_total() > 0,
             extended_events: false,
             dropped_reports: crate::fim_fanotify::queue_overflows(),
+            stores_unresolved,
         }
     }
     #[cfg(all(target_os = "windows", feature = "etw"))]
@@ -1077,6 +1226,7 @@ pub fn sensor() -> StoreWriterSensor {
             entry_events: active,
             extended_events: active,
             dropped_reports: crate::l7_etw::lost_event_reports(),
+            stores_unresolved,
         }
     }
     #[cfg(not(any(
@@ -1092,6 +1242,7 @@ pub fn sensor() -> StoreWriterSensor {
             entry_events: false,
             extended_events: false,
             dropped_reports: 0,
+            stores_unresolved,
         }
     }
 }
@@ -1130,8 +1281,12 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: vec![PathBuf::from(format!("{root}/sessions"))],
             pid_file_suffixes: vec![".json".to_string()],
+            creation_reorder_ms: REORDER_MS,
         }
     }
+
+    /// The reorder bound the tests publish.
+    const REORDER_MS: u64 = 1_000;
 
     fn op(path: &str, ops: u32, pid: u32, started: u64, at_ms: u64) -> Operation<'_> {
         Operation {
@@ -1152,6 +1307,15 @@ mod tests {
     }
 
     fn put(table: &mut Table, counters: &Counters, operation: &Operation<'_>) {
+        put_with(table, counters, operation, REORDER_MS);
+    }
+
+    fn put_with(
+        table: &mut Table,
+        counters: &Counters,
+        operation: &Operation<'_>,
+        creation_reorder_ms: u64,
+    ) {
         let key = normalize(operation.path);
         table.record(
             &key,
@@ -1159,6 +1323,7 @@ mod tests {
             StoreFileKind::Transcript,
             operation.path,
             operation,
+            creation_reorder_ms,
             counters,
         );
     }
@@ -1174,13 +1339,28 @@ mod tests {
                 file_suffixes: vec![".JSONL".to_string(), ".txt".to_string()],
                 pid_file_roots: Vec::new(),
                 pid_file_suffixes: Vec::new(),
+                creation_reorder_ms: 250,
             },
         ]);
         let classify = |path: &str| {
             matcher
                 .classify(&normalize(path))
-                .map(|(agent, kind)| (agent.to_string(), kind))
+                .map(|(store, kind)| (store.agent.clone(), kind))
         };
+        // Each store carries its own published reorder bound.
+        let reorder = |path: &str| {
+            matcher
+                .classify(&normalize(path))
+                .map(|(store, _)| store.creation_reorder_ms)
+        };
+        assert_eq!(
+            reorder("/home/u/.claude/projects/p/s.jsonl"),
+            Some(REORDER_MS)
+        );
+        assert_eq!(
+            reorder("/home/u/.cursor/projects/p/agent-transcripts/t.txt"),
+            Some(250)
+        );
         let transcript = |agent: &str| Some((agent.to_string(), StoreFileKind::Transcript));
         assert_eq!(
             classify("/home/u/.claude/projects/p/s.jsonl"),
@@ -1251,6 +1431,7 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: REORDER_MS,
         }]);
         for root in [&given, &canonical] {
             let file = root.join("p").join("s.jsonl");
@@ -1270,6 +1451,7 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: REORDER_MS,
         }]);
         let file = base.join("not-there-yet").join("s.jsonl");
         assert!(later
@@ -1626,7 +1808,52 @@ mod tests {
         put(
             &mut table,
             &counters,
-            &op(path, ops::CREATE, 10, 500, 2_001 + CREATION_REORDER_MS),
+            &op(path, ops::CREATE, 10, 500, 2_001 + REORDER_MS),
+        );
+        assert_eq!(table.rows_since(0)[0].creation, None);
+
+        // The bound is the store's: a shorter one refuses a creation the
+        // longer one takes, and 0 takes none delivered late.
+        let (mut table, counters) = new_table();
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::WRITE, 10, 500, 2_000),
+            100,
+        );
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::CREATE, 10, 500, 2_101),
+            100,
+        );
+        assert_eq!(table.rows_since(0)[0].creation, None);
+        let (mut table, counters) = new_table();
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::WRITE, 10, 500, 2_000),
+            100,
+        );
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::CREATE, 10, 500, 2_100),
+            100,
+        );
+        assert!(table.rows_since(0)[0].creation.is_some());
+        let (mut table, counters) = new_table();
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::WRITE, 10, 500, 2_000),
+            0,
+        );
+        put_with(
+            &mut table,
+            &counters,
+            &op(path, ops::CREATE, 10, 500, 2_000),
+            0,
         );
         assert_eq!(table.rows_since(0)[0].creation, None);
 
@@ -1754,6 +1981,119 @@ mod tests {
         assert_eq!(again.lost_signals, 0);
         clear();
         assert!(!rows_since(0).expect("the record is free").configured);
+    }
+
+    /// A publication is withdrawn by the generation it was given: the one a
+    /// later publication replaced withdraws nothing, and the record keeps
+    /// its instance.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_replaced_publication_withdraws_nothing() {
+        clear();
+        assert_eq!(stores_generation(), 0);
+        let first = configure(&[spec("/tmp/sw-first/.claude")]);
+        let second = configure(&[spec("/tmp/sw-second/.claude")]);
+        assert_ne!(first, second);
+        assert_eq!(stores_generation(), second);
+        let instance = rows_since(0).expect("the record is free").instance;
+
+        assert!(!clear_if(first));
+        assert!(is_configured());
+        assert_eq!(stores_generation(), second);
+        assert!(classify("/tmp/sw-second/.claude/projects/p/s.jsonl").is_some());
+        assert_eq!(
+            rows_since(0).expect("the record is free").instance,
+            instance
+        );
+
+        assert!(clear_if(second));
+        assert!(!is_configured());
+        assert_eq!(stores_generation(), 0);
+        assert_ne!(
+            rows_since(0).expect("the record is free").instance,
+            instance
+        );
+        // Nothing in place is no publication to withdraw.
+        assert!(!clear_if(0));
+        assert!(!clear_if(second));
+    }
+
+    /// A file monitor that was given no home publishes that, not an empty
+    /// set of stores: nothing is recorded and the sensor's state says why.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn stores_that_could_not_be_resolved_are_published_as_such() {
+        clear();
+        assert!(!stores_unresolved());
+        assert!(!sensor().stores_unresolved);
+
+        let generation = configure_unresolved();
+        assert!(stores_unresolved());
+        assert!(!is_configured());
+        assert!(sensor().stores_unresolved);
+        assert!(!rows_since(0).expect("the record is free").configured);
+        record(&op(
+            "/tmp/sw-test/.claude/projects/p/s.jsonl",
+            ops::CREATE,
+            10,
+            500,
+            2_000,
+        ));
+        assert!(rows_since(0).expect("the record is free").files.is_empty());
+
+        // Stores published afterwards replace it; an empty publication is
+        // not "unresolved".
+        configure(&[spec("/tmp/sw-test/.claude")]);
+        assert!(!stores_unresolved());
+        assert!(!clear_if(generation));
+        configure(&[]);
+        assert!(!stores_unresolved());
+        assert!(!sensor().stores_unresolved);
+        let generation = configure_unresolved();
+        assert!(clear_if(generation));
+        assert!(!stores_unresolved());
+    }
+
+    /// The thread a sensor registered is woken when the stores are published
+    /// and when they are withdrawn.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn the_registered_thread_is_woken_when_the_stores_change() {
+        clear();
+        let (ready, is_ready) = std::sync::mpsc::channel::<()>();
+        let (woken, was_woken) = std::sync::mpsc::channel::<bool>();
+        let listener = std::thread::spawn(move || {
+            wake_on_store_change(std::thread::current());
+            ready.send(()).expect("the test waits");
+            for expected in [true, false] {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while is_configured() != expected && Instant::now() < deadline {
+                    std::thread::park_timeout(Duration::from_secs(10));
+                }
+                woken
+                    .send(is_configured() == expected)
+                    .expect("the test waits");
+            }
+        });
+        is_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the listener registered");
+        let started = Instant::now();
+        // Let the listener park, then publish from this thread.
+        std::thread::sleep(Duration::from_millis(50));
+        let generation = configure(&[spec("/tmp/sw-test/.claude")]);
+        assert!(was_woken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("woken by the publication"));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(clear_if(generation));
+        assert!(was_woken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("woken by the withdrawal"));
+        // Woken, not timed out.
+        assert!(started.elapsed() < Duration::from_secs(8));
+        listener.join().expect("listener thread");
+        LISTENER.store(None);
     }
 
     #[test]

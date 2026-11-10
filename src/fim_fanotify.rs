@@ -1656,6 +1656,7 @@ mod tests {
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: 1_000,
         }]);
         init(std::slice::from_ref(&base));
         assert!(is_active(), "fanotify init failed (are we root?)");

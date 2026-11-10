@@ -24,6 +24,7 @@
 //! running, so nothing will look the table up.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
@@ -85,7 +86,13 @@ struct Roots {
     /// attributable, and the file monitor keeps no event for it. Always
     /// recursive.
     record_only: Vec<String>,
+    /// Which publication this set is (0: none): what [`set_roots`] returned
+    /// to the watcher that published it.
+    generation: u64,
 }
+
+/// Numbers the publications of this process, from 1.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn spellings(roots: &[PathBuf]) -> Vec<String> {
     let mut set = std::collections::BTreeSet::new();
@@ -119,9 +126,10 @@ static ROOTS: Lazy<ArcSwap<Roots>> = Lazy::new(|| ArcSwap::from_pointee(Roots::d
 /// be a silent loss of the writer pid.
 ///
 /// Replaces any previous set, so a watcher restart re-publishes rather than
-/// accumulating.
-pub fn set_roots(roots: &[PathBuf], recursive: bool) {
-    set_roots_with_record_only(roots, &[], recursive);
+/// accumulating. Returns the generation of this publication: the watcher
+/// that stops withdraws it with [`clear_roots_if`].
+pub fn set_roots(roots: &[PathBuf], recursive: bool) -> u64 {
+    set_roots_with_record_only(roots, &[], recursive)
 }
 
 /// [`set_roots`], with the roots published for the sensors only
@@ -129,18 +137,43 @@ pub fn set_roots(roots: &[PathBuf], recursive: bool) {
 /// is attributable like a path under a watch root, and [`is_record_only`]
 /// tells the file monitor that it keeps no event for it. Both spellings of
 /// each are kept, as for the watch roots.
-pub fn set_roots_with_record_only(roots: &[PathBuf], record_only: &[PathBuf], recursive: bool) {
+pub fn set_roots_with_record_only(
+    roots: &[PathBuf],
+    record_only: &[PathBuf],
+    recursive: bool,
+) -> u64 {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     ROOTS.store(std::sync::Arc::new(Roots {
         roots: spellings(roots),
         recursive,
         record_only: spellings(record_only),
+        generation,
     }));
+    generation
 }
 
-/// Forget the roots. After this nothing is attributable until a watcher
-/// publishes again.
+/// Forget the roots, whoever published them. After this nothing is
+/// attributable until a watcher publishes again.
 pub fn clear_roots() {
     ROOTS.store(std::sync::Arc::new(Roots::default()));
+}
+
+/// Forget the roots when they are still the publication `generation` names:
+/// a watcher that stops withdraws its own roots, and leaves in place the
+/// roots a watcher started after it published. `true` when they were
+/// withdrawn.
+pub fn clear_roots_if(generation: u64) -> bool {
+    let current = ROOTS.load_full();
+    if generation == 0 || current.generation != generation {
+        return false;
+    }
+    let previous = ROOTS.compare_and_swap(&current, std::sync::Arc::new(Roots::default()));
+    std::sync::Arc::ptr_eq(&*previous, &current)
+}
+
+/// The generation of the installed roots; 0 when none is installed.
+pub fn roots_generation() -> u64 {
+    ROOTS.load().generation
 }
 
 /// Number of installed root spellings. For logging and tests.
@@ -239,6 +272,23 @@ mod tests {
         assert!(!is_attributable("/tmp/fim-attr-store/t.jsonl"));
 
         clear_roots();
+        assert_eq!(roots_generation(), 0);
+
+        // A publication is withdrawn by the generation it was given: the
+        // one a later publication replaced withdraws nothing.
+        let first = set_roots(&[PathBuf::from("/tmp/fim-attr-test")], true);
+        let second = set_roots(&[PathBuf::from("/tmp/fim-attr-other")], true);
+        assert_ne!(first, second);
+        assert_eq!(roots_generation(), second);
+        assert!(!clear_roots_if(first));
+        assert!(is_attributable("/tmp/fim-attr-other/dropped.sh"));
+        assert_eq!(roots_generation(), second);
+        assert!(clear_roots_if(second));
+        assert!(!is_attributable("/tmp/fim-attr-other/dropped.sh"));
+        assert_eq!(roots_generation(), 0);
+        // Nothing installed is no publication to withdraw.
+        assert!(!clear_roots_if(0));
+        assert!(!clear_roots_if(second));
     }
 
     #[test]
