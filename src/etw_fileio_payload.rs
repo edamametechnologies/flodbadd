@@ -142,18 +142,54 @@ pub fn open_create_options(data: &[u8], ptr_size: usize) -> Option<u32> {
     read_u32(data, 2 * p + 4)
 }
 
-/// The store-writer operation (`crate::store_writers::ops`) an open with
-/// this `CreateOptions` value is in itself: `FILE_CREATE` creates the file
-/// (the request fails when it exists); `FILE_SUPERSEDE`, `FILE_OVERWRITE`
-/// and `FILE_OVERWRITE_IF` replace its content. `FILE_OPEN` and
-/// `FILE_OPEN_IF` are no operation by themselves: a write through the
-/// object is one.
-pub fn store_ops_for_open(create_options: u32) -> u32 {
+/// What the kernel states an open did: the information value of the open's
+/// completion (`IoStatus.Information` of an `IRP_MJ_CREATE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenResult {
+    /// `FILE_SUPERSEDED`: an existing file was replaced by a new one.
+    Superseded,
+    /// `FILE_OPENED`: an existing file was opened as it was.
+    Opened,
+    /// `FILE_CREATED`: no file existed and one was created.
+    Created,
+    /// `FILE_OVERWRITTEN`: an existing file's content was replaced.
+    Overwritten,
+}
+
+/// The [`OpenResult`] of a completion information value. `None` for the
+/// values an open that produced a file object does not complete with.
+pub fn open_result_from_information(information: u64) -> Option<OpenResult> {
+    match information {
+        0 => Some(OpenResult::Superseded),
+        1 => Some(OpenResult::Opened),
+        2 => Some(OpenResult::Created),
+        3 => Some(OpenResult::Overwritten),
+        _ => None,
+    }
+}
+
+/// The store-writer operation (`crate::store_writers::ops`) an open is.
+///
+/// With the kernel's statement of what the open did (`result`): a creation
+/// for a file that was created, a truncation for one that was superseded or
+/// overwritten, nothing for one that was opened as it was. A creation is
+/// recorded from that statement only: `FILE_CREATE`, `FILE_OPEN_IF` and
+/// `FILE_OVERWRITE_IF` are requests, and the same request creates one file
+/// and opens another.
+///
+/// With no statement (`None`), the requested disposition in `create_options`
+/// gives the operation: a truncation for `FILE_SUPERSEDE`, `FILE_OVERWRITE`
+/// and `FILE_OVERWRITE_IF`.
+pub fn store_ops_for_open(create_options: u32, result: Option<OpenResult>) -> u32 {
     use crate::store_writers::ops;
-    match create_options >> 24 {
-        FILE_CREATE => ops::CREATE,
-        FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF => ops::TRUNCATE,
-        _ => 0,
+    match result {
+        Some(OpenResult::Created) => ops::CREATE,
+        Some(OpenResult::Superseded | OpenResult::Overwritten) => ops::TRUNCATE,
+        Some(OpenResult::Opened) => 0,
+        None => match create_options >> 24 {
+            FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF => ops::TRUNCATE,
+            _ => 0,
+        },
     }
 }
 
@@ -496,11 +532,12 @@ mod tests {
         }
     }
 
-    /// The create disposition of an open: `FILE_CREATE` is a creation, the
-    /// superseding and overwriting dispositions replace the content, and an
-    /// open that keeps the content is no operation by itself.
+    /// An open is a creation exactly when the kernel states that a file was
+    /// created, whatever was requested; a superseded or overwritten file is
+    /// a replacement of its content. With no statement, the requested
+    /// disposition gives a replacement, never a creation.
     #[test]
-    fn an_open_maps_to_a_creation_or_a_replacement_by_its_disposition() {
+    fn an_open_is_a_creation_when_the_kernel_states_one() {
         use crate::store_writers::ops;
         let path = r"\Device\HarddiskVolume4\Users\u\.claude\projects\p\s.jsonl";
         let options_of =
@@ -511,17 +548,71 @@ mod tests {
             Some(0x0500_0060)
         );
         assert_eq!(open_create_options(&[0u8; 8], 8), None);
-        assert_eq!(store_ops_for_open(0x0200_0060), ops::CREATE);
+
+        // The completion's information value.
+        assert_eq!(
+            open_result_from_information(0),
+            Some(OpenResult::Superseded)
+        );
+        assert_eq!(open_result_from_information(1), Some(OpenResult::Opened));
+        assert_eq!(open_result_from_information(2), Some(OpenResult::Created));
+        assert_eq!(
+            open_result_from_information(3),
+            Some(OpenResult::Overwritten)
+        );
+        // FILE_EXISTS, FILE_DOES_NOT_EXIST and anything else.
+        assert_eq!(open_result_from_information(4), None);
+        assert_eq!(open_result_from_information(5), None);
+        assert_eq!(open_result_from_information(u64::MAX), None);
+
+        // FILE_SUPERSEDE 0, FILE_OPEN 1, FILE_CREATE 2, FILE_OPEN_IF 3,
+        // FILE_OVERWRITE 4, FILE_OVERWRITE_IF 5.
+        for disposition in 0u32..=5 {
+            let options = disposition << 24 | 0x60;
+            // The kernel's statement decides, whatever was requested: the
+            // same open-or-create request creates one file and opens
+            // another.
+            assert_eq!(
+                store_ops_for_open(options, Some(OpenResult::Created)),
+                ops::CREATE,
+                "{disposition}"
+            );
+            assert_eq!(
+                store_ops_for_open(options, Some(OpenResult::Opened)),
+                0,
+                "{disposition}"
+            );
+            assert_eq!(
+                store_ops_for_open(options, Some(OpenResult::Overwritten)),
+                ops::TRUNCATE,
+                "{disposition}"
+            );
+            assert_eq!(
+                store_ops_for_open(options, Some(OpenResult::Superseded)),
+                ops::TRUNCATE,
+                "{disposition}"
+            );
+            // No statement: a request is never a creation.
+            assert_eq!(
+                store_ops_for_open(options, None) & ops::CREATE,
+                0,
+                "{disposition}"
+            );
+        }
         for replacing in [0u32, 4, 5] {
             assert_eq!(
-                store_ops_for_open(replacing << 24 | 0x60),
+                store_ops_for_open(replacing << 24 | 0x60, None),
                 ops::TRUNCATE,
                 "{replacing}"
             );
         }
-        // FILE_OPEN and FILE_OPEN_IF.
-        assert_eq!(store_ops_for_open(0x0100_0060), 0);
-        assert_eq!(store_ops_for_open(0x0300_0060), 0);
+        for keeping in [1u32, 2, 3] {
+            assert_eq!(
+                store_ops_for_open(keeping << 24 | 0x60, None),
+                0,
+                "{keeping}"
+            );
+        }
     }
 
     /// Truncated payloads and empty names are unmeasured, and the opcodes

@@ -2446,10 +2446,11 @@ mod win {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
-                // The store-writer record: what the open is by its create
-                // disposition, and a delete on close.
+                // The store-writer record: what the open is, and a delete
+                // on close. This event is the open's initiation: it carries
+                // the requested disposition.
                 let open_ops = open_create_options(data, ptr_size)
-                    .map(store_ops_for_open)
+                    .map(|options| store_ops_for_open(options, None))
                     .unwrap_or(0)
                     | if deletes_on_close {
                         store_ops::REMOVE
@@ -3102,7 +3103,8 @@ mod tests {
     /// (the CI's Windows leg runs elevated). The store-writer record as the
     /// FileIo session feeds it: a child process creates a store file and
     /// writes it, a second one appends, a third deletes it. Each has its
-    /// row, the first with the creation.
+    /// row. The session delivers the initiation of an open, which carries
+    /// the request: the record opens with the first process's write.
     #[cfg(all(target_os = "windows", feature = "etw"))]
     #[test]
     #[serial_test::serial(store_writers)]
@@ -3165,7 +3167,7 @@ mod tests {
         let mut creator = run(format!(
             "$f = [IO.File]::Open('{file_arg}', 'CreateNew'); $b = [Text.Encoding]::ASCII.GetBytes(\"first`n\"); $f.Write($b, 0, $b.Length); $f.Close(); Start-Sleep -Seconds 3"
         ));
-        let created = wait_for(creator.id(), ops::CREATE);
+        let written = wait_for(creator.id(), ops::WRITE);
         // Appended by a second process.
         let mut second = run(format!(
             "Add-Content -Path '{file_arg}' -Value 'second'; Start-Sleep -Seconds 3"
@@ -3185,11 +3187,11 @@ mod tests {
         crate::fim_attribution::clear_roots();
         let _ = std::fs::remove_dir_all(&base);
 
-        let created = created.expect("the creator's row carries the creation");
+        let written = written.expect("the first process has a row with its write");
+        assert!(written.rows.iter().all(|row| row.ops & ops::CREATE == 0));
         assert_eq!(
-            created.creation.map(|creation| creation.writer.pid),
-            Some(creator_pid),
-            "the record opens with the creation by the creator"
+            written.creation, None,
+            "a creation is recorded from the kernel's statement of one"
         );
         let appended = appended.expect("the second process has a row");
         assert!(appended
