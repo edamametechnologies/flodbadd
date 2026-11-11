@@ -617,13 +617,16 @@ fn normalize(path: &str) -> String {
     path.trim().to_string()
 }
 
-/// The directory entry events the creation group asks for: a creation, a
-/// removal, and both ends of a move, each with the process that made it.
-fn creation_group_mask() -> MaskFlags {
-    MaskFlags::from_bits_retain(
-        libc::FAN_CREATE | libc::FAN_DELETE | libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO,
-    ) | MaskFlags::FAN_ONDIR
-        | MaskFlags::FAN_EVENT_ON_CHILD
+/// The directory entry events the creation group asks for: a creation; on a
+/// store directory, a removal and both ends of a move too, each with the
+/// process that made it.
+fn creation_group_mask(store_directory: bool) -> MaskFlags {
+    let entries = if store_directory {
+        libc::FAN_CREATE | libc::FAN_DELETE | libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO
+    } else {
+        libc::FAN_CREATE
+    };
+    MaskFlags::from_bits_retain(entries) | MaskFlags::FAN_ONDIR | MaskFlags::FAN_EVENT_ON_CHILD
 }
 
 /// When the process `pid` started (epoch milliseconds), from its
@@ -699,9 +702,11 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             // The creation group marks the same directory: a file or
             // subdirectory created in it is reported with its creator.
             if let Some(dir_fan) = table.dir_fan.as_ref() {
+                let store_directory =
+                    crate::store_writers::is_store_directory(&dir.to_string_lossy());
                 match dir_fan.mark::<_, Path>(
                     MarkFlags::FAN_MARK_ADD,
-                    creation_group_mask(),
+                    creation_group_mask(store_directory),
                     &handle,
                     None,
                 ) {
@@ -1114,21 +1119,34 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 continue;
             }
             let pid = record.pid as u32;
-            let (process_name, process_path) = resolve_writer(pid);
-            // The store-writer record: a file's creation, removal and move,
-            // with the process that made it.
-            if !record.is_dir {
+            // A removal or a move (asked for on store directories only): for
+            // a store file, the record; nothing else is done with it.
+            if record.mask & libc::FAN_CREATE == 0 {
                 let path = created.to_string_lossy();
-                if crate::store_writers::classify(&path).is_some() {
+                if !record.is_dir && crate::store_writers::classify(&path).is_some() {
                     let ops = store_ops_for_mask(record.mask);
                     if ops != 0 {
+                        let (_, process_path) = resolve_writer(pid);
                         store_record(ops, &path, pid, &process_path, None, None);
                     }
                 }
-            }
-            // The rest is about creations: marks and creators.
-            if record.mask & libc::FAN_CREATE == 0 {
                 continue;
+            }
+            let (process_name, process_path) = resolve_writer(pid);
+            // The store-writer record: a file's creation, with the process
+            // that made it.
+            if !record.is_dir {
+                let path = created.to_string_lossy();
+                if crate::store_writers::classify(&path).is_some() {
+                    store_record(
+                        store_ops_for_mask(record.mask),
+                        &path,
+                        pid,
+                        &process_path,
+                        None,
+                        None,
+                    );
+                }
             }
             table
                 .created_total
@@ -1307,6 +1325,19 @@ mod tests {
         );
         assert_eq!(store_ops_for_mask(libc::FAN_ONDIR), 0);
         assert!(!events_report_overflow(&buf));
+    }
+
+    /// Removals and moves are asked for on store directories only.
+    #[test]
+    fn removals_and_moves_are_asked_for_on_store_directories_only() {
+        let store = creation_group_mask(true).bits();
+        let ordinary = creation_group_mask(false).bits();
+        for bit in [libc::FAN_DELETE, libc::FAN_MOVED_FROM, libc::FAN_MOVED_TO] {
+            assert_ne!(store & bit, 0);
+            assert_eq!(ordinary & bit, 0);
+        }
+        assert_ne!(ordinary & libc::FAN_CREATE, 0);
+        assert_ne!(store & libc::FAN_CREATE, 0);
     }
 
     /// A queue overflow is an event without a record of its own: its mask

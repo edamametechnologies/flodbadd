@@ -541,6 +541,24 @@ pub fn classify(path: &str) -> Option<(String, StoreFileKind)> {
         .map(|(store, kind)| (store.agent.clone(), kind))
 }
 
+/// Whether `dir` is a published store directory: a store root or a pid-file
+/// root, or a directory below a store root.
+pub fn is_store_directory(dir: &str) -> bool {
+    let matcher = MATCHER.load();
+    if matcher.stores.is_empty() {
+        return false;
+    }
+    let normalized = normalize(dir);
+    let normalized = normalized.trim_end_matches('/');
+    matcher.stores.iter().any(|store| {
+        store
+            .roots
+            .iter()
+            .any(|root| normalized == root || path_under_root(normalized, root, true))
+            || store.pid_file_roots.iter().any(|root| normalized == root)
+    })
+}
+
 /// Whether stores are published.
 pub fn is_configured() -> bool {
     !MATCHER.load().stores.is_empty()
@@ -2562,6 +2580,22 @@ mod tests {
         assert_eq!(rows.lost_signals, 1);
         assert!(rows.files[0].rows.iter().any(|row| row.writer.pid == 11));
         clear();
+    }
+
+    /// A store directory is a store root, a directory below one, or a
+    /// pid-file root.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_store_directory_is_a_root_a_directory_below_one_or_a_pid_root() {
+        configure(&[spec("/tmp/sw-dirs/.claude")]);
+        assert!(is_store_directory("/tmp/sw-dirs/.claude/projects"));
+        assert!(is_store_directory("/tmp/sw-dirs/.claude/projects/p/sub"));
+        assert!(is_store_directory("/tmp/sw-dirs/.claude/sessions"));
+        assert!(!is_store_directory("/tmp/sw-dirs/.claude/sessions/deep"));
+        assert!(!is_store_directory("/tmp/sw-dirs/.claude"));
+        assert!(!is_store_directory("/tmp/sw-dirs/.claude/projects-old"));
+        clear();
+        assert!(!is_store_directory("/tmp/sw-dirs/.claude/projects"));
     }
 
     /// A cut holds back the changes after it: the files a reader took up to

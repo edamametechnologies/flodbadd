@@ -43,6 +43,8 @@ pub struct FimSourceEvent {
 }
 
 struct Sink {
+    /// The watcher that installed it (its roots' generation).
+    owner: u64,
     roots: Vec<String>,
     recursive: bool,
     tx: SyncSender<FimSourceEvent>,
@@ -62,7 +64,7 @@ pub use crate::fim_attribution::{normalize, path_under_root};
 /// both kept: ES reports `/private/var/...` while callers often pass
 /// `/var/...`). Returns the receiver the watcher consumes. `None` while the
 /// sink of a running watcher is installed (`uninstall` releases it).
-pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceEvent>> {
+pub fn install(roots: &[PathBuf], recursive: bool, owner: u64) -> Option<Receiver<FimSourceEvent>> {
     if SINK.load().is_some() {
         return None;
     }
@@ -81,6 +83,7 @@ pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceE
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
     let sink = Sink {
+        owner,
         roots: set.into_iter().collect(),
         recursive,
         tx,
@@ -105,6 +108,21 @@ pub fn is_active() -> bool {
 /// sidecar writes with no writer at all, FP-MAC-52).
 pub fn uninstall() {
     SINK.store(None);
+}
+
+/// Release the sink when the watcher `owner` installed it; a sink a watcher
+/// started later installed stays. `true` when released.
+pub fn uninstall_if(owner: u64) -> bool {
+    let current = SINK.load_full();
+    match current {
+        Some(sink) if sink.owner == owner => {
+            let previous = SINK.compare_and_swap(&Some(sink.clone()), None);
+            previous
+                .as_ref()
+                .is_some_and(|previous| std::sync::Arc::ptr_eq(previous, &sink))
+        }
+        _ => false,
+    }
 }
 
 /// `(delivered, dropped_because_full)` since install.
@@ -229,6 +247,22 @@ mod tests {
         ));
         assert!(!path_under_root("/users/me/.ssh", "/users/me/.ssh", true));
         assert!(!path_under_root("/tmp/x", "", true));
+    }
+
+    /// The sink is released by the watcher that installed it, never by one
+    /// that stopped after a later watcher installed its own.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_sink_is_released_by_the_watcher_that_installed_it_only() {
+        uninstall();
+        assert!(install(&[PathBuf::from("/tmp/fim-es-owner")], true, 7).is_some());
+        // Installed: a second one waits for its release.
+        assert!(install(&[PathBuf::from("/tmp/fim-es-other")], true, 8).is_none());
+        assert!(!uninstall_if(6));
+        assert!(is_active());
+        assert!(uninstall_if(7));
+        assert!(!is_active());
+        assert!(!uninstall_if(7));
     }
 
     #[test]

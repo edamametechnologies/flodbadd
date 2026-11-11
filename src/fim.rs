@@ -646,7 +646,7 @@ impl FimWatcher {
 
         #[cfg(target_os = "macos")]
         if es_source && !actual_paths.is_empty() {
-            match crate::fim_es::install(&es_roots, config.recursive) {
+            match crate::fim_es::install(&es_roots, config.recursive, roots_generation) {
                 Some(rx) => {
                     info!(
                         "FIM: Endpoint Security is the event source for {} root(s) ({} spellings); FSEvents watcher idle",
@@ -701,6 +701,7 @@ impl FimWatcher {
             spawn_fim_es_late_takeover(
                 es_roots.clone(),
                 config.recursive,
+                roots_generation,
                 store.clone(),
                 running.clone(),
                 hash_threshold,
@@ -769,7 +770,7 @@ impl FimWatcher {
         // The Endpoint Security sink was this watcher's; the next watcher
         // installs its own instead of falling back to FSEvents.
         #[cfg(target_os = "macos")]
-        crate::fim_es::uninstall();
+        crate::fim_es::uninstall_if(self.roots_generation);
         info!("FIM: watcher stopped");
     }
 
@@ -850,9 +851,11 @@ impl FimWatcher {
 /// watcher that started on FSEvents. The sink is installed before FSEvents is
 /// retired, so the switch can duplicate an event, never lose one.
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn spawn_fim_es_late_takeover(
     paths: Vec<PathBuf>,
     recursive: bool,
+    owner: u64,
     store: Arc<FimEventStore>,
     running: Arc<AtomicBool>,
     hash_threshold: u64,
@@ -869,7 +872,7 @@ fn spawn_fim_es_late_takeover(
             if !running.load(Ordering::SeqCst) {
                 return;
             }
-            match crate::fim_es::install(&paths, recursive) {
+            match crate::fim_es::install(&paths, recursive, owner) {
                 Some(rx) => {
                     spawn_fim_es_consumer(rx, store, running, hash_threshold, explicit_watch_roots);
                     fsevents_retired.store(true, Ordering::Release);
@@ -3887,6 +3890,30 @@ mod tests {
         assert!(FimWatchRoots::operator(vec![PathBuf::from("/a")])
             .stores
             .is_empty());
+    }
+
+    /// An operator root inside a store root keeps every event under it;
+    /// the rest of the store root keeps none.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn test_an_operator_root_inside_a_store_root_keeps_its_events() {
+        let store = PathBuf::from("/home/u/.claude/projects");
+        let operator = store.join("audited");
+        crate::fim_attribution::set_roots_with_record_only(
+            &[operator.clone()],
+            &[store.clone()],
+            true,
+        );
+        let explicit = operator_keep_roots(&[operator.clone()]);
+        let inside = operator.join("s.jsonl").to_string_lossy().to_string();
+        assert!(should_keep_fim_event(&inside, &explicit).0);
+        let elsewhere = store
+            .join("other")
+            .join("s.jsonl")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(should_keep_fim_event(&elsewhere, &explicit), (false, false));
+        crate::fim_attribution::clear_roots();
     }
 
     /// A watcher started with stores publishes them for the record and

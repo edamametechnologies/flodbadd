@@ -211,6 +211,15 @@ pub fn is_record_only(path: &str) -> bool {
         return false;
     }
     let normalized = normalize(path);
+    // A path an ordinary watch root covers keeps its events, also inside a
+    // store root.
+    if roots
+        .roots
+        .iter()
+        .any(|root| path_under_root(&normalized, root, roots.recursive))
+    {
+        return false;
+    }
     roots
         .record_only
         .iter()
@@ -289,6 +298,18 @@ mod tests {
         // Nothing installed is no publication to withdraw.
         assert!(!clear_roots_if(0));
         assert!(!clear_roots_if(second));
+
+        // An ordinary watch root inside a store root keeps its paths: only
+        // the rest of the store root is record-only.
+        set_roots_with_record_only(
+            &[PathBuf::from("/tmp/fim-attr-store/p/audit")],
+            &[PathBuf::from("/tmp/fim-attr-store")],
+            true,
+        );
+        assert!(!is_record_only("/tmp/fim-attr-store/p/audit/t.jsonl"));
+        assert!(is_record_only("/tmp/fim-attr-store/p/other/t.jsonl"));
+        assert!(is_attributable("/tmp/fim-attr-store/p/audit/t.jsonl"));
+        clear_roots();
     }
 
     #[test]
