@@ -233,10 +233,10 @@ pub struct FimWatchRoots {
     pub operator: Vec<PathBuf>,
     pub defaults: Vec<PathBuf>,
     pub stores: Vec<crate::store_writers::StoreSpec>,
-    /// The stores were not resolved: no home was given for them. `stores`
-    /// is then empty, and the watcher publishes that state
-    /// ([`crate::store_writers::configure_unresolved`]).
-    pub stores_unresolved: bool,
+    /// The stores were not resolved, and why (no home was given for them, or
+    /// the one given was refused). `stores` is then empty, and the watcher
+    /// publishes that state ([`crate::store_writers::configure_unresolved`]).
+    pub stores_unresolved: Option<String>,
 }
 
 impl FimWatchRoots {
@@ -246,7 +246,7 @@ impl FimWatchRoots {
             operator: paths,
             defaults: Vec::new(),
             stores: Vec::new(),
-            stores_unresolved: false,
+            stores_unresolved: None,
         }
     }
 
@@ -256,22 +256,22 @@ impl FimWatchRoots {
             operator: Vec::new(),
             defaults: paths,
             stores: Vec::new(),
-            stores_unresolved: false,
+            stores_unresolved: None,
         }
     }
 
     /// The same roots, with the stores to record.
     pub fn with_stores(mut self, stores: Vec<crate::store_writers::StoreSpec>) -> Self {
         self.stores = stores;
-        self.stores_unresolved = false;
+        self.stores_unresolved = None;
         self
     }
 
     /// The same roots, with no store and the statement that the stores were
     /// not resolved: the caller was given no home for them.
-    pub fn with_unresolved_stores(mut self) -> Self {
+    pub fn with_unresolved_stores(mut self, reason: &str) -> Self {
         self.stores = Vec::new();
-        self.stores_unresolved = true;
+        self.stores_unresolved = Some(reason.to_string());
         self
     }
 
@@ -638,8 +638,8 @@ impl FimWatcher {
         // feed. Published with every start, also with none: a start is a new
         // instance of the record. A caller that had no home to resolve them
         // under publishes that instead.
-        let stores_generation = if roots.stores_unresolved {
-            crate::store_writers::configure_unresolved()
+        let stores_generation = if let Some(reason) = &roots.stores_unresolved {
+            crate::store_writers::configure_unresolved(reason)
         } else {
             crate::store_writers::configure(&roots.stores)
         };
@@ -2661,7 +2661,7 @@ pub fn default_watch_roots_for_home(home: &Path) -> FimWatchRoots {
         operator,
         defaults,
         stores: Vec::new(),
-        stores_unresolved: false,
+        stores_unresolved: None,
     }
 }
 
@@ -3804,7 +3804,7 @@ mod tests {
             operator: vec![PathBuf::from("/a"), PathBuf::from("/b")],
             defaults: vec![PathBuf::from("/b"), PathBuf::from("/c")],
             stores: Vec::new(),
-            stores_unresolved: false,
+            stores_unresolved: None,
         };
         assert_eq!(
             roots.all(),
@@ -3865,7 +3865,7 @@ mod tests {
                 // A sibling that only shares a prefix with a watched root.
                 store_spec("sibling", &["/home/u/.claude-old/projects"], &[]),
             ],
-            stores_unresolved: false,
+            stores_unresolved: None,
         };
         assert_eq!(
             roots.store_only_roots(),
@@ -4044,23 +4044,27 @@ mod tests {
     #[serial_test::serial(store_writers)]
     fn test_a_watcher_without_a_home_for_the_stores_publishes_that() {
         let watched = plain_scratch_dir("stores-unresolved");
-        let roots = FimWatchRoots::operator(vec![watched.clone()]).with_unresolved_stores();
+        let roots =
+            FimWatchRoots::operator(vec![watched.clone()]).with_unresolved_stores("no_home");
         assert!(roots.stores.is_empty());
         assert!(roots.store_only_roots().is_empty());
         let watcher =
             FimWatcher::start_with_roots(roots, FimConfig::default()).expect("start watcher");
         assert!(crate::store_writers::stores_unresolved());
+        assert_eq!(
+            crate::store_writers::stores_unresolved_reason().as_deref(),
+            Some("no_home")
+        );
         assert!(!crate::store_writers::is_configured());
         assert!(crate::store_writers::sensor().stores_unresolved);
         watcher.stop();
         assert!(!crate::store_writers::stores_unresolved());
         // Stores given after all replace the statement.
-        assert!(
-            !FimWatchRoots::operator(vec![watched.clone()])
-                .with_unresolved_stores()
-                .with_stores(Vec::new())
-                .stores_unresolved
-        );
+        assert!(!FimWatchRoots::operator(vec![watched.clone()])
+            .with_unresolved_stores("no_home")
+            .with_stores(Vec::new())
+            .stores_unresolved
+            .is_some());
         let _ = std::fs::remove_dir_all(&watched);
     }
 

@@ -388,9 +388,9 @@ struct StoreMatcher {
     /// Which publication this set is (0: none): what [`configure`] returned
     /// to the file monitor that published it.
     generation: u64,
-    /// The file monitor runs and published no store because it was given no
-    /// home to resolve them under.
-    unresolved: bool,
+    /// The file monitor runs and published no store: no home was resolved
+    /// for them, and why (a word the status shows).
+    unresolved: Option<String>,
     stores: Vec<MatchedStore>,
     /// Every ending of every store, for the test that runs before a path is
     /// normalized: the sensors ask about every file event under a watch
@@ -467,7 +467,7 @@ impl StoreMatcher {
         endings.dedup();
         Self {
             generation: 0,
-            unresolved: false,
+            unresolved: None,
             stores,
             endings,
         }
@@ -567,7 +567,12 @@ pub fn is_configured() -> bool {
 /// Whether the file monitor runs and published no store because it was given
 /// no home to resolve the stores under.
 pub fn stores_unresolved() -> bool {
-    MATCHER.load().unresolved
+    MATCHER.load().unresolved.is_some()
+}
+
+/// Why no home was resolved for the stores, while that is so.
+pub fn stores_unresolved_reason() -> Option<String> {
+    MATCHER.load().unresolved.clone()
 }
 
 /// The generation of the publication in place; 0 when there is none.
@@ -1231,7 +1236,7 @@ fn publish(mut matcher: StoreMatcher) -> u64 {
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     matcher.generation = generation;
     let stores = matcher.stores.len();
-    let unresolved = matcher.unresolved;
+    let unresolved = matcher.unresolved.is_some();
     let previous = MATCHER.swap(Arc::new(matcher));
     restart_instance();
     stores_changed();
@@ -1239,7 +1244,7 @@ fn publish(mut matcher: StoreMatcher) -> u64 {
         tracing::info!("store writers: no store published, no home was given for the stores");
     } else if stores > 0 {
         tracing::info!("store writers: {} store(s) published", stores);
-    } else if !previous.stores.is_empty() || previous.unresolved {
+    } else if !previous.stores.is_empty() || previous.unresolved.is_some() {
         tracing::info!("store writers: stores withdrawn");
     }
     generation
@@ -1257,9 +1262,9 @@ pub fn configure(specs: &[StoreSpec]) -> u64 {
 /// was given no home to resolve them under ([`stores_unresolved`]). Nothing
 /// is recorded. Returns the generation of this publication, as
 /// [`configure`].
-pub fn configure_unresolved() -> u64 {
+pub fn configure_unresolved(reason: &str) -> u64 {
     publish(StoreMatcher {
-        unresolved: true,
+        unresolved: Some(reason.to_string()),
         ..StoreMatcher::default()
     })
 }
@@ -1291,7 +1296,7 @@ pub fn clear_if(generation: u64) -> bool {
 fn withdrawn(previous: &StoreMatcher) {
     restart_instance();
     stores_changed();
-    if !previous.stores.is_empty() || previous.unresolved {
+    if !previous.stores.is_empty() || previous.unresolved.is_some() {
         tracing::info!("store writers: stores withdrawn");
     }
 }
@@ -1535,6 +1540,8 @@ pub struct StoreWriterSensor {
     /// The file monitor runs and published no store because it was given no
     /// home to resolve the stores under ([`stores_unresolved`]).
     pub stores_unresolved: bool,
+    /// Why, while that is so (a word the caller chose).
+    pub stores_unresolved_reason: Option<String>,
 }
 
 /// The state [`sensor`] last logged (`u32::MAX`: none yet).
@@ -1565,7 +1572,8 @@ pub fn sensor() -> StoreWriterSensor {
 }
 
 fn sensor_now() -> StoreWriterSensor {
-    let stores_unresolved = stores_unresolved();
+    let stores_unresolved_reason = stores_unresolved_reason();
+    let stores_unresolved = stores_unresolved_reason.is_some();
     #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
     {
         let active = crate::l7_es::is_available();
@@ -1576,6 +1584,7 @@ fn sensor_now() -> StoreWriterSensor {
             extended_events: active && crate::l7_es::extended_file_events(),
             dropped_reports: crate::l7_es::dropped_message_gaps(),
             stores_unresolved,
+            stores_unresolved_reason: stores_unresolved_reason.clone(),
         }
     }
     #[cfg(all(target_os = "linux", feature = "fim", feature = "ebpf"))]
@@ -1590,6 +1599,7 @@ fn sensor_now() -> StoreWriterSensor {
             extended_events: false,
             dropped_reports: crate::fim_fanotify::queue_overflows(),
             stores_unresolved,
+            stores_unresolved_reason: stores_unresolved_reason.clone(),
         }
     }
     #[cfg(all(target_os = "windows", feature = "etw"))]
@@ -1602,6 +1612,7 @@ fn sensor_now() -> StoreWriterSensor {
             extended_events: active,
             dropped_reports: crate::l7_etw::lost_event_reports(),
             stores_unresolved,
+            stores_unresolved_reason: stores_unresolved_reason.clone(),
         }
     }
     #[cfg(not(any(
@@ -1618,6 +1629,7 @@ fn sensor_now() -> StoreWriterSensor {
             extended_events: false,
             dropped_reports: 0,
             stores_unresolved,
+            stores_unresolved_reason: stores_unresolved_reason.clone(),
         }
     }
 }
@@ -2687,7 +2699,7 @@ mod tests {
         assert!(!stores_unresolved());
         assert!(!sensor().stores_unresolved);
 
-        let generation = configure_unresolved();
+        let generation = configure_unresolved("no_home");
         assert!(stores_unresolved());
         assert!(!is_configured());
         assert!(sensor().stores_unresolved);
@@ -2716,7 +2728,7 @@ mod tests {
         configure(&[]);
         assert!(!stores_unresolved());
         assert!(!sensor().stores_unresolved);
-        let generation = configure_unresolved();
+        let generation = configure_unresolved("no_home");
         assert!(clear_if(generation));
         assert!(!stores_unresolved());
     }
