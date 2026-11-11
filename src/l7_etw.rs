@@ -1381,6 +1381,8 @@ mod win {
             task_access_mode: Some(record.task_access_mode),
             task_access_mask: Some(record.desired_access),
             net_dst: None,
+            process_start_ms: None,
+            creator_verified: None,
         });
     }
 
@@ -2057,6 +2059,8 @@ mod win {
                     task_access_mode: None,
                     task_access_mask: None,
                     net_dst: None,
+                    process_start_ms: created.and_then(proc_events::filetime_unix_ms),
+                    creator_verified: None,
                 });
                 // The attribution table was primed from a snapshot just before
                 // the session started; it already holds this process (or a
@@ -2136,6 +2140,15 @@ mod win {
                 // is alive (the same kernel clock as its parent's), else the
                 // event's (system time: the session does not ask for raw
                 // timestamps).
+                // The event is written by the process that created the child:
+                // its own process id is the creator. The parent the payload
+                // names is the creator's choice, so the record of a parent
+                // the creator did not name as itself is not a verified one.
+                let creator_verified = crate::etw_process_payload::creator_is_parent(
+                    event.EventHeader.ProcessId,
+                    ppid,
+                    pid,
+                );
                 let child_created = process_creation_filetime(pid).or_else(|| {
                     u64::try_from(event.EventHeader.TimeStamp)
                         .ok()
@@ -2195,6 +2208,12 @@ mod win {
                             task_access_mode: None,
                             task_access_mask: None,
                             net_dst: None,
+                            // The kernel's creation time only, never the
+                            // event's delivery (`child_created` falls back
+                            // to it).
+                            process_start_ms: process_creation_filetime(pid)
+                                .and_then(proc_events::filetime_unix_ms),
+                            creator_verified: Some(creator_verified),
                         });
                         table.insert(
                             pid,
@@ -2247,6 +2266,8 @@ mod win {
                                 task_access_mode: None,
                                 task_access_mask: None,
                                 net_dst: None,
+                                process_start_ms: None,
+                                creator_verified: None,
                             });
                         }
                     }

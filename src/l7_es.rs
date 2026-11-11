@@ -464,6 +464,8 @@ mod macos {
             task_access_mode: Some(mode),
             task_access_mask: None,
             net_dst: None,
+            process_start_ms: None,
+            creator_verified: None,
         });
     }
 
@@ -799,6 +801,11 @@ mod macos {
                     task_access_mode: None,
                     task_access_mask: None,
                     net_dst: None,
+                    // The same reading as every other reader of a
+                    // live process (seconds and microseconds).
+                    process_start_ms: crate::process_events::process_start_ms(pid)
+                        .or_else(|| start_time.checked_mul(1_000)),
+                    creator_verified: None,
                 });
                 recorded += 1;
             }
@@ -998,6 +1005,10 @@ mod macos {
                                 task_access_mode: None,
                                 task_access_mask: None,
                                 net_dst: None,
+                                process_start_ms: child
+                                    .start_time()
+                                    .and_then(crate::process_events::system_time_ms),
+                                creator_verified: None,
                             });
                         }
                         Some(Event::NotifyExec(exec)) => {
@@ -1124,6 +1135,10 @@ mod macos {
                                 task_access_mode: None,
                                 task_access_mask: None,
                                 net_dst: None,
+                                process_start_ms: target
+                                    .start_time()
+                                    .and_then(proc_events::system_time_ms),
+                                creator_verified: None,
                             });
                         }
                         Some(Event::NotifyExit(_)) => {
@@ -1205,6 +1220,8 @@ mod macos {
                                 task_access_mode: None,
                                 task_access_mask: None,
                                 net_dst: None,
+                                process_start_ms: None,
+                                creator_verified: None,
                             });
                         }
                         Some(Event::NotifyGetTask(get_task)) => {

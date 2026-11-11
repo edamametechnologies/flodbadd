@@ -129,6 +129,123 @@ pub struct ProcessEvent {
     /// `NetConnect` only: where the process connected / sent to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_dst: Option<NetDestination>,
+    /// The process's start as the kernel records it, in milliseconds since
+    /// the Unix epoch: its start time (macOS), its start ticks with the boot
+    /// time (Linux), its creation time (Windows). Unlike `timestamp_ms` it
+    /// does not depend on when the event was delivered, so two readers of one
+    /// process agree on it. `None` when the sensor could not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_ms: Option<u64>,
+    /// A process start event that names its parent itself (Windows): whether
+    /// the process that created it is the one named as its parent. `None`
+    /// where the parent is the creating process by construction (a fork) or
+    /// the check does not apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_verified: Option<bool>,
+}
+
+/// Milliseconds since the Unix epoch of a point in time; `None` before it.
+pub fn system_time_ms(time: std::time::SystemTime) -> Option<u64> {
+    let since = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_millis()).ok()
+}
+
+/// A Linux process's start, in milliseconds since the Unix epoch, from its
+/// `/proc/<pid>/stat` line (the start, field 22, in clock ticks since boot)
+/// and the boot time (`btime` of `/proc/stat`, seconds). `None` when the
+/// line does not parse.
+pub fn proc_stat_start_ms(
+    stat: &str,
+    clock_ticks_per_sec: u64,
+    boot_time_secs: u64,
+) -> Option<u64> {
+    if clock_ticks_per_sec == 0 {
+        return None;
+    }
+    // The command name may hold spaces and parentheses: the fields start
+    // after the last `)`. Field 3 (the state) is the first one there.
+    let rest = stat.rsplit_once(')')?.1;
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    boot_time_secs
+        .checked_mul(1_000)?
+        .checked_add(ticks.checked_mul(1_000)? / clock_ticks_per_sec)
+}
+
+/// A Windows FILETIME (100 ns intervals since 1601-01-01) in milliseconds
+/// since the Unix epoch; `None` before it.
+pub fn filetime_unix_ms(filetime: u64) -> Option<u64> {
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    filetime
+        .checked_sub(UNIX_EPOCH_AS_FILETIME)
+        .map(|since| since / 10_000)
+}
+
+/// The start of the live process `pid` as the kernel records it, in
+/// milliseconds since the Unix epoch: the one derivation shared by every
+/// reader of a live process (the sensors that fill
+/// [`ProcessEvent::process_start_ms`] and any other component that names a
+/// process by its pid and start), so their readings of one process agree.
+///
+/// - Linux: the start ticks of `/proc/<pid>/stat` (100 a second) with the
+///   boot time of `/proc/stat` (whole seconds, read once per process). The
+///   kernel derives that boot time from the current clock, so two processes
+///   that read it at different moments can differ by a second: compare with
+///   a tolerance of at least a second.
+/// - Windows: the creation time of the process (`GetProcessTimes`), exact.
+/// - macOS: the start `proc_pidinfo` gives (seconds and microseconds), the
+///   start Endpoint Security reports as `start_time`, exact.
+///
+/// `None` for a process that is gone or cannot be opened: unmeasured, never
+/// a guess.
+pub fn process_start_ms(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        const USER_HZ: u64 = 100;
+        static BOOT_TIME_SECS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        let boot = (*BOOT_TIME_SECS.get_or_init(|| {
+            std::fs::read_to_string("/proc/stat").ok().and_then(|stat| {
+                stat.lines()
+                    .find_map(|line| line.strip_prefix("btime "))
+                    .and_then(|value| value.trim().parse().ok())
+            })
+        }))?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        proc_stat_start_ms(&stat, USER_HZ, boot)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: the handle is opened, read and closed here; the out
+        // parameters are local.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut created = FILETIME::default();
+            let mut exited = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            let ok =
+                GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).is_ok();
+            let _ = CloseHandle(handle);
+            if !ok {
+                return None;
+            }
+            let filetime =
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            filetime_unix_ms(filetime).filter(|ms| *ms > 0)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::l7_macos::process_start_ms(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +462,51 @@ pub fn clear_ring_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kernel start of a process in the units each platform gives it.
+    #[test]
+    fn process_starts_read_in_milliseconds_since_the_epoch() {
+        // A command name with a space and a parenthesis; start ticks 4_250
+        // (field 22) at 100 ticks a second, booted at 1_794_000_000.
+        let stat =
+            "4242 (my (tool) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 4250 1000 10";
+        assert_eq!(
+            proc_stat_start_ms(stat, 100, 1_794_000_000),
+            Some(1_794_000_000_000 + 42_500)
+        );
+        assert_eq!(proc_stat_start_ms("4242 (x) S", 100, 1), None);
+        assert_eq!(proc_stat_start_ms(stat, 0, 1), None);
+        // 2026-11-11T00:00:00Z as a FILETIME.
+        assert_eq!(
+            filetime_unix_ms(116_444_736_000_000_000 + 17_947_872_000_000_000),
+            Some(1_794_787_200_000)
+        );
+        assert_eq!(filetime_unix_ms(5), None);
+        assert_eq!(
+            system_time_ms(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234)),
+            Some(1_234)
+        );
+    }
+
+    /// The shared reading of a live process: this process has a start,
+    /// earlier than now, on the three desktop platforms.
+    #[test]
+    fn a_live_process_start_is_read_where_the_platform_gives_it() {
+        let own = process_start_ms(std::process::id());
+        let now = system_time_ms(std::time::SystemTime::now()).unwrap();
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        )) {
+            let start = own.expect("this process's start");
+            assert!(start <= now + 1_000, "{start} {now}");
+        } else {
+            assert_eq!(own, None);
+        }
+        // A pid no process holds.
+        assert_eq!(process_start_ms(u32::MAX - 1), None);
+    }
     use serial_test::serial;
 
     fn ev(kind: ProcessEventKind, pid: u32) -> ProcessEvent {
@@ -368,6 +530,8 @@ mod tests {
             task_access_mode: None,
             task_access_mask: None,
             net_dst: None,
+            process_start_ms: None,
+            creator_verified: None,
         }
     }
 

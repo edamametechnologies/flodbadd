@@ -402,6 +402,31 @@ pub fn process_bsd_info(pid: u32) -> Option<(u32, u32, u64)> {
     Some((info.pbi_ppid, info.pbi_uid, info.pbi_start_tvsec))
 }
 
+/// The start of process `pid` as the kernel records it, in milliseconds
+/// since the Unix epoch (`pbi_start_tvsec` and `pbi_start_tvusec`: the start
+/// Endpoint Security reports as `start_time`). `None` for a process that is
+/// gone or that this process may not inspect.
+pub fn process_start_ms(pid: u32) -> Option<u64> {
+    let mut info: proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<proc_bsdinfo>() as i32;
+    let written = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut proc_bsdinfo as *mut std::ffi::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    info.pbi_start_tvsec
+        .checked_mul(1_000)?
+        .checked_add(info.pbi_start_tvusec / 1_000)
+        .filter(|ms| *ms > 0)
+}
+
 /// List all PIDs on the system.
 pub fn list_all_pids() -> Vec<u32> {
     let estimated = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
