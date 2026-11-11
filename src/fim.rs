@@ -3835,6 +3835,7 @@ mod tests {
             agent: agent.to_string(),
             roots: roots.iter().map(PathBuf::from).collect(),
             path_segment: String::new(),
+            excluded_segments: Vec::new(),
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: pid_roots.iter().map(PathBuf::from).collect(),
             pid_file_suffixes: vec![".json".to_string()],

@@ -132,6 +132,10 @@ pub struct StoreSpec {
     /// root is named `path_segment`.
     pub roots: Vec<PathBuf>,
     pub path_segment: String,
+    /// Directory names below a root whose files are not the store's (a
+    /// directory of tool outputs beside the transcripts): a file with one of
+    /// them between the root and its name is no store file.
+    pub excluded_segments: Vec<String>,
     pub file_suffixes: Vec<String>,
     /// The directories, absolute, whose direct children ending with one of
     /// `pid_file_suffixes` name a running process of the application.
@@ -404,6 +408,7 @@ struct MatchedStore {
     /// Normalized spellings of the roots (raw and canonical).
     roots: Vec<String>,
     path_segment: String,
+    excluded_segments: Vec<String>,
     file_suffixes: Vec<String>,
     pid_file_roots: Vec<String>,
     pid_file_suffixes: Vec<String>,
@@ -447,6 +452,7 @@ impl StoreMatcher {
                 agent: spec.agent.clone(),
                 roots: normalized_spellings(&spec.roots),
                 path_segment: spec.path_segment.to_lowercase(),
+                excluded_segments: lower(&spec.excluded_segments),
                 file_suffixes: lower(&spec.file_suffixes),
                 pid_file_roots: normalized_spellings(&spec.pid_file_roots),
                 pid_file_suffixes: lower(&spec.pid_file_suffixes),
@@ -497,14 +503,21 @@ impl StoreMatcher {
                     if !path_under_root(normalized, root, true) {
                         continue;
                     }
-                    if store.path_segment.is_empty() {
-                        return Some((store, StoreFileKind::Transcript));
-                    }
                     // The directories between the root and the file name.
                     let below = &normalized[root.len() + 1..];
                     let mut parts: Vec<&str> = below.split('/').collect();
                     parts.pop();
-                    if parts.iter().any(|part| *part == store.path_segment) {
+                    if parts.iter().any(|part| {
+                        store
+                            .excluded_segments
+                            .iter()
+                            .any(|excluded| excluded == part)
+                    }) {
+                        continue;
+                    }
+                    if store.path_segment.is_empty()
+                        || parts.iter().any(|part| *part == store.path_segment)
+                    {
                         return Some((store, StoreFileKind::Transcript));
                     }
                 }
@@ -1696,6 +1709,7 @@ mod tests {
             agent: "claude_code".to_string(),
             roots: vec![PathBuf::from(format!("{root}/projects"))],
             path_segment: String::new(),
+            excluded_segments: Vec::new(),
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: vec![PathBuf::from(format!("{root}/sessions"))],
             pid_file_suffixes: vec![".json".to_string()],
@@ -1755,6 +1769,7 @@ mod tests {
                 agent: "cursor".to_string(),
                 roots: vec![PathBuf::from("/home/u/.cursor/projects")],
                 path_segment: "Agent-Transcripts".to_string(),
+                excluded_segments: Vec::new(),
                 file_suffixes: vec![".JSONL".to_string(), ".txt".to_string()],
                 pid_file_roots: Vec::new(),
                 pid_file_suffixes: Vec::new(),
@@ -1847,6 +1862,7 @@ mod tests {
             agent: "claude_code".to_string(),
             roots: vec![given.clone()],
             path_segment: String::new(),
+            excluded_segments: Vec::new(),
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
@@ -1867,6 +1883,7 @@ mod tests {
             agent: "codex".to_string(),
             roots: vec![base.join("not-there-yet")],
             path_segment: String::new(),
+            excluded_segments: Vec::new(),
             file_suffixes: vec![".jsonl".to_string()],
             pid_file_roots: Vec::new(),
             pid_file_suffixes: Vec::new(),
@@ -2822,6 +2839,33 @@ mod tests {
             AwaitedRootStep::Unrelated
         );
         assert_eq!(awaited_root_step("", &awaited), AwaitedRootStep::Unrelated);
+    }
+
+    /// A file below an excluded directory is no store file, whatever its
+    /// ending; the rest of the store is unchanged.
+    #[test]
+    fn a_file_below_an_excluded_directory_is_no_store_file() {
+        let mut excluding = spec("/home/u/.claude");
+        excluding.excluded_segments = vec!["Tool-Results".to_string()];
+        let matcher = StoreMatcher::from_specs(&[excluding]);
+        let classify = |path: &str| matcher.classify(&normalize(path)).map(|(_, kind)| kind);
+        assert_eq!(
+            classify("/home/u/.claude/projects/p/s.jsonl"),
+            Some(StoreFileKind::Transcript)
+        );
+        assert_eq!(
+            classify("/home/u/.claude/projects/p/s/subagents/a.jsonl"),
+            Some(StoreFileKind::Transcript)
+        );
+        assert_eq!(
+            classify("/home/u/.claude/projects/p/s/tool-results/out.jsonl"),
+            None
+        );
+        // The name of the file itself is not a directory.
+        assert_eq!(
+            classify("/home/u/.claude/projects/p/tool-results.jsonl"),
+            Some(StoreFileKind::Transcript)
+        );
     }
 
     #[test]
