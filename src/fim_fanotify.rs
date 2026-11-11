@@ -562,7 +562,14 @@ fn process_start_ms(pid: u32) -> Option<u64> {
 /// Feed the store-writer record with one operation on `path` by `pid`: the
 /// process's start from `/proc`, its image as resolved for the attribution
 /// table, the time the event was read.
-fn store_record(ops: u32, path: &str, pid: u32, process_path: &str, size: Option<u64>) {
+fn store_record(
+    ops: u32,
+    path: &str,
+    pid: u32,
+    process_path: &str,
+    size: Option<u64>,
+    identity: Option<crate::store_writers::FileId>,
+) {
     crate::store_writers::record(&crate::store_writers::Operation {
         path,
         ops,
@@ -571,6 +578,7 @@ fn store_record(ops: u32, path: &str, pid: u32, process_path: &str, size: Option
         process_path,
         at_ms: crate::store_writers::now_ms(),
         size,
+        identity,
     });
 }
 
@@ -735,13 +743,18 @@ fn reader_loop(table: Arc<FanotifyTable>) {
             // when the image could not be resolved, and the file's size as
             // the event's descriptor gives it.
             if crate::store_writers::classify(&path).is_some() {
-                let size = std::fs::metadata(&fd_link).ok().map(|meta| meta.len());
+                use std::os::unix::fs::MetadataExt;
+                let meta = std::fs::metadata(&fd_link).ok();
                 store_record(
                     crate::store_writers::ops::WRITE,
                     &path,
                     pid,
                     &process_path,
-                    size,
+                    meta.as_ref().map(|meta| meta.len()),
+                    meta.as_ref().map(|meta| crate::store_writers::FileId {
+                        device: meta.dev(),
+                        inode: meta.ino(),
+                    }),
                 );
             }
             if process_name.is_empty() && process_path.is_empty() {
@@ -1007,7 +1020,7 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 if crate::store_writers::classify(&path).is_some() {
                     let ops = store_ops_for_mask(record.mask);
                     if ops != 0 {
-                        store_record(ops, &path, pid, &process_path, None);
+                        store_record(ops, &path, pid, &process_path, None, None);
                     }
                 }
             }

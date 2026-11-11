@@ -577,6 +577,7 @@ mod macos {
     /// Feed the store-writer record (`crate::store_writers`) with one file
     /// operation of the message's process: its pid, the start the kernel
     /// gives for it, its image, and the time of the message.
+    #[allow(clippy::too_many_arguments)]
     fn store_record(
         ops: u32,
         path: &str,
@@ -584,6 +585,7 @@ mod macos {
         pid: u32,
         at_ms: u64,
         size: Option<u64>,
+        identity: Option<crate::store_writers::FileId>,
     ) {
         if !crate::store_writers::is_configured() {
             return;
@@ -601,7 +603,17 @@ mod macos {
             process_path: &exe,
             at_ms,
             size,
+            identity,
         });
+    }
+
+    /// The identity of an event's file.
+    fn file_id(file: &endpoint_sec::File<'_>) -> crate::store_writers::FileId {
+        let stat = file.stat();
+        crate::store_writers::FileId {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino,
+        }
     }
 
     /// `<directory>/<name>`, as the CREATE and RENAME arms join a new path.
@@ -1403,6 +1415,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     None,
+                                    None,
                                 );
                                 FlodbaddL7Es::record_file_attribution(
                                     &file_table_for_handler,
@@ -1448,6 +1461,7 @@ mod macos {
                                 responsible_pid,
                                 message_time_ms(&msg),
                                 None,
+                                Some(file_id(ev.target())),
                             );
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
@@ -1496,6 +1510,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     u64::try_from(ev.target().stat().st_size).ok(),
+                                    Some(file_id(ev.target())),
                                 );
                                 FlodbaddL7Es::record_file_attribution(
                                     &file_table_for_handler,
@@ -1552,6 +1567,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     None,
+                                    None,
                                 );
                             }
                             if let Some(dest) = destination.as_deref() {
@@ -1562,6 +1578,7 @@ mod macos {
                                         &responsible,
                                         responsible_pid,
                                         message_time_ms(&msg),
+                                        None,
                                         None,
                                     );
                                 }
@@ -1611,6 +1628,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     None,
+                                    None,
                                 );
                             }
                             FlodbaddL7Es::record_file_attribution(
@@ -1643,6 +1661,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     None,
+                                    Some(file_id(ev.target())),
                                 );
                             }
                         }
@@ -1657,6 +1676,7 @@ mod macos {
                                     responsible_pid,
                                     at_ms,
                                     None,
+                                    Some(file_id(ev.source())),
                                 );
                             }
                             // The new name holds the linked file's content.
@@ -1671,6 +1691,7 @@ mod macos {
                                     responsible_pid,
                                     at_ms,
                                     None,
+                                    None,
                                 );
                             }
                         }
@@ -1683,6 +1704,7 @@ mod macos {
                                     &responsible,
                                     responsible_pid,
                                     message_time_ms(&msg),
+                                    None,
                                     None,
                                 );
                             }
@@ -1698,6 +1720,7 @@ mod macos {
                                         &responsible,
                                         responsible_pid,
                                         at_ms,
+                                        None,
                                         None,
                                     );
                                 }

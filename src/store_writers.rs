@@ -193,6 +193,13 @@ pub struct WriterSpan {
     pub ops: u32,
 }
 
+/// A file's identity on its device, as a sensor gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileId {
+    pub device: u64,
+    pub inode: u64,
+}
+
 /// One operation, as a sensor reports it.
 #[derive(Debug, Clone, Copy)]
 pub struct Operation<'a> {
@@ -208,6 +215,10 @@ pub struct Operation<'a> {
     pub at_ms: u64,
     /// The file's size, where the event carries it.
     pub size: Option<u64>,
+    /// The identity of the file the operation was made on, where the event
+    /// carries it. `None` for an operation after which the path names
+    /// another file or none (a creation of a new path, a removal, a move).
+    pub identity: Option<FileId>,
 }
 
 /// A file's rows, as [`rows_since`] returns them.
@@ -332,6 +343,10 @@ pub struct DirtyFile {
     pub spans_overflowed: bool,
     /// The file's size at the last event that carried one.
     pub size_at_close: Option<u64>,
+    /// The identity the latest operation on the path carried (`None`: that
+    /// operation carried none): a reader that opens another file at the path
+    /// reads a file no operation was recorded on.
+    pub identity: Option<FileId>,
     /// A sensor reported dropped events since the last take.
     pub lost: bool,
     /// The last operation reported unlinked the path.
@@ -551,6 +566,7 @@ struct FileRecord {
     spans: Vec<WriterSpan>,
     spans_overflowed: bool,
     size_at_close: Option<u64>,
+    identity: Option<FileId>,
     lost: bool,
 }
 
@@ -727,6 +743,7 @@ impl Table {
                     spans: Vec::new(),
                     spans_overflowed: false,
                     size_at_close: None,
+                    identity: None,
                     lost: false,
                 },
             );
@@ -805,6 +822,7 @@ impl Table {
         if op.size.is_some() {
             record.size_at_close = op.size;
         }
+        record.identity = op.identity;
 
         // The row of this process.
         match record.rows.iter_mut().find(|row| row.writer == writer) {
@@ -926,6 +944,7 @@ impl Table {
                     spans: std::mem::take(&mut record.spans),
                     spans_overflowed: std::mem::take(&mut record.spans_overflowed),
                     size_at_close: record.size_at_close.take(),
+                    identity: record.identity,
                     lost: std::mem::take(&mut record.lost),
                     unlinked: record.unlinked,
                 }
@@ -1434,6 +1453,7 @@ mod tests {
             process_path: "/opt/tool/bin/tool",
             at_ms,
             size: None,
+            identity: None,
         }
     }
 

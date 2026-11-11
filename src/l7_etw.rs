@@ -1926,6 +1926,7 @@ mod win {
                 .and_then(super::filetime_to_unix_ms)
                 .unwrap_or_else(crate::store_writers::now_ms),
             size: None,
+            identity: None,
         });
     }
 
