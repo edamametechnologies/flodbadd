@@ -58,10 +58,10 @@ pub const MAX_EVICTED_ROWS_PER_FILE: usize = 16;
 /// yet.
 pub const MAX_TOMBSTONES: usize = 1_024;
 
-/// How long a sensor handler retries a contended record before it counts the
-/// operation as not recorded. Handlers run on kernel-callback threads and
-/// must not stall; the holders are a reader copying a few rows.
-const SENSOR_RETRY_BUDGET: Duration = Duration::from_millis(2);
+/// Reports a sensor handler queues while the record is held, for the next
+/// holder to apply. Beyond it a report is dropped and recorded as dropped
+/// events.
+pub const MAX_QUEUED_REPORTS: usize = 4_096;
 /// How long a reader retries a contended record before it reports that it
 /// read nothing.
 const READ_RETRY_BUDGET: Duration = Duration::from_millis(25);
@@ -283,8 +283,17 @@ pub struct StoreWriterCounters {
     pub spans_overflowed: u64,
     /// Times a sensor reported dropped events ([`note_lost`]).
     pub lost_signals: u64,
-    /// Operations a handler could not record because the record was held.
-    pub dropped_locked: u64,
+    /// Reports queued because the record was held, and reports dropped
+    /// because the queue was full (each recorded as dropped events); the most
+    /// reports queued at once.
+    pub queued_reports: u64,
+    pub dropped_queue_full: u64,
+    pub queue_high_water: u64,
+    /// When dropped events were last recorded, by cause: a sensor's report,
+    /// a full queue, tombstones no reader asked past.
+    pub last_sensor_drop_ms: Option<u64>,
+    pub last_queue_drop_ms: Option<u64>,
+    pub last_tombstone_drop_ms: Option<u64>,
     /// Rows that left a file's record beyond the ones it keeps
     /// ([`MAX_EVICTED_ROWS_PER_FILE`]).
     pub evicted_rows_dropped: u64,
@@ -699,6 +708,9 @@ impl Table {
                 self.tombstones_pruned_through =
                     self.tombstones_pruned_through.max(tombstone.changed_seq);
                 counters.tombstones_dropped.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .last_tombstone_drop_ms
+                    .store(now_ms(), Ordering::Relaxed);
             }
         }
     }
@@ -982,9 +994,19 @@ struct Counters {
     rows_evicted: AtomicU64,
     spans_overflowed: AtomicU64,
     lost_signals: AtomicU64,
-    dropped_locked: AtomicU64,
+    queued_reports: AtomicU64,
+    dropped_queue_full: AtomicU64,
+    queue_depth: AtomicU64,
+    queue_high_water: AtomicU64,
+    last_sensor_drop_ms: AtomicU64,
+    last_queue_drop_ms: AtomicU64,
+    last_tombstone_drop_ms: AtomicU64,
     evicted_rows_dropped: AtomicU64,
     tombstones_dropped: AtomicU64,
+}
+
+fn time_or_none(ms: u64) -> Option<u64> {
+    (ms != 0).then_some(ms)
 }
 
 static COUNTERS: Lazy<Counters> = Lazy::new(Counters::default);
@@ -994,9 +1016,123 @@ static COUNTERS: Lazy<Counters> = Lazy::new(Counters::default);
 // `process_events` and `credential_opens`).
 static TABLE: Lazy<CustomMutex<Table>> = Lazy::new(|| CustomMutex::new(Table::new(now_ms())));
 
-/// An operation or a dropped-event report that could not reach the record
-/// because it was held: the next holder writes it as dropped events.
+/// A report that could not be queued (the queue was full): the next holder
+/// writes it as dropped events.
 static PENDING_LOST: AtomicBool = AtomicBool::new(false);
+
+/// A report made while the record was held, applied by the next holder.
+enum Queued {
+    Operation {
+        key: String,
+        agent: String,
+        kind: StoreFileKind,
+        display: String,
+        path: String,
+        ops: u32,
+        pid: u32,
+        started_at_ms: Option<u64>,
+        process_path: String,
+        at_ms: u64,
+        size: Option<u64>,
+        identity: Option<FileId>,
+        creation_reorder_ms: u64,
+    },
+    Change {
+        key: String,
+        agent: String,
+        kind: StoreFileKind,
+        display: String,
+        at_ms: u64,
+    },
+    Lost {
+        at_ms: u64,
+    },
+}
+
+/// The queue: handlers send without waiting, the holder of the record
+/// receives. The receiver is only ever taken by the holder of the record.
+static QUEUE: Lazy<(
+    std::sync::mpsc::SyncSender<Queued>,
+    CustomMutex<std::sync::mpsc::Receiver<Queued>>,
+)> = Lazy::new(|| {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(MAX_QUEUED_REPORTS);
+    (sender, CustomMutex::new(receiver))
+});
+
+/// Queue `report` for the next holder of the record. A full queue drops it
+/// and records dropped events.
+fn enqueue(report: Queued) {
+    match QUEUE.0.try_send(report) {
+        Ok(()) => {
+            COUNTERS.queued_reports.fetch_add(1, Ordering::Relaxed);
+            let depth = COUNTERS.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+            COUNTERS
+                .queue_high_water
+                .fetch_max(depth, Ordering::Relaxed);
+        }
+        Err(_) => {
+            COUNTERS.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
+            COUNTERS
+                .last_queue_drop_ms
+                .store(now_ms(), Ordering::Relaxed);
+            PENDING_LOST.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Apply the queued reports, in the order they were made.
+fn drain_queue(table: &mut Table) {
+    let _ = QUEUE.1.try_with(|receiver| {
+        while let Ok(report) = receiver.try_recv() {
+            COUNTERS.queue_depth.fetch_sub(1, Ordering::Relaxed);
+            match report {
+                Queued::Operation {
+                    key,
+                    agent,
+                    kind,
+                    display,
+                    path,
+                    ops,
+                    pid,
+                    started_at_ms,
+                    process_path,
+                    at_ms,
+                    size,
+                    identity,
+                    creation_reorder_ms,
+                } => {
+                    let op = Operation {
+                        path: &path,
+                        ops,
+                        pid,
+                        started_at_ms,
+                        process_path: &process_path,
+                        at_ms,
+                        size,
+                        identity,
+                    };
+                    table.record(
+                        &key,
+                        &agent,
+                        kind,
+                        &display,
+                        &op,
+                        creation_reorder_ms,
+                        &COUNTERS,
+                    );
+                }
+                Queued::Change {
+                    key,
+                    agent,
+                    kind,
+                    display,
+                    at_ms,
+                } => table.note_change(&key, &agent, kind, &display, at_ms, &COUNTERS),
+                Queued::Lost { at_ms } => table.note_lost(at_ms),
+            }
+        }
+    });
+}
 
 /// The reader's wake-up: the thread parked in [`wait_dirty`], and whether a
 /// change was reported since it last looked.
@@ -1021,6 +1157,7 @@ fn with_table<R>(budget: Duration, mut f: impl FnMut(&mut Table) -> R) -> Option
     let deadline = Instant::now() + budget;
     loop {
         let result = TABLE.try_with(|table| {
+            drain_queue(table);
             if PENDING_LOST.swap(false, Ordering::AcqRel) {
                 table.note_lost(now_ms());
             }
@@ -1167,7 +1304,8 @@ pub fn record(op: &Operation<'_>) {
     };
     let display = display_path(op.path);
     COUNTERS.operations.fetch_add(1, Ordering::Relaxed);
-    let recorded = with_table(SENSOR_RETRY_BUDGET, |table| {
+    // One try: a held record queues the report for its next holder.
+    let recorded = with_table(Duration::ZERO, |table| {
         table.record(
             &key,
             &store.agent,
@@ -1179,8 +1317,21 @@ pub fn record(op: &Operation<'_>) {
         );
     });
     if recorded.is_none() {
-        COUNTERS.dropped_locked.fetch_add(1, Ordering::Relaxed);
-        PENDING_LOST.store(true, Ordering::Release);
+        enqueue(Queued::Operation {
+            key,
+            agent: store.agent.clone(),
+            kind,
+            display,
+            path: op.path.to_string(),
+            ops: op.ops,
+            pid: op.pid,
+            started_at_ms: op.started_at_ms,
+            process_path: op.process_path.to_string(),
+            at_ms: op.at_ms,
+            size: op.size,
+            identity: op.identity,
+            creation_reorder_ms: store.creation_reorder_ms,
+        });
     }
     wake_reader();
 }
@@ -1198,12 +1349,17 @@ pub fn note_change(path: &str, at_ms: u64) {
     };
     let display = display_path(path);
     COUNTERS.changes_noted.fetch_add(1, Ordering::Relaxed);
-    let noted = with_table(SENSOR_RETRY_BUDGET, |table| {
+    let noted = with_table(Duration::ZERO, |table| {
         table.note_change(&key, &store.agent, kind, &display, at_ms, &COUNTERS);
     });
     if noted.is_none() {
-        COUNTERS.dropped_locked.fetch_add(1, Ordering::Relaxed);
-        PENDING_LOST.store(true, Ordering::Release);
+        enqueue(Queued::Change {
+            key,
+            agent: store.agent.clone(),
+            kind,
+            display,
+            at_ms,
+        });
     }
     wake_reader();
 }
@@ -1215,9 +1371,12 @@ pub fn note_lost(at_ms: u64) {
         return;
     }
     COUNTERS.lost_signals.fetch_add(1, Ordering::Relaxed);
-    let noted = with_table(SENSOR_RETRY_BUDGET, |table| table.note_lost(at_ms));
+    COUNTERS
+        .last_sensor_drop_ms
+        .store(now_ms(), Ordering::Relaxed);
+    let noted = with_table(Duration::ZERO, |table| table.note_lost(at_ms));
     if noted.is_none() {
-        PENDING_LOST.store(true, Ordering::Release);
+        enqueue(Queued::Lost { at_ms });
     }
     // Once per instance of the record; the reports are counted.
     if !LOST_LOGGED.swap(true, Ordering::AcqRel) {
@@ -1322,7 +1481,14 @@ pub fn counters() -> StoreWriterCounters {
         rows_evicted: COUNTERS.rows_evicted.load(Ordering::Relaxed),
         spans_overflowed: COUNTERS.spans_overflowed.load(Ordering::Relaxed),
         lost_signals: COUNTERS.lost_signals.load(Ordering::Relaxed),
-        dropped_locked: COUNTERS.dropped_locked.load(Ordering::Relaxed),
+        queued_reports: COUNTERS.queued_reports.load(Ordering::Relaxed),
+        dropped_queue_full: COUNTERS.dropped_queue_full.load(Ordering::Relaxed),
+        queue_high_water: COUNTERS.queue_high_water.load(Ordering::Relaxed),
+        last_sensor_drop_ms: time_or_none(COUNTERS.last_sensor_drop_ms.load(Ordering::Relaxed)),
+        last_queue_drop_ms: time_or_none(COUNTERS.last_queue_drop_ms.load(Ordering::Relaxed)),
+        last_tombstone_drop_ms: time_or_none(
+            COUNTERS.last_tombstone_drop_ms.load(Ordering::Relaxed),
+        ),
         evicted_rows_dropped: COUNTERS.evicted_rows_dropped.load(Ordering::Relaxed),
         tombstones_dropped: COUNTERS.tombstones_dropped.load(Ordering::Relaxed),
     }
@@ -2350,6 +2516,48 @@ mod tests {
                 .expect("the record is free")
                 .configured
         );
+    }
+
+    /// A report made while the record is held is queued and applied by the
+    /// next holder: it is no dropped event. Only a full queue drops one,
+    /// recorded as dropped events, with its cause.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_report_made_while_the_record_is_held_is_queued_not_dropped() {
+        configure(&[spec("/tmp/sw-queue/.claude")]);
+        let start = rows_since("", 0, None).expect("free");
+        let before = counters();
+        let path = "/tmp/sw-queue/.claude/projects/p/a.jsonl";
+        let held = TABLE.try_with(|_| {
+            record(&op(path, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+            note_change(path, 2_001);
+        });
+        assert!(held.is_some());
+        let after = counters();
+        assert_eq!(after.queued_reports, before.queued_reports + 2);
+        assert_eq!(after.dropped_queue_full, before.dropped_queue_full);
+        let rows = rows_since(&start.instance, start.seq, None).expect("free");
+        assert_eq!(rows.files.len(), 1);
+        assert_eq!(rows.files[0].rows[0].writer.pid, 10);
+        assert!(rows.files[0].creation.is_some());
+        assert_eq!(rows.lost_signals, 0);
+
+        // A full queue: the report beyond it is dropped and recorded as
+        // dropped events.
+        let held = TABLE.try_with(|_| {
+            for i in 0..=MAX_QUEUED_REPORTS as u64 {
+                record(&op(path, ops::WRITE, 11, 500, 3_000 + i));
+            }
+        });
+        assert!(held.is_some());
+        let full = counters();
+        assert_eq!(full.dropped_queue_full, after.dropped_queue_full + 1);
+        assert!(full.last_queue_drop_ms.is_some());
+        assert!(full.queue_high_water >= MAX_QUEUED_REPORTS as u64);
+        let rows = rows_since(&rows.instance, rows.seq, None).expect("free");
+        assert_eq!(rows.lost_signals, 1);
+        assert!(rows.files[0].rows.iter().any(|row| row.writer.pid == 11));
+        clear();
     }
 
     /// A cut holds back the changes after it: the files a reader took up to
