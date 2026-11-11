@@ -1666,7 +1666,7 @@ mod tests {
         }
         let file = project.join("s.jsonl");
         let rows_of = |path: &Path| {
-            store_writers::rows_since(0)
+            store_writers::rows_since("", 0)
                 .expect("the record is free")
                 .files
                 .into_iter()

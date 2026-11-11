@@ -51,6 +51,12 @@ pub const MAX_FILES: usize = 1_024;
 pub const MAX_WRITERS_PER_FILE: usize = 4;
 /// Spans per file between two takes.
 pub const MAX_SPANS_PER_FILE: usize = 8;
+/// Rows that left one file's record to make room and are kept with it (the
+/// first ones; later ones are counted).
+pub const MAX_EVICTED_ROWS_PER_FILE: usize = 16;
+/// Records that left the table to make room and that no reader asked past
+/// yet.
+pub const MAX_TOMBSTONES: usize = 1_024;
 
 /// How long a sensor handler retries a contended record before it counts the
 /// operation as not recorded. Handlers run on kernel-callback threads and
@@ -226,9 +232,27 @@ pub struct FileRows {
     pub rows: Vec<WriterRow>,
     /// Rows that left the record to make room.
     pub rows_evicted: u64,
+    /// The rows that left the record to make room, the first
+    /// [`MAX_EVICTED_ROWS_PER_FILE`] of them (a process that left twice is
+    /// one entry), and how many more left than are kept.
+    pub evicted_rows: Vec<WriterRow>,
+    pub evicted_rows_dropped: u64,
     /// The last operation reported unlinked the path.
     pub unlinked: bool,
     /// The record's sequence number when this file last changed.
+    pub changed_seq: u64,
+}
+
+/// A file record that left the table to make room, with everything it held:
+/// what [`rows_since`] returns once for it, from the sequence number of its
+/// removal. A reader that asks past it no longer gets it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileTombstone {
+    /// The record as it was when it left (its `changed_seq` is the record's
+    /// last change before it left).
+    pub file: FileRows,
+    /// When it left, and the sequence number of its leaving.
+    pub evicted_at_ms: u64,
     pub changed_seq: u64,
 }
 
@@ -250,6 +274,12 @@ pub struct StoreWriterCounters {
     pub lost_signals: u64,
     /// Operations a handler could not record because the record was held.
     pub dropped_locked: u64,
+    /// Rows that left a file's record beyond the ones it keeps
+    /// ([`MAX_EVICTED_ROWS_PER_FILE`]).
+    pub evicted_rows_dropped: u64,
+    /// Records that left the table while more than [`MAX_TOMBSTONES`] were
+    /// waiting for a reader: each is reported as dropped events.
+    pub tombstones_dropped: u64,
 }
 
 /// Reply of [`rows_since`].
@@ -266,6 +296,13 @@ pub struct StoreWriterRows {
     pub seq: u64,
     /// The files that changed after the asked sequence number.
     pub files: Vec<FileRows>,
+    /// The records that left the table after the asked sequence number.
+    pub tombstones: Vec<FileTombstone>,
+    /// Records that left the table up to this sequence number are no longer
+    /// returned (a reader asked past them, or more were waiting than
+    /// [`MAX_TOMBSTONES`]): a reader whose own position is below it has not
+    /// been told of every record that left.
+    pub tombstones_pruned_through: u64,
     /// Files with a record now.
     pub files_recorded: usize,
     /// When a sensor last reported dropped events, and how many times it did
@@ -503,6 +540,8 @@ struct FileRecord {
     complete_since_ms: u64,
     rows: Vec<WriterRow>,
     rows_evicted: u64,
+    evicted_rows: Vec<WriterRow>,
+    evicted_rows_dropped: u64,
     unlinked: bool,
     changed_seq: u64,
     last_event_ms: u64,
@@ -524,6 +563,56 @@ struct Table {
     files: HashMap<String, FileRecord>,
     last_lost_ms: Option<u64>,
     lost_signals: u64,
+    /// Records that left the table, oldest first.
+    tombstones: std::collections::VecDeque<FileTombstone>,
+    /// The highest sequence number of a tombstone no longer kept.
+    tombstones_pruned_through: u64,
+    /// The sequence number a reader of this instance asked past.
+    rows_acked: u64,
+}
+
+impl FileRecord {
+    fn rows(&self) -> FileRows {
+        FileRows {
+            path: self.path.clone(),
+            agent: self.agent.clone(),
+            kind: self.kind,
+            record_id: self.record_id,
+            first_seen_ms: self.first_seen_ms,
+            creation: self.creation,
+            last_creation: self.last_creation,
+            complete_since_ms: self.complete_since_ms,
+            rows: self.rows.clone(),
+            rows_evicted: self.rows_evicted,
+            evicted_rows: self.evicted_rows.clone(),
+            evicted_rows_dropped: self.evicted_rows_dropped,
+            unlinked: self.unlinked,
+            changed_seq: self.changed_seq,
+        }
+    }
+
+    /// Keep a row that left the record to make room.
+    fn keep_evicted(&mut self, row: WriterRow, counters: &Counters) {
+        if let Some(known) = self
+            .evicted_rows
+            .iter_mut()
+            .find(|known| known.writer == row.writer)
+        {
+            known.first_ms = known.first_ms.min(row.first_ms);
+            known.last_ms = known.last_ms.max(row.last_ms);
+            known.ops |= row.ops;
+            known.count = known.count.saturating_add(row.count);
+            return;
+        }
+        if self.evicted_rows.len() < MAX_EVICTED_ROWS_PER_FILE {
+            self.evicted_rows.push(row);
+        } else {
+            self.evicted_rows_dropped += 1;
+            counters
+                .evicted_rows_dropped
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Table {
@@ -536,6 +625,9 @@ impl Table {
             files: HashMap::new(),
             last_lost_ms: None,
             lost_signals: 0,
+            tombstones: std::collections::VecDeque::new(),
+            tombstones_pruned_through: 0,
+            rows_acked: 0,
         }
     }
 
@@ -545,22 +637,58 @@ impl Table {
     }
 
     /// Make room for one more file: the least recently active record leaves,
-    /// one the reader has taken before one it has not.
-    fn make_room(&mut self, counters: &Counters) {
+    /// one the reader has taken before one it has not, and is kept as a
+    /// tombstone until a reader asks past it.
+    fn make_room(&mut self, now_ms: u64, counters: &Counters) {
         while self.files.len() >= MAX_FILES {
             let victim = self
                 .files
                 .iter()
                 .min_by_key(|(_, record)| (record.dirty, record.last_event_ms, record.record_id))
                 .map(|(key, _)| key.clone());
-            match victim {
-                Some(key) => {
-                    self.files.remove(&key);
-                    counters.files_evicted.fetch_add(1, Ordering::Relaxed);
-                }
-                None => break,
+            let Some(record) = victim.and_then(|key| self.files.remove(&key)) else {
+                break;
+            };
+            counters.files_evicted.fetch_add(1, Ordering::Relaxed);
+            let seq = self.bump();
+            self.tombstones.push_back(FileTombstone {
+                file: record.rows(),
+                evicted_at_ms: now_ms,
+                changed_seq: seq,
+            });
+            self.prune_tombstones(counters);
+        }
+    }
+
+    /// Drop the tombstones a reader asked past, then the oldest ones beyond
+    /// [`MAX_TOMBSTONES`].
+    fn prune_tombstones(&mut self, counters: &Counters) {
+        while self
+            .tombstones
+            .front()
+            .is_some_and(|tombstone| tombstone.changed_seq <= self.rows_acked)
+        {
+            if let Some(tombstone) = self.tombstones.pop_front() {
+                self.tombstones_pruned_through =
+                    self.tombstones_pruned_through.max(tombstone.changed_seq);
             }
         }
+        while self.tombstones.len() > MAX_TOMBSTONES {
+            if let Some(tombstone) = self.tombstones.pop_front() {
+                self.tombstones_pruned_through =
+                    self.tombstones_pruned_through.max(tombstone.changed_seq);
+                counters.tombstones_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The tombstones whose sequence number is above `since_seq`.
+    fn tombstones_since(&self, since_seq: u64) -> Vec<FileTombstone> {
+        self.tombstones
+            .iter()
+            .filter(|tombstone| tombstone.changed_seq > since_seq)
+            .cloned()
+            .collect()
     }
 
     fn open_record(
@@ -573,7 +701,7 @@ impl Table {
         counters: &Counters,
     ) -> &mut FileRecord {
         if !self.files.contains_key(key) {
-            self.make_room(counters);
+            self.make_room(now_ms, counters);
             let record_id = self.next_record_id;
             self.next_record_id += 1;
             self.files.insert(
@@ -589,6 +717,8 @@ impl Table {
                     complete_since_ms: now_ms,
                     rows: Vec::new(),
                     rows_evicted: 0,
+                    evicted_rows: Vec::new(),
+                    evicted_rows_dropped: 0,
                     unlinked: false,
                     changed_seq: 0,
                     last_event_ms: now_ms,
@@ -699,10 +829,11 @@ impl Table {
                         .min_by_key(|(_, row)| (Some(row.writer) == creator, row.last_ms))
                         .map(|(index, _)| index);
                     if let Some(index) = victim {
-                        record.rows.remove(index);
+                        let left = record.rows.remove(index);
                         record.rows_evicted += 1;
                         record.complete_since_ms = record.complete_since_ms.max(op.at_ms);
                         counters.rows_evicted.fetch_add(1, Ordering::Relaxed);
+                        record.keep_evicted(left, counters);
                     }
                 }
                 record.rows.push(WriterRow {
@@ -811,20 +942,7 @@ impl Table {
             .files
             .values()
             .filter(|record| record.changed_seq > since_seq)
-            .map(|record| FileRows {
-                path: record.path.clone(),
-                agent: record.agent.clone(),
-                kind: record.kind,
-                record_id: record.record_id,
-                first_seen_ms: record.first_seen_ms,
-                creation: record.creation,
-                last_creation: record.last_creation,
-                complete_since_ms: record.complete_since_ms,
-                rows: record.rows.clone(),
-                rows_evicted: record.rows_evicted,
-                unlinked: record.unlinked,
-                changed_seq: record.changed_seq,
-            })
+            .map(FileRecord::rows)
             .collect();
         files.sort_by_key(|file| (file.changed_seq, file.record_id));
         files
@@ -840,6 +958,8 @@ struct Counters {
     spans_overflowed: AtomicU64,
     lost_signals: AtomicU64,
     dropped_locked: AtomicU64,
+    evicted_rows_dropped: AtomicU64,
+    tombstones_dropped: AtomicU64,
 }
 
 static COUNTERS: Lazy<Counters> = Lazy::new(Counters::default);
@@ -1111,21 +1231,36 @@ pub fn take_dirty() -> Option<DirtyTake> {
     })
 }
 
-/// The files whose rows changed after `since_seq` (0: every file), with the
-/// record's instance and counters. `None` when the record was held (nothing
-/// was read: ask again), never an empty reply standing for "no rows".
-pub fn rows_since(since_seq: u64) -> Option<StoreWriterRows> {
+/// The files whose rows changed, and the records that left the table, after
+/// `since_seq`, for a reader that last read the record's instance
+/// `instance` (another instance, or an empty one: everything, from 0), with
+/// the record's counters. A reader of the running instance asks past
+/// `since_seq` by asking: the tombstones up to it are no longer kept. `None`
+/// when the record was held (nothing was read: ask again), never an empty
+/// reply standing for "no rows".
+pub fn rows_since(instance: &str, since_seq: u64) -> Option<StoreWriterRows> {
     let configured = is_configured();
-    with_table(READ_RETRY_BUDGET, |table| StoreWriterRows {
-        instance: table.instance.clone(),
-        configured,
-        recording_since_ms: table.recording_since_ms,
-        seq: table.seq,
-        files: table.rows_since(since_seq),
-        files_recorded: table.files.len(),
-        last_lost_ms: table.last_lost_ms,
-        lost_signals: table.lost_signals,
-        counters: counters(),
+    with_table(READ_RETRY_BUDGET, |table| {
+        let since_seq = if instance == table.instance {
+            table.rows_acked = table.rows_acked.max(since_seq);
+            table.prune_tombstones(&COUNTERS);
+            since_seq
+        } else {
+            0
+        };
+        StoreWriterRows {
+            instance: table.instance.clone(),
+            configured,
+            recording_since_ms: table.recording_since_ms,
+            seq: table.seq,
+            files: table.rows_since(since_seq),
+            tombstones: table.tombstones_since(since_seq),
+            tombstones_pruned_through: table.tombstones_pruned_through,
+            files_recorded: table.files.len(),
+            last_lost_ms: table.last_lost_ms,
+            lost_signals: table.lost_signals,
+            counters: counters(),
+        }
     })
 }
 
@@ -1138,6 +1273,8 @@ pub fn counters() -> StoreWriterCounters {
         spans_overflowed: COUNTERS.spans_overflowed.load(Ordering::Relaxed),
         lost_signals: COUNTERS.lost_signals.load(Ordering::Relaxed),
         dropped_locked: COUNTERS.dropped_locked.load(Ordering::Relaxed),
+        evicted_rows_dropped: COUNTERS.evicted_rows_dropped.load(Ordering::Relaxed),
+        tombstones_dropped: COUNTERS.tombstones_dropped.load(Ordering::Relaxed),
     }
 }
 
@@ -1609,6 +1746,152 @@ mod tests {
         assert_eq!(counters.rows_evicted.load(Ordering::Relaxed), 1);
     }
 
+    /// A row that leaves the record stays with the file, with its
+    /// operations and times: the evidence of a write is not lost to make
+    /// room. A process that leaves twice is one entry; beyond the bound,
+    /// what leaves is counted.
+    #[test]
+    fn a_row_that_leaves_is_kept_with_its_file() {
+        let (mut table, counters) = new_table();
+        let path = "/home/u/.claude/projects/p/s.jsonl";
+        put(
+            &mut table,
+            &counters,
+            &op(path, ops::CREATE | ops::WRITE, 10, 500, 2_000),
+        );
+        // The writer whose row will leave first.
+        put(
+            &mut table,
+            &counters,
+            &op(path, ops::WRITE | ops::TRUNCATE, 99, 900, 2_050),
+        );
+        for (i, pid) in (11..=13u32).enumerate() {
+            put(
+                &mut table,
+                &counters,
+                &op(path, ops::WRITE, pid, 500, 2_100 + i as u64),
+            );
+        }
+        let rows = table.rows_since(0);
+        assert_eq!(rows[0].rows_evicted, 1);
+        assert_eq!(rows[0].evicted_rows.len(), 1);
+        let left = &rows[0].evicted_rows[0];
+        assert_eq!(left.writer.pid, 99);
+        assert_eq!(left.writer.started_at_ms, Some(900));
+        assert_eq!(left.ops, ops::WRITE | ops::TRUNCATE);
+        assert_eq!((left.first_ms, left.last_ms), (2_050, 2_050));
+        assert!(!rows[0].rows.iter().any(|row| row.writer.pid == 99));
+
+        // It writes again, leaves again: one entry, its operations joined.
+        put(
+            &mut table,
+            &counters,
+            &op(path, ops::REMOVE, 99, 900, 2_200),
+        );
+        for (i, pid) in (20..=22u32).enumerate() {
+            put(
+                &mut table,
+                &counters,
+                &op(path, ops::WRITE, pid, 500, 2_300 + i as u64),
+            );
+        }
+        let rows = table.rows_since(0);
+        let left: Vec<&WriterRow> = rows[0]
+            .evicted_rows
+            .iter()
+            .filter(|row| row.writer.pid == 99)
+            .collect();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].ops, ops::WRITE | ops::TRUNCATE | ops::REMOVE);
+        assert_eq!((left[0].first_ms, left[0].last_ms), (2_050, 2_200));
+
+        // Beyond the bound: the first ones stay, the others are counted.
+        for pid in 100..(100 + 2 * MAX_EVICTED_ROWS_PER_FILE as u32) {
+            put(
+                &mut table,
+                &counters,
+                &op(path, ops::WRITE, pid, 500, 3_000 + u64::from(pid)),
+            );
+        }
+        let rows = table.rows_since(0);
+        assert_eq!(rows[0].evicted_rows.len(), MAX_EVICTED_ROWS_PER_FILE);
+        assert!(rows[0].evicted_rows.iter().any(|row| row.writer.pid == 99));
+        assert!(rows[0].evicted_rows_dropped > 0);
+        assert_eq!(
+            counters.evicted_rows_dropped.load(Ordering::Relaxed),
+            rows[0].evicted_rows_dropped
+        );
+    }
+
+    /// A record that leaves the table to make room is returned as a
+    /// tombstone, with its rows and the rows that left it, from the
+    /// sequence number of its leaving, until a reader of the instance asks
+    /// past it. Beyond the bound the oldest goes unread, and the reply says
+    /// how far tombstones were dropped.
+    #[test]
+    fn a_record_that_leaves_the_table_is_returned_as_a_tombstone() {
+        let (mut table, counters) = new_table();
+        let first = "/home/u/.claude/projects/p/first.jsonl";
+        put(
+            &mut table,
+            &counters,
+            &op(first, ops::CREATE | ops::WRITE, 10, 500, 2_000),
+        );
+        put(
+            &mut table,
+            &counters,
+            &op(first, ops::WRITE, 66, 600, 2_010),
+        );
+        table.take_dirty();
+        let before = table.seq;
+        for i in 0..MAX_FILES as u64 {
+            let path = format!("/home/u/.claude/projects/p/f{i}.jsonl");
+            put(
+                &mut table,
+                &counters,
+                &op(&path, ops::CREATE, 10, 500, 3_000 + i),
+            );
+        }
+        assert!(!table.files.contains_key(&normalize(first)));
+        let tombstones = table.tombstones_since(before);
+        assert_eq!(tombstones.len(), 1);
+        let gone = &tombstones[0];
+        assert_eq!(gone.file.path, first);
+        assert!(gone.changed_seq > before);
+        let pids: Vec<u32> = gone.file.rows.iter().map(|row| row.writer.pid).collect();
+        assert_eq!(pids, vec![10, 66]);
+        assert!(gone.file.creation.is_some());
+        // Already read past: not returned again.
+        assert!(table.tombstones_since(gone.changed_seq).is_empty());
+        assert_eq!(table.tombstones_pruned_through, 0);
+
+        // A reader asks past it: it is dropped, and the reply says so.
+        table.rows_acked = gone.changed_seq;
+        table.prune_tombstones(&counters);
+        assert!(table.tombstones.is_empty());
+        assert_eq!(table.tombstones_pruned_through, gone.changed_seq);
+        assert_eq!(counters.tombstones_dropped.load(Ordering::Relaxed), 0);
+
+        // Nobody reads: beyond the bound the oldest is dropped unread.
+        let (mut table, counters) = new_table();
+        for i in 0..(MAX_FILES + MAX_TOMBSTONES + 1) as u64 {
+            let path = format!("/home/u/.claude/projects/p/g{i}.jsonl");
+            put(
+                &mut table,
+                &counters,
+                &op(&path, ops::CREATE, 10, 500, 3_000 + i),
+            );
+            table.take_dirty();
+        }
+        assert_eq!(table.tombstones.len(), MAX_TOMBSTONES);
+        assert_eq!(counters.tombstones_dropped.load(Ordering::Relaxed), 1);
+        assert!(table.tombstones_pruned_through > 0);
+        assert!(table
+            .tombstones
+            .iter()
+            .all(|tombstone| tombstone.changed_seq > table.tombstones_pruned_through));
+    }
+
     #[test]
     fn a_file_that_leaves_comes_back_as_another_record() {
         let (mut table, counters) = new_table();
@@ -1931,7 +2214,7 @@ mod tests {
         record(&outside);
         assert!(!is_configured());
         assert_eq!(classify("/tmp/sw-test/.claude/projects/p/s.jsonl"), None);
-        let before = rows_since(0).expect("the record is free");
+        let before = rows_since("", 0).expect("the record is free");
         assert!(!before.configured);
         assert!(before.files.is_empty());
 
@@ -1939,7 +2222,7 @@ mod tests {
         // Publishing wakes the reader; drain that wake-up first.
         assert!(wait_dirty(Duration::from_millis(200)));
         assert!(!wait_dirty(Duration::from_millis(20)));
-        let configured = rows_since(0).expect("the record is free");
+        let configured = rows_since("", 0).expect("the record is free");
         assert!(configured.configured);
         assert_ne!(configured.instance, before.instance);
 
@@ -1963,24 +2246,24 @@ mod tests {
         assert_eq!(take.files[0].path, path);
         assert_eq!(take.files[0].agent, "claude_code");
         assert_eq!(take.files[0].kind, StoreFileKind::Transcript);
-        let rows = rows_since(0).expect("the record is free");
+        let rows = rows_since("", 0).expect("the record is free");
         assert_eq!(rows.files.len(), 1);
         assert_eq!(rows.files_recorded, 1);
 
         // A dropped-event report reaches the published record.
         note_lost(7_000);
-        let rows = rows_since(0).expect("the record is free");
+        let rows = rows_since("", 0).expect("the record is free");
         assert_eq!(rows.lost_signals, 1);
         assert_eq!(rows.last_lost_ms, Some(7_000));
 
         // Published again: another instance, an empty record.
         configure(&[spec("/tmp/sw-test/.claude")]);
-        let again = rows_since(0).expect("the record is free");
+        let again = rows_since("", 0).expect("the record is free");
         assert_ne!(again.instance, configured.instance);
         assert!(again.files.is_empty());
         assert_eq!(again.lost_signals, 0);
         clear();
-        assert!(!rows_since(0).expect("the record is free").configured);
+        assert!(!rows_since("", 0).expect("the record is free").configured);
     }
 
     /// A publication is withdrawn by the generation it was given: the one a
@@ -1995,14 +2278,14 @@ mod tests {
         let second = configure(&[spec("/tmp/sw-second/.claude")]);
         assert_ne!(first, second);
         assert_eq!(stores_generation(), second);
-        let instance = rows_since(0).expect("the record is free").instance;
+        let instance = rows_since("", 0).expect("the record is free").instance;
 
         assert!(!clear_if(first));
         assert!(is_configured());
         assert_eq!(stores_generation(), second);
         assert!(classify("/tmp/sw-second/.claude/projects/p/s.jsonl").is_some());
         assert_eq!(
-            rows_since(0).expect("the record is free").instance,
+            rows_since("", 0).expect("the record is free").instance,
             instance
         );
 
@@ -2010,7 +2293,7 @@ mod tests {
         assert!(!is_configured());
         assert_eq!(stores_generation(), 0);
         assert_ne!(
-            rows_since(0).expect("the record is free").instance,
+            rows_since("", 0).expect("the record is free").instance,
             instance
         );
         // Nothing in place is no publication to withdraw.
@@ -2031,7 +2314,7 @@ mod tests {
         assert!(stores_unresolved());
         assert!(!is_configured());
         assert!(sensor().stores_unresolved);
-        assert!(!rows_since(0).expect("the record is free").configured);
+        assert!(!rows_since("", 0).expect("the record is free").configured);
         record(&op(
             "/tmp/sw-test/.claude/projects/p/s.jsonl",
             ops::CREATE,
@@ -2039,7 +2322,10 @@ mod tests {
             500,
             2_000,
         ));
-        assert!(rows_since(0).expect("the record is free").files.is_empty());
+        assert!(rows_since("", 0)
+            .expect("the record is free")
+            .files
+            .is_empty());
 
         // Stores published afterwards replace it; an empty publication is
         // not "unresolved".
