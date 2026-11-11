@@ -357,6 +357,9 @@ pub struct DirtyFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyTake {
     pub instance: String,
+    /// The record's sequence number at the take: every change up to it was
+    /// taken.
+    pub seq: u64,
     pub configured: bool,
     pub files: Vec<DirtyFile>,
 }
@@ -1245,6 +1248,7 @@ pub fn take_dirty() -> Option<DirtyTake> {
     let configured = is_configured();
     with_table(READ_RETRY_BUDGET, |table| DirtyTake {
         instance: table.instance.clone(),
+        seq: table.seq,
         configured,
         files: table.take_dirty(),
     })
@@ -1254,10 +1258,19 @@ pub fn take_dirty() -> Option<DirtyTake> {
 /// `since_seq`, for a reader that last read the record's instance
 /// `instance` (another instance, or an empty one: everything, from 0), with
 /// the record's counters. A reader of the running instance asks past
-/// `since_seq` by asking: the tombstones up to it are no longer kept. `None`
-/// when the record was held (nothing was read: ask again), never an empty
-/// reply standing for "no rows".
-pub fn rows_since(instance: &str, since_seq: u64) -> Option<StoreWriterRows> {
+/// `since_seq` by asking: the tombstones up to it are no longer kept.
+///
+/// `cut`, an instance and a sequence number: the reply holds the changes up
+/// to that sequence number only, and says so in its `seq` (what a reader of
+/// the files took up to: their rows and what it read are one cut). A cut of
+/// another instance than the record's holds every change back. `None` when
+/// the record was held (nothing was read: ask again), never an empty reply
+/// standing for "no rows".
+pub fn rows_since(
+    instance: &str,
+    since_seq: u64,
+    cut: Option<(&str, u64)>,
+) -> Option<StoreWriterRows> {
     let configured = is_configured();
     with_table(READ_RETRY_BUDGET, |table| {
         let since_seq = if instance == table.instance {
@@ -1267,13 +1280,28 @@ pub fn rows_since(instance: &str, since_seq: u64) -> Option<StoreWriterRows> {
         } else {
             0
         };
+        let until = match cut {
+            Some((cut_instance, cut_seq)) if cut_instance == table.instance => {
+                cut_seq.max(since_seq).min(table.seq)
+            }
+            Some(_) => since_seq.min(table.seq),
+            None => table.seq,
+        };
         StoreWriterRows {
             instance: table.instance.clone(),
             configured,
             recording_since_ms: table.recording_since_ms,
-            seq: table.seq,
-            files: table.rows_since(since_seq),
-            tombstones: table.tombstones_since(since_seq),
+            seq: until,
+            files: table
+                .rows_since(since_seq)
+                .into_iter()
+                .filter(|file| file.changed_seq <= until)
+                .collect(),
+            tombstones: table
+                .tombstones_since(since_seq)
+                .into_iter()
+                .filter(|tombstone| tombstone.changed_seq <= until)
+                .collect(),
             tombstones_pruned_through: table.tombstones_pruned_through,
             files_recorded: table.files.len(),
             last_lost_ms: table.last_lost_ms,
@@ -1401,6 +1429,37 @@ fn sensor_now() -> StoreWriterSensor {
             stores_unresolved,
         }
     }
+}
+
+/// What a directory just created is to the store roots awaited because they
+/// did not exist yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwaitedRootStep {
+    /// It is one of them: mark it as a root.
+    Root,
+    /// It lies on the way to one of them: watch it for creations.
+    Ancestor,
+    /// Neither.
+    Unrelated,
+}
+
+/// What `created` (a normalized path) is to the awaited roots (normalized).
+pub fn awaited_root_step(created: &str, awaited: &[String]) -> AwaitedRootStep {
+    let created = created.trim_end_matches('/');
+    if created.is_empty() {
+        return AwaitedRootStep::Unrelated;
+    }
+    let mut step = AwaitedRootStep::Unrelated;
+    for root in awaited {
+        let root = root.trim_end_matches('/');
+        if root == created {
+            return AwaitedRootStep::Root;
+        }
+        if path_under_root(root, created, true) {
+            step = AwaitedRootStep::Ancestor;
+        }
+    }
+    step
 }
 
 /// `btime` of `/proc/stat`: the boot time in seconds since the epoch.
@@ -2234,7 +2293,7 @@ mod tests {
         record(&outside);
         assert!(!is_configured());
         assert_eq!(classify("/tmp/sw-test/.claude/projects/p/s.jsonl"), None);
-        let before = rows_since("", 0).expect("the record is free");
+        let before = rows_since("", 0, None).expect("the record is free");
         assert!(!before.configured);
         assert!(before.files.is_empty());
 
@@ -2242,7 +2301,7 @@ mod tests {
         // Publishing wakes the reader; drain that wake-up first.
         assert!(wait_dirty(Duration::from_millis(200)));
         assert!(!wait_dirty(Duration::from_millis(20)));
-        let configured = rows_since("", 0).expect("the record is free");
+        let configured = rows_since("", 0, None).expect("the record is free");
         assert!(configured.configured);
         assert_ne!(configured.instance, before.instance);
 
@@ -2266,24 +2325,67 @@ mod tests {
         assert_eq!(take.files[0].path, path);
         assert_eq!(take.files[0].agent, "claude_code");
         assert_eq!(take.files[0].kind, StoreFileKind::Transcript);
-        let rows = rows_since("", 0).expect("the record is free");
+        let rows = rows_since("", 0, None).expect("the record is free");
         assert_eq!(rows.files.len(), 1);
         assert_eq!(rows.files_recorded, 1);
 
         // A dropped-event report reaches the published record.
         note_lost(7_000);
-        let rows = rows_since("", 0).expect("the record is free");
+        let rows = rows_since("", 0, None).expect("the record is free");
         assert_eq!(rows.lost_signals, 1);
         assert_eq!(rows.last_lost_ms, Some(7_000));
 
         // Published again: another instance, an empty record.
         configure(&[spec("/tmp/sw-test/.claude")]);
-        let again = rows_since("", 0).expect("the record is free");
+        let again = rows_since("", 0, None).expect("the record is free");
         assert_ne!(again.instance, configured.instance);
         assert!(again.files.is_empty());
         assert_eq!(again.lost_signals, 0);
         clear();
-        assert!(!rows_since("", 0).expect("the record is free").configured);
+        assert!(
+            !rows_since("", 0, None)
+                .expect("the record is free")
+                .configured
+        );
+    }
+
+    /// A cut holds back the changes after it: the files a reader took up to
+    /// a sequence number, and their rows, are one cut. A cut of another
+    /// instance holds every change back; none serves every change.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_cut_holds_back_the_changes_after_it() {
+        configure(&[spec("/tmp/sw-cut/.claude")]);
+        let instance = rows_since("", 0, None).expect("free").instance;
+        record(&op(
+            "/tmp/sw-cut/.claude/projects/p/a.jsonl",
+            ops::CREATE,
+            10,
+            500,
+            2_000,
+        ));
+        let take = take_dirty().expect("free");
+        assert_eq!(take.instance, instance);
+        record(&op(
+            "/tmp/sw-cut/.claude/projects/p/b.jsonl",
+            ops::CREATE,
+            11,
+            500,
+            2_001,
+        ));
+        let cut = rows_since(&instance, 0, Some((&instance, take.seq))).expect("free");
+        assert_eq!(cut.seq, take.seq);
+        let paths: Vec<&str> = cut.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["/tmp/sw-cut/.claude/projects/p/a.jsonl"]);
+        // From that cut on, the rest.
+        let rest = rows_since(&instance, cut.seq, None).expect("free");
+        assert_eq!(rest.files.len(), 1);
+        assert!(rest.seq > cut.seq);
+        // A cut of another instance: nothing past where the reader stood.
+        let held = rows_since(&instance, cut.seq, Some(("another", u64::MAX))).expect("free");
+        assert!(held.files.is_empty());
+        assert_eq!(held.seq, cut.seq);
+        clear();
     }
 
     /// A publication is withdrawn by the generation it was given: the one a
@@ -2298,14 +2400,18 @@ mod tests {
         let second = configure(&[spec("/tmp/sw-second/.claude")]);
         assert_ne!(first, second);
         assert_eq!(stores_generation(), second);
-        let instance = rows_since("", 0).expect("the record is free").instance;
+        let instance = rows_since("", 0, None)
+            .expect("the record is free")
+            .instance;
 
         assert!(!clear_if(first));
         assert!(is_configured());
         assert_eq!(stores_generation(), second);
         assert!(classify("/tmp/sw-second/.claude/projects/p/s.jsonl").is_some());
         assert_eq!(
-            rows_since("", 0).expect("the record is free").instance,
+            rows_since("", 0, None)
+                .expect("the record is free")
+                .instance,
             instance
         );
 
@@ -2313,7 +2419,9 @@ mod tests {
         assert!(!is_configured());
         assert_eq!(stores_generation(), 0);
         assert_ne!(
-            rows_since("", 0).expect("the record is free").instance,
+            rows_since("", 0, None)
+                .expect("the record is free")
+                .instance,
             instance
         );
         // Nothing in place is no publication to withdraw.
@@ -2334,7 +2442,11 @@ mod tests {
         assert!(stores_unresolved());
         assert!(!is_configured());
         assert!(sensor().stores_unresolved);
-        assert!(!rows_since("", 0).expect("the record is free").configured);
+        assert!(
+            !rows_since("", 0, None)
+                .expect("the record is free")
+                .configured
+        );
         record(&op(
             "/tmp/sw-test/.claude/projects/p/s.jsonl",
             ops::CREATE,
@@ -2342,7 +2454,7 @@ mod tests {
             500,
             2_000,
         ));
-        assert!(rows_since("", 0)
+        assert!(rows_since("", 0, None)
             .expect("the record is free")
             .files
             .is_empty());
@@ -2414,6 +2526,41 @@ mod tests {
             Some(1_762_790_000)
         );
         assert_eq!(parse_boot_time_secs("cpu 1 2 3\n"), None);
+    }
+
+    #[test]
+    fn a_created_directory_is_an_awaited_root_or_lies_on_the_way_to_one() {
+        let awaited = vec![
+            "/home/u/.codex/sessions".to_string(),
+            "/home/u/.claude/projects".to_string(),
+        ];
+        assert_eq!(
+            awaited_root_step("/home/u/.codex", &awaited),
+            AwaitedRootStep::Ancestor
+        );
+        assert_eq!(
+            awaited_root_step("/home/u/.codex/sessions", &awaited),
+            AwaitedRootStep::Root
+        );
+        assert_eq!(
+            awaited_root_step("/home/u/.codex/sessions/", &awaited),
+            AwaitedRootStep::Root
+        );
+        // A sibling that shares a prefix, a directory below the root, and
+        // anything else is neither.
+        assert_eq!(
+            awaited_root_step("/home/u/.codex-old", &awaited),
+            AwaitedRootStep::Unrelated
+        );
+        assert_eq!(
+            awaited_root_step("/home/u/.codex/sessions/2026", &awaited),
+            AwaitedRootStep::Unrelated
+        );
+        assert_eq!(
+            awaited_root_step("/home/u/Downloads", &awaited),
+            AwaitedRootStep::Unrelated
+        );
+        assert_eq!(awaited_root_step("", &awaited), AwaitedRootStep::Unrelated);
     }
 
     #[test]

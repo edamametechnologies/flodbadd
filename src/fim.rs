@@ -723,6 +723,14 @@ impl FimWatcher {
                 }
             }
             crate::fim_fanotify::init(&marked_roots);
+            // A store root that does not exist yet is marked when it is
+            // created.
+            let awaited: Vec<PathBuf> = store_only_roots
+                .iter()
+                .filter(|root| !root.exists())
+                .cloned()
+                .collect();
+            crate::fim_fanotify::await_roots(&awaited);
         }
 
         match &delivery {
@@ -3959,7 +3967,7 @@ mod tests {
         assert!(crate::store_writers::classify(&first_transcript).is_some());
 
         let second = start(&second_root, &second_store);
-        let instance = crate::store_writers::rows_since("", 0)
+        let instance = crate::store_writers::rows_since("", 0, None)
             .expect("the record is free")
             .instance;
         let roots_generation = crate::fim_attribution::roots_generation();
@@ -3982,7 +3990,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            crate::store_writers::rows_since("", 0)
+            crate::store_writers::rows_since("", 0, None)
                 .expect("the record is free")
                 .instance,
             instance
@@ -3993,7 +4001,7 @@ mod tests {
         assert!(!crate::fim_attribution::is_attributable(&in_second));
         assert_eq!(crate::fim_attribution::roots_generation(), 0);
         assert_ne!(
-            crate::store_writers::rows_since("", 0)
+            crate::store_writers::rows_since("", 0, None)
                 .expect("the record is free")
                 .instance,
             instance

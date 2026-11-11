@@ -3136,7 +3136,7 @@ mod tests {
         }]);
         let wanted = crate::fim_attribution::normalize(&file_arg);
         let rows_of_file = || {
-            store_writers::rows_since("", 0).and_then(|rows| {
+            store_writers::rows_since("", 0, None).and_then(|rows| {
                 rows.files
                     .into_iter()
                     .find(|rows| crate::fim_attribution::normalize(&rows.path) == wanted)

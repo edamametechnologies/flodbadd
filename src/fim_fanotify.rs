@@ -146,6 +146,11 @@ struct FanotifyTable {
     creation_unresolved_last_errno: std::sync::atomic::AtomicI32,
     /// Queue overflows either group reported (`FAN_Q_OVERFLOW`).
     queue_overflows: std::sync::atomic::AtomicU64,
+    /// Store roots that did not exist when they were given, by normalized
+    /// path, and the directories marked for creations only on the way to
+    /// them.
+    awaited_roots: CustomDashMap<String, PathBuf>,
+    sentinels: CustomDashMap<String, ()>,
 }
 
 static TABLE: OnceCell<Arc<FanotifyTable>> = OnceCell::new();
@@ -213,6 +218,8 @@ pub fn init(roots: &[PathBuf]) {
             creation_unresolved: std::sync::atomic::AtomicU64::new(0),
             creation_unresolved_last_errno: std::sync::atomic::AtomicI32::new(0),
             queue_overflows: std::sync::atomic::AtomicU64::new(0),
+            awaited_roots: CustomDashMap::new("fim_fanotify_awaited_roots"),
+            sentinels: CustomDashMap::new("fim_fanotify_sentinels"),
         });
         let reader = Arc::clone(&table);
         std::thread::Builder::new()
@@ -263,6 +270,90 @@ pub fn init(roots: &[PathBuf]) {
             "off (kernel without FAN_REPORT_DFID_NAME)"
         }
     );
+}
+
+/// Await the store roots in `roots` that do not exist yet: the nearest
+/// directory above each that exists is marked for creations only, then each
+/// directory created on the way to it the same, and the root, once created,
+/// is marked with what is already in it. No-op before `init` or without the
+/// creation group.
+pub fn await_roots(roots: &[PathBuf]) {
+    let Some(table) = TABLE.get() else {
+        return;
+    };
+    if table.dir_fan.is_none() {
+        return;
+    }
+    for root in roots {
+        if root.exists() {
+            continue;
+        }
+        table
+            .awaited_roots
+            .insert(normalize(&root.to_string_lossy()), root.clone());
+        let mut ancestor = root.parent();
+        while let Some(dir) = ancestor {
+            if dir.is_dir() {
+                sentinel_mark(table, dir);
+                break;
+            }
+            ancestor = dir.parent();
+        }
+    }
+}
+
+/// Mark `dir` in the creation group for the creations in it only.
+fn sentinel_mark(table: &FanotifyTable, dir: &Path) {
+    let key = root_key(dir);
+    if table.sentinels.contains_key(&key) {
+        return;
+    }
+    let (Some(dir_fan), Ok(handle)) = (table.dir_fan.as_ref(), std::fs::File::open(dir)) else {
+        return;
+    };
+    let mask = MaskFlags::from_bits_retain(libc::FAN_CREATE) | MaskFlags::FAN_ONDIR;
+    if dir_fan
+        .mark::<_, Path>(MarkFlags::FAN_MARK_ADD, mask, &handle, None)
+        .is_ok()
+    {
+        table.sentinels.insert(key.clone(), ());
+        // Creation records under it resolve against this handle.
+        table.root_handles.insert(key, handle);
+    }
+}
+
+/// A directory created under a directory marked for an awaited root: the
+/// root itself is marked with what is already in it; a directory on the way
+/// is watched for creations in turn. `true` when the creation was one of
+/// these (nothing else is done with it).
+fn awaited_root_created(table: &FanotifyTable, parent: &Path, created: &Path) -> bool {
+    if !table.sentinels.contains_key(&root_key(parent))
+        || table.marked.contains_key(&root_key(parent))
+    {
+        return false;
+    }
+    let awaited: Vec<String> = table
+        .awaited_roots
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    match crate::store_writers::awaited_root_step(&normalize(&created.to_string_lossy()), &awaited)
+    {
+        crate::store_writers::AwaitedRootStep::Root => {
+            table
+                .awaited_roots
+                .remove(&normalize(&created.to_string_lossy()));
+            table.roots.insert(root_key(created), ());
+            if let Ok(handle) = std::fs::File::open(created) {
+                table.root_handles.insert(root_key(created), handle);
+            }
+            let budget = MAX_DIRECTORY_MARKS.saturating_sub(table.marked.len());
+            mark_tree(table, created, budget.min(RUNTIME_MARK_RESERVE));
+        }
+        crate::store_writers::AwaitedRootStep::Ancestor => sentinel_mark(table, created),
+        crate::store_writers::AwaitedRootStep::Unrelated => {}
+    }
+    true
 }
 
 /// Mark `roots` and their subtrees breadth-first, root by root, until the
@@ -1011,6 +1102,17 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 continue;
             };
             let created = parent.join(&record.name);
+            // Under a directory watched only for an awaited store root:
+            // nothing else is done with it (no process is resolved).
+            if record.mask & libc::FAN_CREATE != 0 && record.is_dir {
+                if awaited_root_created(&table, &parent, &created) {
+                    continue;
+                }
+            } else if table.sentinels.contains_key(&root_key(&parent))
+                && !table.marked.contains_key(&root_key(&parent))
+            {
+                continue;
+            }
             let pid = record.pid as u32;
             let (process_name, process_path) = resolve_writer(pid);
             // The store-writer record: a file's creation, removal and move,
@@ -1679,7 +1781,7 @@ mod tests {
         }
         let file = project.join("s.jsonl");
         let rows_of = |path: &Path| {
-            store_writers::rows_since("", 0)
+            store_writers::rows_since("", 0, None)
                 .expect("the record is free")
                 .files
                 .into_iter()
