@@ -1089,28 +1089,41 @@ enum Queued {
     },
 }
 
-/// The queue: handlers send without waiting, the holder of the record
-/// receives. The receiver is only ever taken by the holder of the record.
-static QUEUE: Lazy<(
-    std::sync::mpsc::SyncSender<Queued>,
-    CustomMutex<std::sync::mpsc::Receiver<Queued>>,
-)> = Lazy::new(|| {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(MAX_QUEUED_REPORTS);
-    (sender, CustomMutex::new(receiver))
-});
+/// The queue: a handler that finds the record held appends its report, the
+/// next holder of the record applies them. The queue itself is held for one
+/// push or one swap, never while a report is applied.
+static QUEUE: Lazy<CustomMutex<std::collections::VecDeque<Queued>>> =
+    Lazy::new(|| CustomMutex::new(std::collections::VecDeque::new()));
 
 /// Queue `report` for the next holder of the record. A full queue drops it
 /// and records dropped events.
 fn enqueue(report: Queued) {
-    match QUEUE.0.try_send(report) {
-        Ok(()) => {
+    let mut report = Some(report);
+    let depth = loop {
+        let pushed = QUEUE.try_with(|queue| {
+            if queue.len() >= MAX_QUEUED_REPORTS {
+                return None;
+            }
+            if let Some(report) = report.take() {
+                queue.push_back(report);
+            }
+            let depth = queue.len() as u64;
+            COUNTERS.queue_depth.store(depth, Ordering::Relaxed);
+            Some(depth)
+        });
+        match pushed {
+            Some(depth) => break depth,
+            None => std::thread::yield_now(),
+        }
+    };
+    match depth {
+        Some(depth) => {
             COUNTERS.queued_reports.fetch_add(1, Ordering::Relaxed);
-            let depth = COUNTERS.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
             COUNTERS
                 .queue_high_water
                 .fetch_max(depth, Ordering::Relaxed);
         }
-        Err(_) => {
+        None => {
             COUNTERS.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
             COUNTERS
                 .last_queue_drop_ms
@@ -1122,56 +1135,63 @@ fn enqueue(report: Queued) {
 
 /// Apply the queued reports, in the order they were made.
 fn drain_queue(table: &mut Table) {
-    let _ = QUEUE.1.try_with(|receiver| {
-        while let Ok(report) = receiver.try_recv() {
-            COUNTERS.queue_depth.fetch_sub(1, Ordering::Relaxed);
-            match report {
-                Queued::Operation {
-                    key,
-                    agent,
-                    kind,
-                    display,
-                    path,
+    let reports = loop {
+        let taken = QUEUE.try_with(|queue| {
+            COUNTERS.queue_depth.store(0, Ordering::Relaxed);
+            std::mem::take(queue)
+        });
+        if let Some(reports) = taken {
+            break reports;
+        }
+        std::thread::yield_now();
+    };
+    for report in reports {
+        match report {
+            Queued::Operation {
+                key,
+                agent,
+                kind,
+                display,
+                path,
+                ops,
+                pid,
+                started_at_ms,
+                process_path,
+                at_ms,
+                size,
+                identity,
+                creation_reorder_ms,
+            } => {
+                let op = Operation {
+                    path: &path,
                     ops,
                     pid,
                     started_at_ms,
-                    process_path,
+                    process_path: &process_path,
                     at_ms,
                     size,
                     identity,
-                    creation_reorder_ms,
-                } => {
-                    let op = Operation {
-                        path: &path,
-                        ops,
-                        pid,
-                        started_at_ms,
-                        process_path: &process_path,
-                        at_ms,
-                        size,
-                        identity,
-                    };
-                    table.record(
-                        &key,
-                        &agent,
-                        kind,
-                        &display,
-                        &op,
-                        creation_reorder_ms,
-                        &COUNTERS,
-                    );
-                }
-                Queued::Change {
-                    key,
-                    agent,
+                };
+                table.record(
+                    &key,
+                    &agent,
                     kind,
-                    display,
-                    at_ms,
-                } => table.note_change(&key, &agent, kind, &display, at_ms, &COUNTERS),
-                Queued::Lost { at_ms } => table.note_lost(at_ms),
+                    &display,
+                    &op,
+                    creation_reorder_ms,
+                    &COUNTERS,
+                );
             }
+            Queued::Change {
+                key,
+                agent,
+                kind,
+                display,
+                at_ms,
+            } => table.note_change(&key, &agent, kind, &display, at_ms, &COUNTERS),
+            Queued::Lost { at_ms } => table.note_lost(at_ms),
         }
-    });
+    }
 }
 
 /// The reader's wake-up: the thread parked in [`wait_dirty`], and whether a

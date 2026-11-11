@@ -1461,7 +1461,7 @@ mod macos {
                                 responsible_pid,
                                 message_time_ms(&msg),
                                 None,
-                                Some(file_id(ev.target())),
+                                Some(file_id(&ev.target())),
                             );
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
@@ -1510,7 +1510,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     u64::try_from(ev.target().stat().st_size).ok(),
-                                    Some(file_id(ev.target())),
+                                    Some(file_id(&ev.target())),
                                 );
                                 FlodbaddL7Es::record_file_attribution(
                                     &file_table_for_handler,
@@ -1661,7 +1661,7 @@ mod macos {
                                     responsible_pid,
                                     message_time_ms(&msg),
                                     None,
-                                    Some(file_id(ev.target())),
+                                    Some(file_id(&ev.target())),
                                 );
                             }
                         }
@@ -1676,7 +1676,7 @@ mod macos {
                                     responsible_pid,
                                     at_ms,
                                     None,
-                                    Some(file_id(ev.source())),
+                                    Some(file_id(&ev.source())),
                                 );
                             }
                             // The new name holds the linked file's content.
