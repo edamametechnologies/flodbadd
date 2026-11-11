@@ -330,6 +330,8 @@ pub struct DirtyFile {
     pub agent: String,
     pub kind: StoreFileKind,
     pub record_id: u64,
+    /// When the record was opened (the first operation reported for it).
+    pub first_seen_ms: u64,
     /// The creation reported for the file, when the record opened with it.
     pub creation: Option<CreationSeen>,
     /// The latest creation reported at the path (see [`FileRows`]).
@@ -941,6 +943,7 @@ impl Table {
                     agent: record.agent.clone(),
                     kind: record.kind,
                     record_id: record.record_id,
+                    first_seen_ms: record.first_seen_ms,
                     creation: record.creation,
                     last_creation: record.last_creation,
                     dirty_since_ms: record.dirty_since_ms,
