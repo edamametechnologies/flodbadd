@@ -260,6 +260,25 @@ pub struct FileRows {
     pub unlinked: bool,
     /// The record's sequence number when this file last changed.
     pub changed_seq: u64,
+    /// The file changed after the cut the reply was asked with: its rows
+    /// hold operations the reader of the files had not taken at that cut.
+    pub changed_after_cut: bool,
+    /// What the reader of the files found and gave back to the record
+    /// ([`note_reader_facts`]): the file had more than one name at a read;
+    /// the file's own creation time contradicted the creation recorded.
+    /// Kept for the life of the record.
+    pub reader_multiple_names: bool,
+    pub reader_creation_contradicted: bool,
+}
+
+/// What the reader of the files gives back to the record for one record
+/// ([`note_reader_facts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReaderFacts {
+    /// The reader read the file from this creation (its `at_ms`).
+    pub creation_read_at_ms: Option<u64>,
+    pub multiple_names: bool,
+    pub creation_contradicted: bool,
 }
 
 /// A file record that left the table to make room, with everything it held:
@@ -308,6 +327,10 @@ pub struct StoreWriterCounters {
     /// Records that left the table while more than [`MAX_TOMBSTONES`] were
     /// waiting for a reader: each is reported as dropped events.
     pub tombstones_dropped: u64,
+    /// Renames or removals of a directory holding records
+    /// ([`note_tree_changed`]), and the records they reached.
+    pub tree_changes: u64,
+    pub tree_changed_records: u64,
 }
 
 /// Reply of [`rows_since`].
@@ -322,6 +345,10 @@ pub struct StoreWriterRows {
     pub recording_since_ms: u64,
     /// The record's sequence number at the read: ask again from it.
     pub seq: u64,
+    /// The cut the reply was asked with (its sequence number, or `seq`
+    /// without one): files and tombstones that changed after it are served
+    /// too, marked `changed_after_cut`.
+    pub cut_seq: u64,
     /// The files that changed after the asked sequence number.
     pub files: Vec<FileRows>,
     /// The records that left the table after the asked sequence number.
@@ -370,6 +397,10 @@ pub struct DirtyFile {
     pub lost: bool,
     /// The last operation reported unlinked the path.
     pub unlinked: bool,
+    /// A reader already read the file from this creation (its `at_ms`), as
+    /// it gave back with [`note_reader_facts`]: a reader that holds nothing
+    /// of the file now did not follow it since.
+    pub creation_read_at_ms: Option<u64>,
 }
 
 /// Reply of [`take_dirty`].
@@ -554,6 +585,20 @@ pub fn classify(path: &str) -> Option<(String, StoreFileKind)> {
         .map(|(store, kind)| (store.agent.clone(), kind))
 }
 
+/// The key a file's record is kept under: the normalized path, with its
+/// letter case on Linux (`K.jsonl` and `k.jsonl` are two files there) and
+/// folded elsewhere.
+pub fn record_key(path: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        normalize(path)
+    }
+}
+
 /// Whether `dir` is a published store directory: a store root or a pid-file
 /// root, or a directory below a store root.
 pub fn is_store_directory(dir: &str) -> bool {
@@ -622,6 +667,10 @@ struct FileRecord {
     size_at_close: Option<u64>,
     identity: Option<FileId>,
     lost: bool,
+    // What the reader gave back.
+    creation_read_at_ms: Option<u64>,
+    reader_multiple_names: bool,
+    reader_creation_contradicted: bool,
 }
 
 #[derive(Debug)]
@@ -658,6 +707,9 @@ impl FileRecord {
             evicted_rows_dropped: self.evicted_rows_dropped,
             unlinked: self.unlinked,
             changed_seq: self.changed_seq,
+            changed_after_cut: false,
+            reader_multiple_names: self.reader_multiple_names,
+            reader_creation_contradicted: self.reader_creation_contradicted,
         }
     }
 
@@ -802,6 +854,9 @@ impl Table {
                     size_at_close: None,
                     identity: None,
                     lost: false,
+                    creation_read_at_ms: None,
+                    reader_multiple_names: false,
+                    reader_creation_contradicted: false,
                 },
             );
         }
@@ -983,6 +1038,60 @@ impl Table {
         }
     }
 
+    /// Every record below the directory `prefix` (a record key) names a file
+    /// that may no longer be the one recorded: its rows are complete since
+    /// `at_ms` only, and the reader is told. The number of records reached.
+    fn note_tree_changed(&mut self, prefix: &str, at_ms: u64) -> u64 {
+        let prefix = format!("{}/", prefix.trim_end_matches('/'));
+        if !self.files.keys().any(|key| key.starts_with(&prefix)) {
+            return 0;
+        }
+        let seq = self.bump();
+        let mut reached = 0;
+        for (key, record) in self.files.iter_mut() {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            record.lost = true;
+            record.complete_since_ms = record.complete_since_ms.max(at_ms);
+            record.changed_seq = seq;
+            if !record.dirty {
+                record.dirty = true;
+                record.dirty_since_ms = at_ms;
+            }
+            reached += 1;
+        }
+        reached
+    }
+
+    /// What the reader gave back for the record `record_id` of `key`.
+    fn note_reader_facts(&mut self, key: &str, record_id: u64, facts: ReaderFacts) {
+        let Some(record) = self.files.get_mut(key) else {
+            return;
+        };
+        if record.record_id != record_id {
+            return;
+        }
+        if facts.creation_read_at_ms.is_some() {
+            record.creation_read_at_ms = facts.creation_read_at_ms;
+        }
+        let verdicts_before = (
+            record.reader_multiple_names,
+            record.reader_creation_contradicted,
+        );
+        record.reader_multiple_names |= facts.multiple_names;
+        record.reader_creation_contradicted |= facts.creation_contradicted;
+        if verdicts_before
+            != (
+                record.reader_multiple_names,
+                record.reader_creation_contradicted,
+            )
+        {
+            self.seq += 1;
+            record.changed_seq = self.seq;
+        }
+    }
+
     fn take_dirty(&mut self) -> Vec<DirtyFile> {
         let mut files: Vec<DirtyFile> = self
             .files
@@ -1005,6 +1114,7 @@ impl Table {
                     identity: record.identity,
                     lost: std::mem::take(&mut record.lost),
                     unlinked: record.unlinked,
+                    creation_read_at_ms: record.creation_read_at_ms,
                 }
             })
             .collect();
@@ -1043,6 +1153,8 @@ struct Counters {
     last_tombstone_drop_ms: AtomicU64,
     evicted_rows_dropped: AtomicU64,
     tombstones_dropped: AtomicU64,
+    tree_changes: AtomicU64,
+    tree_changed_records: AtomicU64,
 }
 
 fn time_or_none(ms: u64) -> Option<u64> {
@@ -1086,6 +1198,15 @@ enum Queued {
     },
     Lost {
         at_ms: u64,
+    },
+    Tree {
+        prefix: String,
+        at_ms: u64,
+    },
+    Reader {
+        key: String,
+        record_id: u64,
+        facts: ReaderFacts,
     },
 }
 
@@ -1190,6 +1311,17 @@ fn drain_queue(table: &mut Table) {
                 at_ms,
             } => table.note_change(&key, &agent, kind, &display, at_ms, &COUNTERS),
             Queued::Lost { at_ms } => table.note_lost(at_ms),
+            Queued::Tree { prefix, at_ms } => {
+                let reached = table.note_tree_changed(&prefix, at_ms);
+                COUNTERS
+                    .tree_changed_records
+                    .fetch_add(reached, Ordering::Relaxed);
+            }
+            Queued::Reader {
+                key,
+                record_id,
+                facts,
+            } => table.note_reader_facts(&key, record_id, facts),
         }
     }
 }
@@ -1358,10 +1490,10 @@ pub fn record(op: &Operation<'_>) {
     if matcher.stores.is_empty() || op.ops == 0 || !matcher.ends_like_a_store_file(op.path) {
         return;
     }
-    let key = normalize(op.path);
-    let Some((store, kind)) = matcher.classify(&key) else {
+    let Some((store, kind)) = matcher.classify(&normalize(op.path)) else {
         return;
     };
+    let key = record_key(op.path);
     let display = display_path(op.path);
     COUNTERS.operations.fetch_add(1, Ordering::Relaxed);
     // One try: a held record queues the report for its next holder.
@@ -1403,10 +1535,10 @@ pub fn note_change(path: &str, at_ms: u64) {
     if matcher.stores.is_empty() || !matcher.ends_like_a_store_file(path) {
         return;
     }
-    let key = normalize(path);
-    let Some((store, kind)) = matcher.classify(&key) else {
+    let Some((store, kind)) = matcher.classify(&normalize(path)) else {
         return;
     };
+    let key = record_key(path);
     let display = display_path(path);
     COUNTERS.changes_noted.fetch_add(1, Ordering::Relaxed);
     let noted = with_table(Duration::ZERO, |table| {
@@ -1443,6 +1575,73 @@ pub fn note_lost(at_ms: u64) {
         tracing::info!("store writers: a sensor reported dropped events");
     }
     wake_reader();
+}
+
+/// A directory (or a file) at `path` was renamed or removed. When it is a
+/// store directory, or holds a store root, every record below it names a
+/// file that may no longer be the one recorded (a directory moved into
+/// place carries its own files): those records are complete since `at_ms`
+/// only, and the reader is told. Cheap for any other path.
+pub fn note_tree_changed(path: &str, at_ms: u64) {
+    let matcher = MATCHER.load();
+    if matcher.stores.is_empty() {
+        return;
+    }
+    let normalized = normalize(path);
+    let normalized = normalized.trim_end_matches('/');
+    if normalized.is_empty() {
+        return;
+    }
+    let related = matcher.stores.iter().any(|store| {
+        store
+            .roots
+            .iter()
+            .chain(store.pid_file_roots.iter())
+            .any(|root| {
+                root == normalized
+                    || path_under_root(normalized, root, true)
+                    || path_under_root(root, normalized, true)
+            })
+    });
+    if !related {
+        return;
+    }
+    COUNTERS.tree_changes.fetch_add(1, Ordering::Relaxed);
+    let prefix = record_key(path);
+    let noted = with_table(Duration::ZERO, |table| {
+        table.note_tree_changed(&prefix, at_ms)
+    });
+    match noted {
+        Some(reached) => {
+            COUNTERS
+                .tree_changed_records
+                .fetch_add(reached, Ordering::Relaxed);
+        }
+        None => enqueue(Queued::Tree { prefix, at_ms }),
+    }
+    wake_reader();
+}
+
+/// What the reader of the files found for the record `record_id` of `path`,
+/// given back so that it outlives the reader's own state: the creation it
+/// read the file from, and its verdicts on the file (more than one name; a
+/// creation the file's own time contradicts). Ignored for another record of
+/// the path.
+pub fn note_reader_facts(path: &str, record_id: u64, facts: ReaderFacts) {
+    if !is_configured() || facts == ReaderFacts::default() {
+        return;
+    }
+    let key = record_key(path);
+    let noted = with_table(READ_RETRY_BUDGET, |table| {
+        table.note_reader_facts(&key, record_id, facts)
+    });
+    if noted.is_none() {
+        enqueue(Queued::Reader {
+            key,
+            record_id,
+            facts,
+        });
+    }
 }
 
 /// Block the calling thread until a change is reported or `timeout` elapses.
@@ -1482,12 +1681,13 @@ pub fn take_dirty() -> Option<DirtyTake> {
 /// the record's counters. A reader of the running instance asks past
 /// `since_seq` by asking: the tombstones up to it are no longer kept.
 ///
-/// `cut`, an instance and a sequence number: the reply holds the changes up
-/// to that sequence number only, and says so in its `seq` (what a reader of
-/// the files took up to: their rows and what it read are one cut). A cut of
-/// another instance than the record's holds every change back. `None` when
-/// the record was held (nothing was read: ask again), never an empty reply
-/// standing for "no rows".
+/// `cut`, an instance and a sequence number (what a reader of the files took
+/// up to): every changed file is served, and those that changed after the
+/// cut are marked `changed_after_cut` (their rows are newer than what the
+/// reader read; they only make a trust stricter). A cut of another instance
+/// than the record's marks every change. `None` when the record was held
+/// (nothing was read: ask again), never an empty reply standing for "no
+/// rows".
 pub fn rows_since(
     instance: &str,
     since_seq: u64,
@@ -1513,16 +1713,23 @@ pub fn rows_since(
             instance: table.instance.clone(),
             configured,
             recording_since_ms: table.recording_since_ms,
-            seq: until,
+            seq: table.seq,
+            cut_seq: until,
             files: table
                 .rows_since(since_seq)
                 .into_iter()
-                .filter(|file| file.changed_seq <= until)
+                .map(|mut file| {
+                    file.changed_after_cut = file.changed_seq > until;
+                    file
+                })
                 .collect(),
             tombstones: table
                 .tombstones_since(since_seq)
                 .into_iter()
-                .filter(|tombstone| tombstone.changed_seq <= until)
+                .map(|mut tombstone| {
+                    tombstone.file.changed_after_cut = tombstone.changed_seq > until;
+                    tombstone
+                })
                 .collect(),
             tombstones_pruned_through: table.tombstones_pruned_through,
             files_recorded: table.files.len(),
@@ -1551,6 +1758,8 @@ pub fn counters() -> StoreWriterCounters {
         ),
         evicted_rows_dropped: COUNTERS.evicted_rows_dropped.load(Ordering::Relaxed),
         tombstones_dropped: COUNTERS.tombstones_dropped.load(Ordering::Relaxed),
+        tree_changes: COUNTERS.tree_changes.load(Ordering::Relaxed),
+        tree_changed_records: COUNTERS.tree_changed_records.load(Ordering::Relaxed),
     }
 }
 
@@ -1575,15 +1784,45 @@ pub struct StoreWriterSensor {
     pub stores_unresolved: bool,
     /// Why, while that is so (a word the caller chose).
     pub stores_unresolved_reason: Option<String>,
+    /// Since when the sensor has delivered everything without a break
+    /// ([`StoreWriterSensor::delivers_everything`]), as the polls of
+    /// [`sensor`] saw it; `None` while it does not. A break is recorded as
+    /// dropped events.
+    pub complete_since_ms: Option<u64>,
+}
+
+impl StoreWriterSensor {
+    /// Whether the sensor delivers every operation that can change a store
+    /// file: it is active, creations, removals and moves come with their
+    /// process, and, where the platform reports them as operations of their
+    /// own (Endpoint Security, ETW), so do the operations that set a size or
+    /// a name without a write.
+    pub fn delivers_everything(&self) -> bool {
+        self.active && self.entry_events && (self.extended_events || self.kind == "fanotify")
+    }
 }
 
 /// The state [`sensor`] last logged (`u32::MAX`: none yet).
 static SENSOR_LOGGED: AtomicU32 = AtomicU32::new(u32::MAX);
 
+/// Since when the sensor delivers everything (0: it does not).
+static COMPLETE_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+
 /// The state of the sensor that feeds the record in this build. A change of
-/// that state since the previous call is logged, once.
+/// that state since the previous call is logged, once. Each call is also a
+/// poll: a sensor that stopped delivering everything since the previous one
+/// is recorded as dropped events (whatever happened meanwhile was not
+/// recorded), and one that delivers everything again starts its
+/// `complete_since_ms` now.
 pub fn sensor() -> StoreWriterSensor {
-    let sensor = sensor_now();
+    let mut sensor = sensor_now();
+    let now = now_ms();
+    if sensor.delivers_everything() && is_configured() {
+        let _ = COMPLETE_SINCE_MS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+    } else if COMPLETE_SINCE_MS.swap(0, Ordering::AcqRel) != 0 {
+        note_lost(now);
+    }
+    sensor.complete_since_ms = time_or_none(COMPLETE_SINCE_MS.load(Ordering::Acquire));
     let published = is_configured();
     let state = u32::from(sensor.active)
         | u32::from(sensor.entry_events) << 1
@@ -1618,6 +1857,7 @@ fn sensor_now() -> StoreWriterSensor {
             dropped_reports: crate::l7_es::dropped_message_gaps(),
             stores_unresolved,
             stores_unresolved_reason: stores_unresolved_reason.clone(),
+            complete_since_ms: None,
         }
     }
     #[cfg(all(target_os = "linux", feature = "fim", feature = "ebpf"))]
@@ -1633,6 +1873,7 @@ fn sensor_now() -> StoreWriterSensor {
             dropped_reports: crate::fim_fanotify::queue_overflows(),
             stores_unresolved,
             stores_unresolved_reason: stores_unresolved_reason.clone(),
+            complete_since_ms: None,
         }
     }
     #[cfg(all(target_os = "windows", feature = "etw"))]
@@ -1646,6 +1887,7 @@ fn sensor_now() -> StoreWriterSensor {
             dropped_reports: crate::l7_etw::lost_event_reports(),
             stores_unresolved,
             stores_unresolved_reason: stores_unresolved_reason.clone(),
+            complete_since_ms: None,
         }
     }
     #[cfg(not(any(
@@ -1663,6 +1905,7 @@ fn sensor_now() -> StoreWriterSensor {
             dropped_reports: 0,
             stores_unresolved,
             stores_unresolved_reason: stores_unresolved_reason.clone(),
+            complete_since_ms: None,
         }
     }
 }
@@ -1769,7 +2012,7 @@ mod tests {
         operation: &Operation<'_>,
         creation_reorder_ms: u64,
     ) {
-        let key = normalize(operation.path);
+        let key = record_key(operation.path);
         table.record(
             &key,
             "claude_code",
@@ -2647,12 +2890,13 @@ mod tests {
         assert!(!is_store_directory("/tmp/sw-dirs/.claude/projects"));
     }
 
-    /// A cut holds back the changes after it: the files a reader took up to
-    /// a sequence number, and their rows, are one cut. A cut of another
-    /// instance holds every change back; none serves every change.
+    /// A cut marks the changes after it and holds none back: a file that
+    /// changed again after the reader's take is served with every row, the
+    /// earlier ones included, and marked. A cut of another instance marks
+    /// every change.
     #[test]
     #[serial_test::serial(store_writers)]
-    fn a_cut_holds_back_the_changes_after_it() {
+    fn a_cut_marks_the_changes_after_it_and_holds_none_back() {
         configure(&[spec("/tmp/sw-cut/.claude")]);
         let instance = rows_since("", 0, None).expect("free").instance;
         record(&op(
@@ -2672,18 +2916,195 @@ mod tests {
             2_001,
         ));
         let cut = rows_since(&instance, 0, Some((&instance, take.seq))).expect("free");
-        assert_eq!(cut.seq, take.seq);
-        let paths: Vec<&str> = cut.files.iter().map(|file| file.path.as_str()).collect();
-        assert_eq!(paths, vec!["/tmp/sw-cut/.claude/projects/p/a.jsonl"]);
-        // From that cut on, the rest.
+        assert_eq!(cut.cut_seq, take.seq);
+        assert!(cut.seq > take.seq);
+        let marks: Vec<(&str, bool)> = cut
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.changed_after_cut))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("/tmp/sw-cut/.claude/projects/p/a.jsonl", false),
+                ("/tmp/sw-cut/.claude/projects/p/b.jsonl", true),
+            ]
+        );
+        // Asked again from the reply's sequence number: nothing new.
         let rest = rows_since(&instance, cut.seq, None).expect("free");
-        assert_eq!(rest.files.len(), 1);
-        assert!(rest.seq > cut.seq);
-        // A cut of another instance: nothing past where the reader stood.
-        let held = rows_since(&instance, cut.seq, Some(("another", u64::MAX))).expect("free");
-        assert!(held.files.is_empty());
-        assert_eq!(held.seq, cut.seq);
+        assert!(rest.files.is_empty());
+        // A cut of another instance marks every change.
+        let other = rows_since(&instance, 0, Some(("another", u64::MAX))).expect("free");
+        assert!(other.files.iter().all(|file| file.changed_after_cut));
+        assert_eq!(other.files.len(), 2);
         clear();
+    }
+
+    /// A process that writes a store file after every take of the reader
+    /// never keeps its earlier rows out of a reply: each reply asked with
+    /// the reader's cut holds the file and that process's row.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_writer_in_a_loop_is_served_at_every_reply() {
+        configure(&[spec("/tmp/sw-loop/.claude")]);
+        let path = "/tmp/sw-loop/.claude/projects/p/k.jsonl";
+        let instance = rows_since("", 0, None).expect("free").instance;
+        record(&op(path, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        let mut asked = 0;
+        for round in 0..20u64 {
+            // The child writes, the reader takes, the child writes again
+            // before the relay asks.
+            record(&op(path, ops::WRITE, 66, 900, 3_000 + 2 * round));
+            let take = take_dirty().expect("free");
+            record(&op(path, ops::WRITE, 66, 900, 3_001 + 2 * round));
+            let reply = rows_since(&instance, asked, Some((&instance, take.seq))).expect("free");
+            let file = reply
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .expect("the file is served");
+            assert!(file.changed_after_cut);
+            assert!(file.rows.iter().any(|row| row.writer.pid == 66));
+            asked = reply.seq;
+        }
+        clear();
+    }
+
+    /// A store directory renamed or removed, or a directory holding a store
+    /// root: every record below it is complete since then only, and the
+    /// reader is told. A path that is no store directory reaches nothing.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_directory_moved_or_removed_under_a_store_reaches_its_records() {
+        configure(&[spec("/tmp/sw-tree/.claude")]);
+        let inside = "/tmp/sw-tree/.claude/projects/p/k.jsonl";
+        let elsewhere = "/tmp/sw-tree/.claude/projects/q/s.jsonl";
+        record(&op(inside, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        record(&op(elsewhere, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        let _ = take_dirty().expect("free");
+        let before = counters().tree_changed_records;
+        // Outside every store: nothing.
+        note_tree_changed("/tmp/sw-tree/other", 2_500);
+        assert_eq!(counters().tree_changed_records, before);
+        // The directory holding `inside` moved away (or a prepared one was
+        // moved into its place).
+        note_tree_changed("/tmp/sw-tree/.claude/projects/p", 3_000);
+        assert_eq!(counters().tree_changed_records, before + 1);
+        let take = take_dirty().expect("free");
+        let moved: Vec<(&str, bool)> = take
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.lost))
+            .collect();
+        assert_eq!(moved, vec![(inside, true)]);
+        let rows = rows_since("", 0, None).expect("free");
+        let file = rows.files.iter().find(|file| file.path == inside).unwrap();
+        assert_eq!(file.complete_since_ms, 3_000);
+        let other = rows
+            .files
+            .iter()
+            .find(|file| file.path == elsewhere)
+            .unwrap();
+        assert!(other.complete_since_ms < 3_000);
+        // A directory above the store root reaches every record.
+        note_tree_changed("/tmp/sw-tree", 4_000);
+        assert_eq!(counters().tree_changed_records, before + 3);
+        clear();
+    }
+
+    /// What the reader gives back outlives its own state: the creation it
+    /// read a file from comes with the file's next report, and its verdicts
+    /// with the file's rows. Another record of the path is not touched.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn the_readers_facts_are_kept_with_the_record() {
+        configure(&[spec("/tmp/sw-facts/.claude")]);
+        let path = "/tmp/sw-facts/.claude/projects/p/k.jsonl";
+        record(&op(path, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        let take = take_dirty().expect("free");
+        let file = &take.files[0];
+        assert_eq!(file.creation_read_at_ms, None);
+        let record_id = file.record_id;
+        note_reader_facts(
+            path,
+            record_id + 1,
+            ReaderFacts {
+                creation_read_at_ms: Some(2_000),
+                multiple_names: true,
+                creation_contradicted: true,
+            },
+        );
+        note_reader_facts(
+            path,
+            record_id,
+            ReaderFacts {
+                creation_read_at_ms: Some(2_000),
+                multiple_names: true,
+                creation_contradicted: false,
+            },
+        );
+        record(&op(path, ops::WRITE, 10, 500, 2_100));
+        let take = take_dirty().expect("free");
+        assert_eq!(take.files[0].creation_read_at_ms, Some(2_000));
+        let rows = rows_since("", 0, None).expect("free");
+        let file = rows.files.iter().find(|file| file.path == path).unwrap();
+        assert!(file.reader_multiple_names);
+        assert!(!file.reader_creation_contradicted);
+        clear();
+    }
+
+    /// The sensor delivers everything when it is active and creations,
+    /// removals and moves come with their process, and, where the platform
+    /// reports them apart, the operations that set a size or a name.
+    #[test]
+    fn a_sensor_delivers_everything_only_with_every_kind_of_event() {
+        let sensor = |kind: &str, active: bool, entry: bool, extended: bool| StoreWriterSensor {
+            kind: kind.to_string(),
+            active,
+            entry_events: entry,
+            extended_events: extended,
+            dropped_reports: 0,
+            stores_unresolved: false,
+            stores_unresolved_reason: None,
+            complete_since_ms: None,
+        };
+        assert!(sensor("endpoint_security", true, true, true).delivers_everything());
+        assert!(!sensor("endpoint_security", true, true, false).delivers_everything());
+        assert!(!sensor("etw", true, true, false).delivers_everything());
+        assert!(sensor("fanotify", true, true, false).delivers_everything());
+        assert!(!sensor("fanotify", true, false, false).delivers_everything());
+        assert!(!sensor("endpoint_security", false, true, true).delivers_everything());
+    }
+
+    /// On Linux a record is kept under the path with its letter case: two
+    /// names that differ only in case are two records.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_records_keep_the_letter_case() {
+        let (mut table, counters) = new_table();
+        put(
+            &mut table,
+            &counters,
+            &op(
+                "/home/u/.claude/projects/p/K.jsonl",
+                ops::CREATE,
+                10,
+                500,
+                2_000,
+            ),
+        );
+        put(
+            &mut table,
+            &counters,
+            &op(
+                "/home/u/.claude/projects/p/k.jsonl",
+                ops::CREATE,
+                11,
+                500,
+                2_001,
+            ),
+        );
+        assert_eq!(table.files.len(), 2);
     }
 
     /// A publication is withdrawn by the generation it was given: the one a

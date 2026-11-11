@@ -139,8 +139,14 @@ pub fn stats() -> (u64, u64) {
 }
 
 /// Called from the ES handler for every file event it records. Cheap when
-/// no sink is installed or the path is outside every root.
+/// no sink is installed or the path is outside every root. A rename or a
+/// removal also reaches the store-writer record: a store directory moved or
+/// removed (or one moved into place) changes every file below it without
+/// an operation on any of them ([`crate::store_writers::note_tree_changed`]).
 pub fn push(kind: FimSourceKind, path: &str, pid: u32, process_name: &str, process_path: &str) {
+    if matches!(kind, FimSourceKind::Rename | FimSourceKind::Delete) {
+        crate::store_writers::note_tree_changed(path, crate::store_writers::now_ms());
+    }
     let Some(sink) = SINK.load_full() else {
         return;
     };
@@ -263,6 +269,57 @@ mod tests {
         assert!(uninstall_if(7));
         assert!(!is_active());
         assert!(!uninstall_if(7));
+    }
+
+    /// A store directory moved away, or a prepared one moved into its
+    /// place, reaches the records below it through the events the ES client
+    /// hands the sink, installed or not.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_store_directory_renamed_or_removed_reaches_the_store_record() {
+        use crate::store_writers::{self, ops, Operation, StoreSpec};
+        store_writers::configure(&[StoreSpec {
+            agent: "claude_code".to_string(),
+            roots: vec![PathBuf::from("/tmp/fim-es-tree/.claude/projects")],
+            path_segment: String::new(),
+            file_suffixes: vec![".jsonl".to_string()],
+            pid_file_roots: Vec::new(),
+            pid_file_suffixes: Vec::new(),
+            excluded_segments: Vec::new(),
+            creation_reorder_ms: 1_000,
+        }]);
+        let path = "/tmp/fim-es-tree/.claude/projects/p/k.jsonl";
+        store_writers::record(&Operation {
+            path,
+            ops: ops::CREATE | ops::WRITE,
+            pid: 10,
+            started_at_ms: Some(500),
+            process_path: "/opt/claude/bin/claude",
+            at_ms: 2_000,
+            size: None,
+            identity: None,
+        });
+        let _ = store_writers::take_dirty();
+        let before = store_writers::counters().tree_changed_records;
+        // `mv projects/p elsewhere/p.old` then `mv prepared/p projects/p`.
+        push(
+            FimSourceKind::Delete,
+            "/tmp/fim-es-tree/.claude/projects/p",
+            66,
+            "mv",
+            "/bin/mv",
+        );
+        push(
+            FimSourceKind::Rename,
+            "/tmp/fim-es-tree/.claude/projects/p",
+            66,
+            "mv",
+            "/bin/mv",
+        );
+        assert_eq!(store_writers::counters().tree_changed_records, before + 2);
+        let take = store_writers::take_dirty().expect("free");
+        assert!(take.files.iter().any(|file| file.path == path && file.lost));
+        store_writers::clear();
     }
 
     #[test]
