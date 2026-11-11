@@ -94,6 +94,10 @@ pub mod ops {
     pub const REPLACING: u32 = TRUNCATE | RENAME_TO | RENAME_FROM | REMOVE | CLONE | EXCHANGE;
     /// The operations after which the path names no file, or another one.
     pub const UNLINKING: u32 = RENAME_FROM | REMOVE;
+    /// The operations that change a file's content or its names: every one
+    /// but [`ATTRIBUTES`].
+    pub const TAMPERING: u32 =
+        CREATE | WRITE | TRUNCATE | RENAME_TO | RENAME_FROM | REMOVE | LINK | CLONE | EXCHANGE;
 
     /// The names of the bits set in `mask`, in bit order.
     pub fn names(mask: u32) -> Vec<&'static str> {
@@ -2783,5 +2787,7 @@ mod tests {
         assert!(ops::names(0).is_empty());
         assert_eq!(ops::REPLACING & ops::WRITE, 0);
         assert_eq!(ops::REPLACING & ops::CREATE, 0);
+        assert_eq!(ops::TAMPERING & ops::ATTRIBUTES, 0);
+        assert_eq!(ops::TAMPERING | ops::ATTRIBUTES, (1 << 10) - 1);
     }
 }
