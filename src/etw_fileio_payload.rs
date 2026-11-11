@@ -534,8 +534,8 @@ mod tests {
 
     /// An open is a creation exactly when the kernel states that a file was
     /// created, whatever was requested; a superseded or overwritten file is
-    /// a replacement of its content. With no statement, the requested
-    /// disposition gives a replacement, never a creation.
+    /// a replacement of its content. Without the completion's value, the
+    /// superseding and overwriting dispositions give a replacement.
     #[test]
     fn an_open_is_a_creation_when_the_kernel_states_one() {
         use crate::store_writers::ops;
@@ -592,7 +592,7 @@ mod tests {
                 ops::TRUNCATE,
                 "{disposition}"
             );
-            // No statement: a request is never a creation.
+            // Without the completion's value: the disposition alone.
             assert_eq!(
                 store_ops_for_open(options, None) & ops::CREATE,
                 0,

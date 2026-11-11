@@ -463,10 +463,9 @@ impl FimWatcher {
                             crate::fim_fanotify::forget_directory(p);
                         }
                     }
-                    // Windows: the directory notification is what announces
-                    // a change of a store file to its reader; the kernel
-                    // event that names the process is recorded when the
-                    // FileIo session delivers it.
+                    // Windows: the directory notification marks a store
+                    // file changed for its reader; the FileIo session
+                    // records the process.
                     #[cfg(target_os = "windows")]
                     if crate::store_writers::is_configured()
                         && !matches!(event.kind, EventKind::Access(_))

@@ -2447,9 +2447,8 @@ mod win {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
-                // The store-writer record: what the open is, and a delete
-                // on close. This event is the open's initiation: it carries
-                // the requested disposition.
+                // The store-writer record: what the open is
+                // (`store_ops_for_open`), and a delete on close.
                 let open_ops = open_create_options(data, ptr_size)
                     .map(|options| store_ops_for_open(options, None))
                     .unwrap_or(0)
@@ -3104,8 +3103,7 @@ mod tests {
     /// (the CI's Windows leg runs elevated). The store-writer record as the
     /// FileIo session feeds it: a child process creates a store file and
     /// writes it, a second one appends, a third deletes it. Each has its
-    /// row. The session delivers the initiation of an open, which carries
-    /// the request: the record opens with the first process's write.
+    /// row, and the first process's row holds its write.
     #[cfg(all(target_os = "windows", feature = "etw"))]
     #[test]
     #[serial_test::serial(store_writers)]
@@ -3193,7 +3191,7 @@ mod tests {
         assert!(written.rows.iter().all(|row| row.ops & ops::CREATE == 0));
         assert_eq!(
             written.creation, None,
-            "a creation is recorded from the kernel's statement of one"
+            "the first process's row holds its write"
         );
         let appended = appended.expect("the second process has a row");
         assert!(appended
