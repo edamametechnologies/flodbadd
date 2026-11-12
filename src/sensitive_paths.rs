@@ -370,9 +370,10 @@ pub fn label_patterns_sync(labels: &[&str]) -> Vec<String> {
 ///
 /// The snapshots start as compile-time fallbacks (the pattern list in
 /// `open_files` is a small subset of the catalog). A process that grades
-/// anything from them calls this before its first grading: the core does it
-/// at start, before any task or the agentic ticker runs. [`update`] calls it
-/// after every attempt, whatever the outcome.
+/// anything from them calls this before its first grading: the core at
+/// start, before any task or the agentic ticker runs; the helper process
+/// before it serves, since its file monitor and capture classify from them.
+/// [`update`] calls it after every attempt, whatever the outcome.
 pub async fn refresh_catalog_snapshots() {
     crate::open_files::refresh_patterns_snapshot().await;
     refresh_labels_snapshot().await;
