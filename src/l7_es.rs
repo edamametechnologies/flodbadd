@@ -413,17 +413,6 @@ mod macos {
     /// `mode`: 2 for the control port (`GET_TASK`), 1 for the read-only
     /// port (`GET_TASK_READ`) -- the PTRACE_MODE vocabulary shared with the
     /// Linux kprobe (`ProcessEvent::task_access_mode`).
-    /// The process's start as the message carries it, in Unix seconds
-    /// (`ProcessEvent::process_start_secs`). `None` on a message version
-    /// that has no start time.
-    fn process_start_secs(process: &endpoint_sec::Process<'_>) -> Option<u64> {
-        process
-            .start_time()
-            .and_then(|start| start.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|since_epoch| since_epoch.as_secs())
-            .filter(|secs| *secs > 0)
-    }
-
     fn push_task_access(
         responsible: &endpoint_sec::Process<'_>,
         responsible_pid: u32,
@@ -470,7 +459,6 @@ mod macos {
             team_id: optional_identity(responsible.team_id().to_string_lossy()),
             is_platform_binary: Some(responsible.is_platform_binary()),
             platform_path_marked: false,
-            process_start_secs: None,
             target_pid: Some(target_pid),
             target_process_path: Some(target_path),
             task_access_mode: Some(mode),
@@ -808,7 +796,6 @@ mod macos {
                     team_id: None,
                     is_platform_binary: None,
                     platform_path_marked: false,
-                    process_start_secs: Some(start_time).filter(|secs| *secs > 0),
                     target_pid: None,
                     target_process_path: None,
                     task_access_mode: None,
@@ -1013,7 +1000,6 @@ mod macos {
                                 team_id: None,
                                 is_platform_binary: None,
                                 platform_path_marked: false,
-                                process_start_secs: process_start_secs(&child),
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,
@@ -1144,7 +1130,6 @@ mod macos {
                                 team_id: optional_identity(target.team_id().to_string_lossy()),
                                 is_platform_binary: Some(is_platform),
                                 platform_path_marked: false,
-                                process_start_secs: process_start_secs(&target),
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,
@@ -1230,7 +1215,6 @@ mod macos {
                                 team_id: exit_team,
                                 is_platform_binary: exit_platform,
                                 platform_path_marked: false,
-                                process_start_secs: None,
                                 target_pid: None,
                                 target_process_path: None,
                                 task_access_mode: None,

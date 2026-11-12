@@ -104,13 +104,6 @@ pub struct ProcessEvent {
     /// as a ring pre-filter hint and only when no measured publisher
     /// verdict exists (the 2026-09-09 detection-gap plan, edamame_core/docs/ai-security/24-evolution.md Inc 6.1 / N-01).
     pub platform_path_marked: bool,
-    /// The start of the process as the operating system reports it, in Unix
-    /// seconds, where the sensor read it: the macOS Endpoint Security fork
-    /// and exec messages and the macOS rundown. `None` elsewhere. A start
-    /// time stays the same across an exec, so two events that name the same
-    /// pid and the same start describe the same process.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_start_secs: Option<u64>,
     /// `TaskAccess` only: the victim process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_pid: Option<u32>,
@@ -140,7 +133,9 @@ pub struct ProcessEvent {
     /// the Unix epoch: its start time (macOS), its start ticks with the boot
     /// time (Linux), its creation time (Windows). Unlike `timestamp_ms` it
     /// does not depend on when the event was delivered, so two readers of one
-    /// process agree on it. `None` when the sensor could not read it.
+    /// process agree on it ([`process_start_ms`]), and it stays the same
+    /// across an exec: two events that name the same pid and the same start
+    /// describe the same process. `None` when the sensor could not read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_start_ms: Option<u64>,
     /// A process start event that names its parent itself (Windows): whether
@@ -532,7 +527,6 @@ mod tests {
             team_id: None,
             is_platform_binary: None,
             platform_path_marked: false,
-            process_start_secs: None,
             target_pid: None,
             target_process_path: None,
             task_access_mode: None,
