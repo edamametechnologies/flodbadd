@@ -900,8 +900,8 @@ mod win {
                 KERNEL_SESSION.ended();
                 available.store(false, Ordering::Release);
                 info!("ETW kernel trace session ended");
-                // What happens to a store file from here on is not recorded
-                // until a session delivers again.
+                // Recorded as lost events: the store files are complete
+                // from the next session's delivery.
                 crate::store_writers::note_lost(crate::store_writers::now_ms());
 
                 let _ = CloseTrace(trace_handle);

@@ -624,8 +624,8 @@ pub fn is_store_root(dir: &str) -> bool {
     })
 }
 
-/// A time at which a file of a store may have been written without the
-/// record holding it: what the store as a whole vouches for nothing in.
+/// An interval the store as a whole is recorded as a gap for: a file of it
+/// may have been written in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreGap {
     /// `None`: any time before `until_ms`.
@@ -650,7 +650,7 @@ pub struct StoreCoverage {
 }
 
 /// Store gaps kept per instance of the record (the oldest go first; a
-/// consumer that missed them sees the instance or its own lag).
+/// consumer that read past them sees the instance or its own lag).
 const MAX_STORE_GAPS: usize = 256;
 
 /// The key a file's record is kept under: the normalized path, with its
@@ -756,8 +756,8 @@ struct Table {
     tombstones_pruned_through: u64,
     /// The sequence number a reader of this instance asked past.
     rows_acked: u64,
-    /// Per agent, the times a file of its store may have been written
-    /// unseen, oldest first; when the reader last took the changes.
+    /// Per agent, the store gaps, oldest first; when the reader last took
+    /// the changes.
     store_gaps: std::collections::VecDeque<(String, StoreGap)>,
     last_take_ms: u64,
     /// Per agent, the store directories the sensor holds no watch on, and
@@ -1817,8 +1817,8 @@ pub fn note_store_gap(dir: &str, from_ms: Option<u64>, until_ms: u64, reason: &s
 }
 
 /// The sensor holds no watch on the store directory `dir` (or holds one
-/// again: `watched`). While a store has such directories, it vouches for
-/// nothing since the first of them.
+/// again: `watched`). While a store has such directories, the store is
+/// recorded as a gap from the first of them.
 pub fn note_store_directory_watch(dir: &str, watched: bool) {
     let matcher = MATCHER.load();
     let agents = agents_of_directory(&matcher, dir);
@@ -3201,7 +3201,7 @@ mod tests {
     /// What a store vouches for: its gaps (dropped events since the last
     /// take, a directory moved in with files of any age, the window before
     /// a new directory's watch) and, while a directory of it has no watch,
-    /// nothing since the first of them.
+    /// a gap from the first of them.
     #[test]
     #[serial_test::serial(store_writers)]
     fn a_store_says_when_it_vouches_for_nothing() {
@@ -3232,7 +3232,7 @@ mod tests {
         );
         assert_eq!(gaps[2].from_ms, None);
         assert_eq!(gaps[2].until_ms, 7_000);
-        // A directory without a watch: nothing since, until it has one.
+        // A directory without a watch: a gap from then, until it has one.
         note_store_directory_watch("/tmp/sw-cover/.claude/projects/big", false);
         let store = coverage(9_000);
         assert_eq!(store.unwatched_directories, 1);

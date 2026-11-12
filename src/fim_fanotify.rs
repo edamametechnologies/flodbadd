@@ -466,8 +466,7 @@ pub fn remark_directory(dir: &Path) {
         let roots: Vec<String> = table.roots.iter().map(|root| root.key().clone()).collect();
         let depth = depth_below_roots(&dir.to_string_lossy(), &roots);
         if !may_mark_new_directory(table.marked.len(), depth) {
-            // Past the cap: a store directory left without a watch is a
-            // hole in what its store vouches for.
+            // Past the cap: recorded as a store directory without a watch.
             if crate::store_writers::is_store_directory(&dir.to_string_lossy()) {
                 crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), false);
             }
@@ -916,7 +915,8 @@ fn mark_tree(table: &FanotifyTable, root: &Path, budget: usize) -> usize {
     queue.push_back(root.to_path_buf());
     while let Some(dir) = queue.pop_front() {
         if added >= budget {
-            // Left without a mark: a hole in what a store vouches for.
+            // Past the budget: each store directory recorded as one without
+            // a watch.
             for left in std::iter::once(dir).chain(queue.into_iter()) {
                 if crate::store_writers::is_store_directory(&left.to_string_lossy()) {
                     crate::store_writers::note_store_directory_watch(
@@ -1246,11 +1246,10 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
 }
 
 /// A store directory created since the sensor started, just marked: the
-/// files written in it before the mark (the first transcript of a new
-/// project, the first subagent file of a session, a day's first rollout)
-/// were seen by no event. Each one found is marked changed for its reader
-/// (a record without a creation: never clean), and the window is a store
-/// gap.
+/// window from its creation to its mark is recorded as a store gap, and
+/// each file found in it (the first transcript of a new project, the first
+/// subagent file of a session, a day's first rollout) is marked changed for
+/// its reader, as a record with no creation.
 fn new_store_directory(dir: &Path, read_at_ms: u64) {
     let now = crate::store_writers::now_ms();
     crate::store_writers::note_store_gap(
