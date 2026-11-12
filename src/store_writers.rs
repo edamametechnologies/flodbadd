@@ -585,6 +585,74 @@ pub fn classify(path: &str) -> Option<(String, StoreFileKind)> {
         .map(|(store, kind)| (store.agent.clone(), kind))
 }
 
+/// The agents whose store holds `dir`, or whose store root lies below it.
+fn agents_of_directory(matcher: &StoreMatcher, dir: &str) -> Vec<String> {
+    let normalized = normalize(dir);
+    let normalized = normalized.trim_end_matches('/');
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    matcher
+        .stores
+        .iter()
+        .filter(|store| {
+            store
+                .roots
+                .iter()
+                .chain(store.pid_file_roots.iter())
+                .any(|root| {
+                    root == normalized
+                        || path_under_root(normalized, root, true)
+                        || path_under_root(root, normalized, true)
+                })
+        })
+        .map(|store| store.agent.clone())
+        .collect()
+}
+
+/// Whether `dir` is a published store root (or pid-file root) itself.
+pub fn is_store_root(dir: &str) -> bool {
+    let matcher = MATCHER.load();
+    let normalized = normalize(dir);
+    let normalized = normalized.trim_end_matches('/');
+    matcher.stores.iter().any(|store| {
+        store
+            .roots
+            .iter()
+            .chain(store.pid_file_roots.iter())
+            .any(|root| root == normalized)
+    })
+}
+
+/// A time at which a file of a store may have been written without the
+/// record holding it: what the store as a whole vouches for nothing in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreGap {
+    /// `None`: any time before `until_ms`.
+    pub from_ms: Option<u64>,
+    pub until_ms: u64,
+    /// `lost_events`, `directory_moved`, `new_directory`,
+    /// `unmarked_directory`.
+    pub reason: String,
+}
+
+/// What the record vouches for of one agent's store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreCoverage {
+    pub agent: String,
+    /// Since when every operation on a file of the store has been recorded,
+    /// but in the gaps: the record's instance start, or the sensor's last
+    /// return to delivering everything, whichever is later.
+    pub recorded_since_ms: u64,
+    pub gaps: Vec<StoreGap>,
+    /// Directories of the store the sensor holds no watch on now.
+    pub unwatched_directories: u64,
+}
+
+/// Store gaps kept per instance of the record (the oldest go first; a
+/// consumer that missed them sees the instance or its own lag).
+const MAX_STORE_GAPS: usize = 256;
+
 /// The key a file's record is kept under: the normalized path, with its
 /// letter case on Linux (`K.jsonl` and `k.jsonl` are two files there) and
 /// folded elsewhere.
@@ -688,6 +756,13 @@ struct Table {
     tombstones_pruned_through: u64,
     /// The sequence number a reader of this instance asked past.
     rows_acked: u64,
+    /// Per agent, the times a file of its store may have been written
+    /// unseen, oldest first; when the reader last took the changes.
+    store_gaps: std::collections::VecDeque<(String, StoreGap)>,
+    last_take_ms: u64,
+    /// Per agent, the store directories the sensor holds no watch on, and
+    /// since when the first of them.
+    unwatched: HashMap<String, (std::collections::BTreeSet<String>, u64)>,
 }
 
 impl FileRecord {
@@ -750,6 +825,9 @@ impl Table {
             tombstones: std::collections::VecDeque::new(),
             tombstones_pruned_through: 0,
             rows_acked: 0,
+            store_gaps: std::collections::VecDeque::new(),
+            last_take_ms: now_ms,
+            unwatched: HashMap::new(),
         }
     }
 
@@ -1024,6 +1102,23 @@ impl Table {
     }
 
     fn note_lost(&mut self, at_ms: u64) {
+        let agents: Vec<String> = MATCHER
+            .load()
+            .stores
+            .iter()
+            .map(|store| store.agent.clone())
+            .collect();
+        let from = self.last_take_ms.min(at_ms);
+        for agent in agents {
+            self.push_store_gap(
+                &agent,
+                StoreGap {
+                    from_ms: Some(from),
+                    until_ms: at_ms,
+                    reason: "lost_events".to_string(),
+                },
+            );
+        }
         self.lost_signals += 1;
         self.last_lost_ms = Some(self.last_lost_ms.map_or(at_ms, |known| known.max(at_ms)));
         let seq = self.bump();
@@ -1090,6 +1185,13 @@ impl Table {
             self.seq += 1;
             record.changed_seq = self.seq;
         }
+    }
+
+    fn push_store_gap(&mut self, agent: &str, gap: StoreGap) {
+        if self.store_gaps.len() >= MAX_STORE_GAPS {
+            self.store_gaps.pop_front();
+        }
+        self.store_gaps.push_back((agent.to_string(), gap));
     }
 
     fn take_dirty(&mut self) -> Vec<DirtyFile> {
@@ -1208,6 +1310,10 @@ enum Queued {
         record_id: u64,
         facts: ReaderFacts,
     },
+    StoreGap {
+        agents: Vec<String>,
+        gap: StoreGap,
+    },
 }
 
 /// The queue: a handler that finds the record held appends its report, the
@@ -1322,6 +1428,11 @@ fn drain_queue(table: &mut Table) {
                 record_id,
                 facts,
             } => table.note_reader_facts(&key, record_id, facts),
+            Queued::StoreGap { agents, gap } => {
+                for agent in &agents {
+                    table.push_store_gap(agent, gap.clone());
+                }
+            }
         }
     }
 }
@@ -1607,6 +1718,8 @@ pub fn note_tree_changed(path: &str, at_ms: u64) {
         return;
     }
     COUNTERS.tree_changes.fetch_add(1, Ordering::Relaxed);
+    // A directory moved into place carries files written at any time.
+    note_store_gap(path, None, at_ms, "directory_moved");
     let prefix = record_key(path);
     let noted = with_table(Duration::ZERO, |table| {
         table.note_tree_changed(&prefix, at_ms)
@@ -1667,11 +1780,106 @@ pub fn wait_dirty(timeout: Duration) -> bool {
 /// ask again), never an empty list standing for "no change".
 pub fn take_dirty() -> Option<DirtyTake> {
     let configured = is_configured();
-    with_table(READ_RETRY_BUDGET, |table| DirtyTake {
-        instance: table.instance.clone(),
-        seq: table.seq,
-        configured,
-        files: table.take_dirty(),
+    with_table(READ_RETRY_BUDGET, |table| {
+        table.last_take_ms = now_ms();
+        DirtyTake {
+            instance: table.instance.clone(),
+            seq: table.seq,
+            configured,
+            files: table.take_dirty(),
+        }
+    })
+}
+
+/// A store directory may have had files written before it was watched
+/// (created and watched after, the window between); or files were moved in
+/// with it. Recorded per agent whose store holds `dir`.
+pub fn note_store_gap(dir: &str, from_ms: Option<u64>, until_ms: u64, reason: &str) {
+    let matcher = MATCHER.load();
+    let agents = agents_of_directory(&matcher, dir);
+    if agents.is_empty() {
+        return;
+    }
+    let gap = StoreGap {
+        from_ms,
+        until_ms,
+        reason: reason.to_string(),
+    };
+    // Called from the sensors' handlers too: one try, else queued.
+    let noted = with_table(Duration::ZERO, |table| {
+        for agent in &agents {
+            table.push_store_gap(agent, gap.clone());
+        }
+    });
+    if noted.is_none() {
+        enqueue(Queued::StoreGap { agents, gap });
+    }
+}
+
+/// The sensor holds no watch on the store directory `dir` (or holds one
+/// again: `watched`). While a store has such directories, it vouches for
+/// nothing since the first of them.
+pub fn note_store_directory_watch(dir: &str, watched: bool) {
+    let matcher = MATCHER.load();
+    let agents = agents_of_directory(&matcher, dir);
+    if agents.is_empty() {
+        return;
+    }
+    let key = record_key(dir);
+    let now = now_ms();
+    let _ = with_table(READ_RETRY_BUDGET, |table| {
+        for agent in &agents {
+            let entry = table
+                .unwatched
+                .entry(agent.clone())
+                .or_insert_with(|| (std::collections::BTreeSet::new(), now));
+            if watched {
+                entry.0.remove(&key);
+            } else {
+                if entry.0.is_empty() {
+                    entry.1 = now;
+                }
+                entry.0.insert(key.clone());
+            }
+        }
+    });
+}
+
+/// What the record vouches for of each published store, as of `now_ms`.
+/// `None` when the record was held.
+pub fn store_coverage(now_ms: u64) -> Option<Vec<StoreCoverage>> {
+    let matcher = MATCHER.load();
+    let complete_since = COMPLETE_SINCE_MS.load(Ordering::Acquire);
+    with_table(READ_RETRY_BUDGET, |table| {
+        matcher
+            .stores
+            .iter()
+            .map(|store| {
+                let mut gaps: Vec<StoreGap> = table
+                    .store_gaps
+                    .iter()
+                    .filter(|(agent, _)| *agent == store.agent)
+                    .map(|(_, gap)| gap.clone())
+                    .collect();
+                let unwatched = table.unwatched.get(&store.agent);
+                let unwatched_directories = unwatched.map_or(0, |(dirs, _)| dirs.len() as u64);
+                if let Some((dirs, since)) = unwatched {
+                    if !dirs.is_empty() {
+                        gaps.push(StoreGap {
+                            from_ms: Some(*since),
+                            until_ms: now_ms,
+                            reason: "unmarked_directory".to_string(),
+                        });
+                    }
+                }
+                StoreCoverage {
+                    agent: store.agent.clone(),
+                    recorded_since_ms: table.recording_since_ms.max(complete_since),
+                    gaps,
+                    unwatched_directories,
+                }
+            })
+            .collect()
     })
 }
 
@@ -1939,28 +2147,6 @@ pub fn awaited_root_step(created: &str, awaited: &[String]) -> AwaitedRootStep {
         }
     }
     step
-}
-
-/// `btime` of `/proc/stat`: the boot time in seconds since the epoch.
-pub fn parse_boot_time_secs(proc_stat: &str) -> Option<u64> {
-    proc_stat
-        .lines()
-        .find_map(|line| line.strip_prefix("btime "))
-        .and_then(|value| value.trim().parse::<u64>().ok())
-}
-
-/// Field 22 of `/proc/<pid>/stat` (`starttime`, in clock ticks since boot):
-/// with the boot time, when a process started, for the sensors that receive
-/// a pid only. The second field is the command name in parentheses and may
-/// itself hold spaces and parentheses, so the fields are counted after the
-/// last `)`.
-pub fn parse_stat_start_ticks(stat: &str) -> Option<u64> {
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    // Fields 3.. follow; `starttime` is field 22, the 20th of them.
-    after_comm
-        .split_ascii_whitespace()
-        .nth(19)
-        .and_then(|value| value.parse::<u64>().ok())
 }
 
 #[cfg(test)]
@@ -3012,6 +3198,54 @@ mod tests {
         clear();
     }
 
+    /// What a store vouches for: its gaps (dropped events since the last
+    /// take, a directory moved in with files of any age, the window before
+    /// a new directory's watch) and, while a directory of it has no watch,
+    /// nothing since the first of them.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_store_says_when_it_vouches_for_nothing() {
+        configure(&[spec("/tmp/sw-cover/.claude")]);
+        let coverage = |now: u64| {
+            store_coverage(now)
+                .expect("free")
+                .into_iter()
+                .find(|store| store.agent == "claude_code")
+                .expect("the store")
+        };
+        assert!(coverage(1_000).gaps.is_empty());
+        let _ = take_dirty();
+        note_lost(5_000);
+        note_store_gap(
+            "/tmp/sw-cover/.claude/projects/new",
+            Some(6_000),
+            6_500,
+            "new_directory",
+        );
+        note_store_gap("/tmp/elsewhere", Some(1), 2, "new_directory");
+        note_tree_changed("/tmp/sw-cover/.claude/projects/p", 7_000);
+        let gaps = coverage(8_000).gaps;
+        let reasons: Vec<&str> = gaps.iter().map(|gap| gap.reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            vec!["lost_events", "new_directory", "directory_moved"]
+        );
+        assert_eq!(gaps[2].from_ms, None);
+        assert_eq!(gaps[2].until_ms, 7_000);
+        // A directory without a watch: nothing since, until it has one.
+        note_store_directory_watch("/tmp/sw-cover/.claude/projects/big", false);
+        let store = coverage(9_000);
+        assert_eq!(store.unwatched_directories, 1);
+        let unwatched = store.gaps.last().unwrap();
+        assert_eq!(unwatched.reason, "unmarked_directory");
+        assert_eq!(unwatched.until_ms, 9_000);
+        note_store_directory_watch("/tmp/sw-cover/.claude/projects/big", true);
+        assert_eq!(coverage(9_500).unwatched_directories, 0);
+        assert!(is_store_root("/tmp/sw-cover/.claude/projects"));
+        assert!(!is_store_root("/tmp/sw-cover/.claude/projects/p"));
+        clear();
+    }
+
     /// What the reader gives back outlives its own state: the creation it
     /// read a file from comes with the file's next report, and its verdicts
     /// with the file's rows. Another record of the path is not touched.
@@ -3231,20 +3465,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(8));
         listener.join().expect("listener thread");
         LISTENER.store(None);
-    }
-
-    #[test]
-    fn proc_stat_fields_are_read_after_the_command_name() {
-        // A command name with spaces and a parenthesis.
-        let stat = "4242 (tmux: server (1)) S 1 4242 4242 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 1 0 987654 1000 2000";
-        assert_eq!(parse_stat_start_ticks(stat), Some(987_654));
-        assert_eq!(parse_stat_start_ticks("4242 (sh) S 1"), None);
-        assert_eq!(parse_stat_start_ticks("no parenthesis"), None);
-        assert_eq!(
-            parse_boot_time_secs("cpu  1 2 3\nbtime 1762790000\nprocesses 5\n"),
-            Some(1_762_790_000)
-        );
-        assert_eq!(parse_boot_time_secs("cpu 1 2 3\n"), None);
     }
 
     #[test]

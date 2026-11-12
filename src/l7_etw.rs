@@ -900,6 +900,9 @@ mod win {
                 KERNEL_SESSION.ended();
                 available.store(false, Ordering::Release);
                 info!("ETW kernel trace session ended");
+                // What happens to a store file from here on is not recorded
+                // until a session delivers again.
+                crate::store_writers::note_lost(crate::store_writers::now_ms());
 
                 let _ = CloseTrace(trace_handle);
                 let _ = ControlTraceW(
@@ -1910,8 +1913,12 @@ mod win {
                 Some((started_at, process_path))
                     if !super::file_event_predates_process(at, started_at) =>
                 {
+                    // The process's creation time, through the conversion
+                    // every reader of a process start shares.
                     (
-                        started_at.and_then(super::filetime_to_unix_ms),
+                        started_at
+                            .and_then(|filetime| u64::try_from(filetime).ok())
+                            .and_then(proc_events::filetime_unix_ms),
                         process_path,
                     )
                 }
@@ -1930,6 +1937,16 @@ mod win {
             size: None,
             identity: None,
         });
+    }
+
+    /// A path removed or renamed: when it is a store directory (or holds a
+    /// store root), every record below it is complete since then only.
+    fn store_tree_changed(path: &str, at: Option<i64>) {
+        crate::store_writers::note_tree_changed(
+            path,
+            at.and_then(super::filetime_to_unix_ms)
+                .unwrap_or_else(crate::store_writers::now_ms),
+        );
     }
 
     unsafe fn handle_tcp_event(event: &EVENT_RECORD, opcode: u8) {
@@ -2522,17 +2539,20 @@ mod win {
             FileIoAction::Delete { file_object } => {
                 if let Some(path) = file_object_path(file_object) {
                     store_record(store_ops::REMOVE, &path, pid, at);
+                    store_tree_changed(&path, at);
                     record_file_actor(FileActorTable::Namespace, path, pid, at);
                 }
             }
             FileIoAction::Rename { file_object } => {
                 if let Some(path) = file_object_path(file_object) {
                     store_record(store_ops::RENAME_FROM, &path, pid, at);
+                    store_tree_changed(&path, at);
                     record_file_actor(FileActorTable::Namespace, path, pid, at);
                 }
             }
             FileIoAction::DeletePath { path, .. } => {
                 store_record(store_ops::REMOVE, &path, pid, at);
+                store_tree_changed(&path, at);
                 record_file_actor(FileActorTable::Namespace, path, pid, at);
             }
             FileIoAction::RenamePath {
@@ -2545,11 +2565,13 @@ mod win {
                 if let Some(file_object) = file_object {
                     if let Some(old_path) = file_object_path(file_object) {
                         store_record(store_ops::RENAME_FROM, &old_path, pid, at);
+                        store_tree_changed(&old_path, at);
                         record_file_actor(FileActorTable::Namespace, old_path, pid, at);
                     }
                     remember_file_object(file_object, new_path.clone());
                 }
                 store_record(store_ops::RENAME_TO, &new_path, pid, at);
+                store_tree_changed(&new_path, at);
                 record_file_actor(FileActorTable::Namespace, new_path, pid, at);
             }
             FileIoAction::SetInfo {

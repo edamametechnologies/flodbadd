@@ -593,10 +593,11 @@ mod macos {
             return;
         }
         let exe = responsible.executable().path().to_string_lossy();
+        // The start the message reports, through the conversion every
+        // reader of a process start shares.
         let started_at_ms = responsible
             .start_time()
-            .and_then(|start| start.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
+            .and_then(crate::process_events::system_time_ms);
         crate::store_writers::record(&crate::store_writers::Operation {
             path,
             ops,
@@ -1800,9 +1801,8 @@ mod macos {
             // The operations that change a file's content or names without
             // a write, for the store-writer record: asked for while stores
             // are published and no longer once they are withdrawn (the loop
-            // below). Subscribed on their own: a refusal leaves the first
-            // set delivering as before, and `extended_file_events` says
-            // which set runs.
+            // below), in a subscription of their own; `extended_file_events`
+            // says whether it runs.
             let extended = [
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_TRUNCATE,
                 es_event_type_t::ES_EVENT_TYPE_NOTIFY_LINK,

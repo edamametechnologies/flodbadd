@@ -95,6 +95,11 @@ const CREATED_SUBTREE_MARKS: usize = 64;
 /// Read buffer of the creation group: FID records carry file handles and
 /// names, several per read.
 const DIR_EVENT_BUFFER: usize = 64 * 1024;
+/// Store files marked themselves at most (the record holds as many).
+const MAX_STORE_FILE_MARKS: usize = crate::store_writers::MAX_FILES;
+/// The window before a creation event was read in which the files of a new
+/// store directory may have been written before its mark.
+const NEW_DIRECTORY_SLACK_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 struct WriterAttribution {
@@ -151,6 +156,14 @@ struct FanotifyTable {
     /// them.
     awaited_roots: CustomDashMap<String, PathBuf>,
     sentinels: CustomDashMap<String, ()>,
+    /// Store files marked themselves (inode marks, both groups), by
+    /// `device:inode`, with the store path: a write or a change of names
+    /// through another path reaches the record under this one.
+    inode_marks: CustomDashMap<String, String>,
+    /// Directories whose creation-group mark carries the store mask
+    /// (removals and moves), and the parents of store roots marked for
+    /// removals and moves of the roots themselves.
+    store_masked: CustomDashMap<String, ()>,
 }
 
 static TABLE: OnceCell<Arc<FanotifyTable>> = OnceCell::new();
@@ -220,6 +233,8 @@ pub fn init(roots: &[PathBuf]) {
             queue_overflows: std::sync::atomic::AtomicU64::new(0),
             awaited_roots: CustomDashMap::new("fim_fanotify_awaited_roots"),
             sentinels: CustomDashMap::new("fim_fanotify_sentinels"),
+            inode_marks: CustomDashMap::new("fim_fanotify_inode_marks"),
+            store_masked: CustomDashMap::new("fim_fanotify_store_masked"),
         });
         let reader = Arc::clone(&table);
         std::thread::Builder::new()
@@ -253,9 +268,11 @@ pub fn init(roots: &[PathBuf]) {
     }
     if !created {
         extend(table, roots);
+        remask_store_directories(table);
         return;
     }
     let marked = mark_roots(table, roots);
+    remask_store_directories(table);
     if marked == 0 {
         info!("FIM fanotify: no directory could be marked yet (falling back to lsof)");
         return;
@@ -295,9 +312,36 @@ pub fn await_roots(roots: &[PathBuf]) {
         while let Some(dir) = ancestor {
             if dir.is_dir() {
                 sentinel_mark(table, dir);
+                // A chain created between the test above and the mark
+                // (`mkdir -p`) is followed down now.
+                catch_up_awaited(table, dir);
                 break;
             }
             ancestor = dir.parent();
+        }
+    }
+}
+
+/// After a creation-only mark on `dir`: the directory on the way to each
+/// awaited root below it that already exists (created before the mark, a
+/// `mkdir -p` faster than the marks) is taken as if its creation had been
+/// reported.
+fn catch_up_awaited(table: &FanotifyTable, dir: &Path) {
+    let awaited: Vec<PathBuf> = table
+        .awaited_roots
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    for root in awaited {
+        let Ok(rest) = root.strip_prefix(dir) else {
+            continue;
+        };
+        let Some(first) = rest.components().next() else {
+            continue;
+        };
+        let child = dir.join(first);
+        if child.is_dir() {
+            awaited_root_created(table, dir, &child);
         }
     }
 }
@@ -350,7 +394,10 @@ fn awaited_root_created(table: &FanotifyTable, parent: &Path, created: &Path) ->
             let budget = MAX_DIRECTORY_MARKS.saturating_sub(table.marked.len());
             mark_tree(table, created, budget.min(RUNTIME_MARK_RESERVE));
         }
-        crate::store_writers::AwaitedRootStep::Ancestor => sentinel_mark(table, created),
+        crate::store_writers::AwaitedRootStep::Ancestor => {
+            sentinel_mark(table, created);
+            catch_up_awaited(table, created);
+        }
         crate::store_writers::AwaitedRootStep::Unrelated => {}
     }
     true
@@ -384,6 +431,7 @@ fn mark_roots(table: &FanotifyTable, roots: &[PathBuf]) -> usize {
 /// before is skipped by key, so a restart with the same paths costs
 /// nothing.
 fn extend(table: &FanotifyTable, roots: &[PathBuf]) {
+    remask_store_directories(table);
     let new_roots = roots_to_mark(&table.marked, roots);
     if new_roots.is_empty() {
         return;
@@ -418,6 +466,11 @@ pub fn remark_directory(dir: &Path) {
         let roots: Vec<String> = table.roots.iter().map(|root| root.key().clone()).collect();
         let depth = depth_below_roots(&dir.to_string_lossy(), &roots);
         if !may_mark_new_directory(table.marked.len(), depth) {
+            // Past the cap: a store directory left without a watch is a
+            // hole in what its store vouches for.
+            if crate::store_writers::is_store_directory(&dir.to_string_lossy()) {
+                crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), false);
+            }
             return;
         }
         mark_one(table, dir);
@@ -629,33 +682,10 @@ fn creation_group_mask(store_directory: bool) -> MaskFlags {
     MaskFlags::from_bits_retain(entries) | MaskFlags::FAN_ONDIR | MaskFlags::FAN_EVENT_ON_CHILD
 }
 
-/// When the process `pid` started (epoch milliseconds), from its
-/// `/proc/<pid>/stat` and the boot time. `None` when the process is gone or
-/// its record cannot be read.
-fn process_start_ms(pid: u32) -> Option<u64> {
-    static BOOT_MS: OnceCell<Option<u64>> = OnceCell::new();
-    static TICKS_PER_SEC: OnceCell<u64> = OnceCell::new();
-    let boot_ms = (*BOOT_MS.get_or_init(|| {
-        let stat = std::fs::read_to_string("/proc/stat").ok()?;
-        crate::store_writers::parse_boot_time_secs(&stat).map(|secs| secs.saturating_mul(1000))
-    }))?;
-    let ticks_per_sec = *TICKS_PER_SEC.get_or_init(|| {
-        // SAFETY: sysconf reads a constant of the running system.
-        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if ticks > 0 {
-            ticks as u64
-        } else {
-            100
-        }
-    });
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let ticks = crate::store_writers::parse_stat_start_ticks(&stat)?;
-    Some(boot_ms + ticks.saturating_mul(1000) / ticks_per_sec)
-}
-
 /// Feed the store-writer record with one operation on `path` by `pid`: the
-/// process's start from `/proc`, its image as resolved for the attribution
-/// table, the time the event was read.
+/// process's start as the kernel records it (the one derivation every
+/// sensor uses, `process_events::process_start_ms`), its image as resolved
+/// for the attribution table, the time the event was read.
 fn store_record(
     ops: u32,
     path: &str,
@@ -668,7 +698,7 @@ fn store_record(
         path,
         ops,
         pid,
-        started_at_ms: process_start_ms(pid),
+        started_at_ms: crate::process_events::process_start_ms(pid),
         process_path,
         at_ms: crate::store_writers::now_ms(),
         size,
@@ -704,6 +734,11 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             if let Some(dir_fan) = table.dir_fan.as_ref() {
                 let store_directory =
                     crate::store_writers::is_store_directory(&dir.to_string_lossy());
+                if store_directory {
+                    table.store_masked.insert(root_key(dir), ());
+                    crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), true);
+                    mark_store_root_parent(table, dir);
+                }
                 match dir_fan.mark::<_, Path>(
                     MarkFlags::FAN_MARK_ADD,
                     creation_group_mask(store_directory),
@@ -734,10 +769,140 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             true
         }
         Err(e) => {
-            debug!("FIM fanotify: mark {} failed: {}", dir.display(), e);
+            debug!("FIM fanotify: mark failed: {}", e);
+            if crate::store_writers::is_store_directory(&dir.to_string_lossy()) {
+                crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), false);
+            }
             false
         }
     }
+}
+
+/// A store root's parent, marked in the creation group for removals and
+/// moves: the root itself renamed or removed is reported (its contents
+/// then name other files).
+fn mark_store_root_parent(table: &FanotifyTable, dir: &Path) {
+    if !crate::store_writers::is_store_root(&dir.to_string_lossy()) {
+        return;
+    }
+    let (Some(dir_fan), Some(parent)) = (table.dir_fan.as_ref(), dir.parent()) else {
+        return;
+    };
+    let key = format!("{}#parent", root_key(parent));
+    if table.store_masked.contains_key(&key) {
+        return;
+    }
+    let Ok(handle) = std::fs::File::open(parent) else {
+        return;
+    };
+    let mask =
+        MaskFlags::from_bits_retain(libc::FAN_DELETE | libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO)
+            | MaskFlags::FAN_ONDIR
+            | MaskFlags::FAN_EVENT_ON_CHILD;
+    if dir_fan
+        .mark::<_, Path>(MarkFlags::FAN_MARK_ADD, mask, &handle, None)
+        .is_ok()
+    {
+        table.store_masked.insert(key, ());
+        table.root_handles.insert(root_key(parent), handle);
+    }
+}
+
+/// Every marked directory that is a store directory now and whose
+/// creation-group mark lacks the store mask gets it (stores published after
+/// the directory was marked, a restart). `FAN_MARK_ADD` adds to a mark.
+fn remask_store_directories(table: &FanotifyTable) {
+    let Some(dir_fan) = table.dir_fan.as_ref() else {
+        return;
+    };
+    let marked: Vec<String> = table
+        .marked
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    for key in marked {
+        if !crate::store_writers::is_store_directory(&key) {
+            continue;
+        }
+        let dir = PathBuf::from(&key);
+        mark_store_root_parent(table, &dir);
+        if table.store_masked.contains_key(&root_key(&dir)) {
+            continue;
+        }
+        let Ok(handle) = std::fs::File::open(&dir) else {
+            continue;
+        };
+        if dir_fan
+            .mark::<_, Path>(
+                MarkFlags::FAN_MARK_ADD,
+                creation_group_mask(true),
+                &handle,
+                None,
+            )
+            .is_ok()
+        {
+            table.store_masked.insert(root_key(&dir), ());
+            crate::store_writers::note_store_directory_watch(&key, true);
+        }
+    }
+}
+
+/// Mark a store file itself (an inode mark) in both groups: a write through
+/// any name of the file, and a change of its attributes or of its number of
+/// names, reach the record under the store path. Bounded by the record's
+/// own bound.
+fn mark_store_file(table: &FanotifyTable, path: &str) {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if table.inode_marks.len() >= MAX_STORE_FILE_MARKS {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    if !meta.is_file() {
+        return;
+    }
+    let key = format!("{}:{}", meta.dev(), meta.ino());
+    if table.inode_marks.contains_key(&key) {
+        return;
+    }
+    if table
+        .fan
+        .mark::<_, Path>(
+            MarkFlags::FAN_MARK_ADD,
+            MaskFlags::FAN_MODIFY | MaskFlags::FAN_CLOSE_WRITE,
+            &file,
+            None,
+        )
+        .is_err()
+    {
+        return;
+    }
+    if let Some(dir_fan) = table.dir_fan.as_ref() {
+        let _ = dir_fan.mark::<_, Path>(
+            MarkFlags::FAN_MARK_ADD,
+            MaskFlags::from_bits_retain(libc::FAN_ATTRIB),
+            &file,
+            None,
+        );
+    }
+    table.inode_marks.insert(key, path.to_string());
+}
+
+/// The store path of the marked store file with this metadata, if any.
+fn marked_store_path(table: &FanotifyTable, meta: &std::fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    table
+        .inode_marks
+        .get(&format!("{}:{}", meta.dev(), meta.ino()))
+        .map(|entry| entry.value().clone())
 }
 
 /// Mark `root` and its subdirectories breadth-first (no symlink following),
@@ -751,6 +916,15 @@ fn mark_tree(table: &FanotifyTable, root: &Path, budget: usize) -> usize {
     queue.push_back(root.to_path_buf());
     while let Some(dir) = queue.pop_front() {
         if added >= budget {
+            // Left without a mark: a hole in what a store vouches for.
+            for left in std::iter::once(dir).chain(queue.into_iter()) {
+                if crate::store_writers::is_store_directory(&left.to_string_lossy()) {
+                    crate::store_writers::note_store_directory_watch(
+                        &left.to_string_lossy(),
+                        false,
+                    );
+                }
+            }
             break;
         }
         let Ok(meta) = std::fs::symlink_metadata(&dir) else {
@@ -838,12 +1012,21 @@ fn reader_loop(table: Arc<FanotifyTable>) {
             // The store-writer record takes the write with the pid alone
             // when the image could not be resolved, and the file's size as
             // the event's descriptor gives it.
-            if crate::store_writers::classify(&path).is_some() {
+            // A store file by the name the event's descriptor carries, or a
+            // marked store file written through another name.
+            let meta = std::fs::metadata(&fd_link).ok();
+            let store_path = if crate::store_writers::classify(&path).is_some() {
+                mark_store_file(&table, &path);
+                Some(path.clone())
+            } else {
+                meta.as_ref()
+                    .and_then(|meta| marked_store_path(&table, meta))
+            };
+            if let Some(store_path) = store_path {
                 use std::os::unix::fs::MetadataExt;
-                let meta = std::fs::metadata(&fd_link).ok();
                 store_record(
                     crate::store_writers::ops::WRITE,
-                    &path,
+                    &store_path,
                     pid,
                     &process_path,
                     meta.as_ref().map(|meta| meta.len()),
@@ -1062,6 +1245,46 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
     }
 }
 
+/// A store directory created since the sensor started, just marked: the
+/// files written in it before the mark (the first transcript of a new
+/// project, the first subagent file of a session, a day's first rollout)
+/// were seen by no event. Each one found is marked changed for its reader
+/// (a record without a creation: never clean), and the window is a store
+/// gap.
+fn new_store_directory(dir: &Path, read_at_ms: u64) {
+    let now = crate::store_writers::now_ms();
+    crate::store_writers::note_store_gap(
+        &dir.to_string_lossy(),
+        Some(read_at_ms.saturating_sub(NEW_DIRECTORY_SLACK_MS)),
+        now,
+        "new_directory",
+    );
+    let mut queue = std::collections::VecDeque::from([(dir.to_path_buf(), 0usize)]);
+    let mut seen = 0usize;
+    while let Some((current, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > CREATED_SUBTREE_MARKS * 16 {
+                return;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() && !file_type.is_symlink() && depth < 3 {
+                queue.push_back((path, depth + 1));
+            } else if file_type.is_file()
+                && crate::store_writers::classify(&path.to_string_lossy()).is_some()
+            {
+                crate::store_writers::note_change(&path.to_string_lossy(), now);
+            }
+        }
+    }
+}
+
 /// The store-writer operations a creation-group event's mask stands for.
 fn store_ops_for_mask(mask: u64) -> u32 {
     use crate::store_writers::ops;
@@ -1096,6 +1319,7 @@ fn creation_loop(table: Arc<FanotifyTable>) {
             }
         };
         let own_pid = std::process::id() as i32;
+        let read_at_ms = crate::store_writers::now_ms();
         if events_report_overflow(&buf[..nread]) {
             note_queue_overflow(&table);
         }
@@ -1119,15 +1343,40 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 continue;
             }
             let pid = record.pid as u32;
-            // A removal or a move (asked for on store directories only): for
-            // a store file, the record; nothing else is done with it.
-            if record.mask & libc::FAN_CREATE == 0 {
+            // An attribute change of a store file (its own mark): its
+            // number of names above one is a link, else an attribute.
+            if record.mask & libc::FAN_ATTRIB != 0 && record.mask & libc::FAN_CREATE == 0 {
                 let path = created.to_string_lossy();
                 if !record.is_dir && crate::store_writers::classify(&path).is_some() {
+                    use std::os::unix::fs::MetadataExt;
+                    let links = std::fs::symlink_metadata(&*path).map(|meta| meta.nlink());
+                    let ops = match links {
+                        Ok(1) => crate::store_writers::ops::ATTRIBUTES,
+                        _ => crate::store_writers::ops::LINK,
+                    };
+                    let (_, process_path) = resolve_writer(pid);
+                    store_record(ops, &path, pid, &process_path, None, None);
+                }
+                continue;
+            }
+            // A removal or a move (asked for on store directories and on
+            // the parents of store roots): for a store file, the record; for
+            // a directory, every record below it.
+            if record.mask & libc::FAN_CREATE == 0 {
+                let path = created.to_string_lossy();
+                if record.is_dir {
+                    crate::store_writers::note_tree_changed(&path, read_at_ms);
+                    forget_directory(&created);
+                } else if crate::store_writers::classify(&path).is_some() {
                     let ops = store_ops_for_mask(record.mask);
                     if ops != 0 {
                         let (_, process_path) = resolve_writer(pid);
                         store_record(ops, &path, pid, &process_path, None, None);
+                    }
+                    if record.mask & libc::FAN_DELETE != 0 {
+                        table
+                            .inode_marks
+                            .retain(|_, store_path| store_path != &*path);
                     }
                 }
                 continue;
@@ -1146,6 +1395,7 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                         None,
                         None,
                     );
+                    mark_store_file(&table, &path);
                 }
             }
             table
@@ -1155,6 +1405,9 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 // Mark it (and what is already in it) before anything else,
                 // then remember who made it for the files that beat the mark.
                 mark_created_directory(&table, &created);
+                if crate::store_writers::is_store_directory(&created.to_string_lossy()) {
+                    new_store_directory(&created, read_at_ms);
+                }
                 if !(process_name.is_empty() && process_path.is_empty()) {
                     if table.creators.len() >= TABLE_MAX_ENTRIES {
                         let cutoff = Instant::now();
