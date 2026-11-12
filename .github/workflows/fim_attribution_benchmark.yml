@@ -131,20 +131,15 @@ jobs:
             fim_benchmark_with_es.json
             fim_benchmark_no_es.json
 
-      # The benchmark steps are continue-on-error, so their failure never
-      # fails the job and `failure()` alone never fired for them: test their
-      # outcomes. `failure()` still covers a setup or build step failing.
-      - name: Slack alert on failure
-        if: failure() || steps.benchmark_with_es.outcome == 'failure' || steps.benchmark_no_es.outcome == 'failure'
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          channel-id: "C072J0U9TH7"
-          slack-message: |
-            *FIM Attribution Benchmark (macos) failed for ${{ github.repository }}*
-            - With ES: ${{ steps.benchmark_with_es.outcome }}
-            - Without ES: ${{ steps.benchmark_no_es.outcome }}
-            Branch: ${{ github.ref }}
-            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      - name: Fail the job if a check failed (the Slack notify job reports it)
+        if: (failure() || steps.benchmark_with_es.outcome == 'failure' || steps.benchmark_no_es.outcome == 'failure')
+        run: exit 1
+
+  notify:
+    name: Slack alert
+    needs: [benchmark-macos]
+    if: always() && github.event_name != 'pull_request'
+    uses: edamametechnologies/.github/.github/workflows/slack-notify.yml@main
+    with:
+      results: ${{ toJSON(needs) }}
+    secrets: inherit
