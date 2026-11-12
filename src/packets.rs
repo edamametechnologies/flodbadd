@@ -1375,6 +1375,137 @@ mod tests {
         assert_eq!(info.dst_domain_type, DomainResolutionType::SNI);
     }
 
+    /// A session's names through the sources one after another: an observed
+    /// DNS answer, then a reverse lookup that names the addresses otherwise,
+    /// then the session's own ClientHello, then the resolver again. After
+    /// each step the name and its source are asserted on both sides: a name
+    /// always carries its own source, the ClientHello's name is kept on the
+    /// destination, and the source side, which no ClientHello names, keeps
+    /// taking the resolver's names.
+    #[tokio::test]
+    #[serial]
+    async fn test_names_carry_their_own_source_through_dns_reverse_and_sni() {
+        let host = Ipv4Addr::new(10, 1, 0, 5);
+        let server = Ipv4Addr::new(203, 0, 113, 80);
+        let own: HashSet<IpAddr> = [IpAddr::V4(host)].into_iter().collect();
+        let sessions = Arc::new(CustomDashMap::new("sessions"));
+        let current = Arc::new(CustomRwLock::new(Vec::new()));
+        let filter = Arc::new(CustomRwLock::new(SessionFilter::All));
+        for packet in [
+            tcp_packet((host, 50200), (server, 443), TcpFlags::SYN, 0, None),
+            tcp_packet(
+                (server, 443),
+                (host, 50200),
+                TcpFlags::SYN | TcpFlags::ACK,
+                0,
+                None,
+            ),
+            tcp_packet((host, 50200), (server, 443), TcpFlags::ACK, 0, None),
+        ] {
+            process_parsed_packet(packet, &sessions, &current, &own, &filter, None).await;
+        }
+        assert_eq!(sessions.len(), 1);
+        let key = sessions.iter().next().unwrap().key().clone();
+        let names = |sessions: &CustomDashMap<Session, SessionInfo>| {
+            let info = sessions.get(&key).unwrap();
+            (
+                info.src_domain.clone(),
+                info.src_domain_type,
+                info.dst_domain.clone(),
+                info.dst_domain_type,
+            )
+        };
+        let resolve = |sessions: &CustomDashMap<Session, SessionInfo>,
+                       src: &str,
+                       dst: &str,
+                       source: DomainResolutionType| {
+            sessions.get_mut(&key).unwrap().record_resolved_names(
+                Some((src.to_string(), source)),
+                Some((dst.to_string(), source)),
+                Utc::now(),
+            )
+        };
+        let some = |name: &str| Some(name.to_string());
+        use DomainResolutionType::{Forward, Reverse, SNI};
+
+        // 1. An observed DNS answer for each address.
+        assert!(resolve(
+            &sessions,
+            "laptop.lan.example",
+            "api.vendor.example",
+            Forward
+        ));
+        assert_eq!(
+            names(&sessions),
+            (
+                some("laptop.lan.example"),
+                Forward,
+                some("api.vendor.example"),
+                Forward
+            )
+        );
+        // 2. A reverse lookup that names them otherwise: the names are
+        // replaced, as before, and carry their own source.
+        assert!(resolve(
+            &sessions,
+            "host-5.lan.example",
+            "edge-80.provider.example",
+            Reverse
+        ));
+        assert_eq!(
+            names(&sessions),
+            (
+                some("host-5.lan.example"),
+                Reverse,
+                some("edge-80.provider.example"),
+                Reverse
+            )
+        );
+        // 3. The session's own ClientHello names the destination.
+        let hello = client_hello("api.vendor.example");
+        process_parsed_packet(
+            tcp_packet(
+                (host, 50200),
+                (server, 443),
+                TcpFlags::ACK | TcpFlags::PSH,
+                hello.len(),
+                Some(hello),
+            ),
+            &sessions,
+            &current,
+            &own,
+            &filter,
+            None,
+        )
+        .await;
+        assert_eq!(
+            names(&sessions),
+            (
+                some("host-5.lan.example"),
+                Reverse,
+                some("api.vendor.example"),
+                SNI
+            )
+        );
+        // 4. The resolver again: the destination keeps its ClientHello name;
+        // the source takes the observed answer's name, with its source.
+        assert!(resolve(
+            &sessions,
+            "laptop.lan.example",
+            "cdn.other.example",
+            Forward
+        ));
+        assert_eq!(
+            names(&sessions),
+            (
+                some("laptop.lan.example"),
+                Forward,
+                some("api.vendor.example"),
+                SNI
+            )
+        );
+    }
+
     /// A padded ClientHello that does not fit in one TCP segment -- the shape
     /// a modern client produces once the record carries a post-quantum key
     /// share -- is reassembled across its segments and still names the

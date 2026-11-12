@@ -1002,6 +1002,7 @@ mod tests {
             team_id: None,
             is_platform_binary: None,
             platform_path_marked: false,
+            process_start_secs: None,
             target_pid: None,
             target_process_path: None,
             task_access_mode: None,
