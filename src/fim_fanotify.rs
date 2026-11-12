@@ -1403,6 +1403,8 @@ mod tests {
             task_access_mode: None,
             task_access_mask: None,
             net_dst: None,
+            process_start_ms: None,
+            creator_verified: None,
         };
         // The push and the lookup take a try-lock that can lose to a
         // concurrent reader: retry.
