@@ -318,6 +318,8 @@ mod linux {
                     task_access_mode: None,
                     task_access_mask: None,
                     net_dst: None,
+                    process_start_ms: pe::process_start_ms(pid),
+                    creator_verified: None,
                 }
             }
             2 | 3 => pe::ProcessEvent {
@@ -345,6 +347,8 @@ mod linux {
                 task_access_mode: None,
                 task_access_mask: None,
                 net_dst: None,
+                process_start_ms: (raw_kind == 2).then(|| pe::process_start_ms(pid)).flatten(),
+                creator_verified: None,
             },
             4 => {
                 // ptrace_may_access(target, mode): ppid slot = target tgid,
@@ -382,6 +386,8 @@ mod linux {
                     task_access_mode: Some(uid & 0x3),
                     task_access_mask: Some(uid),
                     net_dst: None,
+                    process_start_ms: None,
+                    creator_verified: None,
                 }
             }
             5 => {
@@ -433,6 +439,8 @@ mod linux {
                         port,
                         proto,
                     }),
+                    process_start_ms: None,
+                    creator_verified: None,
                 }
             }
             _ => return,

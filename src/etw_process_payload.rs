@@ -283,9 +283,34 @@ pub fn same_process_creation(a: Option<u64>, b: Option<u64>) -> bool {
     }
 }
 
+/// Whether a process start event's creator is the parent it names: the
+/// event's own process id (the process that created the child) against the
+/// parent id in its payload. A creator id that is not a process (0, the
+/// all-ones value) or is the child itself cannot be compared, and is not a
+/// verified creator.
+pub fn creator_is_parent(header_process_id: u32, parent_id: u32, pid: u32) -> bool {
+    header_process_id != 0
+        && header_process_id != u32::MAX
+        && header_process_id != pid
+        && header_process_id == parent_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The creator of a process is verified only when the start event was
+    /// written by the parent it names.
+    #[test]
+    fn a_start_event_verifies_its_creator_only_when_it_names_itself() {
+        assert!(creator_is_parent(400, 400, 512));
+        // Created by another process than the one it names.
+        assert!(!creator_is_parent(900, 400, 512));
+        // No creator to compare.
+        assert!(!creator_is_parent(0, 400, 512));
+        assert!(!creator_is_parent(u32::MAX, 400, 512));
+        assert!(!creator_is_parent(512, 512, 512));
+    }
 
     fn image_load_payload(ptr: usize, pid: u32, file_name: &str) -> Vec<u8> {
         let mut v = Vec::new();
