@@ -2030,61 +2030,29 @@ impl FlodbaddCapture {
                 resolver.add_ip_to_resolver(&session.src_ip).await;
             }
 
-            // Determine source domain and resolution type
-            let (src_domain, src_domain_type) = match src_domain_forward {
-                Some(domain) => (Some(domain), DomainResolutionType::Forward),
-                None => match resolver.get_resolved_ip(&session.src_ip).await {
-                    Some(domain) => (Some(domain), DomainResolutionType::Reverse),
-                    None => (None, DomainResolutionType::None),
-                },
+            // The name the resolver has for each address, with its source:
+            // an observed DNS answer, else a reverse lookup.
+            let src_resolved = match src_domain_forward {
+                Some(domain) => Some((domain, DomainResolutionType::Forward)),
+                None => resolver
+                    .get_resolved_ip(&session.src_ip)
+                    .await
+                    .map(|domain| (domain, DomainResolutionType::Reverse)),
+            };
+            let dst_resolved = match dst_domain_forward {
+                Some(domain) => Some((domain, DomainResolutionType::Forward)),
+                None => resolver
+                    .get_resolved_ip(&session.dst_ip)
+                    .await
+                    .map(|domain| (domain, DomainResolutionType::Reverse)),
             };
 
-            // Determine destination domain and resolution type
-            let (dst_domain, dst_domain_type) = match dst_domain_forward {
-                Some(domain) => (Some(domain), DomainResolutionType::Forward),
-                None => match resolver.get_resolved_ip(&session.dst_ip).await {
-                    Some(domain) => (Some(domain), DomainResolutionType::Reverse),
-                    None => (None, DomainResolutionType::None),
-                },
-            };
-
-            // Update session info with domains and resolution types
-            if src_domain.is_some() || dst_domain.is_some() {
+            // Each name is recorded with its source; a destination named
+            // from the session's own ClientHello keeps that name
+            // (`SessionInfo::record_resolved_names`).
+            if src_resolved.is_some() || dst_resolved.is_some() {
                 if let Some(mut session_info) = sessions.get_mut(&session) {
-                    let mut modified = false;
-                    if let Some(domain) = src_domain {
-                        if domain != "Unknown" && domain != "Resolving" {
-                            if session_info.src_domain.as_ref() != Some(&domain) {
-                                session_info.src_domain = Some(domain);
-                                // Only update resolution type if it's an upgrade (SNI > Forward > Reverse > None)
-                                if session_info.src_domain_type < src_domain_type {
-                                    session_info.src_domain_type = src_domain_type;
-                                }
-                                modified = true;
-                            }
-                        }
-                    }
-                    // A name taken from the session's own TLS ClientHello is
-                    // the one the client asked for; the resolver's names are
-                    // per address, and CDN tenants share addresses, so they
-                    // never replace it.
-                    if let Some(domain) = dst_domain
-                        .filter(|_| session_info.dst_domain_type != DomainResolutionType::SNI)
-                    {
-                        if domain != "Unknown" && domain != "Resolving" {
-                            if session_info.dst_domain.as_ref() != Some(&domain) {
-                                session_info.dst_domain = Some(domain);
-                                // Only update resolution type if it's an upgrade (SNI > Forward > Reverse > None)
-                                if session_info.dst_domain_type < dst_domain_type {
-                                    session_info.dst_domain_type = dst_domain_type;
-                                }
-                                modified = true;
-                            }
-                        }
-                    }
-
-                    if modified {
-                        session_info.last_modified = Utc::now();
+                    if session_info.record_resolved_names(src_resolved, dst_resolved, Utc::now()) {
                         update_count += 1;
                     }
                 }

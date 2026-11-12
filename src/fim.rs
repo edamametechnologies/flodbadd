@@ -966,7 +966,8 @@ fn spawn_fim_es_consumer(
 ///    `is_sensitive_path` names, lower-case spellings of Windows patterns)
 ///    or as agent surfaces (`/.claude/`), and the label table is in force
 ///    from start while the pattern snapshot is the smaller compiled-in set
-///    until the first catalog update.
+///    until the process puts the catalog in force
+///    (`sensitive_paths::refresh_catalog_snapshots`).
 ///
 /// Reject rule (overrides ALL accept rules):
 /// - The path matches one of the build-output / browser-cache patterns
@@ -3754,9 +3755,9 @@ mod tests {
                 ] {
                     let path = format!("{home}{sep}{}", rel.replace('/', sep));
                     assert_kept_as_sensitive_or_temp(&path);
-                    // Until the first catalog update the pattern snapshot is
-                    // the compiled-in set (no `/.aws/` directory pattern);
-                    // the catalog labels keep these meanwhile.
+                    // Until the process puts the catalog in force the pattern
+                    // snapshot is the compiled-in set (no `/.aws/` directory
+                    // pattern); the catalog labels keep these meanwhile.
                     assert!(
                         !classify_sensitive_path_labels_sync(&[path.clone()]).is_empty(),
                         "{path} carries a catalog label"
