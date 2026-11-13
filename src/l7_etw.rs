@@ -1860,6 +1860,10 @@ mod win {
         }
     }
 
+    /// How far behind an event's time the session is taken to have
+    /// delivered every earlier event (two of its one-second buffer flushes).
+    const ETW_DELIVERY_SLACK_MS: u64 = 2_000;
+
     unsafe extern "system" fn event_record_callback(record: *mut EVENT_RECORD) {
         if record.is_null() {
             return;
@@ -1868,6 +1872,17 @@ mod win {
         let header = &event.EventHeader;
         let provider = header.ProviderId;
         let opcode = header.EventDescriptor.Opcode;
+        // The session's buffers are flushed per processor: every event up
+        // to this one's time, less a slack of two flush periods, was
+        // delivered.
+        if let Some(at_ms) = Some(header.TimeStamp)
+            .filter(|t| *t > 0)
+            .and_then(super::filetime_to_unix_ms)
+        {
+            crate::store_writers::note_delivered_through(
+                at_ms.saturating_sub(ETW_DELIVERY_SLACK_MS),
+            );
+        }
 
         if provider == TCP_IP_GUID {
             handle_tcp_event(event, opcode);
@@ -1939,14 +1954,35 @@ mod win {
         });
     }
 
-    /// A path removed or renamed: when it is a store directory (or holds a
-    /// store root), every record below it is complete since then only.
+    /// A path removed or renamed away: when it is a store directory (or
+    /// holds a store root), every record below it is complete since then
+    /// only. A file's path holds no records below it.
     fn store_tree_changed(path: &str, at: Option<i64>) {
         crate::store_writers::note_tree_changed(
             path,
             at.and_then(super::filetime_to_unix_ms)
                 .unwrap_or_else(crate::store_writers::now_ms),
         );
+    }
+
+    /// A path renamed into place: a directory there is a directory moved
+    /// in ([`crate::store_writers::note_tree_moved_in`]).
+    fn store_tree_moved_in(path: &str, at: Option<i64>) {
+        // The filesystem is asked only about a path of a store.
+        if !crate::store_writers::relates_to_a_store(path) {
+            return;
+        }
+        let is_directory =
+            std::fs::symlink_metadata(crate::win_path_normalize::nt_device_to_drive(path))
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false);
+        if is_directory {
+            crate::store_writers::note_tree_moved_in(
+                path,
+                at.and_then(super::filetime_to_unix_ms)
+                    .unwrap_or_else(crate::store_writers::now_ms),
+            );
+        }
     }
 
     unsafe fn handle_tcp_event(event: &EVENT_RECORD, opcode: u8) {
@@ -2571,7 +2607,7 @@ mod win {
                     remember_file_object(file_object, new_path.clone());
                 }
                 store_record(store_ops::RENAME_TO, &new_path, pid, at);
-                store_tree_changed(&new_path, at);
+                store_tree_moved_in(&new_path, at);
                 record_file_actor(FileActorTable::Namespace, new_path, pid, at);
             }
             FileIoAction::SetInfo {
