@@ -98,8 +98,10 @@ lazy_static::lazy_static! {
 }
 
 /// Refresh the sync-accessible pattern snapshot from the cloud model.
-/// Called after every `sensitive_paths::update()` attempt, regardless of status --
-/// see the comment there for why `Updated`-only refreshing was wrong.
+/// Called through `sensitive_paths::refresh_catalog_snapshots`: after every
+/// `sensitive_paths::update()` attempt whatever its outcome, and by a process
+/// before its first grading -- see the comment in `update` for why refreshing
+/// on `Updated` only was wrong.
 pub async fn refresh_patterns_snapshot() {
     let db = SENSITIVE_PATHS.data.read().await;
     let patterns: Vec<String> = db
@@ -108,6 +110,19 @@ pub async fn refresh_patterns_snapshot() {
         .map(str::to_string)
         .collect();
     PATTERNS_SNAPSHOT.store(Arc::new(patterns));
+}
+
+/// Install `patterns` as the snapshot (tests: the compile-time fallback a
+/// process starts with, [`compile_time_fallback_patterns`]).
+#[cfg(test)]
+pub(crate) fn set_patterns_snapshot_for_tests(patterns: Vec<String>) {
+    PATTERNS_SNAPSHOT.store(Arc::new(patterns));
+}
+
+/// The patterns the snapshot holds before any refresh (tests).
+#[cfg(test)]
+pub(crate) fn compile_time_fallback_patterns() -> Vec<String> {
+    build_fallback_patterns()
 }
 
 /// Returns true if `path` matches a known credential / secret pattern.

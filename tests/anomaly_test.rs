@@ -330,11 +330,6 @@ fn generate_port_scan_traffic() -> Vec<SessionInfo> {
         .collect()
 }
 
-fn generate_dns_tunnel_traffic(count: usize) -> Vec<SessionInfo> {
-    let mut rng = rand::rng();
-    generate_dns_tunnel_traffic_with_rng(count, &mut rng)
-}
-
 fn generate_dns_tunnel_traffic_with_rng(count: usize, rng: &mut impl Rng) -> Vec<SessionInfo> {
     let base = Utc::now() - Duration::hours(1);
     let mut sessions = Vec::with_capacity(count);

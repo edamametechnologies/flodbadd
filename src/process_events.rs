@@ -133,7 +133,9 @@ pub struct ProcessEvent {
     /// the Unix epoch: its start time (macOS), its start ticks with the boot
     /// time (Linux), its creation time (Windows). Unlike `timestamp_ms` it
     /// does not depend on when the event was delivered, so two readers of one
-    /// process agree on it. `None` when the sensor could not read it.
+    /// process agree on it ([`process_start_ms`]), and it stays the same
+    /// across an exec: two events that name the same pid and the same start
+    /// describe the same process. `None` when the sensor could not read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_start_ms: Option<u64>,
     /// A process start event that names its parent itself (Windows): whether

@@ -35,6 +35,14 @@
 //! process: a FIM restart with other paths calls `init` again, which marks
 //! the roots not covered yet instead of returning.
 //!
+//! Both groups also feed the store-writer record (`crate::store_writers`)
+//! for the files of the published stores: the writer group reports a write
+//! with the file's size as the event's descriptor gives it, the creation
+//! group a creation, a removal and a move with the process that made it
+//! (`FAN_CREATE`, `FAN_DELETE`, `FAN_MOVED_FROM`, `FAN_MOVED_TO`), and a
+//! queue overflow in either group (`FAN_Q_OVERFLOW`) is reported to the
+//! record as dropped events.
+//!
 //! The creation group is inert, and says so once in the log, where the
 //! kernel refuses its FID marks (a filesystem without file handles) or this
 //! process cannot open the handle a record carries (`open_by_handle_at`
@@ -87,6 +95,11 @@ const CREATED_SUBTREE_MARKS: usize = 64;
 /// Read buffer of the creation group: FID records carry file handles and
 /// names, several per read.
 const DIR_EVENT_BUFFER: usize = 64 * 1024;
+/// Store files marked themselves at most (the record holds as many).
+const MAX_STORE_FILE_MARKS: usize = crate::store_writers::MAX_FILES;
+/// How long before a new store directory's creation event was read its store
+/// gap starts.
+const NEW_DIRECTORY_SLACK_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 struct WriterAttribution {
@@ -136,6 +149,21 @@ struct FanotifyTable {
     /// inert and new directories are marked from inotify only.
     creation_unresolved: std::sync::atomic::AtomicU64,
     creation_unresolved_last_errno: std::sync::atomic::AtomicI32,
+    /// Queue overflows either group reported (`FAN_Q_OVERFLOW`).
+    queue_overflows: std::sync::atomic::AtomicU64,
+    /// Store roots that did not exist when they were given, by normalized
+    /// path, and the directories marked for creations only on the way to
+    /// them.
+    awaited_roots: CustomDashMap<String, PathBuf>,
+    sentinels: CustomDashMap<String, ()>,
+    /// Store files marked themselves (inode marks, both groups), by
+    /// `device:inode`, with the store path: a write or a change of names
+    /// through another path reaches the record under this one.
+    inode_marks: CustomDashMap<String, String>,
+    /// Directories whose creation-group mark carries the store mask
+    /// (removals and moves), and the parents of store roots marked for
+    /// removals and moves of the roots themselves.
+    store_masked: CustomDashMap<String, ()>,
 }
 
 static TABLE: OnceCell<Arc<FanotifyTable>> = OnceCell::new();
@@ -202,6 +230,11 @@ pub fn init(roots: &[PathBuf]) {
             creation_mark_last_errno: std::sync::atomic::AtomicI32::new(0),
             creation_unresolved: std::sync::atomic::AtomicU64::new(0),
             creation_unresolved_last_errno: std::sync::atomic::AtomicI32::new(0),
+            queue_overflows: std::sync::atomic::AtomicU64::new(0),
+            awaited_roots: CustomDashMap::new("fim_fanotify_awaited_roots"),
+            sentinels: CustomDashMap::new("fim_fanotify_sentinels"),
+            inode_marks: CustomDashMap::new("fim_fanotify_inode_marks"),
+            store_masked: CustomDashMap::new("fim_fanotify_store_masked"),
         });
         let reader = Arc::clone(&table);
         std::thread::Builder::new()
@@ -235,9 +268,11 @@ pub fn init(roots: &[PathBuf]) {
     }
     if !created {
         extend(table, roots);
+        remask_store_directories(table);
         return;
     }
     let marked = mark_roots(table, roots);
+    remask_store_directories(table);
     if marked == 0 {
         info!("FIM fanotify: no directory could be marked yet (falling back to lsof)");
         return;
@@ -252,6 +287,120 @@ pub fn init(roots: &[PathBuf]) {
             "off (kernel without FAN_REPORT_DFID_NAME)"
         }
     );
+}
+
+/// Await the store roots in `roots` that do not exist yet: the nearest
+/// directory above each that exists is marked for creations only, then each
+/// directory created on the way to it the same, and the root, once created,
+/// is marked with what is already in it. No-op before `init` or without the
+/// creation group.
+pub fn await_roots(roots: &[PathBuf]) {
+    let Some(table) = TABLE.get() else {
+        return;
+    };
+    if table.dir_fan.is_none() {
+        return;
+    }
+    for root in roots {
+        if root.exists() {
+            continue;
+        }
+        table
+            .awaited_roots
+            .insert(normalize(&root.to_string_lossy()), root.clone());
+        let mut ancestor = root.parent();
+        while let Some(dir) = ancestor {
+            if dir.is_dir() {
+                sentinel_mark(table, dir);
+                // A chain created between the test above and the mark
+                // (`mkdir -p`) is followed down now.
+                catch_up_awaited(table, dir);
+                break;
+            }
+            ancestor = dir.parent();
+        }
+    }
+}
+
+/// After a creation-only mark on `dir`: the directory on the way to each
+/// awaited root below it that already exists (created before the mark, a
+/// `mkdir -p` faster than the marks) is taken as if its creation had been
+/// reported.
+fn catch_up_awaited(table: &FanotifyTable, dir: &Path) {
+    let awaited: Vec<PathBuf> = table
+        .awaited_roots
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    for root in awaited {
+        let Ok(rest) = root.strip_prefix(dir) else {
+            continue;
+        };
+        let Some(first) = rest.components().next() else {
+            continue;
+        };
+        let child = dir.join(first);
+        if child.is_dir() {
+            awaited_root_created(table, dir, &child);
+        }
+    }
+}
+
+/// Mark `dir` in the creation group for the creations in it only.
+fn sentinel_mark(table: &FanotifyTable, dir: &Path) {
+    let key = root_key(dir);
+    if table.sentinels.contains_key(&key) {
+        return;
+    }
+    let (Some(dir_fan), Ok(handle)) = (table.dir_fan.as_ref(), std::fs::File::open(dir)) else {
+        return;
+    };
+    let mask = MaskFlags::from_bits_retain(libc::FAN_CREATE) | MaskFlags::FAN_ONDIR;
+    if dir_fan
+        .mark::<_, Path>(MarkFlags::FAN_MARK_ADD, mask, &handle, None)
+        .is_ok()
+    {
+        table.sentinels.insert(key.clone(), ());
+        // Creation records under it resolve against this handle.
+        table.root_handles.insert(key, handle);
+    }
+}
+
+/// A directory created under a directory marked for an awaited root: the
+/// root itself is marked with what is already in it; a directory on the way
+/// is watched for creations in turn. `true` when the creation was one of
+/// these (nothing else is done with it).
+fn awaited_root_created(table: &FanotifyTable, parent: &Path, created: &Path) -> bool {
+    if !table.sentinels.contains_key(&root_key(parent))
+        || table.marked.contains_key(&root_key(parent))
+    {
+        return false;
+    }
+    let awaited: Vec<String> = table
+        .awaited_roots
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    match crate::store_writers::awaited_root_step(&normalize(&created.to_string_lossy()), &awaited)
+    {
+        crate::store_writers::AwaitedRootStep::Root => {
+            table
+                .awaited_roots
+                .remove(&normalize(&created.to_string_lossy()));
+            table.roots.insert(root_key(created), ());
+            if let Ok(handle) = std::fs::File::open(created) {
+                table.root_handles.insert(root_key(created), handle);
+            }
+            let budget = MAX_DIRECTORY_MARKS.saturating_sub(table.marked.len());
+            mark_tree(table, created, budget.min(RUNTIME_MARK_RESERVE));
+        }
+        crate::store_writers::AwaitedRootStep::Ancestor => {
+            sentinel_mark(table, created);
+            catch_up_awaited(table, created);
+        }
+        crate::store_writers::AwaitedRootStep::Unrelated => {}
+    }
+    true
 }
 
 /// Mark `roots` and their subtrees breadth-first, root by root, until the
@@ -282,6 +431,7 @@ fn mark_roots(table: &FanotifyTable, roots: &[PathBuf]) -> usize {
 /// before is skipped by key, so a restart with the same paths costs
 /// nothing.
 fn extend(table: &FanotifyTable, roots: &[PathBuf]) {
+    remask_store_directories(table);
     let new_roots = roots_to_mark(&table.marked, roots);
     if new_roots.is_empty() {
         return;
@@ -316,6 +466,10 @@ pub fn remark_directory(dir: &Path) {
         let roots: Vec<String> = table.roots.iter().map(|root| root.key().clone()).collect();
         let depth = depth_below_roots(&dir.to_string_lossy(), &roots);
         if !may_mark_new_directory(table.marked.len(), depth) {
+            // Past the cap: recorded as a store directory without a watch.
+            if crate::store_writers::is_store_directory(&dir.to_string_lossy()) {
+                crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), false);
+            }
             return;
         }
         mark_one(table, dir);
@@ -503,8 +657,60 @@ pub fn creation_unresolved_total() -> (u64, i32) {
         .unwrap_or((0, 0))
 }
 
+/// Queue overflows the kernel reported to either group since start.
+pub fn queue_overflows() -> u64 {
+    TABLE
+        .get()
+        .map(|t| t.queue_overflows.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 fn normalize(path: &str) -> String {
     path.trim().to_string()
+}
+
+/// The directory entry events the creation group asks for: a creation; on a
+/// store directory, a removal and both ends of a move too, each with the
+/// process that made it.
+fn creation_group_mask(store_directory: bool) -> MaskFlags {
+    let entries = if store_directory {
+        libc::FAN_CREATE | libc::FAN_DELETE | libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO
+    } else {
+        libc::FAN_CREATE
+    };
+    MaskFlags::from_bits_retain(entries) | MaskFlags::FAN_ONDIR | MaskFlags::FAN_EVENT_ON_CHILD
+}
+
+/// Feed the store-writer record with one operation on `path` by `pid`: the
+/// process's start as the kernel records it (the one derivation every
+/// sensor uses, `process_events::process_start_ms`), its image as resolved
+/// for the attribution table, the time the event was read.
+fn store_record(
+    ops: u32,
+    path: &str,
+    pid: u32,
+    process_path: &str,
+    size: Option<u64>,
+    identity: Option<crate::store_writers::FileId>,
+) {
+    crate::store_writers::record(&crate::store_writers::Operation {
+        path,
+        ops,
+        pid,
+        started_at_ms: crate::process_events::process_start_ms(pid),
+        process_path,
+        at_ms: crate::store_writers::now_ms(),
+        size,
+        identity,
+    });
+}
+
+/// A queue overflow: the kernel dropped events of this group.
+fn note_queue_overflow(table: &FanotifyTable) {
+    table
+        .queue_overflows
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::store_writers::note_lost(crate::store_writers::now_ms());
 }
 
 fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
@@ -525,9 +731,16 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             // The creation group marks the same directory: a file or
             // subdirectory created in it is reported with its creator.
             if let Some(dir_fan) = table.dir_fan.as_ref() {
+                let store_directory =
+                    crate::store_writers::is_store_directory(&dir.to_string_lossy());
+                if store_directory {
+                    table.store_masked.insert(root_key(dir), ());
+                    crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), true);
+                    mark_store_root_parent(table, dir);
+                }
                 match dir_fan.mark::<_, Path>(
                     MarkFlags::FAN_MARK_ADD,
-                    MaskFlags::FAN_CREATE | MaskFlags::FAN_ONDIR | MaskFlags::FAN_EVENT_ON_CHILD,
+                    creation_group_mask(store_directory),
                     &handle,
                     None,
                 ) {
@@ -555,10 +768,140 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
             true
         }
         Err(e) => {
-            debug!("FIM fanotify: mark {} failed: {}", dir.display(), e);
+            debug!("FIM fanotify: mark failed: {}", e);
+            if crate::store_writers::is_store_directory(&dir.to_string_lossy()) {
+                crate::store_writers::note_store_directory_watch(&dir.to_string_lossy(), false);
+            }
             false
         }
     }
+}
+
+/// A store root's parent, marked in the creation group for removals and
+/// moves: the root itself renamed or removed is reported (its contents
+/// then name other files).
+fn mark_store_root_parent(table: &FanotifyTable, dir: &Path) {
+    if !crate::store_writers::is_store_root(&dir.to_string_lossy()) {
+        return;
+    }
+    let (Some(dir_fan), Some(parent)) = (table.dir_fan.as_ref(), dir.parent()) else {
+        return;
+    };
+    let key = format!("{}#parent", root_key(parent));
+    if table.store_masked.contains_key(&key) {
+        return;
+    }
+    let Ok(handle) = std::fs::File::open(parent) else {
+        return;
+    };
+    let mask =
+        MaskFlags::from_bits_retain(libc::FAN_DELETE | libc::FAN_MOVED_FROM | libc::FAN_MOVED_TO)
+            | MaskFlags::FAN_ONDIR
+            | MaskFlags::FAN_EVENT_ON_CHILD;
+    if dir_fan
+        .mark::<_, Path>(MarkFlags::FAN_MARK_ADD, mask, &handle, None)
+        .is_ok()
+    {
+        table.store_masked.insert(key, ());
+        table.root_handles.insert(root_key(parent), handle);
+    }
+}
+
+/// Every marked directory that is a store directory now and whose
+/// creation-group mark lacks the store mask gets it (stores published after
+/// the directory was marked, a restart). `FAN_MARK_ADD` adds to a mark.
+fn remask_store_directories(table: &FanotifyTable) {
+    let Some(dir_fan) = table.dir_fan.as_ref() else {
+        return;
+    };
+    let marked: Vec<String> = table
+        .marked
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    for key in marked {
+        if !crate::store_writers::is_store_directory(&key) {
+            continue;
+        }
+        let dir = PathBuf::from(&key);
+        mark_store_root_parent(table, &dir);
+        if table.store_masked.contains_key(&root_key(&dir)) {
+            continue;
+        }
+        let Ok(handle) = std::fs::File::open(&dir) else {
+            continue;
+        };
+        if dir_fan
+            .mark::<_, Path>(
+                MarkFlags::FAN_MARK_ADD,
+                creation_group_mask(true),
+                &handle,
+                None,
+            )
+            .is_ok()
+        {
+            table.store_masked.insert(root_key(&dir), ());
+            crate::store_writers::note_store_directory_watch(&key, true);
+        }
+    }
+}
+
+/// Mark a store file itself (an inode mark) in both groups: a write through
+/// any name of the file, and a change of its attributes or of its number of
+/// names, reach the record under the store path. Bounded by the record's
+/// own bound.
+fn mark_store_file(table: &FanotifyTable, path: &str) {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if table.inode_marks.len() >= MAX_STORE_FILE_MARKS {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    if !meta.is_file() {
+        return;
+    }
+    let key = format!("{}:{}", meta.dev(), meta.ino());
+    if table.inode_marks.contains_key(&key) {
+        return;
+    }
+    if table
+        .fan
+        .mark::<_, Path>(
+            MarkFlags::FAN_MARK_ADD,
+            MaskFlags::FAN_MODIFY | MaskFlags::FAN_CLOSE_WRITE,
+            &file,
+            None,
+        )
+        .is_err()
+    {
+        return;
+    }
+    if let Some(dir_fan) = table.dir_fan.as_ref() {
+        let _ = dir_fan.mark::<_, Path>(
+            MarkFlags::FAN_MARK_ADD,
+            MaskFlags::from_bits_retain(libc::FAN_ATTRIB),
+            &file,
+            None,
+        );
+    }
+    table.inode_marks.insert(key, path.to_string());
+}
+
+/// The store path of the marked store file with this metadata, if any.
+fn marked_store_path(table: &FanotifyTable, meta: &std::fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    table
+        .inode_marks
+        .get(&format!("{}:{}", meta.dev(), meta.ino()))
+        .map(|entry| entry.value().clone())
 }
 
 /// Mark `root` and its subdirectories breadth-first (no symlink following),
@@ -572,6 +915,16 @@ fn mark_tree(table: &FanotifyTable, root: &Path, budget: usize) -> usize {
     queue.push_back(root.to_path_buf());
     while let Some(dir) = queue.pop_front() {
         if added >= budget {
+            // Past the budget: each store directory recorded as one without
+            // a watch.
+            for left in std::iter::once(dir).chain(queue.into_iter()) {
+                if crate::store_writers::is_store_directory(&left.to_string_lossy()) {
+                    crate::store_writers::note_store_directory_watch(
+                        &left.to_string_lossy(),
+                        false,
+                    );
+                }
+            }
             break;
         }
         let Ok(meta) = std::fs::symlink_metadata(&dir) else {
@@ -634,11 +987,16 @@ fn reader_loop(table: Arc<FanotifyTable>) {
             }
         };
         for event in events {
+            if event.mask().bits() & libc::FAN_Q_OVERFLOW != 0 {
+                note_queue_overflow(&table);
+                continue;
+            }
             // `event` owns the fd and closes it on drop.
             let Some(fd) = event.fd() else {
                 continue;
             };
-            let path = match std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())) {
+            let fd_link = format!("/proc/self/fd/{}", fd.as_raw_fd());
+            let path = match std::fs::read_link(&fd_link) {
                 Ok(p) => p.to_string_lossy().to_string(),
                 Err(_) => continue,
             };
@@ -651,6 +1009,33 @@ fn reader_loop(table: Arc<FanotifyTable>) {
                 .events_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (process_name, process_path) = resolve_writer(pid);
+            // The store-writer record takes the write with the pid alone
+            // when the image could not be resolved, and the file's size as
+            // the event's descriptor gives it.
+            // A store file by the name the event's descriptor carries, or a
+            // marked store file written through another name.
+            let meta = std::fs::metadata(&fd_link).ok();
+            let store_path = if crate::store_writers::classify(&path).is_some() {
+                mark_store_file(&table, &path);
+                Some(path.clone())
+            } else {
+                meta.as_ref()
+                    .and_then(|meta| marked_store_path(&table, meta))
+            };
+            if let Some(store_path) = store_path {
+                use std::os::unix::fs::MetadataExt;
+                store_record(
+                    crate::store_writers::ops::WRITE,
+                    &store_path,
+                    pid,
+                    &process_path,
+                    meta.as_ref().map(|meta| meta.len()),
+                    meta.as_ref().map(|meta| crate::store_writers::FileId {
+                        device: meta.dev(),
+                        inode: meta.ino(),
+                    }),
+                );
+            }
             if process_name.is_empty() && process_path.is_empty() {
                 continue;
             }
@@ -680,9 +1065,33 @@ fn reader_loop(table: Arc<FanotifyTable>) {
 struct CreationRecord {
     pid: i32,
     is_dir: bool,
+    /// The event's mask: which of the creation group's events this is.
+    mask: u64,
     handle_type: i32,
     handle: Vec<u8>,
     name: String,
+}
+
+/// Whether one of the events of `buf` is a queue overflow (`FAN_Q_OVERFLOW`:
+/// an event with no record of its own).
+fn events_report_overflow(buf: &[u8]) -> bool {
+    let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
+    let mut offset = 0usize;
+    while offset + meta_size <= buf.len() {
+        // SAFETY: as in `parse_creation_records`: a complete metadata struct
+        // lies at `offset` (the bounds check above), read as an unaligned copy.
+        let meta: libc::fanotify_event_metadata =
+            unsafe { std::ptr::read_unaligned(buf[offset..].as_ptr().cast()) };
+        let event_len = meta.event_len as usize;
+        if event_len < meta_size || offset + event_len > buf.len() {
+            break;
+        }
+        if meta.mask & libc::FAN_Q_OVERFLOW != 0 {
+            return true;
+        }
+        offset += event_len;
+    }
+    false
 }
 
 /// Parse the events a `FAN_REPORT_DFID_NAME` group returned: for each
@@ -738,6 +1147,7 @@ fn parse_creation_records(buf: &[u8]) -> Vec<CreationRecord> {
                             records.push(CreationRecord {
                                 pid: meta.pid,
                                 is_dir: meta.mask & (libc::FAN_ONDIR as u64) != 0,
+                                mask: meta.mask,
                                 handle_type,
                                 handle: buf[handle_start..name_start].to_vec(),
                                 name,
@@ -835,6 +1245,63 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
     }
 }
 
+/// A store directory created since the sensor started, just marked: the
+/// window from its creation to its mark is recorded as a store gap, and
+/// each file found in it is marked changed for its reader, as a record with
+/// no creation.
+fn new_store_directory(dir: &Path, read_at_ms: u64) {
+    let now = crate::store_writers::now_ms();
+    crate::store_writers::note_store_gap(
+        &dir.to_string_lossy(),
+        Some(read_at_ms.saturating_sub(NEW_DIRECTORY_SLACK_MS)),
+        now,
+        "new_directory",
+    );
+    let mut queue = std::collections::VecDeque::from([(dir.to_path_buf(), 0usize)]);
+    let mut seen = 0usize;
+    while let Some((current, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > CREATED_SUBTREE_MARKS * 16 {
+                return;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() && !file_type.is_symlink() && depth < 3 {
+                queue.push_back((path, depth + 1));
+            } else if file_type.is_file()
+                && crate::store_writers::classify(&path.to_string_lossy()).is_some()
+            {
+                crate::store_writers::note_change(&path.to_string_lossy(), now);
+            }
+        }
+    }
+}
+
+/// The store-writer operations a creation-group event's mask stands for.
+fn store_ops_for_mask(mask: u64) -> u32 {
+    use crate::store_writers::ops;
+    let mut out = 0u32;
+    if mask & libc::FAN_CREATE != 0 {
+        out |= ops::CREATE;
+    }
+    if mask & libc::FAN_DELETE != 0 {
+        out |= ops::REMOVE;
+    }
+    if mask & libc::FAN_MOVED_FROM != 0 {
+        out |= ops::RENAME_FROM;
+    }
+    if mask & libc::FAN_MOVED_TO != 0 {
+        out |= ops::RENAME_TO;
+    }
+    out
+}
+
 fn creation_loop(table: Arc<FanotifyTable>) {
     let Some(dir_fan) = table.dir_fan.as_ref() else {
         return;
@@ -850,6 +1317,10 @@ fn creation_loop(table: Arc<FanotifyTable>) {
             }
         };
         let own_pid = std::process::id() as i32;
+        let read_at_ms = crate::store_writers::now_ms();
+        if events_report_overflow(&buf[..nread]) {
+            note_queue_overflow(&table);
+        }
         for record in parse_creation_records(&buf[..nread]) {
             if record.pid <= 0 || record.pid == own_pid {
                 continue;
@@ -858,15 +1329,83 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                 continue;
             };
             let created = parent.join(&record.name);
+            // Under a directory watched only for an awaited store root:
+            // nothing else is done with it (no process is resolved).
+            if record.mask & libc::FAN_CREATE != 0 && record.is_dir {
+                if awaited_root_created(&table, &parent, &created) {
+                    continue;
+                }
+            } else if table.sentinels.contains_key(&root_key(&parent))
+                && !table.marked.contains_key(&root_key(&parent))
+            {
+                continue;
+            }
+            let pid = record.pid as u32;
+            // An attribute change of a store file (its own mark): its
+            // number of names above one is a link, else an attribute.
+            if record.mask & libc::FAN_ATTRIB != 0 && record.mask & libc::FAN_CREATE == 0 {
+                let path = created.to_string_lossy();
+                if !record.is_dir && crate::store_writers::classify(&path).is_some() {
+                    use std::os::unix::fs::MetadataExt;
+                    let links = std::fs::symlink_metadata(&*path).map(|meta| meta.nlink());
+                    let ops = match links {
+                        Ok(1) => crate::store_writers::ops::ATTRIBUTES,
+                        _ => crate::store_writers::ops::LINK,
+                    };
+                    let (_, process_path) = resolve_writer(pid);
+                    store_record(ops, &path, pid, &process_path, None, None);
+                }
+                continue;
+            }
+            // A removal or a move (asked for on store directories and on
+            // the parents of store roots): for a store file, the record; for
+            // a directory, every record below it.
+            if record.mask & libc::FAN_CREATE == 0 {
+                let path = created.to_string_lossy();
+                if record.is_dir {
+                    crate::store_writers::note_tree_changed(&path, read_at_ms);
+                    forget_directory(&created);
+                } else if crate::store_writers::classify(&path).is_some() {
+                    let ops = store_ops_for_mask(record.mask);
+                    if ops != 0 {
+                        let (_, process_path) = resolve_writer(pid);
+                        store_record(ops, &path, pid, &process_path, None, None);
+                    }
+                    if record.mask & libc::FAN_DELETE != 0 {
+                        table
+                            .inode_marks
+                            .retain(|_, store_path| store_path != &*path);
+                    }
+                }
+                continue;
+            }
+            let (process_name, process_path) = resolve_writer(pid);
+            // The store-writer record: a file's creation, with the process
+            // that made it.
+            if !record.is_dir {
+                let path = created.to_string_lossy();
+                if crate::store_writers::classify(&path).is_some() {
+                    store_record(
+                        store_ops_for_mask(record.mask),
+                        &path,
+                        pid,
+                        &process_path,
+                        None,
+                        None,
+                    );
+                    mark_store_file(&table, &path);
+                }
+            }
             table
                 .created_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let pid = record.pid as u32;
-            let (process_name, process_path) = resolve_writer(pid);
             if record.is_dir {
                 // Mark it (and what is already in it) before anything else,
                 // then remember who made it for the files that beat the mark.
                 mark_created_directory(&table, &created);
+                if crate::store_writers::is_store_directory(&created.to_string_lossy()) {
+                    new_store_directory(&created, read_at_ms);
+                }
                 if !(process_name.is_empty() && process_path.is_empty()) {
                     if table.creators.len() >= TABLE_MAX_ENTRIES {
                         let cutoff = Instant::now();
@@ -915,6 +1454,16 @@ mod tests {
     /// what the kernel writes, so the layout is built by hand here, not from
     /// the struct definitions it is checked against.
     fn creation_event(pid: i32, is_dir: bool, handle: &[u8], name: &str) -> Vec<u8> {
+        directory_entry_event(libc::FAN_CREATE, pid, is_dir, handle, name)
+    }
+
+    fn directory_entry_event(
+        kind: u64,
+        pid: i32,
+        is_dir: bool,
+        handle: &[u8],
+        name: &str,
+    ) -> Vec<u8> {
         let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
         let header_size = std::mem::size_of::<libc::fanotify_event_info_header>();
         let fsid_size = std::mem::size_of::<libc::__kernel_fsid_t>();
@@ -925,7 +1474,7 @@ mod tests {
         meta.event_len = (meta_size + record_len_padded) as u32;
         meta.vers = libc::FANOTIFY_METADATA_VERSION;
         meta.metadata_len = meta_size as u16;
-        meta.mask = libc::FAN_CREATE | if is_dir { libc::FAN_ONDIR } else { 0 };
+        meta.mask = kind | if is_dir { libc::FAN_ONDIR } else { 0 };
         meta.fd = libc::FAN_NOFD;
         meta.pid = pid;
         let mut out = Vec::with_capacity(meta.event_len as usize);
@@ -961,6 +1510,7 @@ mod tests {
                 CreationRecord {
                     pid: 4242,
                     is_dir: true,
+                    mask: libc::FAN_CREATE | libc::FAN_ONDIR,
                     handle_type: 1,
                     handle: vec![1, 2, 3, 4, 5, 6, 7, 8],
                     name: "nssdb".to_string(),
@@ -968,6 +1518,7 @@ mod tests {
                 CreationRecord {
                     pid: 4243,
                     is_dir: false,
+                    mask: libc::FAN_CREATE,
                     handle_type: 1,
                     handle: vec![9, 9],
                     name: "key4.db".to_string(),
@@ -977,6 +1528,102 @@ mod tests {
         // A truncated buffer ends the parse without a panic.
         assert!(parse_creation_records(&buf[..buf.len() - 40]).len() <= 1);
         assert!(parse_creation_records(&[]).is_empty());
+    }
+
+    /// A removal and both ends of a move are parsed like a creation and
+    /// carry their mask; each maps to its store-writer operation.
+    #[test]
+    fn removals_and_moves_are_parsed_with_their_mask() {
+        use crate::store_writers::ops;
+        let mut buf = directory_entry_event(libc::FAN_DELETE, 10, false, &[1, 2], "s.jsonl");
+        buf.extend(directory_entry_event(
+            libc::FAN_MOVED_FROM,
+            11,
+            false,
+            &[1, 2],
+            "s.jsonl.tmp",
+        ));
+        buf.extend(directory_entry_event(
+            libc::FAN_MOVED_TO,
+            11,
+            false,
+            &[1, 2],
+            "s.jsonl",
+        ));
+        let records = parse_creation_records(&buf);
+        let seen: Vec<(i32, u32, &str)> = records
+            .iter()
+            .map(|record| {
+                (
+                    record.pid,
+                    store_ops_for_mask(record.mask),
+                    record.name.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (10, ops::REMOVE, "s.jsonl"),
+                (11, ops::RENAME_FROM, "s.jsonl.tmp"),
+                (11, ops::RENAME_TO, "s.jsonl"),
+            ]
+        );
+        assert_eq!(store_ops_for_mask(libc::FAN_CREATE), ops::CREATE);
+        assert_eq!(
+            store_ops_for_mask(libc::FAN_CREATE | libc::FAN_DELETE),
+            ops::CREATE | ops::REMOVE
+        );
+        assert_eq!(store_ops_for_mask(libc::FAN_ONDIR), 0);
+        assert!(!events_report_overflow(&buf));
+    }
+
+    /// Removals and moves are asked for on store directories only.
+    #[test]
+    fn removals_and_moves_are_asked_for_on_store_directories_only() {
+        let store = creation_group_mask(true).bits();
+        let ordinary = creation_group_mask(false).bits();
+        for bit in [libc::FAN_DELETE, libc::FAN_MOVED_FROM, libc::FAN_MOVED_TO] {
+            assert_ne!(store & bit, 0);
+            assert_eq!(ordinary & bit, 0);
+        }
+        assert_ne!(ordinary & libc::FAN_CREATE, 0);
+        assert_ne!(store & libc::FAN_CREATE, 0);
+    }
+
+    /// A queue overflow is an event without a record of its own: its mask
+    /// carries `FAN_Q_OVERFLOW`, wherever it sits among the events read.
+    #[test]
+    fn a_queue_overflow_is_found_among_the_events() {
+        let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
+        let mut overflow: libc::fanotify_event_metadata = unsafe { std::mem::zeroed() };
+        overflow.event_len = meta_size as u32;
+        overflow.vers = libc::FANOTIFY_METADATA_VERSION;
+        overflow.metadata_len = meta_size as u16;
+        overflow.mask = libc::FAN_Q_OVERFLOW;
+        overflow.fd = libc::FAN_NOFD;
+        overflow.pid = 0;
+        let overflow_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&overflow as *const libc::fanotify_event_metadata).cast::<u8>(),
+                meta_size,
+            )
+        }
+        .to_vec();
+        let mut buf = creation_event(4242, false, &[1, 2], "a.jsonl");
+        buf.extend(overflow_bytes.clone());
+        buf.extend(creation_event(4243, false, &[1, 2], "b.jsonl"));
+        assert!(events_report_overflow(&buf));
+        // The records around it are still parsed.
+        assert_eq!(parse_creation_records(&buf).len(), 2);
+        assert!(events_report_overflow(&overflow_bytes));
+        assert!(!events_report_overflow(&creation_event(
+            1,
+            false,
+            &[1],
+            "x"
+        )));
+        assert!(!events_report_overflow(&[]));
     }
 
     /// A writer gone before the reader thread woke up is named from the exec
@@ -1375,5 +2022,186 @@ mod tests {
         assert_eq!(pid, child_pid, "attributed to {name} {path}");
         assert!(events_total() >= 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Root only (`make` runs `--ignored fanotify --test-threads=1`). The
+    /// store-writer record as the two groups feed it: a child creates a store
+    /// file and appends to it, a second process appends, then the file is
+    /// removed. The creator, both writers, the size and the removal are in
+    /// the record. Skips where the creation group cannot run (as the test
+    /// above), since a creation and a removal come from it.
+    #[test]
+    #[ignore]
+    #[serial_test::serial(store_writers)]
+    fn fanotify_feeds_the_store_writer_record() {
+        use crate::store_writers::{self, ops, StoreFileKind, StoreSpec};
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                store_writers::clear();
+                let _ = std::fs::remove_dir_all(&self.0);
+                forget_directory(&self.0);
+            }
+        }
+        let base =
+            std::env::temp_dir().join(format!("flodbadd-fanotify-stores-{}", std::process::id()));
+        let _cleanup = Cleanup(base.clone());
+        let project = base.join("projects").join("p");
+        std::fs::create_dir_all(&project).unwrap();
+        store_writers::configure(&[StoreSpec {
+            agent: "claude_code".to_string(),
+            roots: vec![base.join("projects")],
+            path_segment: String::new(),
+            excluded_segments: Vec::new(),
+            file_suffixes: vec![".jsonl".to_string()],
+            pid_file_roots: Vec::new(),
+            pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: 1_000,
+        }]);
+        init(std::slice::from_ref(&base));
+        assert!(is_active(), "fanotify init failed (are we root?)");
+        if !creation_group_active() || creation_marks_total() == 0 {
+            eprintln!("the creation group cannot run here; the test cannot run here");
+            return;
+        }
+        let file = project.join("s.jsonl");
+        let rows_of = |path: &Path| {
+            store_writers::rows_since("", 0, None)
+                .expect("the record is free")
+                .files
+                .into_iter()
+                .find(|rows| rows.path == path.to_string_lossy())
+        };
+        // The creator: creates, appends a line, stays alive to be resolved.
+        let mut creator = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("echo first >> {}; sleep 3", file.display()))
+            .spawn()
+            .unwrap();
+        let creator_pid = creator.id();
+        let mut created = None;
+        for _ in 0..50 {
+            created = rows_of(&file).filter(|rows| {
+                rows.rows
+                    .iter()
+                    .any(|row| row.writer.pid == creator_pid && row.ops & ops::WRITE != 0)
+            });
+            if created.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if created.is_none() && created_total() == 0 {
+            let (unresolved, errno) = creation_unresolved_total();
+            if unresolved > 0 {
+                eprintln!(
+                    "{unresolved} creation record(s) could not be resolved (errno {errno}); the test cannot run here"
+                );
+                let _ = creator.kill();
+                let _ = creator.wait();
+                return;
+            }
+        }
+        let created = created.expect("the creator's write is recorded");
+        assert_eq!(created.agent, "claude_code");
+        assert_eq!(created.kind, StoreFileKind::Transcript);
+        assert_eq!(
+            created.creation.map(|creation| creation.writer.pid),
+            Some(creator_pid),
+            "the creation names the creator"
+        );
+        let row = created
+            .rows
+            .iter()
+            .find(|row| row.writer.pid == creator_pid)
+            .unwrap();
+        assert!(row.ops & ops::CREATE != 0);
+        assert!(
+            row.writer.started_at_ms.is_some(),
+            "the start is read while it lives"
+        );
+
+        // A second process appends: a second row, and the size at its close.
+        let mut second = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("echo second >> {}; sleep 3", file.display()))
+            .spawn()
+            .unwrap();
+        let second_pid = second.id();
+        let mut both = None;
+        for _ in 0..50 {
+            both = rows_of(&file)
+                .filter(|rows| rows.rows.iter().any(|row| row.writer.pid == second_pid));
+            if both.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let both = both.expect("the second writer is recorded");
+        assert_eq!(both.rows.len(), 2);
+        assert_eq!(both.creation.map(|c| c.writer.pid), Some(creator_pid));
+        let take = store_writers::take_dirty().expect("the record is free");
+        let dirty = take
+            .files
+            .iter()
+            .find(|dirty| dirty.path == file.to_string_lossy())
+            .expect("the file is marked for its reader");
+        assert_eq!(
+            dirty.size_at_close,
+            Some("first\nsecond\n".len() as u64),
+            "the size after both appends"
+        );
+        assert!(dirty.spans.iter().any(|span| span.writer.pid == second_pid));
+
+        // Removed by a third process.
+        let mut remover = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("rm {}; sleep 3", file.display()))
+            .spawn()
+            .unwrap();
+        let mut removed = None;
+        for _ in 0..50 {
+            removed = rows_of(&file).filter(|rows| rows.unlinked);
+            if removed.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for child in [&mut creator, &mut second, &mut remover] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let removed = removed.expect("the removal is recorded");
+        assert!(removed
+            .rows
+            .iter()
+            .any(|row| row.ops & ops::REMOVE != 0 && row.writer.pid != creator_pid));
+
+        // A file written into a directory made the same instant: whatever
+        // the record holds of it, a creation in it names the process that
+        // created the file.
+        let fresh = base.join("projects").join("fresh");
+        let fresh_file = fresh.join("t.jsonl");
+        let mut maker = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "mkdir {} && echo line >> {}; sleep 3",
+                fresh.display(),
+                fresh_file.display()
+            ))
+            .spawn()
+            .unwrap();
+        let maker_pid = maker.id();
+        std::thread::sleep(Duration::from_secs(2));
+        let recorded = rows_of(&fresh_file);
+        let _ = maker.kill();
+        let _ = maker.wait();
+        if let Some(rows) = recorded {
+            if let Some(creation) = rows.creation {
+                assert_eq!(creation.writer.pid, maker_pid);
+            }
+            assert!(rows.rows.iter().all(|row| row.writer.pid == maker_pid));
+        }
+        assert_eq!(queue_overflows(), 0);
     }
 }

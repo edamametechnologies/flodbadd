@@ -109,6 +109,9 @@ pub mod sessions;
     feature = "packetcapture"
 ))]
 pub mod sni;
+/// The processes recorded per file under the configured store roots. Always
+/// compiled: the sensors that feed it are gated on independent features.
+pub mod store_writers;
 pub mod task;
 /// Temp-directory predicate shared with the core detector (always compiled).
 pub mod temp_paths;

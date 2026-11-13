@@ -361,15 +361,46 @@ pub fn label_patterns_sync(labels: &[&str]) -> Vec<String> {
     out
 }
 
+/// Put the catalog the model holds now in force in every sync snapshot: the
+/// patterns (`open_files::is_sensitive_path`), the labels, the watch roots,
+/// the FIM exclusions and forbidden roots, and the credential-open set. The
+/// model holds the embedded catalog from the start and the last good
+/// download after one, so this never installs anything older than what the
+/// model holds, and it is safe to call at any time.
+///
+/// The snapshots start as compile-time fallbacks (the pattern list in
+/// `open_files` is a small subset of the catalog). A process that grades
+/// anything from them calls this before its first grading: the core at
+/// start, before any task or the agentic ticker runs; the helper process
+/// before it serves, since its file monitor and capture classify from them.
+/// [`update`] calls it after every attempt, whatever the outcome.
+pub async fn refresh_catalog_snapshots() {
+    crate::open_files::refresh_patterns_snapshot().await;
+    refresh_labels_snapshot().await;
+}
+
 pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
     info!("Starting sensitive paths update from backend");
 
-    let status = SENSITIVE_PATHS
+    let result = SENSITIVE_PATHS
         .update(branch, force, |data| {
             let json: SensitivePathsJSON = serde_json::from_str(data)?;
             Ok(SensitivePathsDB::new_from_json(&json))
         })
-        .await?;
+        .await;
+
+    // Refresh whatever the outcome, a failed download included. The model
+    // always holds at least the embedded catalog and keeps it, or the last
+    // good download, when a download fails, whereas the sync snapshots are
+    // seeded from the much smaller compile-time fallback. Refreshing only on
+    // `Updated` left a healthy install (embedded signature == remote, so
+    // `NotUpdated`) serving the fallback, which drops every pattern that
+    // exists only in the model; refreshing after a successful download only
+    // left a host that cannot reach the backend serving it until one
+    // succeeded.
+    refresh_catalog_snapshots().await;
+
+    let status = result?;
 
     match status {
         UpdateStatus::Updated => info!("Sensitive paths were successfully updated."),
@@ -379,15 +410,6 @@ pub async fn update(branch: &str, force: bool) -> Result<UpdateStatus> {
             info!("Update skipped because custom sensitive paths are in use.")
         }
     }
-
-    // Refresh for every status, not just Updated. `SENSITIVE_PATHS.data` always holds
-    // at least the embedded snapshot, whereas the sync snapshots are seeded from the
-    // much smaller hardcoded `FALLBACK_*` consts. Refreshing only on Updated left a
-    // healthy install (embedded signature == remote, so NotUpdated) permanently
-    // serving those consts, silently dropping every pattern that exists only in the
-    // model.
-    crate::open_files::refresh_patterns_snapshot().await;
-    refresh_labels_snapshot().await;
 
     Ok(status)
 }
@@ -676,6 +698,59 @@ mod tests {
             missing.len(),
             missing,
         );
+    }
+
+    /// A download that fails (here a branch the repository does not have)
+    /// leaves the model as it was, and the sync snapshots serve that model,
+    /// not the compile-time fallback a process starts with. The refresh used
+    /// to come after the `?` on the download: a host that could not reach the
+    /// backend graded under the fallback patterns until a download succeeded.
+    #[tokio::test]
+    #[serial]
+    async fn test_a_failed_download_leaves_the_snapshots_at_the_model_in_force() {
+        let (signature, model_patterns, model_labels) = {
+            let db = SENSITIVE_PATHS.data.read().await;
+            let patterns: Vec<String> = db
+                .get_patterns_for_platform()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            (db.signature.clone(), patterns, db.labels.clone())
+        };
+        // The state a process starts in for the patterns. The label
+        // snapshot's compile-time seed is already the embedded label table:
+        // a marker label that matches no real path shows its refresh too,
+        // without taking a label from the tests that classify meanwhile.
+        crate::open_files::set_patterns_snapshot_for_tests(
+            crate::open_files::compile_time_fallback_patterns(),
+        );
+        let mut marked = model_labels.clone();
+        marked.insert(
+            "flodbadd_test_marker".to_string(),
+            vec!["/flodbadd-test-marker-of-a-stale-snapshot/".to_string()],
+        );
+        LABELS_SNAPSHOT.store(Arc::new(marked));
+        // The fallback is not the model: some pattern only the model lists.
+        let model_only = model_patterns
+            .iter()
+            .filter(|pat| {
+                let probe = pat.strip_suffix('$').unwrap_or(pat);
+                !crate::open_files::is_sensitive_path(&format!("/home/user{probe}"))
+            })
+            .count();
+        assert!(model_only > 0, "the fallback covers the whole catalog");
+        assert!(!model_labels.is_empty());
+
+        let outcome = update("flodbadd-test-branch-that-does-not-exist", false).await;
+        assert!(outcome.is_err(), "the download must fail: {outcome:?}");
+
+        assert_eq!(
+            SENSITIVE_PATHS.data.read().await.signature,
+            signature,
+            "a failed download leaves the model in force"
+        );
+        assert_eq!(crate::open_files::sensitive_patterns(), model_patterns);
+        assert_eq!(*LABELS_SNAPSHOT.load_full(), model_labels);
     }
 
     /// Cross-platform well-formedness guard for patterns this host cannot exercise.

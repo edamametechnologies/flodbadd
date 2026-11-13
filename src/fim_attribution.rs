@@ -24,6 +24,7 @@
 //! running, so nothing will look the table up.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
@@ -80,6 +81,34 @@ pub fn path_under_root(path: &str, root: &str, recursive: bool) -> bool {
 struct Roots {
     roots: Vec<String>,
     recursive: bool,
+    /// Roots published for the sensors only (the store roots of
+    /// `store_writers` that no watch root covers): a path under one is
+    /// attributable, and the file monitor keeps no event for it. Always
+    /// recursive.
+    record_only: Vec<String>,
+    /// Which publication this set is (0: none): what [`set_roots`] returned
+    /// to the watcher that published it.
+    generation: u64,
+}
+
+/// Numbers the publications of this process, from 1.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn spellings(roots: &[PathBuf]) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for root in roots {
+        let raw = normalize(&root.to_string_lossy());
+        if !raw.is_empty() {
+            set.insert(raw);
+        }
+        if let Ok(canonical) = std::fs::canonicalize(root) {
+            let canonical = normalize(&canonical.to_string_lossy());
+            if !canonical.is_empty() {
+                set.insert(canonical);
+            }
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Published snapshot, replaced whole by `set_roots` / `clear_roots`. The
@@ -97,31 +126,54 @@ static ROOTS: Lazy<ArcSwap<Roots>> = Lazy::new(|| ArcSwap::from_pointee(Roots::d
 /// be a silent loss of the writer pid.
 ///
 /// Replaces any previous set, so a watcher restart re-publishes rather than
-/// accumulating.
-pub fn set_roots(roots: &[PathBuf], recursive: bool) {
-    let mut set = std::collections::BTreeSet::new();
-    for root in roots {
-        let raw = normalize(&root.to_string_lossy());
-        if !raw.is_empty() {
-            set.insert(raw);
-        }
-        if let Ok(canonical) = std::fs::canonicalize(root) {
-            let canonical = normalize(&canonical.to_string_lossy());
-            if !canonical.is_empty() {
-                set.insert(canonical);
-            }
-        }
-    }
-    ROOTS.store(std::sync::Arc::new(Roots {
-        roots: set.into_iter().collect(),
-        recursive,
-    }));
+/// accumulating. Returns the generation of this publication: the watcher
+/// that stops withdraws it with [`clear_roots_if`].
+pub fn set_roots(roots: &[PathBuf], recursive: bool) -> u64 {
+    set_roots_with_record_only(roots, &[], recursive)
 }
 
-/// Forget the roots. After this nothing is attributable until a watcher
-/// publishes again.
+/// [`set_roots`], with the roots published for the sensors only
+/// (`record_only`, the store roots no watch root covers): a path under one
+/// is attributable like a path under a watch root, and [`is_record_only`]
+/// tells the file monitor that it keeps no event for it. Both spellings of
+/// each are kept, as for the watch roots.
+pub fn set_roots_with_record_only(
+    roots: &[PathBuf],
+    record_only: &[PathBuf],
+    recursive: bool,
+) -> u64 {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    ROOTS.store(std::sync::Arc::new(Roots {
+        roots: spellings(roots),
+        recursive,
+        record_only: spellings(record_only),
+        generation,
+    }));
+    generation
+}
+
+/// Forget the roots, whoever published them. After this nothing is
+/// attributable until a watcher publishes again.
 pub fn clear_roots() {
     ROOTS.store(std::sync::Arc::new(Roots::default()));
+}
+
+/// Forget the roots when they are still the publication `generation` names:
+/// a watcher that stops withdraws its own roots, and leaves in place the
+/// roots a watcher started after it published. `true` when they were
+/// withdrawn.
+pub fn clear_roots_if(generation: u64) -> bool {
+    let current = ROOTS.load_full();
+    if generation == 0 || current.generation != generation {
+        return false;
+    }
+    let previous = ROOTS.compare_and_swap(&current, std::sync::Arc::new(Roots::default()));
+    std::sync::Arc::ptr_eq(&*previous, &current)
+}
+
+/// The generation of the installed roots; 0 when none is installed.
+pub fn roots_generation() -> u64 {
+    ROOTS.load().generation
 }
 
 /// Number of installed root spellings. For logging and tests.
@@ -137,7 +189,7 @@ pub fn root_count() -> usize {
 /// something unwatched is treated as watched.
 pub fn is_attributable(path: &str) -> bool {
     let roots = ROOTS.load();
-    if roots.roots.is_empty() {
+    if roots.roots.is_empty() && roots.record_only.is_empty() {
         return false;
     }
     let normalized = normalize(path);
@@ -145,6 +197,33 @@ pub fn is_attributable(path: &str) -> bool {
         .roots
         .iter()
         .any(|root| path_under_root(&normalized, root, roots.recursive))
+        || roots
+            .record_only
+            .iter()
+            .any(|root| path_under_root(&normalized, root, true))
+}
+
+/// Whether `path` lies under a root published for the sensors only: the file
+/// monitor keeps no event for it. `false` when none is published.
+pub fn is_record_only(path: &str) -> bool {
+    let roots = ROOTS.load();
+    if roots.record_only.is_empty() {
+        return false;
+    }
+    let normalized = normalize(path);
+    // A path an ordinary watch root covers keeps its events, also inside a
+    // store root.
+    if roots
+        .roots
+        .iter()
+        .any(|root| path_under_root(&normalized, root, roots.recursive))
+    {
+        return false;
+    }
+    roots
+        .record_only
+        .iter()
+        .any(|root| path_under_root(&normalized, root, true))
 }
 
 #[cfg(test)]
@@ -179,6 +258,57 @@ mod tests {
         assert!(!is_attributable("/tmp/fim-attr-test/dropped.sh"));
         assert!(is_attributable("/tmp/fim-attr-other/dropped.sh"));
 
+        // Roots published for the sensors only: attributable, at any depth
+        // whatever the recursion mode of the watch roots, and told apart.
+        set_roots_with_record_only(
+            &[PathBuf::from("/tmp/fim-attr-test")],
+            &[PathBuf::from("/tmp/fim-attr-store")],
+            false,
+        );
+        assert!(is_attributable("/tmp/fim-attr-test/dropped.sh"));
+        assert!(!is_record_only("/tmp/fim-attr-test/dropped.sh"));
+        assert!(is_attributable("/tmp/fim-attr-store/p/s/t.jsonl"));
+        assert!(is_record_only("/tmp/fim-attr-store/p/s/t.jsonl"));
+        assert!(!is_record_only("/tmp/fim-attr-store"));
+        assert!(!is_attributable("/tmp/fim-attr-stores/t.jsonl"));
+        // With no watch root at all, the record-only roots still confine.
+        set_roots_with_record_only(&[], &[PathBuf::from("/tmp/fim-attr-store")], true);
+        assert!(is_attributable("/tmp/fim-attr-store/t.jsonl"));
+        assert!(!is_attributable("/tmp/fim-attr-test/dropped.sh"));
+        // `set_roots` publishes none.
+        set_roots(&[PathBuf::from("/tmp/fim-attr-test")], true);
+        assert!(!is_record_only("/tmp/fim-attr-store/t.jsonl"));
+        assert!(!is_attributable("/tmp/fim-attr-store/t.jsonl"));
+
+        clear_roots();
+        assert_eq!(roots_generation(), 0);
+
+        // A publication is withdrawn by the generation it was given: the
+        // one a later publication replaced withdraws nothing.
+        let first = set_roots(&[PathBuf::from("/tmp/fim-attr-test")], true);
+        let second = set_roots(&[PathBuf::from("/tmp/fim-attr-other")], true);
+        assert_ne!(first, second);
+        assert_eq!(roots_generation(), second);
+        assert!(!clear_roots_if(first));
+        assert!(is_attributable("/tmp/fim-attr-other/dropped.sh"));
+        assert_eq!(roots_generation(), second);
+        assert!(clear_roots_if(second));
+        assert!(!is_attributable("/tmp/fim-attr-other/dropped.sh"));
+        assert_eq!(roots_generation(), 0);
+        // Nothing installed is no publication to withdraw.
+        assert!(!clear_roots_if(0));
+        assert!(!clear_roots_if(second));
+
+        // An ordinary watch root inside a store root keeps its paths: only
+        // the rest of the store root is record-only.
+        set_roots_with_record_only(
+            &[PathBuf::from("/tmp/fim-attr-store/p/audit")],
+            &[PathBuf::from("/tmp/fim-attr-store")],
+            true,
+        );
+        assert!(!is_record_only("/tmp/fim-attr-store/p/audit/t.jsonl"));
+        assert!(is_record_only("/tmp/fim-attr-store/p/other/t.jsonl"));
+        assert!(is_attributable("/tmp/fim-attr-store/p/audit/t.jsonl"));
         clear_roots();
     }
 

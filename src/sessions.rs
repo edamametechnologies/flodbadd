@@ -58,9 +58,12 @@ pub enum Protocol {
     PartialOrd,
     Default,
 )]
+/// Where a session's name came from. The derived order is the declaration
+/// order and says nothing about the sources; compare them with
+/// [`DomainResolutionType::source_rank`].
 pub enum DomainResolutionType {
-    /// Domain obtained from forward DNS query capture (most reliable)
-    /// The actual domain that the application requested
+    /// Domain obtained from an observed DNS answer for the session's address
+    /// (the last answer seen on this host for that address)
     Forward,
     /// Domain obtained from TLS SNI (Server Name Indication) extraction
     /// Very reliable - the actual hostname sent in TLS ClientHello
@@ -226,7 +229,74 @@ impl Default for SessionStatus {
     }
 }
 
+impl DomainResolutionType {
+    /// The rank of a name's source: the session's own TLS ClientHello (3),
+    /// an observed DNS answer for its address (2), a reverse lookup of its
+    /// address (1), none (0).
+    pub fn source_rank(&self) -> u8 {
+        match self {
+            DomainResolutionType::SNI => 3,
+            DomainResolutionType::Forward => 2,
+            DomainResolutionType::Reverse => 1,
+            DomainResolutionType::None => 0,
+        }
+    }
+}
+
+/// Record one resolved name for one side of a session: the name and the
+/// source it came from are written together. A different name replaces the
+/// current one, with its own source. The same name from a better-ranked
+/// source raises the source. `Unknown` and `Resolving` are not names.
+/// Returns whether anything changed.
+fn record_resolved_name(
+    name: &mut Option<String>,
+    source: &mut DomainResolutionType,
+    resolved: Option<(String, DomainResolutionType)>,
+) -> bool {
+    let Some((resolved_name, resolved_source)) = resolved else {
+        return false;
+    };
+    if resolved_name == "Unknown" || resolved_name == "Resolving" {
+        return false;
+    }
+    if name.as_deref() != Some(resolved_name.as_str()) {
+        *name = Some(resolved_name);
+        *source = resolved_source;
+        return true;
+    }
+    if resolved_source.source_rank() > source.source_rank() {
+        *source = resolved_source;
+        return true;
+    }
+    false
+}
+
 impl SessionInfo {
+    /// Record the names the resolver found for this session's addresses
+    /// (an observed DNS answer, else a reverse lookup), each with its source
+    /// ([`record_resolved_name`]). A destination named from the session's
+    /// own TLS ClientHello keeps that name: the resolver's names are per
+    /// address, and addresses are shared. `last_modified` moves to `now`
+    /// when a name or a source changed, so whoever syncs sessions by
+    /// modification time carries the change. Returns whether anything
+    /// changed.
+    pub fn record_resolved_names(
+        &mut self,
+        src: Option<(String, DomainResolutionType)>,
+        dst: Option<(String, DomainResolutionType)>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut changed =
+            record_resolved_name(&mut self.src_domain, &mut self.src_domain_type, src);
+        if self.dst_domain_type != DomainResolutionType::SNI {
+            changed |= record_resolved_name(&mut self.dst_domain, &mut self.dst_domain_type, dst);
+        }
+        if changed {
+            self.last_modified = now;
+        }
+        changed
+    }
+
     /// Refresh status flags from timestamps so cached snapshots do not report
     /// stale liveliness long after network activity stopped.
     pub fn refresh_status_from_activity(&mut self, now: DateTime<Utc>) {
@@ -1022,6 +1092,152 @@ mod tests {
     use crate::ip::is_lan_ip;
     use chrono::{TimeZone, Utc};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn resolved(
+        name: &str,
+        source: DomainResolutionType,
+    ) -> Option<(String, DomainResolutionType)> {
+        Some((name.to_string(), source))
+    }
+
+    /// The ranks, highest first: ClientHello, observed DNS answer, reverse
+    /// lookup, none. Not the derived order.
+    #[test]
+    fn test_source_rank_orders_the_sources() {
+        use DomainResolutionType::*;
+        assert!(SNI.source_rank() > Forward.source_rank());
+        assert!(Forward.source_rank() > Reverse.source_rank());
+        assert!(Reverse.source_rank() > None.source_rank());
+    }
+
+    /// From no name, each source is recorded with its name, on both sides.
+    #[test]
+    fn test_a_first_name_is_recorded_with_its_source() {
+        use DomainResolutionType::*;
+        for source in [Forward, Reverse] {
+            let mut info = SessionInfo::default();
+            assert!(info.record_resolved_names(
+                resolved("src.example", source),
+                resolved("dst.example", source),
+                Utc::now(),
+            ));
+            assert_eq!(info.src_domain.as_deref(), Some("src.example"));
+            assert_eq!(info.src_domain_type, source);
+            assert_eq!(info.dst_domain.as_deref(), Some("dst.example"));
+            assert_eq!(info.dst_domain_type, source);
+        }
+    }
+
+    /// A later name replaces an earlier one, and carries its own source,
+    /// never the earlier name's: an observed DNS answer, then a reverse
+    /// lookup that names the address otherwise.
+    #[test]
+    fn test_a_replacing_name_carries_its_own_source() {
+        use DomainResolutionType::*;
+        let mut info = SessionInfo::default();
+        info.record_resolved_names(
+            resolved("api.vendor.example", Forward),
+            resolved("cdn.vendor.example", Forward),
+            Utc::now(),
+        );
+        assert!(info.record_resolved_names(
+            resolved("host-1.provider.example", Reverse),
+            resolved("edge-2.provider.example", Reverse),
+            Utc::now(),
+        ));
+        assert_eq!(info.src_domain.as_deref(), Some("host-1.provider.example"));
+        assert_eq!(info.src_domain_type, Reverse);
+        assert_eq!(info.dst_domain.as_deref(), Some("edge-2.provider.example"));
+        assert_eq!(info.dst_domain_type, Reverse);
+    }
+
+    /// The same name from a better source raises the source; from a worse
+    /// one it changes nothing.
+    #[test]
+    fn test_the_same_name_from_a_better_source_raises_the_source() {
+        use DomainResolutionType::*;
+        let mut info = SessionInfo::default();
+        info.record_resolved_names(
+            resolved("a.example", Reverse),
+            resolved("b.example", Reverse),
+            Utc::now(),
+        );
+        assert!(info.record_resolved_names(
+            resolved("a.example", Forward),
+            resolved("b.example", Forward),
+            Utc::now(),
+        ));
+        assert_eq!(info.src_domain_type, Forward);
+        assert_eq!(info.dst_domain_type, Forward);
+        assert!(!info.record_resolved_names(
+            resolved("a.example", Reverse),
+            resolved("b.example", Reverse),
+            Utc::now(),
+        ));
+        assert_eq!(info.src_domain_type, Forward);
+        assert_eq!(info.dst_domain_type, Forward);
+    }
+
+    /// `last_modified` moves when a name changes and when only its source
+    /// does, and stays when nothing changed.
+    #[test]
+    fn test_last_modified_moves_when_only_the_source_changes() {
+        use DomainResolutionType::{Forward, Reverse};
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let t1 = Utc.timestamp_opt(1_700_000_060, 0).unwrap();
+        let t2 = Utc.timestamp_opt(1_700_000_120, 0).unwrap();
+        let t3 = Utc.timestamp_opt(1_700_000_180, 0).unwrap();
+        let mut info = SessionInfo::default();
+        info.last_modified = t0;
+        info.record_resolved_names(None, resolved("b.example", Reverse), t1);
+        assert_eq!(info.last_modified, t1);
+        // The same name, a better source: only the source changes.
+        assert!(info.record_resolved_names(None, resolved("b.example", Forward), t2));
+        assert_eq!(info.dst_domain.as_deref(), Some("b.example"));
+        assert_eq!(info.dst_domain_type, Forward);
+        assert_eq!(info.last_modified, t2);
+        // Nothing new.
+        assert!(!info.record_resolved_names(None, resolved("b.example", Forward), t3));
+        assert_eq!(info.last_modified, t2);
+        // The source side too.
+        assert!(info.record_resolved_names(resolved("a.example", Reverse), None, t3));
+        assert_eq!(info.last_modified, t3);
+    }
+
+    /// A destination named from its ClientHello keeps the name and the
+    /// source, whatever the resolver says; the source side is not named by
+    /// a ClientHello and keeps taking the resolver's names. `Unknown` and
+    /// `Resolving` are not names.
+    #[test]
+    fn test_a_clienthello_name_is_kept_and_placeholders_are_not_names() {
+        use DomainResolutionType::*;
+        let mut info = SessionInfo::default();
+        info.dst_domain = Some("api.vendor.example".to_string());
+        info.dst_domain_type = SNI;
+        for (client, source) in [
+            ("client.example", Forward),
+            ("host-4.provider.example", Reverse),
+        ] {
+            info.record_resolved_names(
+                resolved(client, source),
+                resolved("edge.provider.example", source),
+                Utc::now(),
+            );
+            assert_eq!(info.dst_domain.as_deref(), Some("api.vendor.example"));
+            assert_eq!(info.dst_domain_type, SNI);
+            assert_eq!(info.src_domain.as_deref(), Some(client));
+            assert_eq!(info.src_domain_type, source);
+        }
+        for placeholder in ["Unknown", "Resolving"] {
+            assert!(!info.record_resolved_names(
+                resolved(placeholder, Forward),
+                resolved(placeholder, Forward),
+                Utc::now(),
+            ));
+            assert_eq!(info.src_domain.as_deref(), Some("host-4.provider.example"));
+            assert_eq!(info.src_domain_type, Reverse);
+        }
+    }
 
     #[test]
     fn test_username_sanitization() {

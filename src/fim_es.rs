@@ -43,6 +43,8 @@ pub struct FimSourceEvent {
 }
 
 struct Sink {
+    /// The watcher that installed it (its roots' generation).
+    owner: u64,
     roots: Vec<String>,
     recursive: bool,
     tx: SyncSender<FimSourceEvent>,
@@ -62,7 +64,7 @@ pub use crate::fim_attribution::{normalize, path_under_root};
 /// both kept: ES reports `/private/var/...` while callers often pass
 /// `/var/...`). Returns the receiver the watcher consumes. `None` while the
 /// sink of a running watcher is installed (`uninstall` releases it).
-pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceEvent>> {
+pub fn install(roots: &[PathBuf], recursive: bool, owner: u64) -> Option<Receiver<FimSourceEvent>> {
     if SINK.load().is_some() {
         return None;
     }
@@ -81,6 +83,7 @@ pub fn install(roots: &[PathBuf], recursive: bool) -> Option<Receiver<FimSourceE
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
     let sink = Sink {
+        owner,
         roots: set.into_iter().collect(),
         recursive,
         tx,
@@ -107,6 +110,21 @@ pub fn uninstall() {
     SINK.store(None);
 }
 
+/// Release the sink when the watcher `owner` installed it; a sink a watcher
+/// started later installed stays. `true` when released.
+pub fn uninstall_if(owner: u64) -> bool {
+    let current = SINK.load_full();
+    match current {
+        Some(sink) if sink.owner == owner => {
+            let previous = SINK.compare_and_swap(&Some(sink.clone()), None);
+            previous
+                .as_ref()
+                .is_some_and(|previous| std::sync::Arc::ptr_eq(previous, &sink))
+        }
+        _ => false,
+    }
+}
+
 /// `(delivered, dropped_because_full)` since install.
 pub fn stats() -> (u64, u64) {
     SINK.load()
@@ -121,8 +139,14 @@ pub fn stats() -> (u64, u64) {
 }
 
 /// Called from the ES handler for every file event it records. Cheap when
-/// no sink is installed or the path is outside every root.
+/// no sink is installed or the path is outside every root. A rename or a
+/// removal also reaches the store-writer record: a store directory moved or
+/// removed (or one moved into place) changes every file below it without
+/// an operation on any of them ([`crate::store_writers::note_tree_changed`]).
 pub fn push(kind: FimSourceKind, path: &str, pid: u32, process_name: &str, process_path: &str) {
+    if matches!(kind, FimSourceKind::Rename | FimSourceKind::Delete) {
+        crate::store_writers::note_tree_changed(path, crate::store_writers::now_ms());
+    }
     let Some(sink) = SINK.load_full() else {
         return;
     };
@@ -229,6 +253,73 @@ mod tests {
         ));
         assert!(!path_under_root("/users/me/.ssh", "/users/me/.ssh", true));
         assert!(!path_under_root("/tmp/x", "", true));
+    }
+
+    /// The sink is released by the watcher that installed it, never by one
+    /// that stopped after a later watcher installed its own.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_sink_is_released_by_the_watcher_that_installed_it_only() {
+        uninstall();
+        assert!(install(&[PathBuf::from("/tmp/fim-es-owner")], true, 7).is_some());
+        // Installed: a second one waits for its release.
+        assert!(install(&[PathBuf::from("/tmp/fim-es-other")], true, 8).is_none());
+        assert!(!uninstall_if(6));
+        assert!(is_active());
+        assert!(uninstall_if(7));
+        assert!(!is_active());
+        assert!(!uninstall_if(7));
+    }
+
+    /// A store directory moved away, or a prepared one moved into its
+    /// place, reaches the records below it through the events the ES client
+    /// hands the sink, installed or not.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_store_directory_renamed_or_removed_reaches_the_store_record() {
+        use crate::store_writers::{self, ops, Operation, StoreSpec};
+        store_writers::configure(&[StoreSpec {
+            agent: "claude_code".to_string(),
+            roots: vec![PathBuf::from("/tmp/fim-es-tree/.claude/projects")],
+            path_segment: String::new(),
+            file_suffixes: vec![".jsonl".to_string()],
+            pid_file_roots: Vec::new(),
+            pid_file_suffixes: Vec::new(),
+            excluded_segments: Vec::new(),
+            creation_reorder_ms: 1_000,
+        }]);
+        let path = "/tmp/fim-es-tree/.claude/projects/p/k.jsonl";
+        store_writers::record(&Operation {
+            path,
+            ops: ops::CREATE | ops::WRITE,
+            pid: 10,
+            started_at_ms: Some(500),
+            process_path: "/opt/claude/bin/claude",
+            at_ms: 2_000,
+            size: None,
+            identity: None,
+        });
+        let _ = store_writers::take_dirty();
+        let before = store_writers::counters().tree_changed_records;
+        // `mv projects/p elsewhere/p.old` then `mv prepared/p projects/p`.
+        push(
+            FimSourceKind::Delete,
+            "/tmp/fim-es-tree/.claude/projects/p",
+            66,
+            "mv",
+            "/bin/mv",
+        );
+        push(
+            FimSourceKind::Rename,
+            "/tmp/fim-es-tree/.claude/projects/p",
+            66,
+            "mv",
+            "/bin/mv",
+        );
+        assert_eq!(store_writers::counters().tree_changed_records, before + 2);
+        let take = store_writers::take_dirty().expect("free");
+        assert!(take.files.iter().any(|file| file.path == path && file.lost));
+        store_writers::clear();
     }
 
     #[test]
