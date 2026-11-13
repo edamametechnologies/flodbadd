@@ -2226,8 +2226,9 @@ mod win {
                 // is alive (the same kernel clock as its parent's), else the
                 // event's (system time: the session does not ask for raw
                 // timestamps).
-                // The event header names the process that wrote the event; a
-                // parent is verified only when it is that process.
+                // The parent the payload names may differ from the creating
+                // process; the event header names the process that wrote the
+                // event, and a parent is verified only when it is that one.
                 let creator_verified = crate::etw_process_payload::creator_is_parent(
                     event.EventHeader.ProcessId,
                     ppid,
@@ -2294,9 +2295,19 @@ mod win {
                             net_dst: None,
                             // The kernel's creation time only, never the
                             // event's delivery (`child_created` falls back
-                            // to it).
-                            process_start_ms: process_creation_filetime(pid)
-                                .and_then(proc_events::filetime_unix_ms),
+                            // to it), and only when it lies near the event's
+                            // own timestamp: read at callback time, a pid
+                            // handed out again since gives another
+                            // process's start, which is then unmeasured.
+                            process_start_ms: proc_events::start_matching_event(
+                                process_creation_filetime(pid)
+                                    .and_then(proc_events::filetime_unix_ms),
+                                u64::try_from(event.EventHeader.TimeStamp)
+                                    .ok()
+                                    .filter(|t| *t > 0)
+                                    .and_then(proc_events::filetime_unix_ms),
+                                proc_events::start_event_tolerance_ms(),
+                            ),
                             creator_verified: Some(creator_verified),
                         });
                         table.insert(

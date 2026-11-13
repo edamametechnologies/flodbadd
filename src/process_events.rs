@@ -182,6 +182,39 @@ pub fn filetime_unix_ms(filetime: u64) -> Option<u64> {
         .map(|since| since / 10_000)
 }
 
+/// How far apart, in milliseconds, a new process's creation time read
+/// after its creation event and the event's own timestamp may be before the
+/// reading is taken for another process's (the pid handed out again in
+/// between): the published `process_start_event_tolerance_ms`, handed over by
+/// foundation in whichever process runs the sensors (at capture start and
+/// after each params update). Until then, one second.
+static START_EVENT_TOLERANCE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1_000);
+
+/// Set the tolerance [`start_event_tolerance_ms`] reads.
+pub fn set_start_event_tolerance_ms(tolerance_ms: u64) {
+    START_EVENT_TOLERANCE_MS.store(tolerance_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The tolerance the sensors compare a creation time read after the event
+/// with the event's own timestamp.
+pub fn start_event_tolerance_ms() -> u64 {
+    START_EVENT_TOLERANCE_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A creation time read after the creation event (`read_start_ms`) kept only
+/// when it lies within `tolerance_ms` of the event's own timestamp
+/// (`event_ms`): the process read is then the one the event created. `None`
+/// (unmeasured) otherwise, and when either is unknown.
+pub fn start_matching_event(
+    read_start_ms: Option<u64>,
+    event_ms: Option<u64>,
+    tolerance_ms: u64,
+) -> Option<u64> {
+    let (start, event) = (read_start_ms?, event_ms?);
+    (start.abs_diff(event) <= tolerance_ms).then_some(start)
+}
+
 /// The start of the live process `pid` as the kernel records it, in
 /// milliseconds since the Unix epoch: the one derivation shared by every
 /// reader of a live process (the sensors that fill
@@ -488,6 +521,32 @@ mod tests {
             system_time_ms(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234)),
             Some(1_234)
         );
+    }
+
+    /// A start read after the event is kept only near the event's own
+    /// timestamp: further away it is another process's, unmeasured.
+    #[test]
+    fn a_start_read_after_its_event_is_kept_only_near_the_event() {
+        assert_eq!(
+            start_matching_event(Some(10_000), Some(10_300), 1_000),
+            Some(10_000)
+        );
+        assert_eq!(
+            start_matching_event(Some(10_000), Some(9_000), 1_000),
+            Some(10_000)
+        );
+        // A later occupant of the pid, read a second and a half after.
+        assert_eq!(
+            start_matching_event(Some(11_500), Some(10_000), 1_000),
+            None
+        );
+        assert_eq!(start_matching_event(None, Some(10_000), 1_000), None);
+        assert_eq!(start_matching_event(Some(10_000), None, 1_000), None);
+        // The tolerance is the published one once handed over.
+        let before = start_event_tolerance_ms();
+        set_start_event_tolerance_ms(2_500);
+        assert_eq!(start_event_tolerance_ms(), 2_500);
+        set_start_event_tolerance_ms(before);
     }
 
     /// The shared reading of a live process: this process has a start,
