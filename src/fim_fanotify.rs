@@ -95,8 +95,13 @@ const CREATED_SUBTREE_MARKS: usize = 64;
 /// Read buffer of the creation group: FID records carry file handles and
 /// names, several per read.
 const DIR_EVENT_BUFFER: usize = 64 * 1024;
-/// Store files marked themselves at most (the record holds as many).
-const MAX_STORE_FILE_MARKS: usize = crate::store_writers::MAX_FILES;
+/// Store files marked themselves at most: as many as the reader of the
+/// files may hold. Past it a store file is recorded as one without a mark
+/// ([`crate::store_writers::note_file_mark`]).
+const MAX_STORE_FILE_MARKS: usize = 2_048;
+/// How long either group may wait for an event before it records that its
+/// queue was empty ([`crate::store_writers::note_delivered_through`]).
+const DELIVERY_POLL_MS: i32 = 500;
 /// How long before a new store directory's creation event was read its store
 /// gap starts.
 const NEW_DIRECTORY_SLACK_MS: u64 = 1_000;
@@ -158,8 +163,13 @@ struct FanotifyTable {
     sentinels: CustomDashMap<String, ()>,
     /// Store files marked themselves (inode marks, both groups), by
     /// `device:inode`, with the store path: a write or a change of names
-    /// through another path reaches the record under this one.
+    /// through another path reaches the record under this one. An entry is
+    /// used only while its path still names that inode.
     inode_marks: CustomDashMap<String, String>,
+    /// Up to when each group had read every event the kernel queued for it
+    /// (epoch milliseconds; 0: not yet).
+    writer_delivered_ms: std::sync::atomic::AtomicU64,
+    creation_delivered_ms: std::sync::atomic::AtomicU64,
     /// Directories whose creation-group mark carries the store mask
     /// (removals and moves), and the parents of store roots marked for
     /// removals and moves of the roots themselves.
@@ -235,6 +245,8 @@ pub fn init(roots: &[PathBuf]) {
             sentinels: CustomDashMap::new("fim_fanotify_sentinels"),
             inode_marks: CustomDashMap::new("fim_fanotify_inode_marks"),
             store_masked: CustomDashMap::new("fim_fanotify_store_masked"),
+            writer_delivered_ms: std::sync::atomic::AtomicU64::new(0),
+            creation_delivered_ms: std::sync::atomic::AtomicU64::new(0),
         });
         let reader = Arc::clone(&table);
         std::thread::Builder::new()
@@ -719,6 +731,9 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
         return false;
     }
     let Ok(handle) = std::fs::File::open(dir) else {
+        if crate::store_writers::is_store_directory(&key) {
+            crate::store_writers::note_store_directory_watch(&key, false);
+        }
         return false;
     };
     match table.fan.mark::<_, Path>(
@@ -756,6 +771,15 @@ fn mark_one(table: &FanotifyTable, dir: &Path) -> bool {
                         table
                             .creation_mark_last_errno
                             .store(e as i32, std::sync::atomic::Ordering::Relaxed);
+                        if store_directory {
+                            // Recorded as a store directory without a
+                            // watch.
+                            let _ = table.store_masked.remove(&root_key(dir));
+                            crate::store_writers::note_store_directory_watch(
+                                &dir.to_string_lossy(),
+                                false,
+                            );
+                        }
                         debug!(
                             "FIM fanotify: creation mark {} failed: {}",
                             dir.display(),
@@ -846,31 +870,48 @@ fn remask_store_directories(table: &FanotifyTable) {
     }
 }
 
-/// Mark a store file itself (an inode mark) in both groups: a write through
-/// any name of the file, and a change of its attributes or of its number of
-/// names, reach the record under the store path. Bounded by the record's
-/// own bound.
+/// Mark a store file itself (an inode mark) in both groups, and record
+/// what that found: a write through any name of the file, and a change of
+/// its attributes or of its number of names, reach the record under the
+/// store path. The mark is added on every call (`FAN_MARK_ADD` is
+/// idempotent): an entry of the table never stands for a mark. A file the
+/// marks cannot reach (past [`MAX_STORE_FILE_MARKS`], a refused mark, a
+/// symbolic link) is recorded as one without a mark, and a file with more
+/// than one name when it is marked as one with a second name.
 fn mark_store_file(table: &FanotifyTable, path: &str) {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    if table.inode_marks.len() >= MAX_STORE_FILE_MARKS {
-        return;
+    let at_ms = crate::store_writers::now_ms();
+    if let Some((marked, second_name)) = add_store_file_mark(table, path) {
+        crate::store_writers::note_file_mark(path, at_ms, marked, second_name);
     }
-    let Ok(file) = std::fs::OpenOptions::new()
+}
+
+/// `None` when no regular file is at `path` (gone, a directory); else
+/// whether both marks are in place, and whether the file has more than one
+/// name.
+fn add_store_file_mark(table: &FanotifyTable, path: &str) -> Option<(bool, bool)> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-    else {
-        return;
+    {
+        Ok(file) => file,
+        // A symbolic link at a store path: recorded as a file without a
+        // mark.
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Some((false, false)),
+        Err(_) => return None,
     };
-    let Ok(meta) = file.metadata() else {
-        return;
-    };
+    let meta = file.metadata().ok()?;
     if !meta.is_file() {
-        return;
+        return None;
     }
-    let key = format!("{}:{}", meta.dev(), meta.ino());
-    if table.inode_marks.contains_key(&key) {
-        return;
+    let second_name = meta.nlink() > 1;
+    let key = inode_key(&meta);
+    if !table.inode_marks.contains_key(&key) && table.inode_marks.len() >= MAX_STORE_FILE_MARKS {
+        prune_inode_marks(table);
+        if table.inode_marks.len() >= MAX_STORE_FILE_MARKS {
+            return Some((false, second_name));
+        }
     }
     if table
         .fan
@@ -882,26 +923,104 @@ fn mark_store_file(table: &FanotifyTable, path: &str) {
         )
         .is_err()
     {
-        return;
+        return Some((false, second_name));
     }
     if let Some(dir_fan) = table.dir_fan.as_ref() {
-        let _ = dir_fan.mark::<_, Path>(
-            MarkFlags::FAN_MARK_ADD,
-            MaskFlags::from_bits_retain(libc::FAN_ATTRIB),
-            &file,
-            None,
-        );
+        if dir_fan
+            .mark::<_, Path>(
+                MarkFlags::FAN_MARK_ADD,
+                MaskFlags::from_bits_retain(libc::FAN_ATTRIB),
+                &file,
+                None,
+            )
+            .is_err()
+        {
+            return Some((false, second_name));
+        }
     }
     table.inode_marks.insert(key, path.to_string());
+    Some((true, second_name))
 }
 
-/// The store path of the marked store file with this metadata, if any.
-fn marked_store_path(table: &FanotifyTable, meta: &std::fs::Metadata) -> Option<String> {
+fn inode_key(meta: &std::fs::Metadata) -> String {
     use std::os::unix::fs::MetadataExt;
-    table
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+/// Whether `path` still names the inode `key` was made for.
+fn still_names(path: &str, key: &str) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.is_file() && inode_key(&meta) == key)
+        .unwrap_or(false)
+}
+
+/// Drop every entry whose path no longer names its inode (renamed, removed,
+/// the inode number given to another file).
+fn prune_inode_marks(table: &FanotifyTable) {
+    table.inode_marks.retain(|key, path| still_names(path, key));
+}
+
+/// The store path of the marked store file with this metadata, if any: an
+/// entry whose path no longer names that inode is dropped, not used.
+fn marked_store_path(table: &FanotifyTable, meta: &std::fs::Metadata) -> Option<String> {
+    let key = inode_key(meta);
+    let path = table
         .inode_marks
-        .get(&format!("{}:{}", meta.dev(), meta.ino()))
-        .map(|entry| entry.value().clone())
+        .get(&key)
+        .map(|entry| entry.value().clone())?;
+    if still_names(&path, &key) {
+        Some(path)
+    } else {
+        let _ = table.inode_marks.remove(&key);
+        None
+    }
+}
+
+/// Wait up to [`DELIVERY_POLL_MS`] for an event on `fd`. `true` when one is
+/// ready; `false` when none came, after recording that the group had read
+/// every event the kernel queued up to the start of the wait.
+fn wait_for_events(
+    fd: std::os::fd::BorrowedFd<'_>,
+    delivered: &std::sync::atomic::AtomicU64,
+) -> bool {
+    let before = crate::store_writers::now_ms();
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid `pollfd` for a descriptor the group owns, for the
+    // duration of the call.
+    let ready = unsafe { libc::poll(&mut poll, 1, DELIVERY_POLL_MS) };
+    if ready == 0 {
+        note_group_delivered(delivered, before);
+        return false;
+    }
+    true
+}
+
+/// A group read every event queued up to `at_ms`: the sensor delivered
+/// through the earlier of the two groups' times.
+fn note_group_delivered(delivered: &std::sync::atomic::AtomicU64, at_ms: u64) {
+    delivered.fetch_max(at_ms, std::sync::atomic::Ordering::AcqRel);
+    let Some(table) = TABLE.get() else {
+        return;
+    };
+    let writer = table
+        .writer_delivered_ms
+        .load(std::sync::atomic::Ordering::Acquire);
+    let through = if table.dir_fan.is_some() {
+        writer.min(
+            table
+                .creation_delivered_ms
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    } else {
+        writer
+    };
+    if through != 0 {
+        crate::store_writers::note_delivered_through(through);
+    }
 }
 
 /// Mark `root` and its subdirectories breadth-first (no symlink following),
@@ -978,6 +1097,9 @@ fn resolve_writer(pid: u32) -> (String, String) {
 
 fn reader_loop(table: Arc<FanotifyTable>) {
     loop {
+        if !wait_for_events(table.fan.as_fd(), &table.writer_delivered_ms) {
+            continue;
+        }
         let events = match table.fan.read_events() {
             Ok(events) => events,
             Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
@@ -1224,14 +1346,17 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
             continue;
         };
         for entry in entries.flatten() {
-            if marked >= CREATED_SUBTREE_MARKS {
-                return;
-            }
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
             if file_type.is_dir() && !file_type.is_symlink() {
                 let sub = entry.path();
+                if marked >= CREATED_SUBTREE_MARKS {
+                    // Past the bound: a store directory left without a
+                    // watch is recorded as one.
+                    note_unwatched_store_directory(table, &sub);
+                    continue;
+                }
                 remark_directory(&sub);
                 marked += 1;
                 if table
@@ -1245,18 +1370,31 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
     }
 }
 
+/// A store directory not marked (and not marked before): recorded as one
+/// without a watch.
+fn note_unwatched_store_directory(table: &FanotifyTable, dir: &Path) {
+    let key = dir.to_string_lossy();
+    if !table.marked.contains_key(&root_key(dir)) && crate::store_writers::is_store_directory(&key)
+    {
+        crate::store_writers::note_store_directory_watch(&key, false);
+    }
+}
+
 /// A store directory created since the sensor started, just marked: the
 /// window from its creation to its mark is recorded as a store gap, and
 /// each file found in it is marked changed for its reader, as a record with
 /// no creation.
 fn new_store_directory(dir: &Path, read_at_ms: u64) {
     let now = crate::store_writers::now_ms();
-    crate::store_writers::note_store_gap(
-        &dir.to_string_lossy(),
-        Some(read_at_ms.saturating_sub(NEW_DIRECTORY_SLACK_MS)),
-        now,
-        "new_directory",
-    );
+    let from = Some(read_at_ms.saturating_sub(NEW_DIRECTORY_SLACK_MS));
+    crate::store_writers::note_store_gap(&dir.to_string_lossy(), from, now, "new_directory");
+    walk_store_directory(dir, from, now);
+}
+
+/// Each store file found in `dir` (a few levels down) is marked changed for
+/// its reader, as a record with no creation. Past the walk's bound, the
+/// files left are a gap of the store from `gap_from` to now.
+fn walk_store_directory(dir: &Path, gap_from: Option<u64>, now: u64) {
     let mut queue = std::collections::VecDeque::from([(dir.to_path_buf(), 0usize)]);
     let mut seen = 0usize;
     while let Some((current, depth)) = queue.pop_front() {
@@ -1266,6 +1404,12 @@ fn new_store_directory(dir: &Path, read_at_ms: u64) {
         for entry in entries.flatten() {
             seen += 1;
             if seen > CREATED_SUBTREE_MARKS * 16 {
+                crate::store_writers::note_store_gap(
+                    &dir.to_string_lossy(),
+                    gap_from,
+                    crate::store_writers::now_ms(),
+                    "walk_bound",
+                );
                 return;
             }
             let Ok(file_type) = entry.file_type() else {
@@ -1308,6 +1452,9 @@ fn creation_loop(table: Arc<FanotifyTable>) {
     };
     let mut buf = vec![0u8; DIR_EVENT_BUFFER];
     loop {
+        if !wait_for_events(dir_fan.as_fd(), &table.creation_delivered_ms) {
+            continue;
+        }
         let nread = match nix::unistd::read(dir_fan.as_fd(), &mut buf) {
             Ok(n) => n,
             Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
@@ -1362,7 +1509,17 @@ fn creation_loop(table: Arc<FanotifyTable>) {
             // a directory, every record below it.
             if record.mask & libc::FAN_CREATE == 0 {
                 let path = created.to_string_lossy();
-                if record.is_dir {
+                if record.is_dir && record.mask & libc::FAN_MOVED_TO != 0 {
+                    // Moved into place: marked and walked as a new
+                    // directory, its files of any age a gap of the store up
+                    // to its mark.
+                    mark_created_directory(&table, &created);
+                    let marked_at = crate::store_writers::now_ms();
+                    crate::store_writers::note_tree_moved_in(&path, marked_at);
+                    if crate::store_writers::is_store_directory(&path) {
+                        walk_store_directory(&created, None, marked_at);
+                    }
+                } else if record.is_dir {
                     crate::store_writers::note_tree_changed(&path, read_at_ms);
                     forget_directory(&created);
                 } else if crate::store_writers::classify(&path).is_some() {
@@ -1371,10 +1528,13 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                         let (_, process_path) = resolve_writer(pid);
                         store_record(ops, &path, pid, &process_path, None, None);
                     }
-                    if record.mask & libc::FAN_DELETE != 0 {
+                    if record.mask & (libc::FAN_DELETE | libc::FAN_MOVED_FROM) != 0 {
                         table
                             .inode_marks
                             .retain(|_, store_path| store_path != &*path);
+                    }
+                    if record.mask & libc::FAN_MOVED_TO != 0 {
+                        mark_store_file(&table, &path);
                     }
                 }
                 continue;
@@ -1497,6 +1657,35 @@ mod tests {
             out.push(0);
         }
         out
+    }
+
+    /// An entry of the store-file marks is used only while its path names
+    /// the inode it was made for: a file removed, renamed, or replaced under
+    /// the same path is another inode, and its entry no longer stands.
+    #[test]
+    fn an_inode_entry_stands_only_while_its_path_names_that_inode() {
+        let dir = std::env::temp_dir().join(format!("fan-inode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("k.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        let key = inode_key(&std::fs::metadata(&path).unwrap());
+        let text = path.to_string_lossy().to_string();
+        assert!(still_names(&text, &key));
+        // Replaced under the same path: the old inode is kept alive by a
+        // second name, so the new file cannot take its number.
+        let kept = dir.join("kept");
+        std::fs::hard_link(&path, &kept).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"{}\n").unwrap();
+        assert!(!still_names(&text, &key));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!still_names(&text, &key));
+        // A directory is never a store file's inode.
+        assert!(!still_names(
+            &dir.to_string_lossy(),
+            &inode_key(&std::fs::metadata(&dir).unwrap())
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

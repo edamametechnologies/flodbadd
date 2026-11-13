@@ -269,7 +269,24 @@ pub struct FileRows {
     /// Kept for the life of the record.
     pub reader_multiple_names: bool,
     pub reader_creation_contradicted: bool,
+    /// Each rewrite or replacement the reader found of the file, with the one
+    /// process whose report explains it when there was one, the first
+    /// [`MAX_READER_REPLACEMENTS`]; `reader_replacements_dropped` when more
+    /// were found than are kept.
+    pub reader_replacements: Vec<ReaderReplacement>,
+    pub reader_replacements_dropped: bool,
 }
+
+/// A rewrite or a replacement the reader found of a file: when, and the one
+/// process whose report explains it, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderReplacement {
+    pub at_ms: u64,
+    pub replaced_by: Option<WriterInstance>,
+}
+
+/// Rewrites and replacements a record keeps.
+pub const MAX_READER_REPLACEMENTS: usize = 8;
 
 /// What the reader of the files gives back to the record for one record
 /// ([`note_reader_facts`]).
@@ -279,6 +296,8 @@ pub struct ReaderFacts {
     pub creation_read_at_ms: Option<u64>,
     pub multiple_names: bool,
     pub creation_contradicted: bool,
+    /// A rewrite or a replacement the reader found.
+    pub replacement: Option<ReaderReplacement>,
 }
 
 /// A file record that left the table to make room, with everything it held:
@@ -328,9 +347,12 @@ pub struct StoreWriterCounters {
     /// waiting for a reader: each is reported as dropped events.
     pub tombstones_dropped: u64,
     /// Renames or removals of a directory holding records
-    /// ([`note_tree_changed`]), and the records they reached.
+    /// ([`note_tree_changed`], [`note_tree_moved_in`]), and the records they
+    /// reached.
     pub tree_changes: u64,
     pub tree_changed_records: u64,
+    /// Store files a sensor could not mark ([`note_file_mark`]).
+    pub files_unmarked: u64,
 }
 
 /// Reply of [`rows_since`].
@@ -412,6 +434,11 @@ pub struct DirtyTake {
     pub seq: u64,
     pub configured: bool,
     pub files: Vec<DirtyFile>,
+    /// The sensor had delivered every event of the operations made up to
+    /// this instant when the take was made ([`note_delivered_through`]):
+    /// a report of a write made before it is in this take or an earlier
+    /// one. `None` while no sensor has said so.
+    pub delivered_through_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +659,7 @@ pub struct StoreGap {
     pub from_ms: Option<u64>,
     pub until_ms: u64,
     /// `lost_events`, `directory_moved`, `new_directory`,
-    /// `unmarked_directory`.
+    /// `unmarked_directory`, `sensor_partial`, `walk_bound`, `merged`.
     pub reason: String,
 }
 
@@ -739,6 +766,8 @@ struct FileRecord {
     creation_read_at_ms: Option<u64>,
     reader_multiple_names: bool,
     reader_creation_contradicted: bool,
+    reader_replacements: Vec<ReaderReplacement>,
+    reader_replacements_dropped: bool,
 }
 
 #[derive(Debug)]
@@ -785,6 +814,8 @@ impl FileRecord {
             changed_after_cut: false,
             reader_multiple_names: self.reader_multiple_names,
             reader_creation_contradicted: self.reader_creation_contradicted,
+            reader_replacements: self.reader_replacements.clone(),
+            reader_replacements_dropped: self.reader_replacements_dropped,
         }
     }
 
@@ -935,6 +966,8 @@ impl Table {
                     creation_read_at_ms: None,
                     reader_multiple_names: false,
                     reader_creation_contradicted: false,
+                    reader_replacements: Vec::new(),
+                    reader_replacements_dropped: false,
                 },
             );
         }
@@ -1159,6 +1192,25 @@ impl Table {
         reached
     }
 
+    /// The sensor holds no watch on the store directory `key` for `agents`
+    /// (or holds one again: `watched`).
+    fn note_directory_watch(&mut self, agents: &[String], key: &str, watched: bool, at_ms: u64) {
+        for agent in agents {
+            let entry = self
+                .unwatched
+                .entry(agent.clone())
+                .or_insert_with(|| (std::collections::BTreeSet::new(), at_ms));
+            if watched {
+                entry.0.remove(key);
+            } else {
+                if entry.0.is_empty() {
+                    entry.1 = at_ms;
+                }
+                entry.0.insert(key.to_string());
+            }
+        }
+    }
+
     /// What the reader gave back for the record `record_id` of `key`.
     fn note_reader_facts(&mut self, key: &str, record_id: u64, facts: ReaderFacts) {
         let Some(record) = self.files.get_mut(key) else {
@@ -1176,20 +1228,66 @@ impl Table {
         );
         record.reader_multiple_names |= facts.multiple_names;
         record.reader_creation_contradicted |= facts.creation_contradicted;
-        if verdicts_before
+        let mut changed = verdicts_before
             != (
                 record.reader_multiple_names,
                 record.reader_creation_contradicted,
-            )
-        {
+            );
+        if let Some(replacement) = facts.replacement {
+            if !record.reader_replacements.contains(&replacement) {
+                if record.reader_replacements.len() < MAX_READER_REPLACEMENTS {
+                    record.reader_replacements.push(replacement);
+                } else {
+                    record.reader_replacements_dropped = true;
+                }
+                changed = true;
+            }
+        }
+        if changed {
             self.seq += 1;
             record.changed_seq = self.seq;
         }
     }
 
+    /// What a sensor found of the record of `key` when it marked the file:
+    /// it had more than one name (`second_name`), or it was left without a
+    /// mark (`unmarked_at`: its rows are complete since then only, and the
+    /// reader is told).
+    fn note_sensor_file_facts(&mut self, key: &str, second_name: bool, unmarked_at: Option<u64>) {
+        let Some(record) = self.files.get_mut(key) else {
+            return;
+        };
+        let mut changed = false;
+        if second_name && !record.reader_multiple_names {
+            record.reader_multiple_names = true;
+            changed = true;
+        }
+        if let Some(at_ms) = unmarked_at {
+            record.lost = true;
+            record.complete_since_ms = record.complete_since_ms.max(at_ms);
+            if !record.dirty {
+                record.dirty = true;
+                record.dirty_since_ms = at_ms;
+            }
+            changed = true;
+        }
+        if changed {
+            self.seq += 1;
+            record.changed_seq = self.seq;
+        }
+    }
+
+    /// Keep a store gap. Past [`MAX_STORE_GAPS`], the two oldest gaps of one
+    /// agent are merged into one that covers both (it can only stand for
+    /// more): no gap is dropped.
     fn push_store_gap(&mut self, agent: &str, gap: StoreGap) {
-        if self.store_gaps.len() >= MAX_STORE_GAPS {
-            self.store_gaps.pop_front();
+        if self.store_gaps.len() >= MAX_STORE_GAPS && !merge_oldest_store_gaps(&mut self.store_gaps)
+        {
+            // One gap per agent already: the new one widens the agent's.
+            if let Some((_, held)) = self.store_gaps.iter_mut().find(|(other, _)| other == agent) {
+                widen_store_gap(held, &gap);
+                return;
+            }
         }
         self.store_gaps.push_back((agent.to_string(), gap));
     }
@@ -1238,6 +1336,40 @@ impl Table {
     }
 }
 
+/// Merge the two oldest gaps of the first agent that holds two or more: the
+/// merged gap starts at the earlier start (`None` wins) and ends at the later
+/// end. `false` when every agent holds one gap.
+fn merge_oldest_store_gaps(gaps: &mut std::collections::VecDeque<(String, StoreGap)>) -> bool {
+    let Some((first, agent)) = gaps
+        .iter()
+        .enumerate()
+        .find(|(index, (agent, _))| gaps.iter().skip(index + 1).any(|(other, _)| other == agent))
+        .map(|(index, (agent, _))| (index, agent.clone()))
+    else {
+        return false;
+    };
+    let second = gaps
+        .iter()
+        .enumerate()
+        .skip(first + 1)
+        .find(|(_, (other, _))| *other == agent)
+        .map(|(index, _)| index)
+        .expect("a second gap of the agent");
+    let (_, removed) = gaps.remove(first).expect("the first gap");
+    widen_store_gap(&mut gaps[second - 1].1, &removed);
+    true
+}
+
+/// `held` widened to cover `other` too.
+fn widen_store_gap(held: &mut StoreGap, other: &StoreGap) {
+    held.from_ms = match (held.from_ms, other.from_ms) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        _ => None,
+    };
+    held.until_ms = held.until_ms.max(other.until_ms);
+    held.reason = "merged".to_string();
+}
+
 #[derive(Default)]
 struct Counters {
     operations: AtomicU64,
@@ -1257,6 +1389,7 @@ struct Counters {
     tombstones_dropped: AtomicU64,
     tree_changes: AtomicU64,
     tree_changed_records: AtomicU64,
+    files_unmarked: AtomicU64,
 }
 
 fn time_or_none(ms: u64) -> Option<u64> {
@@ -1313,6 +1446,17 @@ enum Queued {
     StoreGap {
         agents: Vec<String>,
         gap: StoreGap,
+    },
+    Watch {
+        agents: Vec<String>,
+        key: String,
+        watched: bool,
+        at_ms: u64,
+    },
+    SensorFacts {
+        key: String,
+        second_name: bool,
+        unmarked_at: Option<u64>,
     },
 }
 
@@ -1433,6 +1577,17 @@ fn drain_queue(table: &mut Table) {
                     table.push_store_gap(agent, gap.clone());
                 }
             }
+            Queued::Watch {
+                agents,
+                key,
+                watched,
+                at_ms,
+            } => table.note_directory_watch(&agents, &key, watched, at_ms),
+            Queued::SensorFacts {
+                key,
+                second_name,
+                unmarked_at,
+            } => table.note_sensor_file_facts(&key, second_name, unmarked_at),
         }
     }
 }
@@ -1688,22 +1843,21 @@ pub fn note_lost(at_ms: u64) {
     wake_reader();
 }
 
-/// A directory (or a file) at `path` was renamed or removed. When it is a
-/// store directory, or holds a store root, every record below it names a
-/// file that may no longer be the one recorded (a directory moved into
-/// place carries its own files): those records are complete since `at_ms`
-/// only, and the reader is told. Cheap for any other path.
-pub fn note_tree_changed(path: &str, at_ms: u64) {
+/// Whether `path` is a store directory, lies in one, or holds a store root,
+/// for the stores published now. Cheap: no filesystem access.
+pub fn relates_to_a_store(path: &str) -> bool {
     let matcher = MATCHER.load();
-    if matcher.stores.is_empty() {
-        return;
-    }
+    !matcher.stores.is_empty() && related_to_a_store(&matcher, path)
+}
+
+/// Whether `path` is a store directory, lies in one, or holds a store root.
+fn related_to_a_store(matcher: &StoreMatcher, path: &str) -> bool {
     let normalized = normalize(path);
     let normalized = normalized.trim_end_matches('/');
     if normalized.is_empty() {
-        return;
+        return false;
     }
-    let related = matcher.stores.iter().any(|store| {
+    matcher.stores.iter().any(|store| {
         store
             .roots
             .iter()
@@ -1713,13 +1867,60 @@ pub fn note_tree_changed(path: &str, at_ms: u64) {
                     || path_under_root(normalized, root, true)
                     || path_under_root(root, normalized, true)
             })
-    });
-    if !related {
+    })
+}
+
+/// A directory at `path` was renamed away or removed. When it is a store
+/// directory, or holds a store root, every record below it names a file
+/// that may no longer be the one recorded: those records are complete
+/// since `at_ms` only, and the reader is told. Cheap for any other path.
+pub fn note_tree_changed(path: &str, at_ms: u64) {
+    let matcher = MATCHER.load();
+    if matcher.stores.is_empty() || !related_to_a_store(&matcher, path) {
         return;
     }
     COUNTERS.tree_changes.fetch_add(1, Ordering::Relaxed);
-    // A directory moved into place carries files written at any time.
+    mark_tree(path, at_ms);
+}
+
+/// A directory was renamed into place at `path`. It carries files written
+/// at any time: a gap of every store that holds `path`, up to `at_ms`, and
+/// the records below it are complete since `at_ms` only.
+pub fn note_tree_moved_in(path: &str, at_ms: u64) {
+    let matcher = MATCHER.load();
+    if matcher.stores.is_empty() || !related_to_a_store(&matcher, path) {
+        return;
+    }
+    COUNTERS.tree_changes.fetch_add(1, Ordering::Relaxed);
     note_store_gap(path, None, at_ms, "directory_moved");
+    mark_tree(path, at_ms);
+}
+
+/// A rename a sensor reported, from `source` to `destination` (when it
+/// knows it): a directory moved away reaches the records below its old
+/// path, and one moved into place is a directory moved in
+/// ([`note_tree_moved_in`]). A file's own rename is an operation on its
+/// record ([`record`]), nothing more.
+pub fn note_rename(source: &str, destination: Option<&str>, is_directory: bool, at_ms: u64) {
+    if !is_directory {
+        return;
+    }
+    note_tree_changed(source, at_ms);
+    if let Some(destination) = destination {
+        note_tree_moved_in(destination, at_ms);
+    }
+}
+
+/// A removal a sensor reported: a directory removed reaches the records
+/// below it ([`note_tree_changed`]). A file's own removal is an operation on
+/// its record.
+pub fn note_removal(path: &str, is_directory: bool, at_ms: u64) {
+    if is_directory {
+        note_tree_changed(path, at_ms);
+    }
+}
+
+fn mark_tree(path: &str, at_ms: u64) {
     let prefix = record_key(path);
     let noted = with_table(Duration::ZERO, |table| {
         table.note_tree_changed(&prefix, at_ms)
@@ -1780,6 +1981,8 @@ pub fn wait_dirty(timeout: Duration) -> bool {
 /// ask again), never an empty list standing for "no change".
 pub fn take_dirty() -> Option<DirtyTake> {
     let configured = is_configured();
+    // Read before the take: every event delivered up to then is in it.
+    let delivered_through_ms = delivered_through_ms();
     with_table(READ_RETRY_BUDGET, |table| {
         table.last_take_ms = now_ms();
         DirtyTake {
@@ -1787,6 +1990,7 @@ pub fn take_dirty() -> Option<DirtyTake> {
             seq: table.seq,
             configured,
             files: table.take_dirty(),
+            delivered_through_ms,
         }
     })
 }
@@ -1827,26 +2031,63 @@ pub fn note_store_directory_watch(dir: &str, watched: bool) {
     }
     let key = record_key(dir);
     let now = now_ms();
-    let _ = with_table(READ_RETRY_BUDGET, |table| {
-        for agent in &agents {
-            let entry = table
-                .unwatched
-                .entry(agent.clone())
-                .or_insert_with(|| (std::collections::BTreeSet::new(), now));
-            if watched {
-                entry.0.remove(&key);
-            } else {
-                if entry.0.is_empty() {
-                    entry.1 = now;
-                }
-                entry.0.insert(key.clone());
-            }
-        }
+    // Called from the sensors' handlers too: one try, else queued.
+    let noted = with_table(Duration::ZERO, |table| {
+        table.note_directory_watch(&agents, &key, watched, now)
     });
+    if noted.is_none() {
+        enqueue(Queued::Watch {
+            agents,
+            key,
+            watched,
+            at_ms: now,
+        });
+    }
 }
 
-/// What the record vouches for of each published store, as of `now_ms`.
-/// `None` when the record was held.
+/// What a sensor found of the store file at `path` when it marked it at
+/// `at_ms`: it had more than one name (`second_name`), or it was left
+/// without a mark (`marked` false: its rows are complete since then only,
+/// and the reader is told).
+pub fn note_file_mark(path: &str, at_ms: u64, marked: bool, second_name: bool) {
+    if !is_configured() || (marked && !second_name) {
+        return;
+    }
+    if !marked {
+        COUNTERS.files_unmarked.fetch_add(1, Ordering::Relaxed);
+    }
+    let key = record_key(path);
+    let unmarked_at = (!marked).then_some(at_ms);
+    let noted = with_table(Duration::ZERO, |table| {
+        table.note_sensor_file_facts(&key, second_name, unmarked_at)
+    });
+    if noted.is_none() {
+        enqueue(Queued::SensorFacts {
+            key,
+            second_name,
+            unmarked_at,
+        });
+    }
+    wake_reader();
+}
+
+/// The sensor has delivered every event of the operations made up to
+/// `at_ms` (its queue was empty when it read that far). Only ever moves
+/// forward.
+pub fn note_delivered_through(at_ms: u64) {
+    DELIVERED_THROUGH_MS.fetch_max(at_ms, Ordering::AcqRel);
+}
+
+/// Up to when the sensor has delivered every event ([`note_delivered_through`]).
+pub fn delivered_through_ms() -> Option<u64> {
+    time_or_none(DELIVERED_THROUGH_MS.load(Ordering::Acquire))
+}
+
+static DELIVERED_THROUGH_MS: AtomicU64 = AtomicU64::new(0);
+
+/// What the record vouches for of each published store, as of `now_ms`,
+/// from the sensor's state at its last poll ([`sensor`]). `None` when the
+/// record was held.
 pub fn store_coverage(now_ms: u64) -> Option<Vec<StoreCoverage>> {
     let matcher = MATCHER.load();
     let complete_since = COMPLETE_SINCE_MS.load(Ordering::Acquire);
@@ -1871,6 +2112,15 @@ pub fn store_coverage(now_ms: u64) -> Option<Vec<StoreCoverage>> {
                             reason: "unmarked_directory".to_string(),
                         });
                     }
+                }
+                // While the sensor does not deliver everything (as of its
+                // last poll), the store is a gap up to now.
+                if complete_since == 0 {
+                    gaps.push(StoreGap {
+                        from_ms: None,
+                        until_ms: now_ms,
+                        reason: "sensor_partial".to_string(),
+                    });
                 }
                 StoreCoverage {
                     agent: store.agent.clone(),
@@ -1968,6 +2218,7 @@ pub fn counters() -> StoreWriterCounters {
         tombstones_dropped: COUNTERS.tombstones_dropped.load(Ordering::Relaxed),
         tree_changes: COUNTERS.tree_changes.load(Ordering::Relaxed),
         tree_changed_records: COUNTERS.tree_changed_records.load(Ordering::Relaxed),
+        files_unmarked: COUNTERS.files_unmarked.load(Ordering::Relaxed),
     }
 }
 
@@ -2008,6 +2259,12 @@ impl StoreWriterSensor {
     pub fn delivers_everything(&self) -> bool {
         self.active && self.entry_events && (self.extended_events || self.kind == "fanotify")
     }
+}
+
+/// Tests: the sensor delivers everything since `since_ms` (0: it does not).
+#[cfg(test)]
+fn set_complete_since_for_tests(since_ms: u64) {
+    COMPLETE_SINCE_MS.store(since_ms, Ordering::Release);
 }
 
 /// The state [`sensor`] last logged (`u32::MAX`: none yet).
@@ -3207,6 +3464,9 @@ mod tests {
         // A directory above the store root reaches every record.
         note_tree_changed("/tmp/sw-tree", 4_000);
         assert_eq!(counters().tree_changed_records, before + 3);
+        // A directory moved into place reaches the records below it too.
+        note_tree_moved_in("/tmp/sw-tree/.claude/projects/q", 5_000);
+        assert_eq!(counters().tree_changed_records, before + 4);
         clear();
     }
 
@@ -3231,11 +3491,13 @@ mod tests {
     /// What a store vouches for: its gaps (dropped events since the last
     /// take, a directory moved in with files of any age, the window before
     /// a new directory's watch) and, while a directory of it has no watch,
-    /// a gap from the first of them.
+    /// a gap from the first of them. A file or a directory removed or moved
+    /// away is a fact of its own records only.
     #[test]
     #[serial_test::serial(store_writers)]
     fn a_store_says_when_it_vouches_for_nothing() {
         configure(&[spec("/tmp/sw-cover/.claude")]);
+        set_complete_since_for_tests(500);
         let coverage = |now: u64| {
             store_coverage(now)
                 .expect("free")
@@ -3253,7 +3515,11 @@ mod tests {
             "new_directory",
         );
         note_store_gap("/tmp/elsewhere", Some(1), 2, "new_directory");
-        note_tree_changed("/tmp/sw-cover/.claude/projects/p", 7_000);
+        // Removed or moved away: no store gap.
+        note_tree_changed("/tmp/sw-cover/.claude/sessions/4242.json", 6_800);
+        note_tree_changed("/tmp/sw-cover/.claude/projects/p/k.jsonl", 6_900);
+        note_tree_changed("/tmp/sw-cover/.claude/projects/gone", 6_950);
+        note_tree_moved_in("/tmp/sw-cover/.claude/projects/p", 7_000);
         let gaps = coverage(8_000).gaps;
         let reasons: Vec<&str> = gaps.iter().map(|gap| gap.reason.as_str()).collect();
         assert_eq!(
@@ -3273,6 +3539,225 @@ mod tests {
         assert_eq!(coverage(9_500).unwatched_directories, 0);
         assert!(is_store_root("/tmp/sw-cover/.claude/projects"));
         assert!(!is_store_root("/tmp/sw-cover/.claude/projects/p"));
+        set_complete_since_for_tests(0);
+        clear();
+    }
+
+    /// A rename or a removal reaches the record by what it touched: a file's
+    /// own is no store gap (the pid file a harness removes at exit, a
+    /// transcript replaced); a directory moved away or removed reaches the
+    /// records below it; a directory moved into place is a gap of the store
+    /// up to then, its files being of any age.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_rename_or_a_removal_reaches_what_it_touched() {
+        configure(&[spec("/tmp/sw-touch/.claude")]);
+        set_complete_since_for_tests(100);
+        let inside = "/tmp/sw-touch/.claude/projects/p/k.jsonl";
+        record(&op(inside, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        let _ = take_dirty().expect("free");
+        let gaps = |now: u64| {
+            store_coverage(now)
+                .expect("free")
+                .into_iter()
+                .find(|store| store.agent == "claude_code")
+                .expect("the store")
+                .gaps
+        };
+        note_removal("/tmp/sw-touch/.claude/sessions/4242.json", false, 3_000);
+        note_rename(
+            inside,
+            Some("/tmp/sw-touch/.claude/projects/p/k.old"),
+            false,
+            3_100,
+        );
+        note_removal("/tmp/sw-touch/.claude/projects/q", true, 3_200);
+        assert!(gaps(4_000).is_empty());
+        assert!(take_dirty().expect("free").files.is_empty());
+        // `mv projects/p elsewhere/p.old`, then `mv prepared/p projects/p`.
+        note_rename(
+            "/tmp/sw-touch/.claude/projects/p",
+            Some("/tmp/elsewhere/p.old"),
+            true,
+            5_000,
+        );
+        let take = take_dirty().expect("free");
+        assert!(take
+            .files
+            .iter()
+            .any(|file| file.path == inside && file.lost));
+        assert!(gaps(5_500).is_empty());
+        note_rename(
+            "/tmp/prepared/p",
+            Some("/tmp/sw-touch/.claude/projects/p"),
+            true,
+            6_000,
+        );
+        let moved_in = gaps(6_500);
+        assert_eq!(moved_in.len(), 1);
+        assert_eq!(
+            (
+                moved_in[0].from_ms,
+                moved_in[0].until_ms,
+                moved_in[0].reason.as_str()
+            ),
+            (None, 6_000, "directory_moved")
+        );
+        set_complete_since_for_tests(0);
+        clear();
+    }
+
+    /// While the sensor does not deliver everything, a store vouches for
+    /// nothing up to now: an open gap, whatever else it holds.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_sensor_that_does_not_deliver_everything_leaves_the_store_unvouched() {
+        configure(&[spec("/tmp/sw-partial/.claude")]);
+        set_complete_since_for_tests(0);
+        let store = store_coverage(5_000)
+            .expect("free")
+            .into_iter()
+            .find(|store| store.agent == "claude_code")
+            .expect("the store");
+        let partial = store
+            .gaps
+            .iter()
+            .find(|gap| gap.reason == "sensor_partial")
+            .expect("an open gap");
+        assert_eq!((partial.from_ms, partial.until_ms), (None, 5_000));
+        set_complete_since_for_tests(100);
+        let store = store_coverage(6_000)
+            .expect("free")
+            .into_iter()
+            .find(|store| store.agent == "claude_code")
+            .expect("the store");
+        assert!(store.gaps.is_empty());
+        set_complete_since_for_tests(0);
+        clear();
+    }
+
+    /// Past the bound, store gaps are merged, never dropped: a directory
+    /// moved in is still covered after more new directories than the bound.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn store_gaps_past_the_bound_are_merged_not_dropped() {
+        configure(&[spec("/tmp/sw-gapbound/.claude")]);
+        set_complete_since_for_tests(100);
+        note_tree_moved_in("/tmp/sw-gapbound/.claude/projects/p", 7_000);
+        for i in 0..MAX_STORE_GAPS as u64 {
+            note_store_gap(
+                "/tmp/sw-gapbound/.claude/projects/new",
+                Some(8_000 + i),
+                8_001 + i,
+                "new_directory",
+            );
+        }
+        let store = store_coverage(9_000)
+            .expect("free")
+            .into_iter()
+            .find(|store| store.agent == "claude_code")
+            .expect("the store");
+        assert!(store.gaps.len() <= MAX_STORE_GAPS);
+        assert!(
+            store
+                .gaps
+                .iter()
+                .any(|gap| gap.from_ms.is_none() && gap.until_ms >= 7_000),
+            "the moved-in gap, merged"
+        );
+        // A table of its own: one agent per gap, the bound reached.
+        let mut table = Table::new(1);
+        for i in 0..MAX_STORE_GAPS {
+            table.push_store_gap(
+                &format!("agent{i}"),
+                StoreGap {
+                    from_ms: Some(10 + i as u64),
+                    until_ms: 20 + i as u64,
+                    reason: "new_directory".to_string(),
+                },
+            );
+        }
+        table.push_store_gap(
+            "agent0",
+            StoreGap {
+                from_ms: None,
+                until_ms: 5_000,
+                reason: "directory_moved".to_string(),
+            },
+        );
+        assert_eq!(table.store_gaps.len(), MAX_STORE_GAPS);
+        let widened = &table
+            .store_gaps
+            .iter()
+            .find(|(a, _)| a == "agent0")
+            .unwrap()
+            .1;
+        assert_eq!((widened.from_ms, widened.until_ms), (None, 5_000));
+        set_complete_since_for_tests(0);
+        clear();
+    }
+
+    /// A directory watch noted while the record is held is queued and
+    /// applied by the next holder.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_directory_watch_noted_while_the_record_is_held_is_kept() {
+        configure(&[spec("/tmp/sw-watchq/.claude")]);
+        let held = TABLE.try_with(|_| {
+            note_store_directory_watch("/tmp/sw-watchq/.claude/projects/big", false);
+        });
+        assert!(held.is_some());
+        let store = store_coverage(9_000)
+            .expect("free")
+            .into_iter()
+            .find(|store| store.agent == "claude_code")
+            .expect("the store");
+        assert_eq!(store.unwatched_directories, 1);
+        clear();
+    }
+
+    /// A file the sensor could not mark is complete since then only, with
+    /// the reader told; a second name at marking time is the reader's
+    /// "more than one name". A file marked with one name changes nothing.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_file_without_a_mark_or_with_a_second_name_is_recorded() {
+        configure(&[spec("/tmp/sw-mark/.claude")]);
+        let path = "/tmp/sw-mark/.claude/projects/p/k.jsonl";
+        let linked = "/tmp/sw-mark/.claude/projects/p/l.jsonl";
+        record(&op(path, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        record(&op(linked, ops::CREATE | ops::WRITE, 10, 500, 2_000));
+        let _ = take_dirty().expect("free");
+        let before = counters().files_unmarked;
+        note_file_mark(path, 2_100, true, false);
+        assert!(take_dirty().expect("free").files.is_empty());
+        note_file_mark(path, 2_200, false, false);
+        note_file_mark(linked, 2_300, true, true);
+        assert_eq!(counters().files_unmarked, before + 1);
+        let take = take_dirty().expect("free");
+        let unmarked = take.files.iter().find(|file| file.path == path).unwrap();
+        assert!(unmarked.lost);
+        let rows = rows_since("", 0, None).expect("free");
+        let unmarked = rows.files.iter().find(|file| file.path == path).unwrap();
+        assert_eq!(unmarked.complete_since_ms, 2_200);
+        assert!(!unmarked.reader_multiple_names);
+        let second = rows.files.iter().find(|file| file.path == linked).unwrap();
+        assert!(second.reader_multiple_names);
+        clear();
+    }
+
+    /// The sensor's delivery watermark only moves forward, and each take
+    /// carries the one read before it.
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn a_take_carries_what_the_sensor_delivered_through() {
+        configure(&[spec("/tmp/sw-deliv/.claude")]);
+        let start = delivered_through_ms().unwrap_or(0);
+        note_delivered_through(start + 5_000);
+        note_delivered_through(start + 4_000);
+        assert_eq!(delivered_through_ms(), Some(start + 5_000));
+        let take = take_dirty().expect("free");
+        assert_eq!(take.delivered_through_ms, Some(start + 5_000));
         clear();
     }
 
@@ -3296,6 +3781,7 @@ mod tests {
                 creation_read_at_ms: Some(2_000),
                 multiple_names: true,
                 creation_contradicted: true,
+                replacement: None,
             },
         );
         note_reader_facts(
@@ -3305,6 +3791,7 @@ mod tests {
                 creation_read_at_ms: Some(2_000),
                 multiple_names: true,
                 creation_contradicted: false,
+                replacement: None,
             },
         );
         record(&op(path, ops::WRITE, 10, 500, 2_100));
@@ -3314,6 +3801,35 @@ mod tests {
         let file = rows.files.iter().find(|file| file.path == path).unwrap();
         assert!(file.reader_multiple_names);
         assert!(!file.reader_creation_contradicted);
+        assert!(file.reader_replacements.is_empty());
+        // A replacement the reader found is kept with the record, once; past
+        // the bound, the record says more were found.
+        let replaced = |at_ms: u64| ReaderFacts {
+            replacement: Some(ReaderReplacement {
+                at_ms,
+                replaced_by: None,
+            }),
+            ..ReaderFacts::default()
+        };
+        note_reader_facts(path, record_id, replaced(3_000));
+        note_reader_facts(path, record_id, replaced(3_000));
+        let rows = rows_since("", 0, None).expect("free");
+        let file = rows.files.iter().find(|file| file.path == path).unwrap();
+        assert_eq!(
+            file.reader_replacements,
+            vec![ReaderReplacement {
+                at_ms: 3_000,
+                replaced_by: None
+            }]
+        );
+        assert!(!file.reader_replacements_dropped);
+        for i in 0..MAX_READER_REPLACEMENTS as u64 {
+            note_reader_facts(path, record_id, replaced(4_000 + i));
+        }
+        let rows = rows_since("", 0, None).expect("free");
+        let file = rows.files.iter().find(|file| file.path == path).unwrap();
+        assert_eq!(file.reader_replacements.len(), MAX_READER_REPLACEMENTS);
+        assert!(file.reader_replacements_dropped);
         clear();
     }
 

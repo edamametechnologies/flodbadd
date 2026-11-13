@@ -568,6 +568,16 @@ mod macos {
     /// EXCHANGEDATA (subscribed after the first set, on their own).
     static EXTENDED_FILE_EVENTS: AtomicBool = AtomicBool::new(false);
 
+    /// How far behind a message's time the client is taken to have
+    /// delivered every earlier event.
+    const ES_DELIVERY_SLACK_MS: u64 = 250;
+
+    /// Whether the file the message names is a directory: the file type
+    /// bits of its mode (POSIX `S_IFMT`, `S_IFDIR`).
+    fn is_directory(file: &endpoint_sec::File<'_>) -> bool {
+        u32::from(file.stat().st_mode) & 0o170_000 == 0o040_000
+    }
+
     /// The moment the kernel generated a message, in epoch milliseconds.
     fn message_time_ms(msg: &endpoint_sec::Message) -> u64 {
         msg.time()
@@ -1077,6 +1087,12 @@ mod macos {
                 let handler = move |_client: &mut Client<'_>, msg: endpoint_sec::Message| {
                     let responsible = msg.process();
                     let responsible_pid = responsible.audit_token().pid() as u32;
+                    // The client's messages come in the order their events
+                    // happened: every event up to this one's time, less a
+                    // slack, was delivered.
+                    crate::store_writers::note_delivered_through(
+                        message_time_ms(&msg).saturating_sub(ES_DELIVERY_SLACK_MS),
+                    );
 
                     // A skipped sequence number is the kernel's report that
                     // it dropped messages for this client: the store-writer
@@ -1577,6 +1593,12 @@ mod macos {
                                     }
                                 }
                             });
+                            crate::store_writers::note_rename(
+                                &source,
+                                destination.as_deref(),
+                                is_directory(&ev.source()),
+                                message_time_ms(&msg),
+                            );
                             if crate::fim_attribution::is_attributable(&source) {
                                 store_record(
                                     crate::store_writers::ops::RENAME_FROM,
@@ -1638,6 +1660,11 @@ mod macos {
                                 .path()
                                 .to_string_lossy()
                                 .to_string();
+                            crate::store_writers::note_removal(
+                                &path,
+                                is_directory(&ev.target()),
+                                message_time_ms(&msg),
+                            );
                             if crate::fim_attribution::is_attributable(&path) {
                                 store_record(
                                     crate::store_writers::ops::REMOVE,
