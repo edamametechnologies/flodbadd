@@ -1791,9 +1791,9 @@ pub fn take_dirty() -> Option<DirtyTake> {
     })
 }
 
-/// A store directory may have had files written before it was watched
-/// (created and watched after, the window between); or files were moved in
-/// with it. Recorded per agent whose store holds `dir`.
+/// A gap for the stores that hold `dir`: the window between a directory's
+/// creation and its watch, or a directory moved in with its files. Recorded
+/// per agent whose store holds `dir`.
 pub fn note_store_gap(dir: &str, from_ms: Option<u64>, until_ms: u64, reason: &str) {
     let matcher = MATCHER.load();
     let agents = agents_of_directory(&matcher, dir);
@@ -2016,6 +2016,19 @@ static SENSOR_LOGGED: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Since when the sensor delivers everything (0: it does not).
 static COMPLETE_SINCE_MS: AtomicU64 = AtomicU64::new(0);
 
+/// One poll of the sensor's completeness: since when it delivers everything
+/// (`complete_since`, 0 while it does not) starts at the first poll that
+/// finds it delivering everything. `true` when it delivered everything at
+/// the previous poll and does not now: a break, recorded as lost events.
+fn poll_completeness(complete_since: &AtomicU64, delivers_everything: bool, now_ms: u64) -> bool {
+    if delivers_everything {
+        let _ = complete_since.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire);
+        false
+    } else {
+        complete_since.swap(0, Ordering::AcqRel) != 0
+    }
+}
+
 /// The state of the sensor that feeds the record in this build. A change of
 /// that state since the previous call is logged, once. Each call is also a
 /// poll: a sensor that stopped delivering everything since the previous one
@@ -2025,9 +2038,8 @@ static COMPLETE_SINCE_MS: AtomicU64 = AtomicU64::new(0);
 pub fn sensor() -> StoreWriterSensor {
     let mut sensor = sensor_now();
     let now = now_ms();
-    if sensor.delivers_everything() && is_configured() {
-        let _ = COMPLETE_SINCE_MS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
-    } else if COMPLETE_SINCE_MS.swap(0, Ordering::AcqRel) != 0 {
+    let delivers = sensor.delivers_everything() && is_configured();
+    if poll_completeness(&COMPLETE_SINCE_MS, delivers, now) {
         note_lost(now);
     }
     sensor.complete_since_ms = time_or_none(COMPLETE_SINCE_MS.load(Ordering::Acquire));
@@ -3196,6 +3208,24 @@ mod tests {
         note_tree_changed("/tmp/sw-tree", 4_000);
         assert_eq!(counters().tree_changed_records, before + 3);
         clear();
+    }
+
+    /// A sensor's completeness starts at the first poll that finds it
+    /// delivering everything, holds while it does, and a poll that finds it
+    /// no longer doing so reports a break (recorded as lost events) once.
+    #[test]
+    fn a_break_in_delivery_is_reported_once() {
+        let since = AtomicU64::new(0);
+        assert!(!poll_completeness(&since, false, 50));
+        assert!(!poll_completeness(&since, true, 100));
+        assert_eq!(since.load(Ordering::Acquire), 100);
+        assert!(!poll_completeness(&since, true, 200));
+        assert_eq!(since.load(Ordering::Acquire), 100);
+        assert!(poll_completeness(&since, false, 300));
+        assert_eq!(since.load(Ordering::Acquire), 0);
+        assert!(!poll_completeness(&since, false, 400));
+        assert!(!poll_completeness(&since, true, 500));
+        assert_eq!(since.load(Ordering::Acquire), 500);
     }
 
     /// What a store vouches for: its gaps (dropped events since the last

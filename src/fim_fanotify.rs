@@ -97,8 +97,8 @@ const CREATED_SUBTREE_MARKS: usize = 64;
 const DIR_EVENT_BUFFER: usize = 64 * 1024;
 /// Store files marked themselves at most (the record holds as many).
 const MAX_STORE_FILE_MARKS: usize = crate::store_writers::MAX_FILES;
-/// The window before a creation event was read in which the files of a new
-/// store directory may have been written before its mark.
+/// How long before a new store directory's creation event was read its store
+/// gap starts.
 const NEW_DIRECTORY_SLACK_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -1247,9 +1247,8 @@ fn mark_created_directory(table: &FanotifyTable, dir: &Path) {
 
 /// A store directory created since the sensor started, just marked: the
 /// window from its creation to its mark is recorded as a store gap, and
-/// each file found in it (the first transcript of a new project, the first
-/// subagent file of a session, a day's first rollout) is marked changed for
-/// its reader, as a record with no creation.
+/// each file found in it is marked changed for its reader, as a record with
+/// no creation.
 fn new_store_directory(dir: &Path, read_at_ms: u64) {
     let now = crate::store_writers::now_ms();
     crate::store_writers::note_store_gap(
