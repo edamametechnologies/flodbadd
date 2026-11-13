@@ -127,6 +127,14 @@ pub fn file_event_predates_process(event_at: Option<i64>, process_started_at: Op
     )
 }
 
+/// A FILETIME (100 ns intervals since 1601-01-01, the clock of the event
+/// header timestamps) as epoch milliseconds. `None` before the Unix epoch.
+pub fn filetime_to_unix_ms(filetime: i64) -> Option<u64> {
+    const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
+    let since_epoch = filetime.checked_sub(FILETIME_UNIX_EPOCH)?;
+    u64::try_from(since_epoch / 10_000).ok()
+}
+
 #[cfg(all(target_os = "windows", feature = "etw"))]
 mod win {
     use super::*;
@@ -197,6 +205,12 @@ mod win {
     const TCP_IP_GUID: GUID = GUID::from_u128(0x9a280ac0_c8e0_11d1_84e2_00c04fb998a2);
     const PROCESS_GUID: GUID = GUID::from_u128(0x3d6fa8d0_fe05_11d0_9dda_00c04fd7ba7c);
     const FILEIO_GUID: GUID = GUID::from_u128(0x90cbdc39_4a3e_11d1_84f4_0000f80464e3);
+    /// The event-trace class a real-time consumer receives when the session
+    /// lost events before delivering them (`RT_LostEvent`: RTLostEvent 32,
+    /// RTLostBuffer 33).
+    const RT_LOST_EVENT_GUID: GUID = GUID::from_u128(0x6a399ae0_4bc6_4de9_870b_3657f8947e7e);
+    /// Lost-event reports the kernel session delivered.
+    static LOST_EVENT_REPORTS: AtomicU64 = AtomicU64::new(0);
 
     // BS-9 task access (FLODBADD2 §1b.2 Windows row): the kernel's
     // Microsoft-Windows-Kernel-Audit-API-Calls manifest provider reports
@@ -886,6 +900,9 @@ mod win {
                 KERNEL_SESSION.ended();
                 available.store(false, Ordering::Release);
                 info!("ETW kernel trace session ended");
+                // Recorded as lost events: the store files are complete
+                // from the next session's delivery.
+                crate::store_writers::note_lost(crate::store_writers::now_ms());
 
                 let _ = CloseTrace(trace_handle);
                 let _ = ControlTraceW(
@@ -1860,7 +1877,76 @@ mod win {
             handle_fileio_event(event, opcode);
         } else if provider == IMAGE_LOAD_GUID && opcode == EVENT_TRACE_TYPE_LOAD {
             handle_image_load(event);
+        } else if provider == RT_LOST_EVENT_GUID {
+            // The session dropped events before this consumer read them:
+            // the store-writer record is told, so its readers know its rows
+            // are complete from now only.
+            LOST_EVENT_REPORTS.fetch_add(1, Ordering::Relaxed);
+            crate::store_writers::note_lost(crate::store_writers::now_ms());
         }
+    }
+
+    pub fn lost_event_reports() -> u64 {
+        LOST_EVENT_REPORTS.load(Ordering::Relaxed)
+    }
+
+    /// Feed the store-writer record (`crate::store_writers`) with one
+    /// operation of `pid` on `path` at the event's time. The process's start
+    /// and image are the process table's, unless the process holding the pid
+    /// there started after the event (as `record_file_attribution`): then
+    /// only the pid is recorded.
+    fn store_record(ops: u32, path: &str, pid: u32, at: Option<i64>) {
+        if ops == 0 || crate::store_writers::classify(path).is_none() {
+            return;
+        }
+        let (started_at_ms, process_path) = THREAD_PROCESS_TABLE.with(|pt| {
+            let pt = pt.borrow();
+            let Some(table) = pt.as_ref() else {
+                return (None, String::new());
+            };
+            // Copied out, so the table's guard is released before the
+            // closure returns.
+            let known = table
+                .get(&pid)
+                .map(|info| (info.started_at, info.process_path.clone()));
+            match known {
+                Some((started_at, process_path))
+                    if !super::file_event_predates_process(at, started_at) =>
+                {
+                    // The process's creation time, through the conversion
+                    // every reader of a process start shares.
+                    (
+                        started_at
+                            .and_then(|filetime| u64::try_from(filetime).ok())
+                            .and_then(proc_events::filetime_unix_ms),
+                        process_path,
+                    )
+                }
+                _ => (None, String::new()),
+            }
+        });
+        crate::store_writers::record(&crate::store_writers::Operation {
+            path,
+            ops,
+            pid,
+            started_at_ms,
+            process_path: &process_path,
+            at_ms: at
+                .and_then(super::filetime_to_unix_ms)
+                .unwrap_or_else(crate::store_writers::now_ms),
+            size: None,
+            identity: None,
+        });
+    }
+
+    /// A path removed or renamed: when it is a store directory (or holds a
+    /// store root), every record below it is complete since then only.
+    fn store_tree_changed(path: &str, at: Option<i64>) {
+        crate::store_writers::note_tree_changed(
+            path,
+            at.and_then(super::filetime_to_unix_ms)
+                .unwrap_or_else(crate::store_writers::now_ms),
+        );
     }
 
     unsafe fn handle_tcp_event(event: &EVENT_RECORD, opcode: u8) {
@@ -2354,7 +2440,10 @@ mod win {
     /// 37390270562, windows-x64), while the same scenario carried the
     /// remover on macOS (Endpoint Security UNLINK).
     unsafe fn handle_fileio_event(event: &EVENT_RECORD, opcode: u8) {
-        use crate::etw_fileio_payload::{decode, FileIoAction};
+        use crate::etw_fileio_payload::{
+            decode, open_create_options, store_ops_for_open, store_ops_for_set_info, FileIoAction,
+        };
+        use crate::store_writers::ops as store_ops;
 
         let data_ptr = event.UserData;
         let data_len = event.UserDataLength as usize;
@@ -2394,6 +2483,17 @@ mod win {
                 if let Some(file_object) = file_object {
                     remember_file_object(file_object, path.clone());
                 }
+                // The store-writer record: what the open is
+                // (`store_ops_for_open`), and a delete on close.
+                let open_ops = open_create_options(data, ptr_size)
+                    .map(|options| store_ops_for_open(options, None))
+                    .unwrap_or(0)
+                    | if deletes_on_close {
+                        store_ops::REMOVE
+                    } else {
+                        0
+                    };
+                store_record(open_ops, &path, pid, at);
                 // BS-10: reads count too (an in-process key theft never
                 // writes), so this does not depend on `writes`.
                 // Every cold credential path is under a user profile; the
@@ -2429,18 +2529,30 @@ mod win {
             }
             FileIoAction::Write { file_object } => {
                 if let Some(path) = file_object_path(file_object) {
+                    store_record(store_ops::WRITE, &path, pid, at);
                     record_file_actor(FileActorTable::Write, path, pid, at);
                 }
             }
             FileIoAction::Release { file_object } => {
                 let _ = take_file_object(file_object);
             }
-            FileIoAction::Delete { file_object } | FileIoAction::Rename { file_object } => {
+            FileIoAction::Delete { file_object } => {
                 if let Some(path) = file_object_path(file_object) {
+                    store_record(store_ops::REMOVE, &path, pid, at);
+                    store_tree_changed(&path, at);
+                    record_file_actor(FileActorTable::Namespace, path, pid, at);
+                }
+            }
+            FileIoAction::Rename { file_object } => {
+                if let Some(path) = file_object_path(file_object) {
+                    store_record(store_ops::RENAME_FROM, &path, pid, at);
+                    store_tree_changed(&path, at);
                     record_file_actor(FileActorTable::Namespace, path, pid, at);
                 }
             }
             FileIoAction::DeletePath { path, .. } => {
+                store_record(store_ops::REMOVE, &path, pid, at);
+                store_tree_changed(&path, at);
                 record_file_actor(FileActorTable::Namespace, path, pid, at);
             }
             FileIoAction::RenamePath {
@@ -2452,11 +2564,25 @@ mod win {
                 // or a delete through it.
                 if let Some(file_object) = file_object {
                     if let Some(old_path) = file_object_path(file_object) {
+                        store_record(store_ops::RENAME_FROM, &old_path, pid, at);
+                        store_tree_changed(&old_path, at);
                         record_file_actor(FileActorTable::Namespace, old_path, pid, at);
                     }
                     remember_file_object(file_object, new_path.clone());
                 }
+                store_record(store_ops::RENAME_TO, &new_path, pid, at);
+                store_tree_changed(&new_path, at);
                 record_file_actor(FileActorTable::Namespace, new_path, pid, at);
+            }
+            FileIoAction::SetInfo {
+                file_object,
+                info_class,
+            } => {
+                // For the store-writer record only: the attribution tables
+                // do not read this event.
+                if let Some(path) = file_object_path(file_object) {
+                    store_record(store_ops_for_set_info(info_class), &path, pid, at);
+                }
             }
         }
     }
@@ -2764,6 +2890,10 @@ mod win {
         global().init_status()
     }
 
+    pub fn lost_event_reports() -> u64 {
+        0
+    }
+
     pub fn shutdown() {}
 }
 
@@ -2861,6 +2991,12 @@ pub fn get_file_namespace_attribution(path: &str) -> Option<(u32, String, String
 
 pub fn file_attribution_count() -> usize {
     win::global().file_attribution_count()
+}
+
+/// Lost-event reports the kernel session delivered since the process
+/// started. 0 without a session.
+pub fn lost_event_reports() -> u64 {
+    win::lost_event_reports()
 }
 
 pub fn file_event_stats() -> u64 {
@@ -2972,6 +3108,21 @@ mod tests {
     }
 
     #[test]
+    fn a_filetime_converts_to_epoch_milliseconds() {
+        // 1970-01-01T00:00:00Z and one millisecond later.
+        assert_eq!(filetime_to_unix_ms(116_444_736_000_000_000), Some(0));
+        assert_eq!(filetime_to_unix_ms(116_444_736_000_010_000), Some(1));
+        // 2026-11-10T00:00:00Z.
+        assert_eq!(
+            filetime_to_unix_ms(116_444_736_000_000_000 + 1_794_268_800_000 * 10_000),
+            Some(1_794_268_800_000)
+        );
+        // Before the Unix epoch, and the unset timestamp.
+        assert_eq!(filetime_to_unix_ms(0), None);
+        assert_eq!(filetime_to_unix_ms(i64::MIN), None);
+    }
+
+    #[test]
     fn test_etw_returns_none_without_session() {
         let session = Session {
             protocol: Protocol::TCP,
@@ -2987,5 +3138,109 @@ mod tests {
     fn test_etw_support_string() {
         let support = etw_support();
         assert!(!support.is_empty());
+    }
+
+    /// Elevated only: needs the kernel trace session, and skips without it
+    /// (the CI's Windows leg runs elevated). The store-writer record as the
+    /// FileIo session feeds it: a child process creates a store file and
+    /// writes it, a second one appends, a third deletes it. Each has its
+    /// row, and the first process's row holds its write.
+    #[cfg(all(target_os = "windows", feature = "etw"))]
+    #[test]
+    #[serial_test::serial(store_writers)]
+    fn etw_feeds_the_store_writer_record() {
+        use crate::store_writers::{self, ops, StoreSpec};
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        if !is_available() {
+            eprintln!("the kernel trace session is not available (not elevated); the test cannot run here");
+            return;
+        }
+        let base: PathBuf =
+            std::env::temp_dir().join(format!("flodbadd-etw-stores-{}", std::process::id()));
+        let root = base.join("projects");
+        std::fs::create_dir_all(root.join("p")).unwrap();
+        let file = root.join("p").join("s.jsonl");
+        let file_arg = file.to_string_lossy().to_string();
+        crate::fim_attribution::set_roots_with_record_only(&[], &[root.clone()], true);
+        store_writers::configure(&[StoreSpec {
+            agent: "claude_code".to_string(),
+            roots: vec![root.clone()],
+            path_segment: String::new(),
+            excluded_segments: Vec::new(),
+            file_suffixes: vec![".jsonl".to_string()],
+            pid_file_roots: Vec::new(),
+            pid_file_suffixes: Vec::new(),
+            creation_reorder_ms: 1_000,
+        }]);
+        let wanted = crate::fim_attribution::normalize(&file_arg);
+        let rows_of_file = || {
+            store_writers::rows_since("", 0, None).and_then(|rows| {
+                rows.files
+                    .into_iter()
+                    .find(|rows| crate::fim_attribution::normalize(&rows.path) == wanted)
+            })
+        };
+        // The session delivers its buffers with a delay: poll for a while.
+        let wait_for = |pid: u32, operation: u32| {
+            for _ in 0..150 {
+                let found = rows_of_file().filter(|rows| {
+                    rows.rows
+                        .iter()
+                        .any(|row| row.writer.pid == pid && row.ops & operation != 0)
+                });
+                if found.is_some() {
+                    return found;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            None
+        };
+        let run = |script: String| {
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .spawn()
+                .expect("spawn powershell")
+        };
+
+        // Created (the file must not exist) and written, by one process.
+        let mut creator = run(format!(
+            "$f = [IO.File]::Open('{file_arg}', 'CreateNew'); $b = [Text.Encoding]::ASCII.GetBytes(\"first`n\"); $f.Write($b, 0, $b.Length); $f.Close(); Start-Sleep -Seconds 3"
+        ));
+        let written = wait_for(creator.id(), ops::WRITE);
+        // Appended by a second process.
+        let mut second = run(format!(
+            "Add-Content -Path '{file_arg}' -Value 'second'; Start-Sleep -Seconds 3"
+        ));
+        let appended = wait_for(second.id(), ops::WRITE);
+        // Deleted by a third.
+        let mut remover = run(format!(
+            "Remove-Item -Path '{file_arg}'; Start-Sleep -Seconds 3"
+        ));
+        let removed = wait_for(remover.id(), ops::REMOVE);
+        let (creator_pid, second_pid) = (creator.id(), second.id());
+        for child in [&mut creator, &mut second, &mut remover] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        store_writers::clear();
+        crate::fim_attribution::clear_roots();
+        let _ = std::fs::remove_dir_all(&base);
+
+        let written = written.expect("the first process has a row with its write");
+        assert!(written.rows.iter().all(|row| row.ops & ops::CREATE == 0));
+        assert_eq!(
+            written.creation, None,
+            "the first process's row holds its write"
+        );
+        let appended = appended.expect("the second process has a row");
+        assert!(appended
+            .rows
+            .iter()
+            .any(|row| row.writer.pid == creator_pid && row.ops & ops::WRITE != 0));
+        assert!(appended.rows.iter().any(|row| row.writer.pid == second_pid));
+        let removed = removed.expect("the removal has a row");
+        assert!(removed.unlinked);
     }
 }

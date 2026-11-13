@@ -307,6 +307,90 @@ pub(crate) fn task_access_repeats(
     false
 }
 
+/// Whether a message's global sequence number `seq` follows `previous`, the
+/// number of the message the client received before it (`u64::MAX` before
+/// its first message). Each message carries the previous one's number plus
+/// one.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) fn global_sequence_follows(previous: u64, seq: u64) -> bool {
+    previous == u64::MAX || seq == previous.wrapping_add(1)
+}
+
+/// What the client's thread does about its extended file events
+/// (TRUNCATE, LINK, CLONE, EXCHANGEDATA), which it asks for while stores are
+/// published (`store_writers::is_configured`).
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtendedStep {
+    Subscribe,
+    Unsubscribe,
+    Keep,
+}
+
+/// The step that brings the extended subscription (`subscribed`) in line with
+/// whether stores are published (`wanted`).
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) fn extended_subscription_step(wanted: bool, subscribed: bool) -> ExtendedStep {
+    match (wanted, subscribed) {
+        (true, false) => ExtendedStep::Subscribe,
+        (false, true) => ExtendedStep::Unsubscribe,
+        _ => ExtendedStep::Keep,
+    }
+}
+
+/// How often the client's thread looks at the published stores when nothing
+/// woke it.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "endpointsecurity")),
+    allow(dead_code)
+)]
+pub(crate) const EXTENDED_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(test)]
+mod global_sequence_tests {
+    use super::*;
+
+    #[test]
+    fn the_extended_events_follow_the_published_stores() {
+        // Stores published and not subscribed: subscribe. Also after a
+        // refusal, at the next look.
+        assert_eq!(
+            extended_subscription_step(true, false),
+            ExtendedStep::Subscribe
+        );
+        // Stores withdrawn and still subscribed: unsubscribe.
+        assert_eq!(
+            extended_subscription_step(false, true),
+            ExtendedStep::Unsubscribe
+        );
+        // In line already: nothing is asked of the client.
+        assert_eq!(extended_subscription_step(true, true), ExtendedStep::Keep);
+        assert_eq!(extended_subscription_step(false, false), ExtendedStep::Keep);
+    }
+
+    #[test]
+    fn a_sequence_number_follows_the_previous_one_plus_one() {
+        // The first message of a client follows nothing.
+        assert!(global_sequence_follows(u64::MAX, 0));
+        assert!(global_sequence_follows(u64::MAX, 4_242));
+        assert!(global_sequence_follows(0, 1));
+        assert!(global_sequence_follows(41, 42));
+        // A skipped number, a repeated one and one that went back do not.
+        assert!(!global_sequence_follows(41, 43));
+        assert!(!global_sequence_follows(41, 41));
+        assert!(!global_sequence_follows(41, 7));
+    }
+}
+
 #[cfg(test)]
 mod task_access_coalescing_tests {
     use super::*;
@@ -472,6 +556,77 @@ mod macos {
     const FILE_ATTR_MAX_ENTRIES: usize = 50_000;
     const FILE_ATTR_TTL_SECS: u64 = 30;
     const FILE_ATTR_PRUNE_INTERVAL: u64 = 1_000;
+
+    /// The global sequence number of the last message the main client's
+    /// handler received (`u64::MAX`: none yet). Each message carries the
+    /// previous one's number plus one; another value means the kernel
+    /// dropped messages for this client in between.
+    static LAST_GLOBAL_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
+    /// Times the sequence skipped.
+    static GLOBAL_SEQ_GAPS: AtomicU64 = AtomicU64::new(0);
+    /// Whether the main client also delivers TRUNCATE / LINK / CLONE /
+    /// EXCHANGEDATA (subscribed after the first set, on their own).
+    static EXTENDED_FILE_EVENTS: AtomicBool = AtomicBool::new(false);
+
+    /// The moment the kernel generated a message, in epoch milliseconds.
+    fn message_time_ms(msg: &endpoint_sec::Message) -> u64 {
+        msg.time()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_else(|_| crate::store_writers::now_ms())
+    }
+
+    /// Feed the store-writer record (`crate::store_writers`) with one file
+    /// operation of the message's process: its pid, the start the kernel
+    /// gives for it, its image, and the time of the message.
+    #[allow(clippy::too_many_arguments)]
+    fn store_record(
+        ops: u32,
+        path: &str,
+        responsible: &endpoint_sec::Process<'_>,
+        pid: u32,
+        at_ms: u64,
+        size: Option<u64>,
+        identity: Option<crate::store_writers::FileId>,
+    ) {
+        if !crate::store_writers::is_configured() {
+            return;
+        }
+        let exe = responsible.executable().path().to_string_lossy();
+        // The start the message reports, through the conversion every
+        // reader of a process start shares.
+        let started_at_ms = responsible
+            .start_time()
+            .and_then(crate::process_events::system_time_ms);
+        crate::store_writers::record(&crate::store_writers::Operation {
+            path,
+            ops,
+            pid,
+            started_at_ms,
+            process_path: &exe,
+            at_ms,
+            size,
+            identity,
+        });
+    }
+
+    /// The identity of an event's file.
+    fn file_id(file: &endpoint_sec::File<'_>) -> crate::store_writers::FileId {
+        let stat = file.stat();
+        crate::store_writers::FileId {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino,
+        }
+    }
+
+    /// `<directory>/<name>`, as the CREATE and RENAME arms join a new path.
+    fn join_new_path(directory: &OsStr, name: &OsStr) -> String {
+        format!(
+            "{}/{}",
+            directory.to_string_lossy().trim_end_matches('/'),
+            name.to_string_lossy()
+        )
+    }
 
     #[derive(Clone, Debug)]
     pub struct FimEsAttribution {
@@ -923,6 +1078,18 @@ mod macos {
                     let responsible = msg.process();
                     let responsible_pid = responsible.audit_token().pid() as u32;
 
+                    // A skipped sequence number is the kernel's report that
+                    // it dropped messages for this client: the store-writer
+                    // record is told, so its readers know its rows are
+                    // complete from now only.
+                    if let Some(seq) = msg.global_seq_num() {
+                        let previous = LAST_GLOBAL_SEQ.swap(seq, Ordering::Relaxed);
+                        if !global_sequence_follows(previous, seq) {
+                            GLOBAL_SEQ_GAPS.fetch_add(1, Ordering::Relaxed);
+                            crate::store_writers::note_lost(crate::store_writers::now_ms());
+                        }
+                    }
+
                     match msg.event() {
                         Some(Event::NotifyFork(fork)) => {
                             let child = fork.child();
@@ -1259,6 +1426,15 @@ mod macos {
                                     .path()
                                     .to_string_lossy()
                                     .to_string();
+                                store_record(
+                                    crate::store_writers::ops::CREATE,
+                                    &path,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    None,
+                                    None,
+                                );
                                 FlodbaddL7Es::record_file_attribution(
                                     &file_table_for_handler,
                                     &file_counter_for_handler,
@@ -1296,6 +1472,15 @@ mod macos {
                                 .path()
                                 .to_string_lossy()
                                 .to_string();
+                            store_record(
+                                crate::store_writers::ops::WRITE,
+                                &path,
+                                &responsible,
+                                responsible_pid,
+                                message_time_ms(&msg),
+                                None,
+                                Some(file_id(&ev.target())),
+                            );
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
                                 &file_counter_for_handler,
@@ -1334,6 +1519,17 @@ mod macos {
                                     .path()
                                     .to_string_lossy()
                                     .to_string();
+                                // The close carries the file's size as it is
+                                // left.
+                                store_record(
+                                    crate::store_writers::ops::WRITE,
+                                    &path,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    u64::try_from(ev.target().stat().st_size).ok(),
+                                    Some(file_id(&ev.target())),
+                                );
                                 FlodbaddL7Es::record_file_attribution(
                                     &file_table_for_handler,
                                     &file_counter_for_handler,
@@ -1381,6 +1577,30 @@ mod macos {
                                     }
                                 }
                             });
+                            if crate::fim_attribution::is_attributable(&source) {
+                                store_record(
+                                    crate::store_writers::ops::RENAME_FROM,
+                                    &source,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    None,
+                                    None,
+                                );
+                            }
+                            if let Some(dest) = destination.as_deref() {
+                                if crate::fim_attribution::is_attributable(dest) {
+                                    store_record(
+                                        crate::store_writers::ops::RENAME_TO,
+                                        dest,
+                                        &responsible,
+                                        responsible_pid,
+                                        message_time_ms(&msg),
+                                        None,
+                                        None,
+                                    );
+                                }
+                            }
                             #[cfg(feature = "fim")]
                             FlodbaddL7Es::fim_source_push(
                                 crate::fim_es::FimSourceKind::Delete,
@@ -1418,6 +1638,17 @@ mod macos {
                                 .path()
                                 .to_string_lossy()
                                 .to_string();
+                            if crate::fim_attribution::is_attributable(&path) {
+                                store_record(
+                                    crate::store_writers::ops::REMOVE,
+                                    &path,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    None,
+                                    None,
+                                );
+                            }
                             FlodbaddL7Es::record_file_attribution(
                                 &file_table_for_handler,
                                 &file_counter_for_handler,
@@ -1435,12 +1666,92 @@ mod macos {
                                 &table_for_handler,
                             );
                         }
+                        // The four operations below feed the store-writer
+                        // record only: the attribution table and the file
+                        // monitor's event stream are as before.
+                        Some(Event::NotifyTruncate(ev)) => {
+                            let target = ev.target().path().to_string_lossy();
+                            if crate::fim_attribution::is_attributable(&target) {
+                                store_record(
+                                    crate::store_writers::ops::TRUNCATE,
+                                    &target,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    None,
+                                    Some(file_id(&ev.target())),
+                                );
+                            }
+                        }
+                        Some(Event::NotifyLink(ev)) => {
+                            let source = ev.source().path().to_string_lossy();
+                            let at_ms = message_time_ms(&msg);
+                            if crate::fim_attribution::is_attributable(&source) {
+                                store_record(
+                                    crate::store_writers::ops::LINK,
+                                    &source,
+                                    &responsible,
+                                    responsible_pid,
+                                    at_ms,
+                                    None,
+                                    Some(file_id(&ev.source())),
+                                );
+                            }
+                            // The new name holds the linked file's content.
+                            let target =
+                                join_new_path(ev.target_dir().path(), ev.target_filename());
+                            if crate::fim_attribution::is_attributable(&target) {
+                                store_record(
+                                    crate::store_writers::ops::LINK
+                                        | crate::store_writers::ops::RENAME_TO,
+                                    &target,
+                                    &responsible,
+                                    responsible_pid,
+                                    at_ms,
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                        Some(Event::NotifyClone(ev)) => {
+                            let target = join_new_path(ev.target_dir().path(), ev.target_name());
+                            if crate::fim_attribution::is_attributable(&target) {
+                                store_record(
+                                    crate::store_writers::ops::CLONE,
+                                    &target,
+                                    &responsible,
+                                    responsible_pid,
+                                    message_time_ms(&msg),
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                        Some(Event::NotifyExchangeData(ev)) => {
+                            let at_ms = message_time_ms(&msg);
+                            for file in [ev.file1(), ev.file2()] {
+                                let path = file.path().to_string_lossy();
+                                if crate::fim_attribution::is_attributable(&path) {
+                                    store_record(
+                                        crate::store_writers::ops::EXCHANGE,
+                                        &path,
+                                        &responsible,
+                                        responsible_pid,
+                                        at_ms,
+                                        None,
+                                        None,
+                                    );
+                                }
+                            }
+                        }
                         _ => {
                             counters.other_event.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 };
 
+                // A new client numbers its messages from its own start.
+                LAST_GLOBAL_SEQ.store(u64::MAX, Ordering::Relaxed);
                 match Client::new(handler) {
                     Ok(client) => break client,
                     Err(e) => {
@@ -1487,9 +1798,26 @@ mod macos {
                 return;
             }
 
+            // The operations that change a file's content or names without
+            // a write, for the store-writer record: asked for while stores
+            // are published and no longer once they are withdrawn (the loop
+            // below), in a subscription of their own; `extended_file_events`
+            // says whether it runs.
+            let extended = [
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_TRUNCATE,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_LINK,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_CLONE,
+                es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA,
+            ];
+            EXTENDED_FILE_EVENTS.store(false, Ordering::Release);
+            // Woken when the stores are published or withdrawn.
+            crate::store_writers::wake_on_store_change(std::thread::current());
+
             last_error.store(None);
             available.store(true, Ordering::Release);
-            info!("ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK");
+            info!(
+                "ES client subscribed to FORK/EXEC/EXIT + GET_TASK(_READ) + CREATE/WRITE/CLOSE/RENAME/UNLINK"
+            );
             let running = Self::rundown_running_processes(&table);
             info!(
                 "ES rundown: {} process(es) already running recorded",
@@ -1505,9 +1833,52 @@ mod macos {
 
             // Park this thread -- the client must stay alive for events to be
             // delivered. The handler closure runs on Apple's ES dispatch queue,
-            // not on this thread, so parking is fine.
+            // not on this thread, so parking is fine. It wakes when the
+            // stores are published or withdrawn (and every few seconds, in
+            // case a wake-up was for something else) and brings the
+            // extended subscription in line with them.
+            let mut refusal_logged = false;
             loop {
-                std::thread::park();
+                let wanted = crate::store_writers::is_configured();
+                let subscribed = EXTENDED_FILE_EVENTS.load(Ordering::Acquire);
+                match extended_subscription_step(wanted, subscribed) {
+                    ExtendedStep::Subscribe => match client.subscribe(&extended) {
+                        Ok(()) => {
+                            EXTENDED_FILE_EVENTS.store(true, Ordering::Release);
+                            refusal_logged = false;
+                            info!("ES client subscribed to TRUNCATE/LINK/CLONE/EXCHANGEDATA (stores published)");
+                        }
+                        Err(e) => {
+                            if !refusal_logged {
+                                refusal_logged = true;
+                                warn!(
+                                    "ES subscribe to TRUNCATE/LINK/CLONE/EXCHANGEDATA failed: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                    ExtendedStep::Unsubscribe => match client.unsubscribe(&extended) {
+                        Ok(()) => {
+                            EXTENDED_FILE_EVENTS.store(false, Ordering::Release);
+                            refusal_logged = false;
+                            info!("ES client unsubscribed from TRUNCATE/LINK/CLONE/EXCHANGEDATA (stores withdrawn)");
+                        }
+                        Err(e) => {
+                            // Still delivered: the flag stays, the handler
+                            // records nothing while no store is published.
+                            if !refusal_logged {
+                                refusal_logged = true;
+                                warn!(
+                                    "ES unsubscribe from TRUNCATE/LINK/CLONE/EXCHANGEDATA failed: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                    ExtendedStep::Keep => {}
+                }
+                std::thread::park_timeout(EXTENDED_RECHECK);
             }
         }
 
@@ -1816,6 +2187,14 @@ mod macos {
         INSTANCE.get_or_init(FlodbaddL7Es::init)
     }
 
+    pub fn dropped_message_gaps() -> u64 {
+        GLOBAL_SEQ_GAPS.load(Ordering::Relaxed)
+    }
+
+    pub fn extended_file_events() -> bool {
+        EXTENDED_FILE_EVENTS.load(Ordering::Acquire)
+    }
+
     pub fn get_init_status() -> String {
         global().init_status()
     }
@@ -2003,6 +2382,35 @@ pub fn is_available() -> bool {
     #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
     {
         macos::global().is_available()
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]
+    {
+        false
+    }
+}
+
+/// Times the main client's message sequence skipped (the kernel dropped
+/// messages for it), since the process started. 0 without a client.
+pub fn dropped_message_gaps() -> u64 {
+    #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
+    {
+        macos::dropped_message_gaps()
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]
+    {
+        0
+    }
+}
+
+/// Whether the main client delivers TRUNCATE / LINK / CLONE / EXCHANGEDATA
+/// besides its first set of file events. `false` without a client: an absent
+/// capability, nothing is delivered at all.
+pub fn extended_file_events() -> bool {
+    #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
+    {
+        macos::extended_file_events()
     }
 
     #[cfg(not(all(target_os = "macos", feature = "endpointsecurity")))]
