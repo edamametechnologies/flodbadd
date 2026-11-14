@@ -1089,10 +1089,14 @@ mod macos {
                     let responsible_pid = responsible.audit_token().pid() as u32;
                     // The client's messages come in the order their events
                     // happened: every event up to this one's time, less a
-                    // slack, was delivered.
-                    crate::store_writers::note_delivered_through(
-                        message_time_ms(&msg).saturating_sub(ES_DELIVERY_SLACK_MS),
-                    );
+                    // slack, was delivered. Recorded while stores are
+                    // published.
+                    let stores_published = crate::store_writers::is_configured();
+                    if stores_published {
+                        crate::store_writers::note_delivered_through(
+                            message_time_ms(&msg).saturating_sub(ES_DELIVERY_SLACK_MS),
+                        );
+                    }
 
                     // A skipped sequence number is the kernel's report that
                     // it dropped messages for this client: the store-writer
@@ -1593,12 +1597,14 @@ mod macos {
                                     }
                                 }
                             });
-                            crate::store_writers::note_rename(
-                                &source,
-                                destination.as_deref(),
-                                is_directory(&ev.source()),
-                                message_time_ms(&msg),
-                            );
+                            if stores_published {
+                                crate::store_writers::note_rename(
+                                    &source,
+                                    destination.as_deref(),
+                                    is_directory(&ev.source()),
+                                    message_time_ms(&msg),
+                                );
+                            }
                             if crate::fim_attribution::is_attributable(&source) {
                                 store_record(
                                     crate::store_writers::ops::RENAME_FROM,
@@ -1660,11 +1666,13 @@ mod macos {
                                 .path()
                                 .to_string_lossy()
                                 .to_string();
-                            crate::store_writers::note_removal(
-                                &path,
-                                is_directory(&ev.target()),
-                                message_time_ms(&msg),
-                            );
+                            if stores_published {
+                                crate::store_writers::note_removal(
+                                    &path,
+                                    is_directory(&ev.target()),
+                                    message_time_ms(&msg),
+                                );
+                            }
                             if crate::fim_attribution::is_attributable(&path) {
                                 store_record(
                                     crate::store_writers::ops::REMOVE,
