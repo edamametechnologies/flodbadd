@@ -1876,7 +1876,7 @@ mod win {
         // to this one's time, less a slack of two flush periods, was
         // delivered.
         if let Some(at_ms) = Some(header.TimeStamp)
-            .filter(|t| *t > 0)
+            .filter(|t| *t > 0 && crate::store_writers::is_configured())
             .and_then(super::filetime_to_unix_ms)
         {
             crate::store_writers::note_delivered_through(
@@ -1968,8 +1968,9 @@ mod win {
     /// A path renamed into place: a directory there is a directory moved
     /// in ([`crate::store_writers::note_tree_moved_in`]).
     fn store_tree_moved_in(path: &str, at: Option<i64>) {
-        // The filesystem is asked only about a path of a store.
-        if !crate::store_writers::relates_to_a_store(path) {
+        // The filesystem is asked only about a path of a published store.
+        if !crate::store_writers::is_configured() || !crate::store_writers::relates_to_a_store(path)
+        {
             return;
         }
         let is_directory =

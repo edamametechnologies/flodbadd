@@ -999,10 +999,27 @@ fn wait_for_events(
     true
 }
 
+/// After a read and the handling of what it returned: when the group's
+/// queue holds nothing more, the group read every event queued up to the
+/// start of that read.
+fn note_if_drained(
+    fd: std::os::fd::BorrowedFd<'_>,
+    delivered: &std::sync::atomic::AtomicU64,
+    read_started_ms: u64,
+) {
+    let mut pending: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one `c_int` through the pointer given, for a
+    // descriptor the group owns.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &mut pending) };
+    if rc == 0 && pending == 0 {
+        note_group_delivered(delivered, read_started_ms);
+    }
+}
+
 /// A group read every event queued up to `at_ms`: the sensor delivered
 /// through the earlier of the two groups' times.
 fn note_group_delivered(delivered: &std::sync::atomic::AtomicU64, at_ms: u64) {
-    delivered.fetch_max(at_ms, std::sync::atomic::Ordering::AcqRel);
+    crate::store_writers::advance_delivery(delivered, at_ms);
     let Some(table) = TABLE.get() else {
         return;
     };
@@ -1097,9 +1114,12 @@ fn resolve_writer(pid: u32) -> (String, String) {
 
 fn reader_loop(table: Arc<FanotifyTable>) {
     loop {
-        if !wait_for_events(table.fan.as_fd(), &table.writer_delivered_ms) {
+        // With stores published, the group says up to when it delivered.
+        let configured = crate::store_writers::is_configured();
+        if configured && !wait_for_events(table.fan.as_fd(), &table.writer_delivered_ms) {
             continue;
         }
+        let read_started = crate::store_writers::now_ms();
         let events = match table.fan.read_events() {
             Ok(events) => events,
             Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
@@ -1176,6 +1196,9 @@ fn reader_loop(table: Arc<FanotifyTable>) {
                     seen: Instant::now(),
                 },
             );
+        }
+        if configured {
+            note_if_drained(table.fan.as_fd(), &table.writer_delivered_ms, read_started);
         }
     }
 }
@@ -1452,9 +1475,11 @@ fn creation_loop(table: Arc<FanotifyTable>) {
     };
     let mut buf = vec![0u8; DIR_EVENT_BUFFER];
     loop {
-        if !wait_for_events(dir_fan.as_fd(), &table.creation_delivered_ms) {
+        let configured = crate::store_writers::is_configured();
+        if configured && !wait_for_events(dir_fan.as_fd(), &table.creation_delivered_ms) {
             continue;
         }
+        let read_started = crate::store_writers::now_ms();
         let nread = match nix::unistd::read(dir_fan.as_fd(), &mut buf) {
             Ok(n) => n,
             Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
@@ -1601,6 +1626,9 @@ fn creation_loop(table: Arc<FanotifyTable>) {
                     },
                 );
             }
+        }
+        if configured {
+            note_if_drained(dir_fan.as_fd(), &table.creation_delivered_ms, read_started);
         }
     }
 }

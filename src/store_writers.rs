@@ -387,6 +387,11 @@ pub struct StoreWriterRows {
     pub last_lost_ms: Option<u64>,
     pub lost_signals: u64,
     pub counters: StoreWriterCounters,
+    /// When the rows were read, and up to when the sensor had delivered
+    /// every event just before (every operation made up to then is in these
+    /// rows or earlier ones).
+    pub read_at_ms: u64,
+    pub delivered_through_ms: Option<u64>,
 }
 
 /// A file that changed since the last take, as [`take_dirty`] returns it.
@@ -1902,7 +1907,7 @@ pub fn note_tree_moved_in(path: &str, at_ms: u64) {
 /// ([`note_tree_moved_in`]). A file's own rename is an operation on its
 /// record ([`record`]), nothing more.
 pub fn note_rename(source: &str, destination: Option<&str>, is_directory: bool, at_ms: u64) {
-    if !is_directory {
+    if !is_directory || !is_configured() {
         return;
     }
     note_tree_changed(source, at_ms);
@@ -1915,7 +1920,7 @@ pub fn note_rename(source: &str, destination: Option<&str>, is_directory: bool, 
 /// below it ([`note_tree_changed`]). A file's own removal is an operation on
 /// its record.
 pub fn note_removal(path: &str, is_directory: bool, at_ms: u64) {
-    if is_directory {
+    if is_directory && is_configured() {
         note_tree_changed(path, at_ms);
     }
 }
@@ -2072,10 +2077,26 @@ pub fn note_file_mark(path: &str, at_ms: u64, marked: bool, second_name: bool) {
 }
 
 /// The sensor has delivered every event of the operations made up to
-/// `at_ms` (its queue was empty when it read that far). Only ever moves
-/// forward.
+/// `at_ms` (its queue was empty when it read that far). It moves forward,
+/// and back only when a sensor says a time more than
+/// [`DELIVERY_STEP_BACK_MS`] below it (the clock stepped back).
 pub fn note_delivered_through(at_ms: u64) {
-    DELIVERED_THROUGH_MS.fetch_max(at_ms, Ordering::AcqRel);
+    if !is_configured() {
+        return;
+    }
+    advance_delivery(&DELIVERED_THROUGH_MS, at_ms);
+}
+
+/// How far below the recorded delivery a sensor's word is taken as the
+/// clock having stepped back.
+pub const DELIVERY_STEP_BACK_MS: u64 = 5_000;
+
+/// `delivered` moved to `at_ms`: forward, or back past
+/// [`DELIVERY_STEP_BACK_MS`].
+pub fn advance_delivery(delivered: &AtomicU64, at_ms: u64) {
+    let _ = delivered.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        (at_ms > current || current.saturating_sub(at_ms) > DELIVERY_STEP_BACK_MS).then_some(at_ms)
+    });
 }
 
 /// Up to when the sensor has delivered every event ([`note_delivered_through`]).
@@ -2086,9 +2107,11 @@ pub fn delivered_through_ms() -> Option<u64> {
 static DELIVERED_THROUGH_MS: AtomicU64 = AtomicU64::new(0);
 
 /// What the record vouches for of each published store, as of `now_ms`,
-/// from the sensor's state at its last poll ([`sensor`]). `None` when the
+/// from the sensor's state, polled first ([`sensor`]). `None` when the
 /// record was held.
 pub fn store_coverage(now_ms: u64) -> Option<Vec<StoreCoverage>> {
+    // The sensor's state now, not as of whichever poll came last.
+    let _ = sensor();
     let matcher = MATCHER.load();
     let complete_since = COMPLETE_SINCE_MS.load(Ordering::Acquire);
     with_table(READ_RETRY_BUDGET, |table| {
@@ -2113,8 +2136,8 @@ pub fn store_coverage(now_ms: u64) -> Option<Vec<StoreCoverage>> {
                         });
                     }
                 }
-                // While the sensor does not deliver everything (as of its
-                // last poll), the store is a gap up to now.
+                // While the sensor does not deliver everything, the store is
+                // a gap up to now.
                 if complete_since == 0 {
                     gaps.push(StoreGap {
                         from_ms: None,
@@ -2152,6 +2175,8 @@ pub fn rows_since(
     cut: Option<(&str, u64)>,
 ) -> Option<StoreWriterRows> {
     let configured = is_configured();
+    // Read before the rows: every event delivered up to then is in them.
+    let delivered_through_ms = delivered_through_ms();
     with_table(READ_RETRY_BUDGET, |table| {
         let since_seq = if instance == table.instance {
             table.rows_acked = table.rows_acked.max(since_seq);
@@ -2194,6 +2219,8 @@ pub fn rows_since(
             last_lost_ms: table.last_lost_ms,
             lost_signals: table.lost_signals,
             counters: counters(),
+            read_at_ms: now_ms(),
+            delivered_through_ms,
         }
     })
 }
@@ -2267,6 +2294,16 @@ fn set_complete_since_for_tests(since_ms: u64) {
     COMPLETE_SINCE_MS.store(since_ms, Ordering::Release);
 }
 
+/// Tests: the sensor of this build delivers everything (or does not).
+#[cfg(test)]
+static TEST_SENSOR_DELIVERS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn sensor_delivers_for_tests(delivers: bool) {
+    TEST_SENSOR_DELIVERS.store(delivers, Ordering::Release);
+    let _ = sensor();
+}
+
 /// The state [`sensor`] last logged (`u32::MAX`: none yet).
 static SENSOR_LOGGED: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -2323,6 +2360,19 @@ pub fn sensor() -> StoreWriterSensor {
 fn sensor_now() -> StoreWriterSensor {
     let stores_unresolved_reason = stores_unresolved_reason();
     let stores_unresolved = stores_unresolved_reason.is_some();
+    #[cfg(test)]
+    if TEST_SENSOR_DELIVERS.load(Ordering::Acquire) {
+        return StoreWriterSensor {
+            kind: "test".to_string(),
+            active: true,
+            entry_events: true,
+            extended_events: true,
+            dropped_reports: 0,
+            stores_unresolved,
+            stores_unresolved_reason,
+            complete_since_ms: None,
+        };
+    }
     #[cfg(all(target_os = "macos", feature = "endpointsecurity"))]
     {
         let active = crate::l7_es::is_available();
@@ -3497,7 +3547,7 @@ mod tests {
     #[serial_test::serial(store_writers)]
     fn a_store_says_when_it_vouches_for_nothing() {
         configure(&[spec("/tmp/sw-cover/.claude")]);
-        set_complete_since_for_tests(500);
+        sensor_delivers_for_tests(true);
         let coverage = |now: u64| {
             store_coverage(now)
                 .expect("free")
@@ -3539,7 +3589,7 @@ mod tests {
         assert_eq!(coverage(9_500).unwatched_directories, 0);
         assert!(is_store_root("/tmp/sw-cover/.claude/projects"));
         assert!(!is_store_root("/tmp/sw-cover/.claude/projects/p"));
-        set_complete_since_for_tests(0);
+        sensor_delivers_for_tests(false);
         clear();
     }
 
@@ -3552,7 +3602,7 @@ mod tests {
     #[serial_test::serial(store_writers)]
     fn a_rename_or_a_removal_reaches_what_it_touched() {
         configure(&[spec("/tmp/sw-touch/.claude")]);
-        set_complete_since_for_tests(100);
+        sensor_delivers_for_tests(true);
         let inside = "/tmp/sw-touch/.claude/projects/p/k.jsonl";
         record(&op(inside, ops::CREATE | ops::WRITE, 10, 500, 2_000));
         let _ = take_dirty().expect("free");
@@ -3603,7 +3653,7 @@ mod tests {
             ),
             (None, 6_000, "directory_moved")
         );
-        set_complete_since_for_tests(0);
+        sensor_delivers_for_tests(false);
         clear();
     }
 
@@ -3613,7 +3663,10 @@ mod tests {
     #[serial_test::serial(store_writers)]
     fn a_sensor_that_does_not_deliver_everything_leaves_the_store_unvouched() {
         configure(&[spec("/tmp/sw-partial/.claude")]);
-        set_complete_since_for_tests(0);
+        sensor_delivers_for_tests(false);
+        // The coverage polls the sensor itself: a completeness left from an
+        // earlier poll is not read.
+        set_complete_since_for_tests(100);
         let store = store_coverage(5_000)
             .expect("free")
             .into_iter()
@@ -3625,14 +3678,17 @@ mod tests {
             .find(|gap| gap.reason == "sensor_partial")
             .expect("an open gap");
         assert_eq!((partial.from_ms, partial.until_ms), (None, 5_000));
-        set_complete_since_for_tests(100);
+        // The completeness the poll found broken is recorded as dropped
+        // events.
+        assert!(store.gaps.iter().any(|gap| gap.reason == "lost_events"));
+        sensor_delivers_for_tests(true);
         let store = store_coverage(6_000)
             .expect("free")
             .into_iter()
             .find(|store| store.agent == "claude_code")
             .expect("the store");
-        assert!(store.gaps.is_empty());
-        set_complete_since_for_tests(0);
+        assert!(store.gaps.iter().all(|gap| gap.reason != "sensor_partial"));
+        sensor_delivers_for_tests(false);
         clear();
     }
 
@@ -3642,7 +3698,7 @@ mod tests {
     #[serial_test::serial(store_writers)]
     fn store_gaps_past_the_bound_are_merged_not_dropped() {
         configure(&[spec("/tmp/sw-gapbound/.claude")]);
-        set_complete_since_for_tests(100);
+        sensor_delivers_for_tests(true);
         note_tree_moved_in("/tmp/sw-gapbound/.claude/projects/p", 7_000);
         for i in 0..MAX_STORE_GAPS as u64 {
             note_store_gap(
@@ -3693,7 +3749,7 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!((widened.from_ms, widened.until_ms), (None, 5_000));
-        set_complete_since_for_tests(0);
+        sensor_delivers_for_tests(false);
         clear();
     }
 
@@ -3746,18 +3802,29 @@ mod tests {
         clear();
     }
 
-    /// The sensor's delivery watermark only moves forward, and each take
-    /// carries the one read before it.
+    /// The sensor's delivery watermark moves forward, and back only past a
+    /// clock's step; each take and each read of the rows carries the one
+    /// read before it; nothing is noted while no store is published.
     #[test]
     #[serial_test::serial(store_writers)]
     fn a_take_carries_what_the_sensor_delivered_through() {
         configure(&[spec("/tmp/sw-deliv/.claude")]);
-        let start = delivered_through_ms().unwrap_or(0);
+        let start = delivered_through_ms().unwrap_or(0) + DELIVERY_STEP_BACK_MS;
         note_delivered_through(start + 5_000);
         note_delivered_through(start + 4_000);
         assert_eq!(delivered_through_ms(), Some(start + 5_000));
         let take = take_dirty().expect("free");
         assert_eq!(take.delivered_through_ms, Some(start + 5_000));
+        let rows = rows_since("", 0, None).expect("free");
+        assert_eq!(rows.delivered_through_ms, Some(start + 5_000));
+        // A word further below than a clock's step back: taken as is.
+        let stepped = start + 5_000 - DELIVERY_STEP_BACK_MS - 1;
+        note_delivered_through(stepped);
+        assert_eq!(delivered_through_ms(), Some(stepped));
+        // Nothing is noted while no store is published.
+        clear();
+        note_delivered_through(stepped + 60_000);
+        assert_eq!(delivered_through_ms(), Some(stepped));
         clear();
     }
 
