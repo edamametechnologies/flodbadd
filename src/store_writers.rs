@@ -2304,6 +2304,19 @@ fn sensor_delivers_for_tests(delivers: bool) {
     let _ = sensor();
 }
 
+/// Tests: the sensor of this build does not deliver everything, whatever
+/// the build's own sensor does. A test run as root on Linux has the
+/// fanotify sensor of the FIM tests running, and it delivers everything.
+/// [`sensor_delivers_for_tests`] still takes precedence.
+#[cfg(test)]
+static TEST_SENSOR_PARTIAL: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn sensor_partial_for_tests(partial: bool) {
+    TEST_SENSOR_PARTIAL.store(partial, Ordering::Release);
+    let _ = sensor();
+}
+
 /// The state [`sensor`] last logged (`u32::MAX`: none yet).
 static SENSOR_LOGGED: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -2367,6 +2380,19 @@ fn sensor_now() -> StoreWriterSensor {
             active: true,
             entry_events: true,
             extended_events: true,
+            dropped_reports: 0,
+            stores_unresolved,
+            stores_unresolved_reason,
+            complete_since_ms: None,
+        };
+    }
+    #[cfg(test)]
+    if TEST_SENSOR_PARTIAL.load(Ordering::Acquire) {
+        return StoreWriterSensor {
+            kind: "test".to_string(),
+            active: false,
+            entry_events: false,
+            extended_events: false,
             dropped_reports: 0,
             stores_unresolved,
             stores_unresolved_reason,
@@ -3664,6 +3690,8 @@ mod tests {
     fn a_sensor_that_does_not_deliver_everything_leaves_the_store_unvouched() {
         configure(&[spec("/tmp/sw-partial/.claude")]);
         sensor_delivers_for_tests(false);
+        // Whatever sensor this run has (root on Linux runs fanotify).
+        sensor_partial_for_tests(true);
         // The coverage polls the sensor itself: a completeness left from an
         // earlier poll is not read.
         set_complete_since_for_tests(100);
@@ -3689,6 +3717,7 @@ mod tests {
             .expect("the store");
         assert!(store.gaps.iter().all(|gap| gap.reason != "sensor_partial"));
         sensor_delivers_for_tests(false);
+        sensor_partial_for_tests(false);
         clear();
     }
 
