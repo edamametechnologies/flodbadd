@@ -6523,9 +6523,12 @@ mod tests {
             Err(e) => {
                 println!("Traffic generation failed: {}", e);
                 // Second attempt
-                println!("Waiting 10s before second attempt...");
+                // The second attempt goes to another host: the traffic is only a
+                // stimulus for the capture, and one mirror being down must not
+                // fail the test.
+                println!("Waiting 10s before a second attempt on another host...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                match client.get(target_url).send().await {
+                match client.get("https://github.com/").send().await {
                     Ok(response) => {
                         println!(
                             "Traffic generation successful (Status: {})",
@@ -6644,9 +6647,12 @@ mod tests {
             Err(e) => {
                 println!("Traffic generation failed: {}", e);
                 // Second attempt
-                println!("Waiting 10s before second attempt...");
+                // The second attempt goes to another host: the traffic is only a
+                // stimulus for the capture, and one mirror being down must not
+                // fail the test.
+                println!("Waiting 10s before a second attempt on another host...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                match client.get(target_url).send().await {
+                match client.get("https://github.com/").send().await {
                     Ok(response) => {
                         println!(
                             "Traffic generation successful (Status: {})",
