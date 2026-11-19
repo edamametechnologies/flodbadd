@@ -2322,6 +2322,23 @@ mod tests {
         let created = created.expect("the creator's write is recorded");
         assert_eq!(created.agent, "claude_code");
         assert_eq!(created.kind, StoreFileKind::Transcript);
+        // The writer group recorded the write; the creation group may not run
+        // here (a container without CAP_DAC_READ_SEARCH cannot open the file
+        // handles FID mode reports, or the kernel lacks FID mode). Its
+        // counters say which: the creation half is skipped instead of failing.
+        if created.creation.is_none() {
+            let (unresolved, errno) = creation_unresolved_total();
+            let (mark_failures, mark_errno) = creation_mark_failures();
+            if !creation_group_active() || unresolved > 0 || mark_failures > 0 {
+                eprintln!(
+                    "creation group unavailable (active={}, unresolved={unresolved} errno {errno}, mark failures={mark_failures} errno {mark_errno}); the creation half cannot run here",
+                    creation_group_active()
+                );
+                let _ = creator.kill();
+                let _ = creator.wait();
+                return;
+            }
+        }
         assert_eq!(
             created.creation.map(|creation| creation.writer.pid),
             Some(creator_pid),
