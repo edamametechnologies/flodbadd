@@ -109,24 +109,9 @@ jobs:
             benchmark_with_ebpf.json
             benchmark_no_ebpf.json
 
-      # The benchmark steps are continue-on-error, so their failure never
-      # fails the job and `failure()` alone never fired for them: test their
-      # outcomes. `failure()` still covers a setup or build step failing.
-      - name: Slack alert on failure
-        if: failure() || steps.benchmark_with_ebpf.outcome == 'failure' || steps.benchmark_no_ebpf.outcome == 'failure'
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          channel-id: "C072J0U9TH7"
-          slack-message: |
-            *L7 Attribution Benchmark (linux) failed for ${{ github.repository }}*
-            - With eBPF: ${{ steps.benchmark_with_ebpf.outcome }}
-            - Without eBPF: ${{ steps.benchmark_no_ebpf.outcome }}
-            Branch: ${{ github.ref }}
-            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
+      - name: Fail the job if a check failed (the Slack notify job reports it)
+        if: (failure() || steps.benchmark_with_ebpf.outcome == 'failure' || steps.benchmark_no_ebpf.outcome == 'failure')
+        run: exit 1
   benchmark-macos:
     name: benchmark-macos
     runs-on: macos-15
@@ -160,7 +145,18 @@ jobs:
       - name: Build and codesign benchmark binary with ES entitlement
         shell: bash
         run: |
-          cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test --no-run 2>&1
+          # The executable's path comes from cargo itself: nightly cargo no
+          # longer writes test binaries to target/debug/deps (they are under
+          # target/debug/build/<package>/<hash>/out/), and a glob on deps
+          # found nothing, so the ES run never ran.
+          BENCH_BIN=$(cargo test --features packetcapture,asyncpacketcapture,endpointsecurity --test l7_benchmark_test --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "l7_benchmark_test") | .executable // empty' \
+            | tail -1)
+          if [ -z "$BENCH_BIN" ] || [ ! -x "$BENCH_BIN" ]; then
+            echo "::error::cargo reported no l7_benchmark_test executable"
+            exit 1
+          fi
+          echo "BENCH_BIN=$BENCH_BIN" >> "$GITHUB_ENV"
           cat > /tmp/es_bench.entitlements << 'ENTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -171,20 +167,15 @@ jobs:
           </dict>
           </plist>
           ENTEOF
-          for binary in target/debug/deps/l7_benchmark_test-*; do
-            if [ -x "$binary" ] && [[ ! "$binary" == *.d ]] && [[ ! "$binary" == *.o ]]; then
-              echo "Signing $binary with ES entitlement"
-              codesign --force --sign - --entitlements /tmp/es_bench.entitlements "$binary"
-              codesign -dvvv "$binary" 2>&1 | head -5
-            fi
-          done
+          echo "Signing $BENCH_BIN with ES entitlement"
+          codesign --force --sign - --entitlements /tmp/es_bench.entitlements "$BENCH_BIN"
+          codesign -dvvv "$BENCH_BIN" 2>&1 | head -5
 
       - name: L7 benchmark with Endpoint Security
         id: benchmark_with_es
         shell: bash
         continue-on-error: true
         run: |
-          BENCH_BIN=$(find target/debug/deps -name 'l7_benchmark_test-*' -perm +111 ! -name '*.d' ! -name '*.o' | head -1)
           echo "Running signed binary: $BENCH_BIN"
           sudo -E "$BENCH_BIN" --nocapture 2>&1 | tee benchmark_with_es.log
 
@@ -222,24 +213,9 @@ jobs:
             benchmark_with_es.json
             benchmark_no_es.json
 
-      # The benchmark steps are continue-on-error, so their failure never
-      # fails the job and `failure()` alone never fired for them: test their
-      # outcomes. `failure()` still covers a setup or build step failing.
-      - name: Slack alert on failure
-        if: failure() || steps.benchmark_with_es.outcome == 'failure' || steps.benchmark_no_es.outcome == 'failure'
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          channel-id: "C072J0U9TH7"
-          slack-message: |
-            *L7 Attribution Benchmark (macos) failed for ${{ github.repository }}*
-            - With ES: ${{ steps.benchmark_with_es.outcome }}
-            - Without ES: ${{ steps.benchmark_no_es.outcome }}
-            Branch: ${{ github.ref }}
-            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
+      - name: Fail the job if a check failed (the Slack notify job reports it)
+        if: (failure() || steps.benchmark_with_es.outcome == 'failure' || steps.benchmark_no_es.outcome == 'failure')
+        run: exit 1
   benchmark-windows:
     name: benchmark-windows
     runs-on: windows-latest
@@ -326,20 +302,16 @@ jobs:
             benchmark_with_etw.json
             benchmark_no_etw.json
 
-      # The benchmark steps are continue-on-error, so their failure never
-      # fails the job and `failure()` alone never fired for them: test their
-      # outcomes. `failure()` still covers a setup or build step failing.
-      - name: Slack alert on failure
-        if: failure() || steps.benchmark_with_etw.outcome == 'failure' || steps.benchmark_no_etw.outcome == 'failure'
-        continue-on-error: true
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          channel-id: "C072J0U9TH7"
-          slack-message: |
-            *L7 Attribution Benchmark (windows) failed for ${{ github.repository }}*
-            - With ETW: ${{ steps.benchmark_with_etw.outcome }}
-            - Without ETW: ${{ steps.benchmark_no_etw.outcome }}
-            Branch: ${{ github.ref }}
-            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      - name: Fail the job if a check failed (the Slack notify job reports it)
+        if: (failure() || steps.benchmark_with_etw.outcome == 'failure' || steps.benchmark_no_etw.outcome == 'failure')
+        run: exit 1
+
+  notify:
+    name: Slack alert
+    needs: [benchmark-linux, benchmark-macos, benchmark-windows]
+    if: always() && github.event_name != 'pull_request'
+    uses: edamametechnologies/.github/.github/workflows/slack-notify.yml@main
+    with:
+      results: ${{ toJSON(needs) }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
