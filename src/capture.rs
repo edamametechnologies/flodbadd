@@ -6583,9 +6583,11 @@ mod tests {
             }
             Err(e) => {
                 println!("Traffic generation failed: {}", e);
-                // Second attempt
+                // Second attempt, on another host: the traffic is only a
+                // stimulus for the capture, and one mirror being down must not
+                // fail the test.
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                match client.get(target_url).send().await {
+                match client.get("https://github.com/").send().await {
                     Ok(response) => {
                         println!(
                             "Traffic generation successful (Status: {})",
