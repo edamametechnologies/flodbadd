@@ -311,9 +311,169 @@ fn utf16_cstring(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&wide)
 }
 
+/// The kernel `FileObject`s of the files a lookup can ask about, by address:
+/// an open records the object's path, so that a later FileIo event on the
+/// object (a write, a delete, a rename) names its file.
+///
+/// An address names one file object at a time, and the kernel reuses it as
+/// soon as the object is freed. An open is therefore the truth about its
+/// address: it replaces the entry, and an open of a file no lookup asks
+/// about removes it. Until 2.3.3 such an open left the entry alone, so an
+/// entry whose close the session missed, or whose close was delivered
+/// before the rename that recorded it again (real-time ETW does not order
+/// events across processors), outlived its object, and the next process to
+/// get the address for a file of its own had every write through it
+/// credited to the old path: shiawase, 2026-11-21, a VPN service and the
+/// antivirus engine as the writers of a browser's `Local State` and
+/// `Preferences` for hours (FP-WIN-52). Eviction by age only runs when the
+/// table is full.
+pub struct FileObjectPaths {
+    objects: std::collections::HashMap<u64, (String, std::time::Instant)>,
+    max_entries: usize,
+    ttl: std::time::Duration,
+}
+
+impl FileObjectPaths {
+    pub fn new(max_entries: usize, ttl: std::time::Duration) -> Self {
+        Self {
+            objects: std::collections::HashMap::new(),
+            max_entries: max_entries.max(1),
+            ttl,
+        }
+    }
+
+    /// `file_object` was opened on `path` (or renamed to it) at `now`;
+    /// `attributable` says whether any lookup can ask about the path.
+    pub fn opened(
+        &mut self,
+        file_object: u64,
+        path: String,
+        attributable: bool,
+        now: std::time::Instant,
+    ) {
+        if !attributable {
+            // The address now names a file nobody asks about: whatever it
+            // named before is gone.
+            self.objects.remove(&file_object);
+            return;
+        }
+        if self.objects.len() >= self.max_entries && !self.objects.contains_key(&file_object) {
+            self.evict(now);
+        }
+        self.objects.insert(file_object, (path, now));
+    }
+
+    /// `file_object` was closed: its path, if it was recorded.
+    pub fn released(&mut self, file_object: u64) -> Option<String> {
+        self.objects.remove(&file_object).map(|(path, _)| path)
+    }
+
+    /// The path `file_object` names, if its open was recorded.
+    pub fn path(&self, file_object: u64) -> Option<String> {
+        self.objects.get(&file_object).map(|(path, _)| path.clone())
+    }
+
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// Room for one more: the entries older than the TTL go, and when the
+    /// table is still full of live objects the oldest tenth. The newest
+    /// object is the one whose write is about to arrive.
+    fn evict(&mut self, now: std::time::Instant) {
+        let ttl = self.ttl;
+        self.objects
+            .retain(|_, (_, seen)| now.saturating_duration_since(*seen) < ttl);
+        if self.objects.len() >= self.max_entries {
+            let mut by_age: Vec<(u64, std::time::Instant)> = self
+                .objects
+                .iter()
+                .map(|(key, (_, seen))| (*key, *seen))
+                .collect();
+            by_age.sort_by_key(|(_, seen)| *seen);
+            for (key, _) in by_age.iter().take((self.max_entries / 10).max(1)) {
+                self.objects.remove(key);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FP-WIN-52: an address whose close was not seen is reused by another
+    /// process for a file outside the watch roots; a write through it is
+    /// no longer credited to the old path.
+    #[test]
+    fn an_open_elsewhere_ends_what_the_address_named() {
+        let now = std::time::Instant::now();
+        let mut objects = FileObjectPaths::new(16, std::time::Duration::from_secs(120));
+        let local_state = "\\Device\\HarddiskVolume3\\Users\\u\\AppData\\Local\\Google\\Chrome\\User Data\\Local State".to_string();
+        // The browser renames its temp file to `Local State` through the
+        // object; its close was delivered first, so nothing releases it.
+        objects.opened(FO, local_state.clone(), true, now);
+        assert_eq!(objects.path(FO), Some(local_state));
+        // Another process gets the address for a file of its own.
+        objects.opened(
+            FO,
+            "\\Device\\HarddiskVolume3\\ProgramData\\Vpn\\peers.d\\x.peer".to_string(),
+            false,
+            now,
+        );
+        assert_eq!(
+            objects.path(FO),
+            None,
+            "a write through the reused object names nothing"
+        );
+        assert!(objects.is_empty());
+    }
+
+    /// An open under a root replaces what the address named; a close ends it.
+    #[test]
+    fn an_open_replaces_and_a_close_ends_an_entry() {
+        let now = std::time::Instant::now();
+        let mut objects = FileObjectPaths::new(16, std::time::Duration::from_secs(120));
+        objects.opened(FO, "C:/w/a".to_string(), true, now);
+        objects.opened(FO, "C:/w/b".to_string(), true, now);
+        assert_eq!(objects.path(FO), Some("C:/w/b".to_string()));
+        assert_eq!(objects.released(FO), Some("C:/w/b".to_string()));
+        assert_eq!(objects.path(FO), None);
+        assert_eq!(objects.released(FO), None);
+    }
+
+    /// A full table drops what is older than the TTL first, then the oldest
+    /// tenth; the new object always gets its entry.
+    #[test]
+    fn a_full_table_makes_room_for_the_new_object() {
+        let start = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(120);
+        let mut objects = FileObjectPaths::new(10, ttl);
+        for i in 0..10u64 {
+            objects.opened(
+                i,
+                format!("C:/w/{i}"),
+                true,
+                start + std::time::Duration::from_secs(i),
+            );
+        }
+        assert_eq!(objects.len(), 10);
+        // All live: the oldest tenth (one) goes.
+        let later = start + std::time::Duration::from_secs(20);
+        objects.opened(100, "C:/w/new".to_string(), true, later);
+        assert_eq!(objects.path(0), None);
+        assert_eq!(objects.path(100), Some("C:/w/new".to_string()));
+        assert_eq!(objects.len(), 10);
+        // Past the TTL: every expired entry goes at once.
+        let much_later = start + ttl + std::time::Duration::from_secs(30);
+        objects.opened(101, "C:/w/newer".to_string(), true, much_later);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects.path(101), Some("C:/w/newer".to_string()));
+    }
 
     const FO: u64 = 0xffff_c283_a766_1150;
     const IRP: u64 = 0xffff_c283_ac0d_8b88;

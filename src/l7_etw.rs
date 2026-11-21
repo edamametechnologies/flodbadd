@@ -188,7 +188,9 @@ mod win {
     // Open file objects seen at FileIo/Create by a foreign process, keyed by
     // the kernel `FileObject` pointer, so a later FileIo/Write on that
     // object can be attributed to the writer's path. Bounded; entries die
-    // at Cleanup/Close or after `FILE_OBJECT_TTL_SECS`.
+    // at Cleanup/Close, when an open reuses their address (2.3.3,
+    // FP-WIN-52), or, once the table is full, after `FILE_OBJECT_TTL_SECS`
+    // (`etw_fileio_payload::FileObjectPaths`).
     //
     // 2.3.2: only objects under a FIM watch root are remembered, and a full
     // table evicts its oldest entries instead of refusing the new one. Until
@@ -1120,8 +1122,11 @@ mod win {
         static THREAD_NAMESPACE_TABLE: std::cell::RefCell<Option<Arc<DashMap<String, FimEtwAttribution>>>> =
             const { std::cell::RefCell::new(None) };
         // Only the ProcessTrace thread touches it: no lock needed.
-        static THREAD_FILE_OBJECTS: std::cell::RefCell<std::collections::HashMap<u64, (String, Instant)>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
+        static THREAD_FILE_OBJECTS: std::cell::RefCell<crate::etw_fileio_payload::FileObjectPaths> =
+            std::cell::RefCell::new(crate::etw_fileio_payload::FileObjectPaths::new(
+                FILE_OBJECT_MAX_ENTRIES,
+                std::time::Duration::from_secs(FILE_OBJECT_TTL_SECS),
+            ));
         // Audit session thread only: the opens waiting for a program image.
         static PENDING_TASK_ACCESS: std::cell::RefCell<std::collections::VecDeque<PendingTaskAccess>> =
             const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
@@ -2417,47 +2422,24 @@ mod win {
     }
 
     fn remember_file_object(file_object: u64, path: String) {
-        // Only the objects a FIM lookup can ever ask about: the attribution
-        // tables are confined to the watch roots (`record_file_actor`), so a
-        // file object elsewhere would only crowd this table.
-        if !crate::fim_attribution::is_attributable(&path) {
-            return;
-        }
+        // Only the objects a FIM lookup can ever ask about are kept: the
+        // attribution tables are confined to the watch roots
+        // (`record_file_actor`). An open elsewhere still ends what its
+        // address named before (`FileObjectPaths::opened`, FP-WIN-52).
+        let attributable = crate::fim_attribution::is_attributable(&path);
         THREAD_FILE_OBJECTS.with(|objects| {
-            let mut objects = objects.borrow_mut();
-            if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
-                let cutoff = Instant::now();
-                objects.retain(|_, (_, seen)| {
-                    cutoff.duration_since(*seen).as_secs() < FILE_OBJECT_TTL_SECS
-                });
-                if objects.len() >= FILE_OBJECT_MAX_ENTRIES {
-                    // Still full of live objects: make room by dropping the
-                    // oldest tenth. The newest object is the one whose write
-                    // is about to arrive.
-                    let mut by_age: Vec<(u64, Instant)> =
-                        objects.iter().map(|(k, (_, seen))| (*k, *seen)).collect();
-                    by_age.sort_by_key(|(_, seen)| *seen);
-                    for (key, _) in by_age.iter().take(FILE_OBJECT_MAX_ENTRIES / 10) {
-                        objects.remove(key);
-                    }
-                }
-            }
-            objects.insert(file_object, (path, Instant::now()));
+            objects
+                .borrow_mut()
+                .opened(file_object, path, attributable, Instant::now())
         });
     }
 
     fn take_file_object(file_object: u64) -> Option<String> {
-        THREAD_FILE_OBJECTS
-            .with(|objects| objects.borrow_mut().remove(&file_object).map(|(p, _)| p))
+        THREAD_FILE_OBJECTS.with(|objects| objects.borrow_mut().released(file_object))
     }
 
     fn file_object_path(file_object: u64) -> Option<String> {
-        THREAD_FILE_OBJECTS.with(|objects| {
-            objects
-                .borrow()
-                .get(&file_object)
-                .map(|(path, _)| path.clone())
-        })
+        THREAD_FILE_OBJECTS.with(|objects| objects.borrow().path(file_object))
     }
 
     /// The attribution table a FileIo event feeds.
