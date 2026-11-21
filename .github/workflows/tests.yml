@@ -597,8 +597,8 @@ jobs:
         if: ${{ contains(matrix.container_image, 'alpine') }}
         shell: sh
         run: |
-          apk update
-          apk add --no-cache build-base git curl bash sudo pkgconf
+          apk --wait 300 update
+          apk --wait 300 add --no-cache build-base git curl bash sudo pkgconf
           git config --global --add safe.directory '*'
 
       - name: Setup permissions for git and install missing packages (apt)
@@ -679,11 +679,11 @@ jobs:
         if: ${{ contains(matrix.container_image, 'alpine') }}
         shell: sh
         run: |
-          apk add --no-cache protobuf-dev libpcap-dev
+          apk --wait 300 add --no-cache protobuf-dev libpcap-dev
           # eBPF development tools for L7 process resolution (REQUIRED for eBPF compilation)
-          apk add --no-cache clang llvm
+          apk --wait 300 add --no-cache clang llvm
           # libbpf-dev and linux-headers (optional, may not be available in older Alpine)
-          apk add --no-cache libbpf-dev linux-headers || true
+          apk --wait 300 add --no-cache libbpf-dev linux-headers || true
 
       - name: Install additional packages (apt)
         if: ${{ !contains(matrix.container_image, 'alpine') }}
@@ -728,7 +728,7 @@ jobs:
         shell: bash
         run: |
           if [ -f /etc/alpine-release ]; then
-            apk add --no-cache build-base
+            apk --wait 300 add --no-cache build-base
           fi
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           # Add rust to path for subsequent steps
