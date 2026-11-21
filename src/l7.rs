@@ -1389,9 +1389,9 @@ impl FlodbaddL7 {
                         .into_iter()
                         .filter_map(|(pid, needs_full)| {
                             let files = if needs_full {
-                                crate::open_files::get_open_file_paths(pid)
+                                crate::open_files::session_open_file_paths(pid)
                             } else {
-                                crate::open_files::get_retained_open_file_paths(pid)
+                                crate::open_files::session_retained_open_file_paths(pid)
                             };
                             if files.is_empty() {
                                 None
@@ -2335,7 +2335,7 @@ impl FlodbaddL7 {
                     read_bytes: disk_stats.read_bytes,
                 };
                 let open_files = crate::open_files::aggregate_open_files(
-                    crate::open_files::get_open_file_paths(socket_pid),
+                    crate::open_files::session_open_file_paths(socket_pid),
                 );
                 let (parent_pid, parent_process_name, parent_process_path, parent_cmd) =
                     if let Some(parent_sysinfo_pid) = process.parent() {
@@ -2463,8 +2463,9 @@ impl FlodbaddL7 {
             total_read_bytes: disk_stats.total_read_bytes,
             read_bytes: disk_stats.read_bytes,
         };
-        let open_files =
-            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
+        let open_files = crate::open_files::aggregate_open_files(
+            crate::open_files::session_open_file_paths(pid),
+        );
 
         let (parent_pid, parent_process_name, parent_process_path, parent_cmd) =
             if let Some(parent_sysinfo_pid) = process.parent() {
@@ -2601,8 +2602,9 @@ impl FlodbaddL7 {
         } else {
             vec![process_path.clone()]
         };
-        let open_files =
-            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
+        let open_files = crate::open_files::aggregate_open_files(
+            crate::open_files::session_open_file_paths(pid),
+        );
         let spawned_from_tmp = Self::originates_from_tmp(&process_path, "", None, "", None, &cmd);
 
         Some((
@@ -2724,8 +2726,9 @@ impl FlodbaddL7 {
             }
         }
 
-        l7.open_files =
-            crate::open_files::aggregate_open_files(crate::open_files::get_open_file_paths(pid));
+        l7.open_files = crate::open_files::aggregate_open_files(
+            crate::open_files::session_open_file_paths(pid),
+        );
 
         l7.parent_script_path = Self::extract_script_path(&l7.parent_process_path, &l7.parent_cmd);
         l7.grandparent_script_path =

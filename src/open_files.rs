@@ -777,6 +777,46 @@ pub fn get_retained_open_file_paths(pid: u32) -> Vec<String> {
         .collect()
 }
 
+/// Whether `pid` is the process taking the measurement: the one that
+/// enumerates open files and resolves sessions (a standalone daemon, or the
+/// helper that does it for an application).
+///
+/// Its descriptor table holds what the observation itself opened: the file
+/// monitor's handles on the directories it watches, the files it hashes or
+/// scans, and on Windows the handles it duplicates to name other processes'
+/// files. Attributed to its own sessions, those read as material the process
+/// holds: every credential store it watches, on every flow it opens. The
+/// credential-open sensor and the file monitor leave this process out for
+/// the same reason (`credential_opens`, `fim`).
+pub fn is_measuring_process(pid: u32) -> bool {
+    pid != 0 && pid == std::process::id()
+}
+
+/// The open files a session's process is credited with: those of
+/// [`get_open_file_paths`], except for the process taking the measurement,
+/// which is credited with none (see [`is_measuring_process`]).
+pub fn session_open_file_paths(pid: u32) -> Vec<String> {
+    session_open_file_paths_with(pid, std::process::id(), get_open_file_paths)
+}
+
+/// The sensitive and ownership-lock subset a session's process is credited
+/// with on a populated record ([`get_retained_open_file_paths`]), under the
+/// rule of [`session_open_file_paths`].
+pub fn session_retained_open_file_paths(pid: u32) -> Vec<String> {
+    session_open_file_paths_with(pid, std::process::id(), get_retained_open_file_paths)
+}
+
+fn session_open_file_paths_with(
+    pid: u32,
+    measuring_pid: u32,
+    read: impl FnOnce(u32) -> Vec<String>,
+) -> Vec<String> {
+    if pid != 0 && pid == measuring_pid {
+        return Vec::new();
+    }
+    read(pid)
+}
+
 /// How long a per-pid open-file enumeration is reused before the OS is
 /// asked again.
 ///
@@ -1959,6 +1999,47 @@ mod tests {
             t2 - t1
         );
         let _ = (first, second);
+    }
+
+    /// The process taking the measurement holds a file open and is credited
+    /// with none of its open files, its lock files included (they come
+    /// through the same read; a parent's locks are only asked of a parent of
+    /// the session's own image, which the measuring process's sessions do
+    /// not have).
+    #[test]
+    fn the_measuring_process_is_credited_with_no_open_file() {
+        let dir =
+            std::env::temp_dir().join(format!("flodbadd_measuring_process_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join("Cookies");
+        std::fs::write(&file_path, b"held").expect("write");
+        let held = std::fs::File::open(&file_path).expect("open");
+
+        let me = std::process::id();
+        assert!(is_measuring_process(me));
+        assert!(!is_measuring_process(0));
+        assert!(session_open_file_paths(me).is_empty());
+        assert!(session_retained_open_file_paths(me).is_empty());
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any other process is credited with what the reader returns for it.
+    #[test]
+    fn another_process_is_credited_with_its_open_files() {
+        let read = |pid: u32| vec![format!("/stores/{pid}/Cookies")];
+        assert_eq!(
+            session_open_file_paths_with(4242, 7, read),
+            vec!["/stores/4242/Cookies".to_string()]
+        );
+        assert!(session_open_file_paths_with(7, 7, read).is_empty());
+        // Pid 0 names no process: it is passed to the reader, which reports
+        // nothing for it, rather than taken for the measuring process.
+        assert_eq!(
+            session_open_file_paths_with(0, 0, read),
+            vec!["/stores/0/Cookies".to_string()]
+        );
     }
 
     #[test]
